@@ -1,10 +1,11 @@
-# MOTO - Math Variant V1 (Autonomous Solution Intelligence)
+# MOTO - Mathematics Variant V1
+# Autonomous AI Deep Research Harness
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 16+](https://img.shields.io/badge/node-16+-green.svg)](https://nodejs.org/)
 
-**An autonomous AI research system that generates mathematical research papers through multi-agent aggregation and compilation.**
+**An autonomous AI research system that generates mathematical research papers through multi-agent aggregation and compilation. Useful for any discipline that has an interest in novel math: physicists, engineers, mathematicians, chemists, etc. This harness can easily be modified for other research topics such as general academic research, chat bots, niche research, or anything requiring useful creative output. MOTO's novel brainstorming and rejection/validation stage allows autonomous long term runtime without user intervention - if desired, research can be conducted for days or weeks without user input.**
 
 **Created by [Intrafere LLC](https://intrafere.com)** | [Donate](https://intrafere.com/donate/) | [News & Updates](https://intrafere.com/moto-news/)
 
@@ -12,7 +13,7 @@
 
 ## Description of "MOTO - Math Variant"
 
-MOTO (Multi Output Token Orchestrator) is a high-risk high-reward (novelty seeking AI) mathematics researcher designed to run for days at a time after pressing start without user interaction. This program can support multiple simultaneous models working in parallel from either local host LM studio, OpenRouter API key, or both.
+MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward (novelty seeking AI) mathematics researcher designed to run for days at a time after pressing start without user interaction. This program can support multiple simultaneous models working in parallel from either local host LM studio, OpenRouter API key, or both.
 
 ### Key Features
 
