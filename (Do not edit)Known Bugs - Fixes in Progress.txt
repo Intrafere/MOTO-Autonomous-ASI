@@ -1,6 +1,6 @@
 List of known bugs/problems currently being worked on:
 
-UNAVOIDABLE QWERK?: ROCm may be incompatable for now as it seems to produce repetitive output - this is NOT a MOTO harness code issue. Other engines may have issues as well, for example Chat GPT OSS 120B hosted by Google Vertex appears to have issues with long runtimes and eventually produces corrupt outputs. ROCm seems to produce repetitive spam outputs over time that polluce the databse. Vulkan is stable. This system is untested on anything other than Vulkan.
+TEMPORARY UNAVOIDABLE QWERK?: ROCm may (unconfirmed) be incompatible for now as it seems to produce repetitive output - this does not appear to be a MOTO harness code issue. Other engines may have issues as well, for example Chat GPT OSS 120B hosted by Google Vertex appears to have issues with long runtime sessions and may eventually produces corrupt outputs. ROCm seems to produce repetitive spam outputs over time that pollute the database. Vulkan is stable. This system is untested on anything other than Vulkan.
 
 1.) Start/stop/restart functionality is buggy.
         - Starting/stopping during the middle of papers often makes it start writing a new fresh paper on accident.
@@ -8,23 +8,24 @@ UNAVOIDABLE QWERK?: ROCm may be incompatable for now as it seems to produce repe
 3.) Metric displays and live displays can have issues.
 4.) Paper writing logging needs to be expanded.
 5.) html2canvas may need to be removed for another option that doesn't split some lines in the PDF rendering between pages.
+6.) API call credits at the end of the paper may not cumulate accurately, particularly on the final volume credits, API boost usage during mid-construction, and other mid-research session model switching. 
 
 ---
-MINOR TO MEDIUAM SIZED UPDATES NEEDED:
+MINOR TO MEDIUM SIZED UPDATES DESIRED:
 
-- **add old_string edit functions as an OPTION instead of paper rewrite or no paper rewrite. So a 3rd option for how to edit the paper, both options to edit should give context that the will get to decide if they want to redo the title too in the next question.
-- Allow users to adjust the number of critique phase rounds from 3 to a dynamic user set variable.
-- Evaluate of "JSON repair" on malformed JSON outputs is actually helping anything.
-- **Handle context limits much better, make a decision whether this system requires direct injection and if RAG is continued to be allowed, where - will it only be certain areas with very specific rules?
+-**main** Add tier 3 critique and rewrite phase just like the tier 2 papers currently have.
+-**main** Look into SymPy/SageMath for simple math handling locally (an agent tool call) and look into optional Wolfram Alpha API key addition to allow Wolfram Alpha tool call from certain models to solve certain math (i.e. rigor submitter could use this very well). This helps mitigate the famous problem AI have on doing math, even simple math like 2+2. It's not optimal use the "platonic space" nature of AI weights to perform deterministic operations like math.
+- **Handle context limits better, decide whether this system requires direct injection and if RAG is continued to be allowed, where - will it only be certain areas with very specific rules?
+- *Add multi-instance support so you can run multiple instances of the program at once. FOR NOW IF USERS WANT TO DO THIS THEY CAN COPY THE FILE FOLDER MULTIPLE TIMES AND MANUALLY CHANGE ports in launch.bat (lines 188, 194, etc.) and vite.config.js (port and proxy target) [possibly other locations too].
+- *Add debug logs check in the settings to enable/disable debug logs in CMD prompt to clean up terminal.
+- Allow users to adjust the number of critique phase rounds from 1 (current static hard code set) to a dynamic user set variable.
+- Evaluate if "JSON repair" mechanic on malformed JSON outputs is actually helping anything.
 - Make rejection feedback disappear appropriately, as it may be static in every submitter modality.
-- Streamline rules.
-- Add debug logs check in the settings to enable/disable debug logs in CMD prompt to clean up terminal.
-- *Add multi-instance support so you can run multiple instances of the program at once. FOR NOW IF USERS WANT TO DO THIS THEY CAN COPY THE FILE FOLDER MULTIPLE TIMES AND MANUALLY CHANGE ports in launch.bat (lines 188, 194, etc) and vite.config.js (port and proxy target) [possibly other locations too].
-- Retries system needs reworking theres no point in the system to continue to generate topics if it fails to generate a paper.
+- Streamline/optimize .cursor agentic edit rules.
+- System needs to handle FAILRE loops better - e.g. the paper-failed-so-retry-with-new-brainstorm topic system needs reworking there’s no point in the system to continue to generate topics if it fails to generate a paper over and over. - brainstorm topics are never referenced in anything other than their respective paper writing right now, if paper writing of a brainstorm topic fails the brainstorm topic will never be forwarded into the memory-evolution mechanics (context accumulation).
 - Add total elapsed research timer/total input/output token counts for paper and near timer display.
 - Unify loop detection recovery logic. (maybe)
 - Add tool calls, add ability for AI to ask for more time by ending with a JSON category for "needs more consideration time" or something similar with a true/false.
-- **Look into SymPy/SageMath for simple math handling locally (an agent tool call) and look into optional Wolfram Alpha API key addition to allow Wolfram Alpha tool call from certain models to solve certain math (i.e. rigor submitter could use this very well). This solves the famous problem AI have on doing math, even simple math like 2+2. It does not make sense to use the "platonic space" nature of AI weights to the deterministic result of math anyways.
 - Add a "Internal Peer Review" feedback for each paper that is exactly like the paper critique aggregation mode for rewrites. Only make this one eternal with the paper as the final result as some papers may inherently be controversial and always have feedback in peer review. This feedback should be noted as unverified internal model feedback, not actual peer review. This feedback should go with ANY model referencing each full-text paper for any writing with full context as to what it is.
 - **Upgrade rewrite system to use old content string function to allow for exact edits of paper instead of rewrite, FIRST give option - rewrite or edit, then if edit - change title option y/n, etc.
 - Potentially add some kind of critique feedback to the conclusion, intro and abstract writing phase too.
