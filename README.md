@@ -41,7 +41,7 @@ Before installation, you need:
 2. **Node.js 16+** - [Download here](https://nodejs.org/)
 3. **LM Studio** (optional but recommended) - [Download here](https://lmstudio.ai/)
    - Download and load at least one model (e.g., DeepSeek, Llama, Qwen)
-   - **REQUIRED**: Load the embedding model `nomic-ai/nomic-embed-text-v1.5`
+   - **Optional But Recommended (faster outputs)**: Load the embedding model `nomic-ai/nomic-embed-text-v1.5`
    - Start the local server (port 1234)
 
 ### Installation
