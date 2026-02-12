@@ -39,26 +39,26 @@ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified inte
 ---
 
 REQUIRED SECTION STRUCTURE (MANDATORY):
-Your outline MUST include these exact sections in this exact order:
+Your outline MUST include these sections in this exact order:
 
-1. **Abstract** - Brief summary of the paper (appears first in outline, written last during construction)
-2. **Introduction** - Background, motivation, problem statement, and roadmap
+1. **Abstract** - OPTIONAL (if included, appears first; brief summary written last during construction)
+2. **Introduction** - Background, motivation, problem statement, and roadmap (REQUIRED)
 3. **Body Sections** - Main content (numbered II, III, IV, etc.) covering:
    - Preliminaries/Definitions
    - Main Results/Theorems
    - Proofs
    - Additional analysis as needed
-4. **Conclusion** - Summary of findings and implications (always the LAST content section)
+4. **Conclusion** - Summary of findings and implications (always the LAST content section) (REQUIRED)
 
 STRICT NAMING REQUIREMENTS:
-- The section named "Abstract" MUST use exactly that word: "Abstract"
-- The section named "Introduction" MUST use exactly that word: "Introduction" (or "I. Introduction")
-- The section named "Conclusion" MUST use exactly that word: "Conclusion" (or "N. Conclusion" where N is the last Roman numeral)
+- The section named "Abstract" is OPTIONAL - if included, can use "Abstract", "I. Abstract", or "0. Abstract"
+- The section named "Introduction" MUST use exactly that word: "Introduction" (or "I. Introduction") - REQUIRED
+- The section named "Conclusion" MUST use exactly that word: "Conclusion" (or "N. Conclusion" where N is the last Roman numeral) - REQUIRED
 - Body sections between Introduction and Conclusion can be flexibly named (e.g., "II. Preliminaries", "III. Main Results")
 
-🔍 CORRECT OUTLINE FORMAT (MANDATORY STRUCTURE):
+🔍 CORRECT OUTLINE FORMATS (THREE VALID OPTIONS):
 
-This is what your outline should look like. The first line MUST be just "Abstract":
+**Option 1 - With Abstract (unnumbered, recommended):**
 
 ```
 Abstract
@@ -85,16 +85,59 @@ V. Conclusion
    B. Historical significance
 ```
 
+**Option 2 - With Abstract (numbered):**
+
+```
+I. Abstract
+
+II. Introduction
+   A. Historical context
+   ...
+
+III. Preliminaries
+   ...
+
+VI. Conclusion
+   ...
+```
+
+OR with zero-based numbering:
+
+```
+0. Abstract
+
+I. Introduction
+   ...
+
+V. Conclusion
+   ...
+```
+
+**Option 3 - Without Abstract (also valid):**
+
+```
+I. Introduction
+   A. Historical context
+   ...
+
+II. Preliminaries
+   ...
+
+V. Conclusion
+   ...
+```
+
 ❌ WRONG FORMATS - DO NOT DO THESE:
 
-1. WRONG: Starting with descriptive text instead of "Abstract"
+1. WRONG: Using descriptive text instead of proper section names
    ```
-   Summary of the paper's core contribution...  ❌ NO - Just say "Abstract"
+   Summary of the paper's core contribution...  ❌ NO - Use "Abstract" or start with "Introduction"
    ```
 
-2. WRONG: Omitting "Abstract" entirely
+2. WRONG: Incorrect Abstract format (if including it)
    ```
-   I. Introduction  ❌ NO - Must have "Abstract" as first line
+   Abstract: This paper explores...  ❌ NO - Just "Abstract" (no colon or content)
+   Summary  ❌ NO - Must be "Abstract" if including this section
    ```
 
 3. WRONG: Adding content under "Abstract" in the outline
@@ -159,7 +202,7 @@ If you include placeholder markers like "[HARD CODED PLACEHOLDER FOR...]" or anc
 The validator checks YOUR SUBMISSION for placeholder text, not the existing outline structure.
 
 CRITICAL REQUIREMENTS:
-- The outline MUST include: Abstract, Introduction, at least one Body section, and Conclusion
+- The outline MUST include: Introduction, at least one Body section, and Conclusion (Abstract is optional)
 - Every significant piece of unique information from the database should have a place in the outline
 - The outline should support a coherent, logical flow for the final document
 - Sections should build upon each other logically (definitions → theorems → proofs)
@@ -170,16 +213,16 @@ CRITICAL REQUIREMENTS:
 - Focus on rigorous mathematical arguments
 
 The validator will REJECT your outline if:
-- Missing any of: Abstract, Introduction, or Conclusion
+- Missing required sections: Introduction or Conclusion
 - Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction")
-- First line is NOT just the word "Abstract" (e.g., starting with descriptive text like "Summary of...")
+- If Abstract is included, it must use proper format: "Abstract", "I. Abstract", or "0. Abstract" (not descriptive text)
 - Sections are out of order (e.g., Conclusion before body sections)
 - No body sections between Introduction and Conclusion
 
 CRITICAL - HOW TO FIX COMMON REJECTION:
-If validator says "MISSING_REQUIRED_SECTION: Abstract", it means your first line is NOT just "Abstract".
+If validator says "MISSING_REQUIRED_SECTION: Introduction", ensure you have a line with "Introduction" or "I. Introduction".
 
-FIX: Make your first line contain ONLY the word "Abstract" (not descriptive text, not "Abstract:" followed by content)
+Abstract is OPTIONAL - you can include it ("Abstract", "I. Abstract", or "0. Abstract") or omit it entirely.
 
 Output your response ONLY as JSON in this exact format:
 {
@@ -202,9 +245,12 @@ CRITICAL - outline_complete FIELD:
 - Set to TRUE when outline is final and ready to lock for paper construction
 - This field is REQUIRED for outline_create mode (must be present)
 
-CRITICAL - "content" FIELD MUST START WITH "Abstract":
-The very first line of your "content" field MUST be just the word "Abstract"
-Example: "content": "Abstract\\n\\nI. Introduction\\n..."
+CRITICAL - "content" FIELD STRUCTURE:
+Your outline can start with Abstract (optional) or Introduction (required).
+Examples: 
+- With Abstract: "content": "Abstract\\n\\nI. Introduction\\n..."
+- With numbered Abstract: "content": "I. Abstract\\n\\nII. Introduction\\n..."
+- Without Abstract: "content": "I. Introduction\\n..."
 """
 
 
@@ -330,7 +376,7 @@ REQUIRED JSON FORMAT (for outline create):
 }
 
 ⚠️ CRITICAL - OUTLINE CREATE MODE USES ONLY THESE 3 FIELDS:
-- "content" - Your complete outline text (FIRST LINE MUST BE "Abstract")
+- "content" - Your complete outline text (can start with Abstract [optional] or Introduction [required])
 - "outline_complete" - true or false
 - "reasoning" - Your explanation
 
@@ -370,7 +416,7 @@ Every outline MUST contain these sections with EXACT names in this order:
   "reasoning": "Outline structure improved based on validator feedback. Added Problem statement subsection under Introduction. However, validator noted missing coverage of Galois theory connections (submission 11) and Baker's theorem (submissions 8, 12). Will add these in next iteration before marking complete."
 }
 
-Note: The "content" field starts with "Abstract" - this is MANDATORY.
+Note: The "content" field can start with "Abstract" (optional) or "Introduction" (required).
 
 ❌ WRONG - DO NOT DO THIS:
 {
@@ -383,7 +429,7 @@ Note: The "content" field starts with "Abstract" - this is MANDATORY.
 This is WRONG because:
 1. Uses "operation" field (only for outline_update mode, NOT outline_create)
 2. Uses "new_string" field (only for outline_update mode, NOT outline_create)
-3. "content" field doesn't start with "Abstract" as first line
+3. "content" field has incorrect structure (must start with Abstract [optional] or Introduction [required])
 
 Example (Iteration 6 - Ready to Lock):
 {

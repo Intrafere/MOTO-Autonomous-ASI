@@ -7,6 +7,7 @@ The system's evolving context provides sufficient diversity through growing data
 import httpx
 import asyncio
 import logging
+import time
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -18,10 +19,16 @@ class OpenRouterClient:
     BASE_URL = "https://openrouter.ai/api/v1"
     MAX_RETRIES = 3
     RETRY_DELAY = 2.0  # seconds
+    RATE_LIMIT_COOLDOWN = 3600.0  # 1 hour in seconds
     
     # Per-model semaphores for rate limiting
     _model_semaphores: Dict[str, asyncio.Semaphore] = {}
     _semaphore_lock = asyncio.Lock()
+    
+    # Track rate-limited free models
+    # Maps model_id -> timestamp when rate limit was hit
+    _rate_limited_models: Dict[str, float] = {}
+    _rate_limit_lock = asyncio.Lock()
     
     # App attribution for OpenRouter leaderboards
     # See: https://openrouter.ai/docs/app-attribution
@@ -55,6 +62,71 @@ class OpenRouterClient:
                 self._model_semaphores[model] = asyncio.Semaphore(1)
                 logger.debug(f"Created semaphore for OpenRouter model: {model}")
             return self._model_semaphores[model]
+    
+    def _is_free_model(self, model: str) -> bool:
+        """
+        Check if a model is a free model (subject to rate limits).
+        
+        Free models are identified by the ':free' suffix in their model ID.
+        
+        Args:
+            model: Model identifier
+            
+        Returns:
+            True if model is a free model, False otherwise
+        """
+        return ":free" in model.lower()
+    
+    async def _is_model_rate_limited(self, model: str) -> tuple[bool, Optional[float]]:
+        """
+        Check if a model is currently rate-limited.
+        
+        Args:
+            model: Model identifier
+            
+        Returns:
+            Tuple of (is_rate_limited, retry_after_timestamp)
+            - is_rate_limited: True if model is rate-limited and cooldown hasn't elapsed
+            - retry_after_timestamp: Timestamp when model can be retried (None if not rate-limited)
+        """
+        async with self._rate_limit_lock:
+            if model not in self._rate_limited_models:
+                return False, None
+            
+            rate_limit_time = self._rate_limited_models[model]
+            current_time = time.time()
+            elapsed = current_time - rate_limit_time
+            
+            # If 1 hour has passed, remove from rate limit tracking
+            if elapsed >= self.RATE_LIMIT_COOLDOWN:
+                del self._rate_limited_models[model]
+                logger.info(f"OpenRouter rate limit cooldown elapsed for model: {model}")
+                return False, None
+            
+            # Still rate-limited
+            retry_after = rate_limit_time + self.RATE_LIMIT_COOLDOWN
+            return True, retry_after
+    
+    async def _record_rate_limit(self, model: str) -> float:
+        """
+        Record that a model hit rate limit.
+        
+        Args:
+            model: Model identifier
+            
+        Returns:
+            Timestamp when model can be retried (current_time + 1 hour)
+        """
+        current_time = time.time()
+        async with self._rate_limit_lock:
+            self._rate_limited_models[model] = current_time
+        
+        retry_after = current_time + self.RATE_LIMIT_COOLDOWN
+        logger.warning(
+            f"OpenRouter free model rate limit hit: {model}. "
+            f"Pausing requests for 1 hour (until {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(retry_after))})."
+        )
+        return retry_after
     
     def _get_headers(self) -> Dict[str, str]:
         """
@@ -296,6 +368,18 @@ class OpenRouterClient:
         provider: Optional[str] = None
     ) -> Dict[str, Any]:
         """Execute the actual completion request."""
+        # Check if this model is currently rate-limited (for free models)
+        if self._is_free_model(model):
+            is_limited, retry_after = await self._is_model_rate_limited(model)
+            if is_limited:
+                retry_after_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(retry_after))
+                raise RateLimitError(
+                    f"OpenRouter free model '{model}' is rate-limited. "
+                    f"Retry after {retry_after_str} (1-hour cooldown).",
+                    model=model,
+                    retry_after=retry_after
+                )
+        
         # Calculate approximate token count for logging
         total_chars = sum(len(msg.get("content", "")) for msg in messages)
         approx_tokens = total_chars // 4
@@ -365,6 +449,43 @@ class OpenRouterClient:
             except httpx.HTTPStatusError as e:
                 error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
                 
+                # Check for rate limit (429 Too Many Requests)
+                if e.response.status_code == 429:
+                    if self._is_free_model(model):
+                        retry_after = await self._record_rate_limit(model)
+                        retry_after_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(retry_after))
+                        logger.error(
+                            f"OpenRouter rate limit detected (429) for free model '{model}': {error_detail}"
+                        )
+                        raise RateLimitError(
+                            f"OpenRouter free model '{model}' hit rate limit. "
+                            f"Pausing for 1 hour. Retry after {retry_after_str}.",
+                            model=model,
+                            retry_after=retry_after
+                        )
+                    else:
+                        # Paid model hit rate limit - treat as transient error
+                        logger.warning(f"OpenRouter rate limit (429) for paid model '{model}': {error_detail}")
+                        if attempt < self.MAX_RETRIES - 1:
+                            await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                            continue
+                        raise ValueError(f"OpenRouter rate limit: {error_detail}")
+                
+                # Check for rate limit keywords in error message
+                if any(keyword in error_detail.lower() for keyword in ["rate limit", "too many requests", "rate_limit"]):
+                    if self._is_free_model(model):
+                        retry_after = await self._record_rate_limit(model)
+                        retry_after_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(retry_after))
+                        logger.error(
+                            f"OpenRouter rate limit detected in error message for free model '{model}': {error_detail}"
+                        )
+                        raise RateLimitError(
+                            f"OpenRouter free model '{model}' hit rate limit. "
+                            f"Pausing for 1 hour. Retry after {retry_after_str}.",
+                            model=model,
+                            retry_after=retry_after
+                        )
+                
                 # Check for privacy policy error (404 with specific message)
                 # This occurs when user's OpenRouter privacy settings block free models
                 if e.response.status_code == 404 and "data policy" in error_detail.lower():
@@ -430,12 +551,25 @@ class OpenRouterClient:
             
         Raises:
             CreditExhaustionError: When credits are exhausted (402 error)
+            RateLimitError: When free model hits rate limit
             ValueError: For other API errors
         """
         if not texts:
             return []
         
         embedding_model = model or "openai/text-embedding-3-small"
+        
+        # Check if embedding model is rate-limited (for free models)
+        if self._is_free_model(embedding_model):
+            is_limited, retry_after = await self._is_model_rate_limited(embedding_model)
+            if is_limited:
+                retry_after_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(retry_after))
+                raise RateLimitError(
+                    f"OpenRouter free embedding model '{embedding_model}' is rate-limited. "
+                    f"Retry after {retry_after_str} (1-hour cooldown).",
+                    model=embedding_model,
+                    retry_after=retry_after
+                )
         
         payload = {
             "model": embedding_model,
@@ -476,6 +610,36 @@ class OpenRouterClient:
         
         except httpx.HTTPStatusError as e:
             error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
+            
+            # Check for rate limit (429 Too Many Requests)
+            if e.response.status_code == 429:
+                if self._is_free_model(embedding_model):
+                    retry_after = await self._record_rate_limit(embedding_model)
+                    retry_after_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(retry_after))
+                    logger.error(
+                        f"OpenRouter rate limit detected (429) for free embedding model '{embedding_model}': {error_detail}"
+                    )
+                    raise RateLimitError(
+                        f"OpenRouter free embedding model '{embedding_model}' hit rate limit. "
+                        f"Pausing for 1 hour. Retry after {retry_after_str}.",
+                        model=embedding_model,
+                        retry_after=retry_after
+                    )
+            
+            # Check for rate limit keywords in error message
+            if any(keyword in error_detail.lower() for keyword in ["rate limit", "too many requests", "rate_limit"]):
+                if self._is_free_model(embedding_model):
+                    retry_after = await self._record_rate_limit(embedding_model)
+                    retry_after_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(retry_after))
+                    logger.error(
+                        f"OpenRouter rate limit detected in error message for free embedding model '{embedding_model}': {error_detail}"
+                    )
+                    raise RateLimitError(
+                        f"OpenRouter free embedding model '{embedding_model}' hit rate limit. "
+                        f"Pausing for 1 hour. Retry after {retry_after_str}.",
+                        model=embedding_model,
+                        retry_after=retry_after
+                    )
             
             # Check for privacy policy error (404 with specific message)
             if e.response.status_code == 404 and "data policy" in error_detail.lower():
@@ -522,4 +686,22 @@ class OpenRouterPrivacyPolicyError(Exception):
     enable the option to allow data to be used for model training.
     """
     pass
+
+
+class RateLimitError(Exception):
+    """
+    Raised when OpenRouter free model hits rate limit (429 or rate limit message).
+    
+    Free models have usage limits and require a cooldown period (typically 1 hour)
+    before requests can resume. This error indicates the model should not be
+    called again until the cooldown period elapses.
+    
+    Attributes:
+        model: Model identifier that hit rate limit
+        retry_after: Timestamp (Unix epoch) when model can be retried
+    """
+    def __init__(self, message: str, model: str, retry_after: float):
+        super().__init__(message)
+        self.model = model
+        self.retry_after = retry_after
 

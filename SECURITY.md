@@ -243,5 +243,5 @@ We credit security researchers who responsibly disclose vulnerabilities:
 
 **Thank you for helping keep MOTO secure!** 🔒
 
-For non-security issues, please use GitHub Issues: https://github.com/Intrafere/MOTO-Autonomous-AI/issues
+For non-security issues, please use GitHub Issues: https://github.com/Intrafere/MOTO-Autonomous-ASI/issues
 

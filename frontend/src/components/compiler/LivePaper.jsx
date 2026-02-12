@@ -268,7 +268,7 @@ function LivePaper() {
             disabled={isRunning}
             title="Delete paper and restart from scratch"
           >
-            🗑️ Delete & Retry from Scratch
+            🗑️ Delete & Retry
           </button>
 
           <button

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
+import TextFileUploader from '../TextFileUploader';
 
 function CompilerInterface({ activeTab }) {
   const [compilerPrompt, setCompilerPrompt] = useState('');
@@ -108,6 +109,13 @@ function CompilerInterface({ activeTab }) {
     } catch (error) {
       console.error('Failed to load status:', error);
     }
+  };
+
+  const handleTextFileLoaded = (content) => {
+    // Append to existing prompt with separator
+    const separator = compilerPrompt.trim() ? '\n\n' : '';
+    const newPrompt = compilerPrompt + separator + content;
+    setCompilerPrompt(newPrompt);
   };
 
   const handleStart = async () => {
@@ -302,6 +310,14 @@ function CompilerInterface({ activeTab }) {
           placeholder='Create a final prompt that exactly relates to a solution your aggregation database helps solve, i.e. "Tell me the most theoretically advanced perspective on how squaring the circle works."'
           rows={6}
           disabled={status.is_running}
+        />
+        <TextFileUploader 
+          onFileLoaded={handleTextFileLoaded}
+          disabled={status.is_running}
+          maxSizeMB={5}
+          showCharCount={true}
+          confirmIfNotEmpty={true}
+          existingPromptLength={compilerPrompt.length}
         />
         <small>This prompt directs the compiler on what kind of mathematical document to create from the aggregated database. View your in-progress and final answer in the "Live Paper" tab.</small>
       </div>

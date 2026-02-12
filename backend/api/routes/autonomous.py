@@ -296,25 +296,53 @@ async def get_all_brainstorms():
 
 @router.get("/papers")
 async def get_all_papers():
-    """Get list of all completed papers with abstracts."""
+    """Get list of all completed papers with abstracts and critique ratings."""
     try:
+        from backend.shared.critique_memory import get_latest_critique
+        from pathlib import Path
+        
         papers = await paper_library.get_all_papers()
         
+        # Build response with critique ratings
+        paper_responses = []
+        for p in papers:
+            # Get latest critique for this paper
+            paper_path = paper_library.get_paper_path(p.paper_id)
+            base_path = None
+            if paper_path:
+                base_path = str(Path(paper_path).parent)
+            
+            latest_critique = await get_latest_critique(
+                paper_type="autonomous_paper",
+                paper_id=p.paper_id,
+                base_path=base_path
+            )
+            
+            # Calculate average rating if critique exists
+            critique_avg = None
+            if latest_critique:
+                critique_avg = round(
+                    (latest_critique.novelty_rating + 
+                     latest_critique.correctness_rating + 
+                     latest_critique.impact_rating) / 3.0,
+                    1
+                )
+            
+            paper_responses.append({
+                "paper_id": p.paper_id,
+                "title": p.title,
+                "abstract": p.abstract,
+                "word_count": p.word_count,
+                "source_brainstorm_ids": p.source_brainstorm_ids,
+                "referenced_papers": p.referenced_papers,
+                "status": p.status,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "model_usage": p.model_usage,
+                "critique_avg": critique_avg
+            })
+        
         return {
-            "papers": [
-                {
-                    "paper_id": p.paper_id,
-                    "title": p.title,
-                    "abstract": p.abstract,
-                    "word_count": p.word_count,
-                    "source_brainstorm_ids": p.source_brainstorm_ids,
-                    "referenced_papers": p.referenced_papers,
-                    "status": p.status,
-                    "created_at": p.created_at.isoformat() if p.created_at else None,
-                    "model_usage": p.model_usage
-                }
-                for p in papers
-            ]
+            "papers": paper_responses
         }
         
     except Exception as e:

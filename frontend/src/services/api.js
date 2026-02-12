@@ -84,6 +84,41 @@ export const api = {
     if (!response.ok) throw new Error('Failed to fetch settings');
     return { data: await response.json() };
   },
+  
+  // Wolfram Alpha API
+  async getWolframStatus() {
+    const response = await fetch(`${API_BASE}/compiler/wolfram/status`);
+    if (!response.ok) throw new Error('Failed to get Wolfram Alpha status');
+    return response.json();
+  },
+  
+  async setWolframApiKey(apiKey) {
+    const response = await fetch(`${API_BASE}/compiler/wolfram/set-api-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    if (!response.ok) throw new Error('Failed to set Wolfram Alpha API key');
+    return response.json();
+  },
+  
+  async clearWolframApiKey() {
+    const response = await fetch(`${API_BASE}/compiler/wolfram/api-key`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) throw new Error('Failed to clear Wolfram Alpha API key');
+    return response.json();
+  },
+  
+  async testWolframQuery(request) {
+    const response = await fetch(`${API_BASE}/compiler/wolfram/test-query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) throw new Error('Failed to test Wolfram Alpha query');
+    return response.json();
+  },
 };
 
 // Export aggregatorAPI as alias for backward compatibility

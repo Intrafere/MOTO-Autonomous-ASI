@@ -16,7 +16,8 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import (
     OpenRouterClient, 
     CreditExhaustionError,
-    OpenRouterPrivacyPolicyError
+    OpenRouterPrivacyPolicyError,
+    RateLimitError
 )
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
@@ -311,6 +312,52 @@ class APIClientManager:
                 finally:
                     await boost_client.close()
                     
+            except RateLimitError as e:
+                # Rate limit error - log and fall through to primary (boost has no fallback concept)
+                duration_ms = (time.time() - start_time) * 1000
+                await boost_logger.log_boost_call(
+                    task_id=task_id,
+                    role_id=role_id,
+                    model=boost_model,
+                    prompt_preview=prompt_preview,
+                    response_content="",
+                    duration_ms=duration_ms,
+                    success=False,
+                    error=str(e),
+                    boost_mode=boost_mode
+                )
+                
+                # Log to autonomous API logger if callback set
+                if self._autonomous_logger_callback:
+                    full_prompt = messages[-1].get("content", "") if messages else ""
+                    await self._autonomous_logger_callback(
+                        task_id=task_id,
+                        role_id=role_id,
+                        model=boost_model,
+                        provider="openrouter",
+                        prompt=full_prompt,
+                        response="",
+                        tokens_used=None,
+                        duration_ms=duration_ms,
+                        success=False,
+                        error=f"Rate Limit: {str(e)}",
+                        phase=self._current_autonomous_phase
+                    )
+                
+                logger.warning(f"Boost model rate limited for task {task_id}: {e}")
+                
+                # Broadcast rate limit event to frontend
+                retry_after_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.retry_after))
+                await self._broadcast("openrouter_rate_limit", {
+                    "model": boost_model,
+                    "role_id": role_id,
+                    "retry_after": retry_after_iso,
+                    "message": f"OpenRouter free model rate limit hit. Retrying after 1 hour."
+                })
+                
+                # Fall through to primary model (boost has no fallback concept)
+                logger.info(f"Boost rate limited, using primary model for task {task_id}")
+            
             except OpenRouterPrivacyPolicyError as e:
                 # Privacy policy error - log and crash (boost has no fallback concept)
                 duration_ms = (time.time() - start_time) * 1000
@@ -525,6 +572,60 @@ class APIClientManager:
                     await self._track_model_usage(openrouter_model)
                     
                     return result
+                
+                except RateLimitError as e:
+                    # Rate limit error - try LM Studio fallback if configured (TEMPORARY, not permanent)
+                    duration_ms = (time.time() - start_time) * 1000
+                    
+                    # Log to autonomous API logger if callback set
+                    if self._autonomous_logger_callback:
+                        full_prompt = messages[-1].get("content", "") if messages else ""
+                        await self._autonomous_logger_callback(
+                            task_id=task_id,
+                            role_id=role_id,
+                            model=openrouter_model,
+                            provider="openrouter",
+                            prompt=full_prompt,
+                            response="",
+                            tokens_used=None,
+                            duration_ms=duration_ms,
+                            success=False,
+                            error=f"Rate Limit: {str(e)}",
+                            phase=self._current_autonomous_phase
+                        )
+                    
+                    logger.warning(f"OpenRouter rate limit for role {role_id}: {e}")
+                    
+                    # Broadcast rate limit event to frontend
+                    retry_after_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.retry_after))
+                    await self._broadcast("openrouter_rate_limit", {
+                        "model": openrouter_model,
+                        "role_id": role_id,
+                        "retry_after": retry_after_iso,
+                        "message": f"OpenRouter free model rate limit hit. Retrying after 1 hour."
+                    })
+                    
+                    # CHECK: Is fallback configured?
+                    if not role_config.lm_studio_fallback_id:
+                        # NO FALLBACK - raise clear error
+                        error_msg = (
+                            f"OpenRouter free model '{openrouter_model}' is rate-limited for role '{role_id}' "
+                            f"and no LM Studio fallback configured. "
+                            f"Please wait for cooldown period or configure an LM Studio fallback model in settings."
+                        )
+                        logger.error(error_msg)
+                        raise RuntimeError(error_msg)
+                    
+                    # Fallback IS configured - use it TEMPORARILY (don't mark as permanent fallback)
+                    fallback_model = role_config.lm_studio_fallback_id
+                    
+                    logger.info(
+                        f"OpenRouter free model rate-limited for role '{role_id}'. "
+                        f"Temporarily using LM Studio fallback: {fallback_model} (will retry OpenRouter after cooldown)"
+                    )
+                    
+                    # Fall through to LM Studio (don't re-raise, don't mark as permanent)
+                    model = fallback_model
                 
                 except OpenRouterPrivacyPolicyError as e:
                     # Privacy policy error - try LM Studio fallback if configured

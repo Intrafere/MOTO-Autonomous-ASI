@@ -163,16 +163,16 @@ CORRECT RESPONSE:
 - Improve validator rigor (currently lacks evaluation depth)
 - Maintain existing prompt assembly order: System → JSON Schema → User Prompt → Context → RAG → Final Instruction
 - **MATH VARIANT**: Citation requirements REMOVED. Focus on mathematical rigor, logical correctness, and established mathematical principles. Models with web search capabilities are encouraged to use them for verification. Validation is purely AI-driven.
-- **Compiler Outline Injection**: The compiler outline is always fully injected (never truncated, never RAGed) for all modes (construction, outline_update, review, rigor, validator) because it provides the structural framework for document construction and validation.
-- **TEMPERATURE POLICY**: All prompts use temperature=0.0 (deterministic generation). The system's evolving context (growing databases, rejection feedback, cyclic RAG chunk sizes, completion reviews) provides sufficient diversity. Deterministic generation ensures: (1) Reproducible results for debugging, (2) Consistent JSON formatting, (3) Stable validation decisions, (4) Predictable behavior across long research sessions. This applies to ALL agents: aggregator submitters/validator, compiler submitters/validator, autonomous agents, and all retry/reparse operations.
-- **NATURAL COMPLETION POLICY**: Models are allowed to stop naturally when they complete their JSON response. The system does not enforce stop sequences. Both LM Studio and OpenRouter clients allow models to complete naturally without forcing generation to `max_tokens` limits. The `sanitize_json_response()` function in `backend/shared/json_parser.py` handles trailing whitespace and padding in model outputs. **CRITICAL**: If a model hits `max_tokens` and produces truncated JSON (unclosed braces/brackets/strings or 10+ consecutive trailing newlines), the sanitizer **raises ValueError** instead of attempting repair. This prevents corrupted content from passing validation. Agents handle truncation errors by retrying with feedback asking for more concise output.
-- **JSON Response Preprocessing**: All LLM responses are preprocessed by `sanitize_json_response()` in `backend/shared/json_parser.py` to: (1) Strip reasoning tokens (e.g., `<think>...</think>`) used by DeepSeek R1, QwQ-32B, and similar reasoning models, (2) Strip markdown code block wrappers (````json` ... ````), (3) Strip model control tokens (e.g., `<|channel|>`, `<|constrain|>`, `<|message|>`) using regex pattern matching, (4) **Extract only the first complete JSON object when multiple objects are present** (reasoning models sometimes output multiple JSON responses or wrap JSON in explanatory text), (5) **Search for JSON anywhere in text** if not found at start (handles models that output explanations before/after JSON), (6) **Handle LaTeX escape sequences comprehensively**: (a) Fix invalid `\u{word}` patterns (e.g., `\u{widehat}` → `\\u{widehat}`), (b) Fix invalid `\uXXXX` where XXXX is not exactly 4 hex digits (e.g., `\uinfty` → `\\uinfty`), (c) **Pre-escape dangerous LaTeX commands BEFORE any json.loads() attempt** (prevents `\to` becoming tab+o, `\text` becoming tab+ext, etc.) - dangerous commands include `\to`, `\text`, `\textbf`, `\times`, `\top`, `\tau`, `\theta`, `\triangle`, `\frac`, `\forall`, `\beta`, `\bar`, `\big*`, `\begin`, `\nu`, `\nabla`, `\neq`, `\not*`, `\rho`, `\right*`, `\rightarrow`, `\Rightarrow`, `\upsilon`, `\underline`, `\uparrow`, (d) Convert other invalid escapes to valid JSON through comprehensive backslash escaping, (7) **Escape control characters ONLY inside JSON strings** (not structural whitespace) - raw control characters (0x00-0x1F) inside string values cause "Invalid control character" errors; the sanitizer parses character-by-character to track string boundaries and only escapes control chars inside strings, preserving structural newlines/tabs between JSON tokens, (8) **REJECT truncated JSON** - if the response has unclosed braces/brackets/strings or 10+ consecutive trailing newlines (indicating model hit max_tokens), the sanitizer **raises ValueError** with diagnostic information; agents handle this by retrying with feedback asking for more concise output; **NO REPAIR ATTEMPTED** - corrupted content is never accepted, (9) **Explicit error on pure reasoning text** - if after all sanitization steps NO JSON structure is found (no opening brace or bracket), raises explicit ValueError with message "No JSON found in response - only conversational reasoning text" indicating the model spent all tokens on reasoning before writing JSON; this provides clearer diagnostics than generic parse errors and helps retry mechanisms detect this specific failure mode. After `json.loads()` parsing, the content is used directly **without** additional `.decode('unicode_escape')` processing, which would corrupt Unicode characters and LaTeX notation. **Enhanced Error Logging**: The `parse_json()` function provides detailed logging on failures including: original response length and preview (first 500/last 200 chars), sanitized content preview, error position context (50 chars before/after error), specific error type and location, **truncation detection** (raises ValueError if response appears truncated with unclosed braces/brackets or unterminated strings), **no JSON structure detection** (explicit "🚨 MODEL OUTPUT CONTAINS NO JSON STRUCTURE" error when only reasoning text is present). **Array Response Handling**: `parse_json()` automatically extracts `data[0]` if the model returns an array instead of a single object, logging a warning and using only the first element.
-- **No Startup Compatibility Testing**: The system does NOT test models for JSON compatibility at startup. Models are trusted to work, and the JSON sanitizer handles all quirks (reasoning tokens, markdown, control tokens, etc.) automatically. Model configs are cached on first successful use for recovery purposes.
-- **Reasoning Field Extraction**: Some reasoning models (e.g., certain GPT variants, DeepSeek) output their response in a separate `reasoning` field instead of the standard `content` field in the API response. All agent code checks BOTH fields: `message.get("content", "") or message.get("reasoning", "")` to handle both response formats. This ensures compatibility with models that use either field for JSON output.
-- **Centralized JSON Parsing**: All agents across the entire codebase use the central `parse_json()` function from `backend/shared/json_parser.py` for consistent JSON parsing. This includes: (1) All aggregator submitters and validators, (2) All compiler submitters (high-context, high-param, critique) and validator, (3) All autonomous research agents (topic selector/validator, completion reviewer, reference selector, paper title selector, final answer agents, paper redundancy checker). The central function provides: unified sanitization logic, enhanced error logging with detailed diagnostics, and automatic array-to-object conversion. **This eliminates duplicate parsing logic and ensures all agents benefit from parsing improvements**. The only exceptions are memory modules loading JSON from system-written files (brainstorm metadata, paper metadata, etc.) which use direct `json.loads()` since they're loading structured data written by the system itself, not LLM-generated responses.
-- **Specialized Retry for Pure Reasoning Text**: When a JSON parse error contains "No JSON found" or "only conversational reasoning", the aggregator submitter (`backend/aggregator/agents/submitter.py`) uses a specialized retry prompt that differs from the standard LaTeX-focused retry. The specialized prompt explicitly instructs the model to: (1) NOT think step-by-step, (2) start the response with `{` immediately, (3) output only raw JSON without markdown or explanation. This handles models that spend all tokens on chain-of-thought reasoning before writing JSON. The standard retry prompt (focused on LaTeX escaping) is used for other JSON formatting errors. Note: if a model consistently outputs only reasoning text, it may be fundamentally incompatible with the required JSON output format - the retry mechanism cannot fix architectural model behavior.
-- **Standard LaTeX-Focused Retry**: For JSON formatting errors (not pure reasoning text), retry prompts guide models on proper LaTeX escaping in JSON. **CRITICAL**: Retry prompts DO NOT tell models to avoid LaTeX - they explain HOW to properly escape it. Key guidance: (1) **LaTeX IS allowed** in content, (2) Every backslash needs ONE escape in JSON (`\mathbb` → `\\mathbb`), (3) Do NOT double-escape (`\\\\mathbb` is wrong), (4) For `old_string`: copy text EXACTLY from document, just escape backslashes. This ensures models can correctly match LaTeX content during exact string matching for edits. The previous approach of telling models "DO NOT use LaTeX notation" caused models to either strip mathematical content or double-escape backslashes, leading to validation failures.
-- **Retry Context Overflow Prevention (CRITICAL)**: Conversational retry prompts include the original prompt + failed LLM output + retry instructions. When the failed output is large (e.g., 90K+ tokens from a reasoning model), this can EXCEED the context window, causing API errors like "requested about 138374 tokens... maximum context length is 131072". **FIX**: All retry logic MUST: (1) Truncate failed output to ~2000 chars (~500 tokens) before including in retry conversation, (2) Calculate if the retry conversation fits in context window BEFORE sending, (3) Fall back to simple re-prompting (original prompt only) if conversation is too large, (4) Set `max_tokens` explicitly on retry calls (never `None`), (5) **NEVER automatically increase max_tokens beyond user-configured limits** - max_tokens is ALWAYS user-configured and respects model capabilities. This applies to: `submitter.py` (two-stage retry), `validator.py` (single retry + batch retry), `high_param_submitter.py`, and `compiler_validator.py`.
+- **Compiler Outline Injection**: The compiler outline is always fully injected (never truncated, never RAGed) for all modes because it provides the structural framework for document construction and validation.
+- **TEMPERATURE POLICY**: All prompts use temperature=0.0 (deterministic generation). The system's evolving context provides sufficient diversity. This applies to ALL agents.
+- **NATURAL COMPLETION POLICY**: Models stop naturally when JSON response is complete. No stop sequences enforced. `sanitize_json_response()` handles trailing whitespace. **CRITICAL**: Truncated JSON (unclosed braces/brackets) raises ValueError - no repair attempted.
+- **JSON Response Preprocessing**: All LLM responses preprocessed by `sanitize_json_response()` in `backend/shared/json_parser.py`. See implementation for complete sanitization pipeline: strips reasoning tokens/markdown/control tokens, handles LaTeX escapes (pre-escapes dangerous commands), escapes control chars in strings, rejects truncated JSON, detects pure reasoning text. Enhanced error logging with diagnostics. Array responses auto-extract `data[0]`.
+- **No Startup Compatibility Testing**: Models trusted to work. JSON sanitizer handles all quirks automatically. Model configs cached on first success.
+- **Reasoning Field Extraction**: Agent code checks BOTH `content` and `reasoning` fields for model compatibility.
+- **Centralized JSON Parsing**: All agents use `parse_json()` from `backend/shared/json_parser.py`. Exceptions: memory modules loading system-written files use direct `json.loads()`.
+- **Specialized Retry for Pure Reasoning Text**: When "No JSON found" error, aggregator submitter uses specialized retry: (1) Don't think step-by-step, (2) Start with `{` immediately, (3) Raw JSON only. See `backend/aggregator/agents/submitter.py`.
+- **Standard LaTeX-Focused Retry**: Retry prompts explain HOW to escape LaTeX properly. **LaTeX IS allowed** - just escape backslashes once (`\mathbb` → `\\mathbb`). DO NOT double-escape. For `old_string`: copy EXACTLY from document, just escape backslashes.
+- **Retry Context Overflow Prevention (CRITICAL)**: Truncate failed output to ~2000 chars before retry. Calculate if retry fits context window. Fall back to simple re-prompt if too large. Set `max_tokens` explicitly (never `None`). NEVER auto-increase beyond user limits. Applies to: `submitter.py`, `validator.py`, `high_param_submitter.py`, `compiler_validator.py`.
 
 ## Internal Content Warning (Required in All Prompts)
 
@@ -850,8 +850,8 @@ Every outline MUST include these exact sections with these exact names in this e
 4. **Conclusion** - Must be named exactly "Conclusion" or "N. Conclusion" (always LAST content section)
 
 OUTLINE VALIDATION CRITERIA:
-1. SECTION_STRUCTURE: MUST include Abstract, Introduction, at least one Body section, and Conclusion with exact names
-2. SECTION_ORDER: Abstract → Introduction → Body sections → Conclusion (this exact order)
+1. SECTION_STRUCTURE: MUST include Introduction, at least one Body section, and Conclusion with exact names (Abstract is optional but recommended)
+2. SECTION_ORDER: [Abstract →] Introduction → Body sections → Conclusion (this exact order, where Abstract is optional)
 3. COHERENCE: Logically structured with clear sections and subsections
 4. COMPLETENESS: Captures all relevant content from aggregator database in relation to what is relevant to the title set in the user prompt
 5. ALIGNMENT: Aligns with user's compiler-directing prompt goals
@@ -866,9 +866,9 @@ YOUR TASK:
 Verify the submission meets ALL criteria above. Accept only if ALL criteria pass. Reject if ANY criterion fails.
 
 REJECTION CATEGORIES (provide specific feedback):
-- MISSING_REQUIRED_SECTION: Missing Abstract, Introduction, or Conclusion (must have all three with exact names)
-- INCORRECT_SECTION_ORDER: Sections are out of order (must be: Abstract → Introduction → Body → Conclusion)
-- INCORRECT_SECTION_NAME: Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction")
+- MISSING_REQUIRED_SECTION: Missing Introduction or Conclusion (must have both with exact names; Abstract is optional)
+- INCORRECT_SECTION_ORDER: Sections are out of order (must be: [Abstract →] Introduction → Body → Conclusion, where Abstract is optional)
+- INCORRECT_SECTION_NAME: Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction"; if Abstract included, must be "Abstract", "I. Abstract", or "0. Abstract")
 - STRUCTURAL: Body sections not in logical mathematical progression order
 - INCOMPLETENESS: Missing critical content from aggregator database that's relevant to document title
 - MISALIGNMENT: Doesn't serve user's compiler-directing prompt goals
@@ -889,8 +889,8 @@ Section Name Validation:
 **outline_create mode:**
 ```python
 """MODE-SPECIFIC CRITERIA (Outline Creation):
-- Outline MUST include: Abstract, Introduction, at least one Body section, Conclusion
-- Section names MUST match exactly: "Abstract", "Introduction", "Conclusion"
+- Outline MUST include: Introduction, at least one Body section, Conclusion (Abstract is optional)
+- Section names MUST match exactly: "Introduction", "Conclusion" (if Abstract included: "Abstract", "I. Abstract", or "0. Abstract")
 - Outline captures all relevant unique content from aggregator database
 - Outline provides clear structure for mathematical document construction
 - Outline aligns with user's compiler-directing prompt
@@ -1436,7 +1436,7 @@ All outlines MUST include these exact sections with these exact names in this ex
 {
   "content": "Abstract\n\nI. Introduction\n   A. Historical context of circle-squaring problem\n   B. Statement of impossibility\n   C. Overview of proof approach\n\nII. Preliminaries and Definitions\n   A. Compass and straightedge constructions\n   B. Field extensions and constructible numbers\n   C. Algebraic vs. transcendental numbers\n   D. Galois theory connections to constructibility\n\nIII. Main Theoretical Results\n   A. Theorem: Characterization of constructible lengths\n   B. Theorem: Lindemann-Weierstrass (transcendence of π)\n   C. Theorem: Baker's theorem and applications\n   D. Corollary: Impossibility of squaring the circle\n\nIV. Proofs and Derivations\n   A. Proof of constructibility characterization\n   B. Lindemann-Weierstrass proof outline\n   C. Connection to algebraic field theory\n   D. Derivation of main impossibility result\n\nV. Conclusion\n   A. Summary of impossibility result\n   B. Related classical problems\n   C. Historical and mathematical significance",
   "outline_complete": true,
-  "reasoning": "Outline comprehensively captures ALL content from aggregator database. Added Galois theory subsection D under Preliminaries (iterations 3-4 feedback). Expanded Main Results with Baker's theorem (iteration 5 feedback). Added algebraic field theory connection in Proofs section (iteration 6 feedback). All required sections (Abstract, Introduction, Body, Conclusion) present with exact names. Structure follows logical mathematical progression. Ready to lock and begin paper construction."
+  "reasoning": "Outline comprehensively captures ALL content from aggregator database. Added Galois theory subsection D under Preliminaries (iterations 3-4 feedback). Expanded Main Results with Baker's theorem (iteration 5 feedback). Added algebraic field theory connection in Proofs section (iteration 6 feedback). All required sections (Introduction, Body, Conclusion) present with exact names, plus optional Abstract section. Structure follows logical mathematical progression. Ready to lock and begin paper construction."
 }
 ```
 
@@ -1447,12 +1447,12 @@ All outlines MUST include these exact sections with these exact names in this ex
 ITERATION 4 - ACCEPTED
 
 STRENGTHS:
-- All required sections (Abstract, Introduction, Body sections, Conclusion) present with correct names
+- All required sections (Introduction, Body sections, Conclusion) present with correct names, plus optional Abstract
 - Good coverage of Lindemann-Weierstrass theorem and constructibility theory
 - Logical progression from basic definitions to advanced theorems
 
 VALIDATION CRITERIA MET:
-✓ Required section structure (Abstract, Intro, Body, Conclusion)
+✓ Required section structure (Intro, Body, Conclusion) with optional Abstract
 ✓ Captures content from submissions 1, 3, 5, 7, 9, 12, 14
 ✓ Aligns with user's compiler-directing prompt goal
 ✓ Sections in correct order with valid names
@@ -1470,7 +1470,7 @@ DECISION: You may refine further (outline_complete=false) or lock now (outline_c
 ITERATION 2 - REJECTED
 
 VALIDATION FAILURE: MISSING REQUIRED SECTION
-The outline is missing the "Conclusion" section. Every outline MUST include: Abstract, Introduction, at least one Body section, and Conclusion with exact names.
+The outline is missing the "Conclusion" section. Every outline MUST include: Introduction, at least one Body section, and Conclusion with exact names (Abstract is optional).
 
 ADDITIONAL CONTENT GAPS:
 - Section II "Preliminaries" lacks coverage of Galois theory connections to constructibility (extensively discussed in submissions 8, 11, 15)
@@ -1944,90 +1944,115 @@ The loop continues until `more_edits_needed=false` or max iterations (20) reache
 
 ---
 
-## 9. COMPILER RIGOR PROMPTS
+## 9. COMPILER RIGOR PROMPTS (2-STEP PROCESS)
 
 **File:** `backend/compiler/prompts/rigor_prompts.py`
 
 **BODY-ONLY MODE**: Rigor enhancement is ONLY performed during body construction phase. Once body is complete (Conclusion exists in paper, or in autonomous mode when `autonomous_section_phase != "body"`), rigor mode is skipped entirely. The coordinator handles this check via `_is_body_complete()` before invoking the rigor loop.
 
-### Complete Prompt Structure
+### Two-Step Architecture
 
-**Function:** `get_rigor_system_prompt()`
+The rigor submitter uses a **2-step planning-then-execution process**:
 
-```python
-def get_rigor_system_prompt() -> str:
-    return """You are enhancing the mathematical rigor of a mathematical document. Your role is to:
+**Step 1: Planning (unvalidated)**
+- LLM reviews full paper and decides if rigor work is needed
+- Chooses mode: standard_enhancement, rewrite_focus, or wolfram_verification (if enabled)
+- Specifies target_section as guidance for Step 2 (reminder label, NOT context limitation)
+- This decision is NOT validated - LLM has full autonomy
 
-1. Review the current document
-2. Review the outline
-3. Identify areas where mathematical rigor can be improved
-4. Propose specific enhancements
+**Step 2: Execution (with self-refusal option)**
+- LLM receives FULL paper (same RAG retrieval as Step 1)
+- Receives target_section from Step 1 as guidance reminder
+- Can REFUSE if Step 1 made a mistake (refusal not validated)
+- If proceeds with changes: submission goes to validator
+- Validator checks actual paper modifications
 
-YOUR TASK:
-Identify where rigor can be improved - or if the document already maintains appropriate mathematical rigor for its current stage of construction, state such instead of creating an enhancement attempt and note your refusal to make changes as they would be unnecessary or could degrade readability.
+**Wolfram Alpha Integration (Optional)**:
+- If enabled and Step 1 chooses wolfram_verification mode
+- System makes Wolfram Alpha API call between steps
+- Step 2 receives query result and decides whether to incorporate it
+- Accepted Wolfram calls tracked in model credits separately from LLM API calls
 
-Consider these areas for potential improvement:
-- Precision of mathematical claims and definitions
-- Completeness of proofs and logical arguments
-- Justification and supporting lemmas
-- Acknowledgment of assumptions and edge cases
-- Clarity of mathematical notation
-- Addressing potential counterexamples or boundary conditions
+### Step 1: Planning JSON Schema
 
-If enhancements are warranted, propose revisions that strengthen mathematical grounding while preserving correctness and flow.
-
-RIGOR ENHANCEMENTS INCLUDE:
-- Strengthening proof arguments with additional steps
-- Clarifying assumptions and conditions
-- Adding intermediate lemmas where appropriate
-- Improving precision of mathematical language and notation
-- Addressing potential counterexamples or edge cases
-- Strengthening logical connections between claims
-- Ensuring all claims are properly justified
-- Adding clarifying remarks for complex arguments
-
-Requirements:
-- Only propose enhancements that add mathematical rigor, not change content
-- Maintain the existing narrative and structure
-- Describe clearly where the enhancement should be applied
-- Don't remove or substantially alter existing content
-- Focus on making mathematical claims more precise and defensible
-- Do not add forward-looking structural previews
-- Add rigor to existing mathematical prose, not roadmaps of future content
-- Focus on sound mathematical reasoning
-
-EXACT STRING MATCHING FOR ENHANCEMENTS:
-This system uses EXACT STRING MATCHING. To propose an enhancement:
-1. Find the EXACT text you want to enhance (must exist verbatim in document)
-2. Choose the operation: "replace" (to improve existing text) or "insert_after" (to add after specific text)
-3. Specify old_string (exact match) and new_string (enhanced version or addition)
-
-If the document is already rigorous enough at this stage of construction, you may respond that no enhancement is needed.
-
-The validator will reject if:
-- Enhancement reduces rigor or clarity
-- old_string doesn't exist exactly in the document
-- Changes undermine existing coherence
-- Enhancement is inappropriate for current draft stage
-- Enhancement introduces unsound mathematical claims
-
-Output your response ONLY as JSON in this exact format:
+```json
 {
-  "needs_enhancement": true or false,
-  "operation": "replace | insert_after",
-  "old_string": "exact text to find (must exist verbatim, empty if needs_enhancement=false)",
-  "new_string": "enhanced text (empty if needs_enhancement=false)",
-  "content": "full content for logging",
-  "reasoning": "Why this enhancement is or isn't needed"
+  "needs_rigor_work": true or false,
+  "mode": "standard_enhancement | rewrite_focus | wolfram_verification | null",
+  "target_section": "text snippet from paper (200-500 chars, guidance label for Step 2)",
+  "wolfram_query": "natural language query for Wolfram Alpha (only if mode=wolfram_verification)",
+  "preliminary_reasoning": "explanation of chosen approach"
 }
-"""
 ```
 
-**Note**: The outline is always fully injected for rigor mode. If outline + system prompts exceed available context, RAG budget is automatically reduced to fit. The outline provides the structural framework for document construction and validation. Without the complete outline, agents cannot properly:
-- Determine where content should be placed
-- Ensure sections follow the planned structure
-- Validate coherence across the entire document
-- Add rigor enhancements that align with the document's organization
+**Field Definitions:**
+- `needs_rigor_work`: Whether any rigor work should be attempted
+- `mode`: Approach to use (required if needs_rigor_work=true)
+  - `standard_enhancement`: Normal rigor improvements
+  - `rewrite_focus`: Significant rewriting needed
+  - `wolfram_verification`: Verify claim with Wolfram Alpha (only if enabled in system config)
+- `target_section`: Text snippet identifying which section to work on (provides continuity to Step 2, NOT a context limitation)
+- `wolfram_query`: Natural language query (e.g., "Is pi algebraic?", "Solve x^2 + 2x + 1 = 0")
+- `preliminary_reasoning`: Explanation of chosen approach
+
+**Example (Wolfram Verification)**:
+```json
+{
+  "needs_rigor_work": true,
+  "mode": "wolfram_verification",
+  "target_section": "Theorem 4.1: π is transcendental. Proof: By Lindemann-Weierstrass theorem...",
+  "wolfram_query": "Is pi algebraic?",
+  "preliminary_reasoning": "Computational verification would strengthen the π transcendence claim by providing independent confirmation"
+}
+```
+
+### Step 2: Execution JSON Schemas
+
+**For standard_enhancement or rewrite_focus:**
+```json
+{
+  "proceed": true or false,
+  "needs_enhancement": true or false,
+  "operation": "replace | insert_after",
+  "old_string": "exact text from document (empty if proceed=false or needs_enhancement=false)",
+  "new_string": "enhanced text (empty if proceed=false or needs_enhancement=false)",
+  "content": "full content for logging",
+  "reasoning": "explanation OR refusal reason"
+}
+```
+
+**For wolfram_verification:**
+```json
+{
+  "proceed": true or false,
+  "verification_result_interpretation": "how to interpret Wolfram Alpha result",
+  "needs_enhancement": true or false,
+  "operation": "insert_after",
+  "old_string": "exact text after which to insert remark (empty if proceed=false or needs_enhancement=false)",
+  "new_string": "verification remark incorporating Wolfram result (empty if proceed=false or needs_enhancement=false)",
+  "content": "full content for logging",
+  "reasoning": "explanation OR refusal reason"
+}
+```
+
+**Self-Refusal Mechanism:**
+- Step 2 can set `proceed=false` if Step 1 made a mistake
+- Refusals are NOT validated (no penalty)
+- Logged as declines, rigor loop ends
+- Allows LLM to self-correct without rejection feedback
+
+**Context:**
+- **Step 1**: Sees FULL paper (RAG retrieval), full outline, user prompt, rejection history
+- **Step 2**: Sees FULL paper (same RAG retrieval as Step 1), full outline, user prompt, rejection history, PLUS target_section as guidance label
+- For Wolfram mode Step 2: Also receives wolfram_query and wolfram_result
+- **CRITICAL**: Both steps see FULL paper via RAG - target_section is guidance only, NOT a context limitation
+
+**Wolfram Alpha Tracking:**
+- Only ACCEPTED Wolfram calls tracked (full chain: API success → proceed=true → needs_enhancement=true → validator accept → paper updated)
+- Tracked in `PaperModelTracker._wolfram_calls` (separate from LLM API calls)
+- Displayed in MODEL CREDITS as: "Wolfram Alpha Verifications: N queries"
+
+**Note**: The outline is always fully injected for rigor mode. If outline + system prompts exceed available context, RAG budget is automatically reduced to fit. The outline provides the structural framework for document construction and validation.
 
 ---
 
@@ -2582,7 +2607,9 @@ These core requirements apply across all prompt types:
 6. **JSON Preprocessing**: All LLM responses preprocessed by `sanitize_json_response()`
 7. **Exact String Matching**: Document edits use exact verbatim matches with conservative consecutive fuzzy matching fallback for model escaping quirks (85% consecutive + tail anchor + uniqueness required)
 8. **Phase-Based Construction**: Papers written in order: Body → Conclusion → Introduction → Abstract
-9. **Required Sections**: All outlines/papers must include Abstract, Introduction, Body, Conclusion with exact names
+9. **Required Sections**: 
+   - **OUTLINE**: Must include Introduction, Body, Conclusion (Abstract is optional - can be "Abstract", "I. Abstract", or "0. Abstract")
+   - **PAPER CONSTRUCTION**: Always writes Abstract → Introduction → Body → Conclusion (Abstract is always written during construction phase regardless of outline)
 10. **No Placeholder Output**: Submissions must never contain placeholder markers
 11. **Placeholder Resume Repair**: When resuming from existing paper, missing placeholders are automatically added via `paper_memory.ensure_placeholders_exist()` to prevent "old_string not found" failures
 12. **Fake Placeholder Detection**: System distinguishes real section content from model-inserted fake placeholder text (FULL content >300 chars = real; <300 chars with keywords = fake) to prevent confusion during marker repair

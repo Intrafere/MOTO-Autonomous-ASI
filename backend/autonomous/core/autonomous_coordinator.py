@@ -2763,10 +2763,12 @@ class AutonomousCoordinator:
         # Get model usage from per-paper tracker
         model_usage = None
         generation_date = None
+        wolfram_calls = None
         if self._current_paper_tracker:
             model_usage = self._current_paper_tracker.get_models_dict()
             generation_date = self._current_paper_tracker.generation_date
-            logger.info(f"Paper {paper_id}: tracked {len(model_usage)} models, {self._current_paper_tracker.total_calls} API calls")
+            wolfram_calls = self._current_paper_tracker.get_wolfram_call_count()
+            logger.info(f"Paper {paper_id}: tracked {len(model_usage)} models, {self._current_paper_tracker.total_calls} API calls, {wolfram_calls} Wolfram calls")
         
         # Get reference paper model usage for "Possible Models Used for Additional Reference" section
         reference_paper_models = None
@@ -2813,7 +2815,8 @@ class AutonomousCoordinator:
             referenced_papers=reference_paper_ids,
             model_usage=model_usage,
             generation_date=generation_date,
-            status="complete" if mark_complete else "in_progress"
+            status="complete" if mark_complete else "in_progress",
+            wolfram_calls=wolfram_calls
         )
         
         # Register in central metadata
@@ -2831,6 +2834,13 @@ class AutonomousCoordinator:
             "word_count": paper_metadata.word_count
         })
         
+        # Trigger auto-critique generation in background (only if marking as complete)
+        if mark_complete:
+            asyncio.create_task(self._auto_generate_paper_critique(
+                paper_id=paper_id,
+                paper_title=title
+            ))
+        
         # Only clear paper state if marking as complete
         if mark_complete:
             # Clear paper-specific workflow state (paper is complete)
@@ -2846,6 +2856,181 @@ class AutonomousCoordinator:
         else:
             # Paper saved but still in progress - keep state
             logger.info(f"Paper saved (in progress): {paper_id} ({paper_metadata.word_count} words)")
+    
+    async def _auto_generate_paper_critique(
+        self,
+        paper_id: str,
+        paper_title: str
+    ) -> None:
+        """
+        Automatically generate a critique for a completed paper.
+        If the average rating is >= 6.25, emit a WebSocket event for popup notification.
+        
+        This runs in the background and failures are logged but don't affect paper completion.
+        """
+        from backend.shared.critique_prompts import build_critique_prompt
+        from backend.shared.critique_memory import save_critique
+        from backend.shared.api_client_manager import api_client_manager
+        from backend.shared.json_parser import parse_json
+        from backend.shared.utils import count_tokens
+        from backend.shared.models import PaperCritique, ModelConfig
+        import uuid
+        from datetime import datetime
+        
+        try:
+            logger.info(f"Auto-generating critique for paper {paper_id}: {paper_title}")
+            
+            # Check if validator config exists
+            if not self._validator_model:
+                logger.warning(f"Cannot auto-generate critique: No validator model configured")
+                return
+            
+            # Get paper content
+            paper_content = await paper_library.get_paper_content(paper_id)
+            if not paper_content:
+                logger.error(f"Cannot auto-generate critique: Paper {paper_id} content not found")
+                return
+            
+            # Build critique prompt string (returns str, not messages list)
+            from backend.shared.critique_prompts import DEFAULT_CRITIQUE_PROMPT
+            
+            prompt = build_critique_prompt(
+                paper_content=paper_content,
+                paper_title=paper_title,
+                custom_prompt=None  # Use default prompt
+            )
+            
+            # Wrap in messages list for API call
+            messages = [{"role": "user", "content": prompt}]
+            
+            # Check context window (attribute is _validator_context, not _validator_context_window)
+            prompt_tokens = count_tokens(prompt)
+            available_tokens = self._validator_context - self._validator_max_tokens - 500
+            
+            if prompt_tokens > available_tokens:
+                logger.error(
+                    f"Cannot auto-generate critique for paper {paper_id}: "
+                    f"Content too large ({prompt_tokens} tokens > {available_tokens} available)"
+                )
+                return
+            
+            # Configure the paper_critic role before making the API call
+            # This ensures proper routing to OpenRouter or LM Studio
+            api_client_manager.configure_role(
+                "paper_critic",
+                ModelConfig(
+                    provider=self._validator_provider,
+                    model_id=self._validator_model,
+                    openrouter_model_id=self._validator_model if self._validator_provider == "openrouter" else None,
+                    openrouter_provider=self._validator_openrouter_provider,
+                    lm_studio_fallback_id=self._validator_lm_studio_fallback,
+                    context_window=self._validator_context,
+                    max_output_tokens=self._validator_max_tokens
+                )
+            )
+            
+            # Generate critique
+            response = await api_client_manager.generate_completion(
+                task_id=f"auto_paper_critique_{paper_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                role_id="paper_critic",
+                model=self._validator_model,
+                messages=messages,
+                max_tokens=self._validator_max_tokens,
+                temperature=0.0
+            )
+            
+            # Parse response
+            response_content = ""
+            if response.get("choices"):
+                message = response["choices"][0].get("message", {})
+                response_content = message.get("content", "") or message.get("reasoning", "")
+            
+            if not response_content:
+                logger.error(f"Empty response from validator model for paper {paper_id}")
+                return
+            
+            # Parse JSON
+            try:
+                critique_data = parse_json(response_content)
+            except Exception as e:
+                logger.warning(f"Failed to parse critique JSON for paper {paper_id}: {e}")
+                # Create fallback structure
+                critique_data = {
+                    "novelty_rating": 0,
+                    "novelty_feedback": "Unable to parse structured response",
+                    "correctness_rating": 0,
+                    "correctness_feedback": "Unable to parse structured response",
+                    "impact_rating": 0,
+                    "impact_feedback": "Unable to parse structured response",
+                    "full_critique": response_content
+                }
+            
+            # Extract ratings
+            novelty = critique_data.get("novelty_rating", 0)
+            correctness = critique_data.get("correctness_rating", 0)
+            impact = critique_data.get("impact_rating", 0)
+            
+            # Calculate average rating
+            average_rating = (novelty + correctness + impact) / 3.0
+            
+            # Create critique object
+            critique = PaperCritique(
+                critique_id=str(uuid.uuid4()),
+                model_id=self._validator_model,
+                provider=self._validator_provider,
+                host_provider=self._validator_openrouter_provider,
+                date=datetime.now(),
+                prompt_used=DEFAULT_CRITIQUE_PROMPT,  # Always uses default for auto-critiques
+                novelty_rating=novelty,
+                novelty_feedback=critique_data.get("novelty_feedback", ""),
+                correctness_rating=correctness,
+                correctness_feedback=critique_data.get("correctness_feedback", ""),
+                impact_rating=impact,
+                impact_feedback=critique_data.get("impact_feedback", ""),
+                full_critique=critique_data.get("full_critique", "")
+            )
+            
+            # Save critique
+            from pathlib import Path
+            
+            paper_path = paper_library.get_paper_path(paper_id)  # Synchronous, returns str
+            if paper_path:
+                base_path = Path(paper_path).parent
+                await save_critique(
+                    paper_type="autonomous_paper",
+                    critique=critique,
+                    paper_id=paper_id,
+                    base_path=str(base_path)
+                )
+                logger.info(
+                    f"Auto-critique saved for paper {paper_id}: "
+                    f"avg={average_rating:.1f} (N={novelty}, C={correctness}, I={impact})"
+                )
+                
+                # Always emit critique completion event (for badge refresh)
+                await self._broadcast("paper_critique_completed", {
+                    "paper_id": paper_id,
+                    "average_rating": round(average_rating, 1)
+                })
+                
+                # If average rating >= 6.25, also emit high-score event for popup notification
+                if average_rating >= 6.25:
+                    await self._broadcast("high_score_critique", {
+                        "paper_id": paper_id,
+                        "paper_title": paper_title,
+                        "average_rating": round(average_rating, 1),
+                        "novelty_rating": novelty,
+                        "correctness_rating": correctness,
+                        "impact_rating": impact,
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    logger.info(f"High-score critique notification sent for paper {paper_id} (avg={average_rating:.1f})")
+            else:
+                logger.error(f"Cannot save critique: Paper path not found for {paper_id}")
+        
+        except Exception as e:
+            # Log but don't crash - auto-critique is non-critical
+            logger.error(f"Auto-critique generation failed for paper {paper_id}: {e}", exc_info=True)
     
     # ========================================================================
     # PAPER REDUNDANCY CHECK

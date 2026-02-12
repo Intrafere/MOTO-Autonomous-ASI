@@ -38,6 +38,9 @@ class PaperModelTracker:
         self._paper_title = paper_title
         self._generation_date = datetime.now()
         self._total_calls = 0
+        
+        # Wolfram Alpha tracking
+        self._wolfram_calls: int = 0
     
     @property
     def user_prompt(self) -> str:
@@ -108,8 +111,27 @@ class PaperModelTracker:
         )
     
     def has_tracking_data(self) -> bool:
-        """Check if any model calls have been tracked."""
-        return len(self._models) > 0
+        """Check if any model calls or Wolfram calls have been tracked."""
+        return len(self._models) > 0 or self._wolfram_calls > 0
+    
+    def track_wolfram_call(self, query: str) -> None:
+        """
+        Record a Wolfram Alpha API call.
+        
+        Args:
+            query: The Wolfram Alpha query (stored for logging, not tracking)
+        """
+        self._wolfram_calls += 1
+        logger.debug(f"Paper tracker: Wolfram Alpha call #{self._wolfram_calls}")
+    
+    def get_wolfram_call_count(self) -> int:
+        """
+        Get total Wolfram Alpha API calls.
+        
+        Returns:
+            Number of Wolfram Alpha queries made
+        """
+        return self._wolfram_calls
     
     def generate_author_attribution(
         self,
@@ -143,6 +165,13 @@ class PaperModelTracker:
         # Format the date
         gen_date = self._generation_date.strftime("%Y-%m-%d")
         
+        # Truncate prompt for attribution header to prevent embedding entire uploaded papers.
+        # The full prompt is preserved in session_metadata.json for reference.
+        MAX_PROMPT_LENGTH = 500
+        display_prompt = prompt
+        if len(prompt) > MAX_PROMPT_LENGTH:
+            display_prompt = prompt[:MAX_PROMPT_LENGTH].rstrip() + "... [truncated]"
+        
         # Build the attribution section
         lines = [
             "=" * 80,
@@ -154,7 +183,7 @@ class PaperModelTracker:
             "may contain errors. These papers often contain ambitious content and/or "
             "extraordinary claims, all content should be viewed with extreme scrutiny.",
             "",
-            f"User's Research Prompt: {prompt}",
+            f"User's Research Prompt: {display_prompt}",
             "",
             f"Paper Title: {title}",
             "",
@@ -201,15 +230,27 @@ class PaperModelTracker:
             ""
         ]
         
-        # Add each model with its call count
-        for model_id, call_count in models_by_usage:
-            lines.append(f"- {model_id} ({call_count} API calls)")
+        # Add each model with its call count (if any models tracked)
+        if models_by_usage:
+            for model_id, call_count in models_by_usage:
+                lines.append(f"- {model_id} ({call_count} API calls)")
+            
+            lines.extend([
+                "",
+                f"Total AI Model API Calls: {self._total_calls}"
+            ])
+        else:
+            # No model calls tracked, but Wolfram calls exist
+            lines.append("(No AI model API calls tracked)")
         
-        lines.extend([
-            "",
-            f"Total API Calls: {self._total_calls}",
-            "=" * 80
-        ])
+        # Add Wolfram Alpha section if any calls were made
+        if self._wolfram_calls > 0:
+            lines.extend([
+                "",
+                f"Wolfram Alpha Verifications: {self._wolfram_calls} queries"
+            ])
+        
+        lines.append("=" * 80)
         
         return "\n".join(lines)
     
@@ -274,6 +315,7 @@ class PaperModelTracker:
         """Reset the tracker for a new paper."""
         self._models.clear()
         self._total_calls = 0
+        self._wolfram_calls = 0
         self._generation_date = datetime.now()
         self._user_prompt = ""
         self._paper_title = ""
@@ -318,24 +360,29 @@ def generate_attribution_for_existing_paper(
 
 
 def generate_credits_for_existing_paper(
-    model_usage: Optional[Dict[str, int]]
+    model_usage: Optional[Dict[str, int]],
+    wolfram_calls: Optional[int] = None
 ) -> str:
     """
     Generate model credits for an existing paper with stored model data.
     
     Args:
         model_usage: Dict of model_id -> API call count (may be None)
+        wolfram_calls: Number of Wolfram Alpha verifications (may be None)
     
     Returns:
         Formatted model credits text, or empty string if no data
     """
-    if not model_usage:
+    # Return empty if no tracking data at all
+    if not model_usage and not wolfram_calls:
         return ""
     
     # Create a temporary tracker with the stored data
     tracker = PaperModelTracker()
-    tracker._models = dict(model_usage)
-    tracker._total_calls = sum(model_usage.values())
+    if model_usage:
+        tracker._models = dict(model_usage)
+        tracker._total_calls = sum(model_usage.values())
+    tracker._wolfram_calls = wolfram_calls or 0
     
     return tracker.generate_model_credits()
 

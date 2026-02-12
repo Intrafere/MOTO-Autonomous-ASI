@@ -281,6 +281,12 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
 
+  // Wolfram Alpha settings (shared with compiler)
+  const [wolframEnabled, setWolframEnabled] = useState(false);
+  const [wolframApiKey, setWolframApiKey] = useState('');
+  const [wolframTestResult, setWolframTestResult] = useState('');
+  const [testingWolfram, setTestingWolfram] = useState(false);
+  
   // Critique prompt editor state
   const [critiquePromptExpanded, setCritiquePromptExpanded] = useState(false);
   const [customCritiquePrompt, setCustomCritiquePrompt] = useState('');
@@ -436,6 +442,16 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
         }
       } catch (err) {
         console.error('Failed to check OpenRouter key:', err);
+      }
+      
+      // Load Wolfram Alpha status from backend
+      try {
+        const wolframStatus = await api.getWolframStatus();
+        if (wolframStatus.enabled) {
+          setWolframEnabled(true);
+        }
+      } catch (err) {
+        console.error('Failed to load Wolfram Alpha status:', err);
       }
 
       // Try to fetch fresh LM Studio models
@@ -774,6 +790,50 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setCritiquePromptSaved(true);
     setTimeout(() => setCritiquePromptSaved(false), 2000);
   };
+  
+  // Wolfram Alpha handlers (shared with compiler)
+  const handleTestWolframConnection = async () => {
+    if (!wolframApiKey.trim()) {
+      setWolframTestResult('Please enter an API key');
+      return;
+    }
+    
+    setTestingWolfram(true);
+    setWolframTestResult('Testing...');
+    
+    try {
+      const response = await api.testWolframQuery({
+        query: 'What is 2+2?',
+        api_key: wolframApiKey
+      });
+      
+      if (response.success) {
+        setWolframTestResult(`✓ Success! Result: ${response.result}`);
+        // Save the key to backend
+        await api.setWolframApiKey(wolframApiKey);
+        setWolframEnabled(true);
+      } else {
+        setWolframTestResult('✗ Failed: ' + response.message);
+      }
+    } catch (err) {
+      setWolframTestResult('✗ Error: ' + err.message);
+    } finally {
+      setTestingWolfram(false);
+      setTimeout(() => setWolframTestResult(''), 5000);
+    }
+  };
+  
+  const handleClearWolframKey = async () => {
+    try {
+      await api.clearWolframApiKey();
+      setWolframApiKey('');
+      setWolframEnabled(false);
+      setWolframTestResult('Key cleared');
+      setTimeout(() => setWolframTestResult(''), 3000);
+    } catch (err) {
+      console.error('Failed to clear Wolfram Alpha key:', err);
+    }
+  };
 
   const handleRestoreCritiquePrompt = () => {
     localStorage.removeItem('autonomous_critique_custom_prompt');
@@ -1046,6 +1106,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               )}
             </div>
           </h3>
+          <p style={{ fontSize: '.70rem', color: '#888', marginTop: '0.5rem', marginBottom: '1rem', lineHeight: '1.4', marginLeft: '20px' }}>
+            Note: Computer science and/or non-general purpose models may have trouble performing as validators, critique submitters, or in the tier 2 compilation stage. These models generally perform fine for brainstorming. Note that some models in this category may work without issue.
+          </p>
           <div className="models-list">
             {/* King of the Hill - Gold */}
             <div className="model-item" style={{ 
@@ -1211,8 +1274,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">OpenAI: GPT 5.2 Pro</div>
+              <div className="model-item-name">GPT 5.2 Pro</div>
               <div className="model-item-badge">Highly knowledgeable</div>
+            </div>
+
+            <div className="model-item">
+              <div className="model-item-name">GPT 5.2 Codex</div>
+              <div className="model-item-badge">Computer science</div>
             </div>
             
             <div className="model-item">
@@ -1234,7 +1302,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       <div className="settings-group" style={{ marginBottom: '1.5rem' }}>
         <h4>Profile Selection</h4>
         <p className="settings-info">
-          Load a recommended profile or create your own custom profile.
+          Load a recommended profile or create your own custom profile. (These models and hosts are not affiliated with MOTO/Intrafere)
         </p>
         
         <div className="settings-row">
@@ -1491,7 +1559,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       <div className="settings-group">
         <h4>Validator (Single Instance)</h4>
         <p className="settings-info">
-          Single validator maintains coherent Markov chain evolution for database alignment.
+          Single validator maintains coherent Markov chain evolution for database alignment. This models speed will be your biggest bottleneck for the system, however their knowledge is also very important. Choose this model wisely, about half of all API calls will be to this model. A single validator as the markov chain bottleneck for the solution progression is important to mitigate the "alignment problem" with AI and user prompts. This is the model that will reject wrong answers, off-track answers, etc. at all stages of solution creation.
         </p>
 
         <RoleConfig
@@ -1568,6 +1636,109 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
         />
+      </div>
+
+      {/* Wolfram Alpha Integration */}
+      <div className="settings-group">
+        <h3>Wolfram Alpha Integration (Optional)</h3>
+        <small style={{ color: '#888', display: 'block', marginBottom: '1rem' }}>
+          Enable Wolfram Alpha API for computational verification in rigor mode. Shared with manual compiler mode.
+          Get your API key from <a href="https://products.wolframalpha.com/api" target="_blank" rel="noopener noreferrer">developer.wolframalpha.com</a>
+        </small>
+        
+        <label style={{ display: 'flex', alignItems: 'center', marginBottom: '1rem' }}>
+          <input
+            type="checkbox"
+            checked={wolframEnabled}
+            onChange={async (e) => {
+              const checked = e.target.checked;
+              if (!checked) {
+                // Unchecking - clear key from backend
+                await handleClearWolframKey();
+              } else {
+                // Checking - just show UI (key will be saved on Test Connection)
+                setWolframEnabled(true);
+              }
+            }}
+            style={{ marginRight: '0.75rem' }}
+          />
+          <span style={{ fontWeight: '500' }}>Enable Wolfram Alpha Verification in Rigor Mode</span>
+        </label>
+        
+        {wolframEnabled && (
+          <div style={{ marginLeft: '1.75rem', marginTop: '1rem' }}>
+            <div className="form-group">
+              <label>Wolfram Alpha API Key:</label>
+              <input
+                type="password"
+                value={wolframApiKey}
+                onChange={(e) => setWolframApiKey(e.target.value)}
+                placeholder="Enter your Wolfram Alpha App ID"
+                style={{
+                  padding: '0.6rem',
+                  backgroundColor: '#1e1e1e',
+                  border: '1px solid #444',
+                  borderRadius: '4px',
+                  color: '#fff',
+                  width: '100%',
+                  marginBottom: '0.75rem'
+                }}
+              />
+            </div>
+            
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+              <button 
+                onClick={handleTestWolframConnection}
+                disabled={testingWolfram}
+                style={{
+                  padding: '0.6rem 1.25rem',
+                  backgroundColor: '#4CAF50',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#fff',
+                  cursor: testingWolfram ? 'wait' : 'pointer',
+                  opacity: testingWolfram ? 0.6 : 1,
+                  fontWeight: '500'
+                }}
+              >
+                {testingWolfram ? 'Testing...' : 'Test Connection'}
+              </button>
+              
+              <button 
+                onClick={handleClearWolframKey}
+                style={{
+                  padding: '0.6rem 1.25rem',
+                  backgroundColor: 'transparent',
+                  border: '1px solid #666',
+                  borderRadius: '4px',
+                  color: '#888',
+                  cursor: 'pointer'
+                }}
+              >
+                Clear Key
+              </button>
+            </div>
+            
+            {wolframTestResult && (
+              <div style={{ 
+                marginTop: '1rem', 
+                padding: '0.75rem', 
+                borderRadius: '4px',
+                backgroundColor: wolframTestResult.includes('✓') ? '#1a3a1a' : '#3a1a1a',
+                color: wolframTestResult.includes('✓') ? '#4CAF50' : '#ff6b6b',
+                fontSize: '0.9rem'
+              }}>
+                {wolframTestResult}
+              </div>
+            )}
+            
+            <small style={{ color: '#888', display: 'block', marginTop: '1rem', lineHeight: '1.5' }}>
+              In rigor mode, the AI can request Wolfram Alpha verification of mathematical claims. 
+              This enables computational checking of theorems, solving equations, and verifying properties.
+              This setting is shared with the manual compiler mode.
+            </small>
+          </div>
+        )}
       </div>
 
       {/* Validator Critique Prompt Editor */}

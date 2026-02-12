@@ -138,7 +138,7 @@ const LiveTier3Progress = ({ api, status }) => {
     const isShortForm = volumeProgress?.is_long_form === false;
     const isLongForm = volumeProgress?.is_long_form === true;
     
-    let message = 'Are you sure you want to DELETE this paper and RESTART from scratch?\n\n';
+    let message = 'Are you sure you want to DELETE this paper and RESTART?\n\n';
     
     if (isShortForm) {
       message += 'This will:\n' +
@@ -153,7 +153,7 @@ const LiveTier3Progress = ({ api, status }) => {
         '• Delete the chapter outline\n' +
         '• Reset chapter status to pending\n' +
         '• Keep all other chapters intact\n' +
-        '• Restart writing this chapter from scratch\n\n';
+        '• Restart writing this chapter\n\n';
     } else {
       message += 'This will:\n' +
         '• Delete the current paper content\n' +
@@ -312,9 +312,9 @@ const LiveTier3Progress = ({ api, status }) => {
                   className="tier3-btn-reset"
                   onClick={handleResetPaper}
                   disabled={isResetting || !status.is_active}
-                  title="Delete current paper and restart from scratch"
+                  title="Delete current paper and restart"
                 >
-                  {isResetting ? '🔄 Resetting...' : '🗑️ Delete & Retry from Scratch'}
+                  {isResetting ? '🔄 Resetting...' : '🗑️ Delete & Retry'}
                 </button>
               </div>
             </div>

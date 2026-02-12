@@ -6,6 +6,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import './AutonomousResearch.css';
 import LivePaperProgress from './LivePaperProgress';
 import LiveTier3Progress from './LiveTier3Progress';
+import TextFileUploader from '../TextFileUploader';
 
 const AutonomousResearchInterface = ({
   isRunning,
@@ -17,7 +18,10 @@ const AutonomousResearchInterface = ({
   config,
   api
 }) => {
-  const [researchPrompt, setResearchPrompt] = useState('');
+  const [researchPrompt, setResearchPrompt] = useState(() => {
+    const saved = localStorage.getItem('autonomous_research_prompt');
+    return saved || '';
+  });
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [showForceConfirm, setShowForceConfirm] = useState(false);
@@ -28,6 +32,11 @@ const AutonomousResearchInterface = ({
   const [isSkipping, setIsSkipping] = useState(false);
   const [skipQueued, setSkipQueued] = useState(false);  // Skip has been queued pre-emptively
   const activityEndRef = useRef(null);
+
+  // Save research prompt to localStorage
+  useEffect(() => {
+    localStorage.setItem('autonomous_research_prompt', researchPrompt);
+  }, [researchPrompt]);
 
   // Auto-scroll activity feed
   useEffect(() => {
@@ -62,6 +71,13 @@ const AutonomousResearchInterface = ({
       setCritiquePhaseActive(false);
     }
   }, [status?.current_tier]);
+
+  const handleTextFileLoaded = (content) => {
+    // Append to existing prompt with separator
+    const separator = researchPrompt.trim() ? '\n\n' : '';
+    const newPrompt = researchPrompt + separator + content;
+    setResearchPrompt(newPrompt);
+  };
 
   const handleStart = () => {
     if (!researchPrompt.trim()) {
@@ -332,9 +348,17 @@ const AutonomousResearchInterface = ({
           id="research-prompt"
           value={researchPrompt}
           onChange={(e) => setResearchPrompt(e.target.value)}
-          placeholder="Enter your high-level research goal (e.g., 'Explore the connections between modular forms and the Langlands program')"
+          placeholder="Enter your high level research goal on any topic that related to S.T.E.M. mathematics, anything event remotely related to mathematics (e.g., 'Explore the connections between modular forms and the Langlands program' or )"
           disabled={isRunning}
           rows={3}
+        />
+        <TextFileUploader 
+          onFileLoaded={handleTextFileLoaded}
+          disabled={isRunning}
+          maxSizeMB={5}
+          showCharCount={true}
+          confirmIfNotEmpty={true}
+          existingPromptLength={researchPrompt.length}
         />
       </div>
 
@@ -468,6 +492,9 @@ const AutonomousResearchInterface = ({
         <div className="tier3-dialog-overlay">
           <div className="tier3-dialog">
             <h3>Force Final Answer Generation</h3>
+            <p className="tier3-warning">
+              <strong>Warning:</strong> Your system will review for final answer writing; however, it may autonomously decide to override the user and continue paper generation. This system is designed this way because Tier 2 answers are currently the better answers. Given the hallucinatory nature of Tier 3 answers, we want Tier 3 to have the best potential possible. You may find it efficient to skip tier 3 unless you require a 30K+ word answer.
+            </p>
             <p className="tier3-context">{getTier3DialogContext()}</p>
             <p className="tier3-papers-count">
               {status?.stats?.total_papers_completed || 0} completed papers available for synthesis

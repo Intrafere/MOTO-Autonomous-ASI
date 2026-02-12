@@ -1816,6 +1816,73 @@ button.danger:hover {
   backdrop-filter: blur(2px);
 }
 
+/* ============================================
+   Rate Limit Warning Banner
+   ============================================ */
+.rate-limit-warning-banner {
+  background: linear-gradient(135deg, #ff8c00 0%, #ff6b00 100%);
+  border: 2px solid #ff6b00;
+  border-radius: 8px;
+  padding: 1rem 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 12px rgba(255, 107, 0, 0.3);
+}
+
+.rate-limit-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.rate-limit-icon {
+  font-size: 1.5rem;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.rate-limit-title {
+  font-weight: 600;
+  font-size: 1rem;
+  color: #ffffff;
+}
+
+.rate-limit-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-left: 2.25rem;
+}
+
+.rate-limit-model {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+}
+
+.rate-limit-model-name {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 0.875rem;
+  color: #ffffff;
+}
+
+.rate-limit-countdown {
+  font-size: 0.875rem;
+  color: #ffe0b3;
+  font-weight: 500;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
 .disclaimer-modal {
   position: fixed;
   top: 50%;

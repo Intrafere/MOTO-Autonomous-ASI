@@ -223,8 +223,8 @@ project-root/
 │
 ├── requirements.txt                     # Python dependencies
 ├── package.json                         # Root scripts
-├── launch.bat                           # The user's one-click program launcher.
-└── launch.ps1
+├── Press to Launch MOTO.bat             # The user's one-click program launcher.
+└── _moto_internal_launcher.ps1          # Internal PowerShell launcher (not for direct user use)
 
 ## File Purpose Descriptions
 
