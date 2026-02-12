@@ -279,8 +279,12 @@ async def save_paper():
                 reference_paper_models=None  # No reference papers in manual mode
             )
             
-            # Generate credits footer
-            credits_section = generate_credits_for_existing_paper(model_data["model_usage"])
+            # Generate credits footer (including Wolfram calls if available)
+            wolfram_count = model_data.get("wolfram_calls", 0)
+            credits_section = generate_credits_for_existing_paper(
+                model_data["model_usage"],
+                wolfram_calls=wolfram_count
+            )
         
         # Build full content with attribution
         full_content_parts = []
@@ -704,4 +708,152 @@ async def get_compiler_default_critique_prompt():
         "success": True,
         "prompt": DEFAULT_CRITIQUE_PROMPT
     }
+
+
+# =============================================================================
+# WOLFRAM ALPHA ENDPOINTS
+# =============================================================================
+
+@router.post("/wolfram/set-api-key")
+async def set_wolfram_api_key(request: dict):
+    """
+    Set and validate Wolfram Alpha API key.
+    
+    Args:
+        request: {"api_key": str}
+    
+    Returns:
+        Success status and validation result
+    """
+    from backend.shared.wolfram_alpha_client import initialize_wolfram_client, get_wolfram_client
+    
+    try:
+        api_key = request.get("api_key", "").strip()
+        
+        if not api_key:
+            raise HTTPException(status_code=400, detail="API key is required")
+        
+        # Initialize client
+        initialize_wolfram_client(api_key)
+        
+        # Test connection with simple query
+        client = get_wolfram_client()
+        test_result = await client.query("What is 2+2?")
+        
+        if test_result is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to connect to Wolfram Alpha - invalid API key or network error"
+            )
+        
+        # Store in system config
+        system_config.wolfram_alpha_api_key = api_key
+        system_config.wolfram_alpha_enabled = True
+        
+        logger.info("Wolfram Alpha API key set and validated")
+        
+        return {
+            "success": True,
+            "message": "Wolfram Alpha API key validated successfully",
+            "test_result": test_result
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to set Wolfram Alpha API key: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/wolfram/api-key")
+async def clear_wolfram_api_key():
+    """
+    Clear Wolfram Alpha API key.
+    
+    Returns:
+        Success status
+    """
+    from backend.shared.wolfram_alpha_client import clear_wolfram_client
+    
+    try:
+        # Clear client
+        clear_wolfram_client()
+        
+        # Clear from config
+        system_config.wolfram_alpha_api_key = None
+        system_config.wolfram_alpha_enabled = False
+        
+        logger.info("Wolfram Alpha API key cleared")
+        
+        return {
+            "success": True,
+            "message": "Wolfram Alpha API key cleared"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to clear Wolfram Alpha API key: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/wolfram/status")
+async def get_wolfram_status():
+    """
+    Get Wolfram Alpha configuration status.
+    
+    Returns:
+        enabled: bool, has_key: bool
+    """
+    return {
+        "enabled": system_config.wolfram_alpha_enabled,
+        "has_key": system_config.wolfram_alpha_api_key is not None
+    }
+
+
+@router.post("/wolfram/test-query")
+async def test_wolfram_query(request: dict):
+    """
+    Test Wolfram Alpha query without saving API key.
+    
+    Args:
+        request: {"query": str, "api_key": str}
+    
+    Returns:
+        Query result or error
+    """
+    from backend.shared.wolfram_alpha_client import WolframAlphaClient
+    
+    try:
+        query = request.get("query", "").strip()
+        api_key = request.get("api_key", "").strip()
+        
+        if not query or not api_key:
+            raise HTTPException(status_code=400, detail="Both query and api_key are required")
+        
+        # Create temporary client (don't initialize singleton)
+        temp_client = WolframAlphaClient(api_key)
+        
+        try:
+            result = await temp_client.query(query)
+            
+            if result is None:
+                return {
+                    "success": False,
+                    "message": "Query failed - check API key and query format",
+                    "result": None
+                }
+            
+            return {
+                "success": True,
+                "message": "Query successful",
+                "result": result
+            }
+            
+        finally:
+            await temp_client.close()
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to test Wolfram Alpha query: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 

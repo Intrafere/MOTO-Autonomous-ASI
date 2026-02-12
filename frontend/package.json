@@ -1,7 +1,7 @@
 {
   "name": "asi-aggregator-frontend",
-  "version": "1.0.0",
-  "description": "Frontend UI for MOTO Math Variant - Autonomous AI Research System",
+  "version": "1.0.1",
+  "description": "Frontend UI for MOTO S.T.E.M. Mathematics Variant - Autonomous ASI Research System for Novel S.T.E.M. Mathematical Paper Generation",
   "author": "Intrafere LLC",
   "license": "MIT",
   "type": "module",
@@ -13,7 +13,7 @@
   "dependencies": {
     "dompurify": "^3.2.4",
     "html2pdf.js": "^0.14.0",
-    "jspdf": "^4.0.0",
+    "jspdf": "^4.1.0",
     "katex": "^0.16.27",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
@@ -25,6 +25,6 @@
     "vite": "^7.1.12"
   },
   "overrides": {
-    "jspdf": "^4.0.0"
+    "jspdf": "^4.1.0"
   }
 }

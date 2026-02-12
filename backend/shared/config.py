@@ -153,6 +153,10 @@ class SystemConfig(BaseSettings):
     autonomous_max_reference_papers: int = 6  # Max papers for reference context
     autonomous_topic_selection_retry_limit: int = 3
     
+    # Wolfram Alpha integration (optional)
+    wolfram_alpha_enabled: bool = False
+    wolfram_alpha_api_key: Optional[str] = None
+    
     # File paths
     data_dir: str = "backend/data"
     logs_dir: str = "backend/logs"

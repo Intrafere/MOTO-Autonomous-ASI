@@ -303,6 +303,8 @@ class PaperMetadata(BaseModel):
     model_usage: Optional[Dict[str, int]] = None
     # Generation date for the paper (separate from created_at for tracking purposes)
     generation_date: Optional[datetime] = None
+    # Wolfram Alpha verification count (tracked separately from LLM API calls)
+    wolfram_calls: Optional[int] = None
 
 
 class TopicSelectionSubmission(BaseModel):

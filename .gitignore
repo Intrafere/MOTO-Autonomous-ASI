@@ -45,8 +45,10 @@ frontend/.vite/
 Thumbs.db
 desktop.ini
 
-# Application Data (exclude user-generated content)
-backend/data/user_uploads/
+# Application Data (exclude user-generated content, preserve .gitkeep)
+backend/data/user_uploads/*
+!backend/data/user_uploads/.gitkeep
+
 backend/data/rag_shared_training.txt
 backend/data/aggregator_event_log.txt
 backend/data/aggregator_stats.json
@@ -54,20 +56,40 @@ backend/data/compiler_outline.txt
 backend/data/compiler_paper.txt
 backend/data/compiler_last_10_rejections.txt
 backend/data/compiler_last_10_acceptances.txt
+backend/data/compiler_last_10_declines.txt
 backend/data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_*.txt
-backend/data/auto_brainstorms/
-backend/data/auto_papers/
-backend/data/auto_final_answer/
+
+backend/data/auto_brainstorms/*
+!backend/data/auto_brainstorms/.gitkeep
+
+backend/data/auto_papers/**
+!backend/data/auto_papers/.gitkeep
+!backend/data/auto_papers/archive/
+!backend/data/auto_papers/archive/.gitkeep
+
+backend/data/auto_final_answer/*
+!backend/data/auto_final_answer/.gitkeep
+
 backend/data/auto_sessions/
+
 backend/data/auto_research_metadata.json
 backend/data/auto_research_stats.json
 backend/data/auto_workflow_state.json
 backend/data/auto_research_topic_rejections.txt
-backend/data/chroma_db/
+backend/data/auto_api_log.txt
+
+backend/data/chroma_db/*
+!backend/data/chroma_db/.gitkeep
+
 backend/data/boost_api_log.txt
+backend/data/model_cache.json
+backend/data/paper_version_*.txt
+backend/data/critique_feedback_*.txt
+backend/data/critique_rejection_feedback.txt
 
 # Logs
-backend/logs/
+backend/logs/*
+!backend/logs/.gitkeep
 *.log
 
 # Environment
@@ -86,3 +108,4 @@ htmlcov/
 *.swp
 final_volume.txt
 RANDOM LOG.txt
+commits_pending.txt

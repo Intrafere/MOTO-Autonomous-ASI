@@ -858,26 +858,6 @@ The validator will REJECT any outline missing these required sections or with in
 - **Frontend**: "Skip Critique & Continue" button appears in paper status banner during critique phase (requires confirmation)
 - **Error Conditions**: 400 if not running, 400 if not in Tier 2 paper writing, 400 if not in critique phase
 
-**Delete and Retry from Scratch (Paper Reset)**:
-- **Purpose**: Allow users to delete current paper work and restart from appropriate checkpoints when paper writing goes off-track
-- **Tier 2 (Manual Compiler) Reset Behavior**: Deletes current paper content and outline, clears rejection/acceptance logs, resets workflow state and model tracker, restarts from outline creation (iterative refinement). API endpoint: `POST /api/compiler/clear-paper?confirm=true`. UI: "Delete & Retry from Scratch" button in LivePaper component. WebSocket event: `paper_cleared`
-- **Tier 3 Short-Form Reset Behavior**: Deletes current paper content and outline, clears selected paper title, resets to title selection phase, restarts entire short-form answer generation. API endpoint: `POST /api/auto-research/reset-current-paper?confirm=true`. UI: "Delete & Retry from Scratch" button in LiveTier3Progress component. WebSocket event: `tier3_paper_reset`
-- **Tier 3 Long-Form Reset Behavior**: Deletes ONLY current chapter being written (gap/intro/conclusion), keeps volume organization intact, keeps all other completed chapters intact, resets chapter status to "pending", restarts writing current chapter from outline creation. API endpoint: `POST /api/auto-research/reset-current-paper?confirm=true`. UI: "Delete & Retry from Scratch" button in LiveTier3Progress component. WebSocket event: `tier3_chapter_reset`
-- **Confirmation Requirements**: All reset operations require explicit user confirmation. Confirmation dialogs clearly explain what will be deleted and where restart will begin. API endpoints require `confirm=true` query parameter to prevent accidental resets
-- **Use Cases**: Paper writing diverged from desired direction, fundamental errors require complete restart, want to try different approach with same brainstorm/database, chapter in long-form volume needs complete rewrite
-
-**During Conclusion Phase**:
-- Construction mode: Write conclusion only (triggered after last body section validated)
-- Cannot write introduction/abstract yet
-
-**During Introduction Phase**:
-- Construction mode: Write introduction only (triggered after conclusion validated)
-- Cannot write abstract yet
-
-**During Abstract Phase**:
-- Construction mode: Write abstract only (triggered after introduction validated)
-- This is the FINAL construction step
-
 **Outline Updates**: Outline can be updated at any time during the cycle (same as Part 2)
 
 **Review/Rigor**: These modes operate normally throughout all phases
@@ -992,6 +972,16 @@ When abstract is written and validated, the paper is considered COMPLETE. Additi
    - Increment total_papers_completed
    - Track papers per brainstorm
    - Track average word counts
+
+6. **Auto-Generate Critique** (background task):
+   - Automatically generates validator critique for every completed Tier 2 paper
+   - Uses validator model from current session configuration
+   - Calculates average rating: `(novelty + correctness + impact) / 3`
+   - Saves critique to paper's critique storage
+   - If average rating ≥ 7.0, emits `high_score_critique` WebSocket event
+   - Frontend displays popup notification (max 3, FIFO queue)
+   - Non-blocking: errors logged but don't affect paper completion
+   - See "Auto-Critique Popup Notifications" section below for details
 
 ### Paper Redundancy Review
 
@@ -1266,9 +1256,20 @@ MOTO, and the following model(s):
 - deepseek-r1:70b (85 API calls)
 - qwen-2.5:32b (23 API calls)
 
-Total API Calls: 108
+Total AI Model API Calls: 108
+
+Wolfram Alpha Verifications: 3 queries
 ================================================================================
 ```
+
+**Wolfram Alpha Verification Tracking**:
+- Wolfram Alpha API calls are tracked separately from LLM API calls
+- Only ACCEPTED Wolfram verifications are counted (where result was added to paper via validated rigor submission)
+- Displayed in MODEL CREDITS section below LLM model list
+- Format: "Wolfram Alpha Verifications: N queries"
+- Tracking happens in `compiler_coordinator._submit_and_validate_rigor()` after validator acceptance
+- If no Wolfram calls made, this line is omitted from credits
+- **Graceful edge case handling**: Credits show even if only Wolfram calls exist (no model tracking data), or if only model calls exist (no Wolfram calls)
 
 **PaperMetadata Model Updates**:
 ```python
@@ -1276,14 +1277,19 @@ class PaperMetadata(BaseModel):
     # ... existing fields ...
     model_usage: Optional[Dict[str, int]] = None  # model_id -> API call count
     generation_date: Optional[datetime] = None    # When paper was generated
+    wolfram_calls: Optional[int] = None           # Wolfram Alpha verification count
 ```
 
 **PaperModelTracker Class** (`backend/autonomous/memory/paper_model_tracker.py`):
 - `track_call(model_id)`: Record an API call for a model
+- `track_wolfram_call(query)`: Record a Wolfram Alpha verification
+- `get_wolfram_call_count()`: Get total Wolfram queries
+- `has_tracking_data()`: Returns True if any model calls OR Wolfram calls exist (handles edge cases gracefully)
 - `get_models_dict()`: Get Dict[str, int] for metadata storage
 - `get_author_list()`: Get list of unique model IDs
 - `generate_author_attribution(...)`: Generate header text with reference models
-- `generate_model_credits()`: Generate footer text
+- `generate_model_credits()`: Generate footer text (includes Wolfram count if >0, handles edge case of Wolfram-only credits)
+- `generate_credits_for_existing_paper(model_usage, wolfram_calls)`: Includes Wolfram count for saved papers, gracefully handles missing model_usage
 - `aggregate_reference_models(paper_usages)`: Aggregate models from reference papers
 - `format_reference_models(models_dict)`: Format alphabetically with duplicate counts
 
@@ -1720,6 +1726,29 @@ Paper library component:
   - Located after download buttons in paper actions
   - Prevents deletion of active paper during compilation
   - Calls `DELETE /api/auto-research/paper/{paper_id}?confirm=true`
+
+### CritiqueNotificationStack.jsx
+Persistent popup notification component for high-scoring paper critiques:
+- **Fixed position**: Bottom-right corner with z-index 999999
+- **Max 3 notifications**: FIFO queue (oldest removed when 4th arrives)
+- **Trigger condition**: Paper completed with validator critique avg rating ≥ 7.0
+- **Each notification displays**:
+  - Paper title (truncated to 2 lines)
+  - Average rating with color coding (green ≥8, blue ≥7)
+  - Star icon
+  - X button to dismiss
+  - "Click to view critique" hint
+- **Interactions**:
+  - Click anywhere (except X) → opens `PaperCritiqueModal` with full critique
+  - Click X → dismisses notification with slide-out animation
+- **Persistence**: Stays visible across all screens until dismissed (not saved to localStorage)
+- **Styling**: Purple gradient, compact design (~250px × ~80px), smooth animations
+- **WebSocket Integration**: Listens to `high_score_critique` event from backend
+
+**State Management** (in App.jsx):
+- `critiqueNotifications` array stores active notifications
+- `selectedCritiquePaper` tracks paper selected from notification click
+- `showCritiqueModal` toggles critique modal visibility
 
 ### AutonomousResearchSettings.jsx
 Settings integrated into main Settings panel:

@@ -1,0 +1,146 @@
+/* TextFileUploader Component Styles */
+/* Matches existing design system from frontend/src/index.css */
+
+.text-file-uploader {
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Upload Button - Matches button.secondary pattern */
+.text-upload-btn {
+  background: #666;           /* Matches button.secondary from index.css line 345 */
+  color: white;
+  padding: 0.75rem 1.5rem;    /* Standard button padding from index.css line 324 */
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 600;
+  transition: background 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  justify-content: center;
+}
+
+.text-upload-btn:hover:not(:disabled) {
+  background: #777;           /* Matches button.secondary:hover from index.css line 348 */
+}
+
+.text-upload-btn:disabled {
+  background: #555;           /* Matches button:disabled from index.css line 340 */
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.text-upload-btn:focus {
+  outline: 2px solid #4CAF50;
+  outline-offset: 2px;
+}
+
+/* Loading Spinner Animation */
+.upload-spinner {
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Status Messages - Matches .message pattern from BoostControlModal.css */
+.upload-status {
+  padding: 0.75rem 1rem;      /* Matches .message from BoostControlModal.css line 169-172 */
+  border-radius: 4px;
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.upload-status.success {
+  background: #2d5f2d;        /* Matches .message.success from BoostControlModal.css line 181 */
+  border: 1px solid #4CAF50;
+  color: #4CAF50;
+}
+
+.upload-status.error {
+  background: #5f2d2d;        /* Matches .message.error from BoostControlModal.css line 175 */
+  border: 1px solid #ff6b6b;
+  color: #ff6b6b;
+}
+
+.upload-status span {
+  flex: 1;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+/* Close Button for Status Messages */
+.status-close-btn {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+  flex-shrink: 0;
+  margin-left: 0.5rem;
+}
+
+.status-close-btn:hover {
+  opacity: 1;
+}
+
+.status-close-btn:focus {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+/* Mobile Responsiveness - Matches existing breakpoint */
+@media (max-width: 768px) {
+  .text-upload-btn {
+    font-size: 0.9rem;
+    padding: 0.7rem 1.2rem;
+  }
+
+  .upload-status {
+    font-size: 0.85rem;
+    padding: 0.65rem 0.85rem;
+  }
+
+  .upload-status span {
+    /* Truncate very long filenames on mobile */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+

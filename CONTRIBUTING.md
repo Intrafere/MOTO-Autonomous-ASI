@@ -25,8 +25,8 @@ This document provides guidelines for contributing to the project.
 
 2. **Clone your fork**:
    ```bash
-   git clone https://github.com/Intrafere/MOTO
-   cd moto-math-variant
+   git clone https://github.com/Intrafere/MOTO-Autonomous-ASI
+   cd MOTO-Autonomous-ASI
    ```
 
 3. **Install dependencies**:
@@ -300,7 +300,6 @@ Update documentation when you:
 ### Documentation Locations
 
 - **README.md**: Main project documentation
-- **QUICKSTART.md**: Setup and usage guide
 - **.cursor/rules/**: System design specifications (update if architecture changes)
 - **Code comments**: Add inline documentation
 - **Docstrings**: Document classes and functions

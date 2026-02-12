@@ -208,7 +208,8 @@ class PaperLibrary:
         referenced_papers: List[str] = None,
         model_usage: Dict[str, int] = None,
         generation_date: datetime = None,
-        status: str = "complete"
+        status: str = "complete",
+        wolfram_calls: int = None
     ) -> PaperMetadata:
         """
         Save a paper with all associated files.
@@ -244,7 +245,8 @@ class PaperLibrary:
                 status=status,  # Use provided status (default "complete")
                 created_at=datetime.now(),
                 model_usage=model_usage,
-                generation_date=generation_date or datetime.now()
+                generation_date=generation_date or datetime.now(),
+                wolfram_calls=wolfram_calls
             )
             
             # Save paper content

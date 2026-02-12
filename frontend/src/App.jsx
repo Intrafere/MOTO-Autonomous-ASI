@@ -21,6 +21,8 @@ import BoostControlModal from './components/BoostControlModal';
 import BoostLogs from './components/BoostLogs';
 import OpenRouterApiKeyModal from './components/OpenRouterApiKeyModal';
 import OpenRouterPrivacyWarningModal from './components/OpenRouterPrivacyWarningModal';
+import CritiqueNotificationStack from './components/CritiqueNotificationStack';
+import PaperCritiqueModal from './components/PaperCritiqueModal';
 import { websocket } from './services/websocket';
 import { api, autonomousAPI, openRouterAPI } from './services/api';
 
@@ -67,7 +69,7 @@ function App() {
       try {
         const settings = JSON.parse(settingsConfig);
         return {
-          userPrompt: '',
+          userPrompt: settings.userPrompt || '',
           submitterConfigs: settings.submitterConfigs || [
             { submitterId: 1, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
             { submitterId: 2, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
@@ -92,7 +94,7 @@ function App() {
       try {
         const parsed = JSON.parse(savedConfig);
         return {
-          userPrompt: '',
+          userPrompt: parsed.userPrompt || '',
           submitterConfigs: parsed.submitterConfigs || [
             { submitterId: 1, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
             { submitterId: 2, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
@@ -131,6 +133,7 @@ function App() {
   // CRITICAL: Save to BOTH keys to maintain backward compatibility
   useEffect(() => {
     const configToSave = {
+      userPrompt: config.userPrompt,
       submitterConfigs: config.submitterConfigs,
       validatorModel: config.validatorModel,
       validatorProvider: config.validatorProvider,
@@ -142,7 +145,7 @@ function App() {
     // Save to both old and new keys
     localStorage.setItem('aggregatorConfig', JSON.stringify(configToSave));
     localStorage.setItem('aggregator_settings', JSON.stringify(configToSave));
-  }, [config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput]);
+  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput]);
 
   // Autonomous mode state
   const [autonomousRunning, setAutonomousRunning] = useState(false);
@@ -158,6 +161,14 @@ function App() {
   // OpenRouter privacy warning modal state
   const [showPrivacyWarning, setShowPrivacyWarning] = useState(false);
   const [privacyWarningData, setPrivacyWarningData] = useState(null);
+  
+  // OpenRouter rate limit tracking
+  const [rateLimitedModels, setRateLimitedModels] = useState(new Map());
+  
+  // Critique notification stack state
+  const [critiqueNotifications, setCritiqueNotifications] = useState([]);
+  const [selectedCritiquePaper, setSelectedCritiquePaper] = useState(null);
+  const [showCritiqueModal, setShowCritiqueModal] = useState(false);
 
   // Autonomous config with localStorage persistence
   // CRITICAL: Read from 'autonomous_research_settings' (used by AutonomousResearchSettings component)
@@ -755,6 +766,26 @@ function App() {
       });
     }));
     
+    // OpenRouter rate limit event
+    unsubscribers.push(websocket.on('openrouter_rate_limit', (data) => {
+      console.warn('OpenRouter rate limit hit:', data);
+      
+      // Add to rate-limited models tracking
+      setRateLimitedModels(prev => {
+        const newMap = new Map(prev);
+        newMap.set(data.model, new Date(data.retry_after));
+        return newMap;
+      });
+      
+      // Also add to activity log
+      addActivity({
+        event: 'openrouter_rate_limit',
+        timestamp: new Date().toISOString(),
+        message: `⏳ Rate limit: ${data.model} (retry in 1 hour)`,
+        ...data
+      });
+    }));
+    
     unsubscribers.push(websocket.on('final_answer_complete', (data) => {
       addActivity({
         event: 'final_answer_complete',
@@ -764,6 +795,47 @@ function App() {
       });
       // Refresh status
       autonomousAPI.getStatus().then(setAutonomousStatus).catch(console.error);
+    }));
+    
+    // Paper critique completed event (always fires, updates badge)
+    unsubscribers.push(websocket.on('paper_critique_completed', (data) => {
+      console.log('Paper critique completed:', data);
+      // Refresh papers list to show updated critique rating badge on tile
+      autonomousAPI.getPapers().then(res => setPapers(res.papers || [])).catch(console.error);
+    }));
+    
+    // High-score critique notification event (only fires for ratings >= 6.25, shows popup)
+    unsubscribers.push(websocket.on('high_score_critique', (data) => {
+      console.log('High-score critique received:', data);
+      
+      // Add to notification stack (max 3, FIFO)
+      setCritiqueNotifications(prev => {
+        const newNotification = {
+          id: `critique_${data.paper_id}_${Date.now()}`,
+          paper_id: data.paper_id,
+          paper_title: data.paper_title,
+          average_rating: data.average_rating,
+          novelty_rating: data.novelty_rating,
+          correctness_rating: data.correctness_rating,
+          impact_rating: data.impact_rating,
+          timestamp: data.timestamp
+        };
+        
+        // Add to stack, keep max 3 (remove oldest if full)
+        const newStack = [...prev, newNotification];
+        if (newStack.length > 3) {
+          return newStack.slice(-3); // Keep last 3
+        }
+        return newStack;
+      });
+      
+      // Also add to activity log
+      addActivity({
+        event: 'high_score_critique',
+        timestamp: new Date().toISOString(),
+        message: `⭐ High-score critique: ${data.paper_title} (avg: ${data.average_rating})`,
+        data
+      });
     }));
     
     return () => {
@@ -795,6 +867,26 @@ function App() {
     
     return () => clearInterval(interval);
   }, [autonomousRunning]);
+  
+  // Clean up expired rate limits every minute
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setRateLimitedModels(prev => {
+        const now = new Date();
+        const newMap = new Map();
+        
+        for (const [model, retryAfter] of prev.entries()) {
+          if (retryAfter > now) {
+            newMap.set(model, retryAfter);
+          }
+        }
+        
+        return newMap;
+      });
+    }, 60000); // Check every minute
+    
+    return () => clearInterval(interval);
+  }, []);
 
   // Autonomous handlers
   const handleAutonomousStart = async (researchPrompt) => {
@@ -912,13 +1004,47 @@ function App() {
     }
     return 'Stage 3: Final Answer';
   };
+  
+  // Critique notification handlers
+  const handleDismissNotification = (notificationId) => {
+    setCritiqueNotifications(prev => prev.filter(n => n.id !== notificationId));
+  };
+  
+  const handleClickNotification = (paperId, paperTitle) => {
+    setSelectedCritiquePaper({ paper_id: paperId, paper_title: paperTitle });
+    setShowCritiqueModal(true);
+  };
+  
+  const handleCloseCritiqueModal = () => {
+    setShowCritiqueModal(false);
+    setSelectedCritiquePaper(null);
+  };
+  
+  // Critique modal API functions
+  const handleGenerateCritique = async (customPrompt, validatorConfig) => {
+    if (!selectedCritiquePaper) return;
+    
+    const response = await autonomousAPI.generatePaperCritique(
+      selectedCritiquePaper.paper_id,
+      customPrompt,
+      validatorConfig
+    );
+    return response;
+  };
+  
+  const handleGetCritiques = async () => {
+    if (!selectedCritiquePaper) return { critiques: [] };
+    
+    const response = await autonomousAPI.getPaperCritiques(selectedCritiquePaper.paper_id);
+    return response;
+  };
 
   const mainTabs = [
     { id: 'auto-interface', label: 'Start Here: Autonomous Deep Research Controller', group: 'autonomous-main' },
     { id: 'auto-brainstorms', label: 'Stage 1: Brainstorms', group: 'autonomous-main' },
-    { id: 'auto-papers', label: 'Stage 2: Working Final Answer(s)', subtext: '(Less Hallucinatory - Abbreviated Final Answers)', subtextClass: 'green', group: 'autonomous-main' },
+    { id: 'auto-papers', label: 'Stage 2: Short-Form Final Answer(s)', subtext: '(Less Hallucinatory - Short-Form Final Answers)', subtextClass: 'green', group: 'autonomous-main' },
     { id: 'auto-final-answer', label: getFinalAnswerLabel(), subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
-    { id: 'auto-final-answer-library', label: 'Final Answer History', subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
+    { id: 'auto-final-answer-library', label: 'Long-Form Final Answer History', subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
   ];
 
   const autonomousSettingsTabs = [
@@ -987,7 +1113,7 @@ function App() {
             <span className="banner-moto">M.O.T.O.</span>
             <span className="banner-subtitle">Deep Research Harness</span>
           </h1>
-          <p className="banner-variant">Creative Math Researcher Variant for S.T.E.M. (High Risk, High Reward Outputs)</p>
+          <p className="banner-variant"> A Prototype Super Intelligence - Creative Math Researcher Variant for S.T.E.M. (High Risk, High Reward Outputs)</p>
           <p className="banner-company">By Intrafere Research Group</p>
         </div>
       </div>
@@ -1161,6 +1287,32 @@ function App() {
       
       <div className="tab-content">
         <div className="container">
+          {/* Rate Limit Warning Banner - Global indicator */}
+          {rateLimitedModels.size > 0 && (
+            <div className="rate-limit-warning-banner">
+              <div className="rate-limit-header">
+                <span className="rate-limit-icon">⏳</span>
+                <span className="rate-limit-title">
+                  OpenRouter free model usage limits in effect - {rateLimitedModels.size} model(s) paused and retrying
+                </span>
+              </div>
+              <div className="rate-limit-details">
+                {Array.from(rateLimitedModels.entries()).map(([model, retryAfter]) => {
+                  const now = new Date();
+                  const minutesRemaining = Math.max(0, Math.ceil((retryAfter - now) / 60000));
+                  return (
+                    <div key={model} className="rate-limit-model">
+                      <span className="rate-limit-model-name">{model}</span>
+                      <span className="rate-limit-countdown">
+                        Retry in {minutesRemaining} minute{minutesRemaining !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          
           {/* Main Tabs Content */}
           {activeTab === 'auto-interface' && (
             <AutonomousResearchInterface
@@ -1262,7 +1414,7 @@ function App() {
                 <strong>QUICKSTART:</strong> (Optional) Load your Nomic embedding agent on LM STUDIO, or use an OpenRouter API key-only instead of LM STUDIO and go straight to picking your models, and then start the program - expect it to run for at the VERY LEAST hours to days once you hit run. You must leave your PC on and awake during runtime.
               </p>
               <p style={{ fontSize: '0.95rem', lineHeight: '1.5', marginBottom: '1.5rem', color: '#bbb' }}>
-                Please report all bugs and issues to project the repo at <a href="https://github.com/Intrafere/MOTO" target="_blank" rel="noopener noreferrer" style={{ color: '#f1c40f', textDecoration: 'none' }}>GitHub</a>.
+                Please report all bugs and issues to project the repo at <a href="https://github.com/Intrafere/MOTO-Autonomous-ASI" target="_blank" rel="noopener noreferrer" style={{ color: '#f1c40f', textDecoration: 'none' }}>GitHub</a>.
               </p>
               <p style={{ fontSize: '0.95rem', lineHeight: '1.5', marginBottom: '1.5rem', color: '#bbb' }}>
                 Trouble shoot and modify this program easily using the code's specialized rules for AIs and Cursor.com's agentic code editing app - no programming experience required!
@@ -1301,6 +1453,26 @@ function App() {
         onClose={() => setShowPrivacyWarning(false)}
         errorData={privacyWarningData}
       />
+      
+      {/* Critique Notification Stack - Persists across all screens */}
+      <CritiqueNotificationStack
+        notifications={critiqueNotifications}
+        onDismiss={handleDismissNotification}
+        onClickNotification={handleClickNotification}
+      />
+      
+      {/* Critique Modal - Opens when notification is clicked */}
+      {showCritiqueModal && selectedCritiquePaper && (
+        <PaperCritiqueModal
+          isOpen={showCritiqueModal}
+          onClose={handleCloseCritiqueModal}
+          paperType="autonomous_paper"
+          paperId={selectedCritiquePaper.paper_id}
+          paperTitle={selectedCritiquePaper.paper_title}
+          onGenerateCritique={handleGenerateCritique}
+          onGetCritiques={handleGetCritiques}
+        />
+      )}
       
       {/* Footer Section */}
       <footer className="app-footer">

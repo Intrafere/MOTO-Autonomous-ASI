@@ -376,9 +376,22 @@ CONTINUATION OF STARTUP CYCLE LOOP 1 (once the intitial outline and then the pap
 18. validator reviews the special submission edit and decides to accept or reject, if accepted the coordinator updates the applicable database(s) to reflect the paper change.
 Continuation of startup cycle LOOP 2 - rigor enhancement with high parameter low context model
 **NOTE: Loop 2 is SKIPPED entirely if body construction is complete (Conclusion exists in paper). Rigor enhancements are only for body sections.**
-19. Low context high parameter model reviews the database and seeks to add mathematical rigor to the document or decides if the document at this current stage of construction is rigorous enough given optimal mathematical standards (needs_enhancement=false). If the submitter declined, the decline is logged and treated as a rejection for loop purposes.
-20.  The validator reviews to see if it should accept the submission.
-21. Loop 2 is repeated until the first rigor-enhancing submission rejection (or decline) by the validator/submitter. Once the first rigor-enhancing submission rejection or decline occurs return back to loop 1 start sequence to resume the work-flow loops.
+19. RIGOR MODE (2-Step Process):
+    Step 1 (unvalidated): High-param model sees full paper via RAG, decides if rigor work 
+    needed, and chooses mode (standard_enhancement, rewrite_focus, or wolfram_verification 
+    if Wolfram Alpha enabled). Specifies target_section as guidance for Step 2.
+    
+    Step 2 (with self-refusal): Sees full paper (same RAG retrieval as Step 1) plus 
+    target_section as reminder label. Can refuse if Step 1 made mistake (proceed=false). 
+    If proceeds with changes, submits to validator.
+    
+    If Wolfram mode: System makes Wolfram Alpha API call between steps, passes result 
+    to Step 2 for interpretation. API failures treated as declines.
+    
+    Accepted Wolfram Alpha calls tracked in model credits separately from LLM API calls.
+
+20. The validator reviews actual paper changes (if Step 2 didn't refuse or decline).
+21. Loop 2 is repeated until the first rigor-enhancing submission rejection or decline. Once the first rigor rejection/decline occurs (including Step 1 decline, Step 2 refusal, Wolfram API failure, or validator rejection) return back to loop 1 start sequence to resume the work-flow loops.
 
 ## Decline Mechanisms for All Submitter Modes
 
@@ -490,40 +503,6 @@ When the paper is empty (first body section), the `full_content` operation is MA
 
 ## Progressive Answer Generation and Output
 The current paper-build file should be viewable in a 3rd tab in the GUI. I should also be able to save a copy of the output up to its current state. The generate answer should just stop all calculation and save the output of the final paper to this point. The idea is that the user will be able to see how complete the paper is by how many rejections are occuring over time.
-
-## Delete and Retry from Scratch (Paper Reset)
-
-**Purpose**: Allow users to delete current paper work and restart from outline creation when paper writing goes off-track.
-
-**Reset Behavior**:
-- Deletes current paper content and outline
-- Clears all rejection/acceptance logs
-- Resets workflow state and per-paper model tracker
-- Resets all statistics counters (acceptances, rejections, declines)
-- Restarts from outline creation (iterative refinement with validator feedback)
-
-**Implementation**:
-- **Backend Method**: `compiler_coordinator.clear_paper()`
-- **API Endpoint**: `POST /api/compiler/clear-paper?confirm=true`
-- **Frontend Component**: "Delete & Retry from Scratch" button in LivePaper component
-- **WebSocket Event**: `paper_cleared`
-
-**Confirmation Requirements**:
-- Requires explicit user confirmation via browser confirm dialog
-- Dialog explains all items that will be deleted
-- API endpoint requires `confirm=true` query parameter to prevent accidental resets
-- Cannot be undone once executed
-
-**Use Cases**:
-- Paper writing diverged from desired direction
-- Fundamental errors require complete restart from outline
-- Want to try different outline approach with same aggregator database
-- Multiple rejection cycles indicate need for fresh start
-
-**UI Button Appearance**:
-- Red danger button with trash icon: "🗑️ Delete & Retry from Scratch"
-- Disabled when compiler is running (prevents reset during active generation)
-- Located in paper controls section alongside Save Draft and Generate Final
 
 ## Progress Indication Logs
 

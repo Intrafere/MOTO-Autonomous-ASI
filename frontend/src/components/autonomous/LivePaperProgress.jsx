@@ -169,7 +169,7 @@ const LivePaperProgress = ({ api, isCompiling }) => {
                 disabled={isResetting || !isCompiling}
                 title="Delete paper and restart from scratch"
               >
-                {isResetting ? '🔄 Resetting...' : '🗑️ Delete & Retry from Scratch'}
+                {isResetting ? '🔄 Resetting...' : '🗑️ Delete & Retry'}
               </button>
             </div>
           </div>

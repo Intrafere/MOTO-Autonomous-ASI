@@ -777,6 +777,32 @@ All fallback events are logged with:
 - Fallback model being used
 - Broadcast to WebSocket for UI notification
 
+### Rate Limit Handling (Free Models)
+
+**Detection**: HTTP 429 or rate limit keywords in error messages ("rate limit", "too many requests")
+**Behavior**: 1-hour pause per free model (identified by `:free` suffix in model ID)
+**Tracking**: Class-level `_rate_limited_models` dictionary with timestamps in `OpenRouterClient`
+**Frontend**: Orange banner shows paused models with countdown timer
+**Fallback**: Uses LM Studio fallback if configured (temporary, not permanent like credit exhaustion)
+**Logging**: Backend logs rate limit events, frontend shows indicator with minutes remaining
+
+**Implementation**:
+- `OpenRouterClient._is_free_model()` checks for `:free` suffix
+- `OpenRouterClient._is_model_rate_limited()` checks if model in cooldown window
+- `OpenRouterClient._record_rate_limit()` records timestamp when rate limit hit
+- `RateLimitError` exception raised when rate-limited model called within 1-hour window
+- After 1 hour, model automatically unblocked and requests resume
+
+**WebSocket Event** (`openrouter_rate_limit`):
+```json
+{
+  "model": "nousresearch/hermes-3-llama-3.1-405b:free",
+  "role_id": "aggregator_submitter_3",
+  "retry_after": "2026-02-03T15:30:00Z",
+  "message": "OpenRouter free model rate limit hit. Retrying after 1 hour."
+}
+```
+
 ### OpenRouter Privacy Policy Errors
 
 OpenRouter free models require users to opt-in to data sharing for training. If privacy settings block free models:

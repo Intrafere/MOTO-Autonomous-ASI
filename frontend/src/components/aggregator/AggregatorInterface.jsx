@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
+import TextFileUploader from '../TextFileUploader';
 
 export default function AggregatorInterface({ config, setConfig }) {
   const [isRunning, setIsRunning] = useState(false);
@@ -38,6 +39,13 @@ export default function AggregatorInterface({ config, setConfig }) {
         alert(`Failed to upload ${file.name}`);
       }
     }
+  };
+
+  const handleTextFileLoaded = (content) => {
+    // Append to existing prompt with separator
+    const separator = config.userPrompt.trim() ? '\n\n' : '';
+    const newPrompt = config.userPrompt + separator + content;
+    setConfig({ ...config, userPrompt: newPrompt });
   };
 
   const handleStart = async () => {
@@ -123,6 +131,14 @@ export default function AggregatorInterface({ config, setConfig }) {
           onChange={(e) => setConfig({ ...config, userPrompt: e.target.value })}
           placeholder='Be descriptive, this prompt should direct an open-ended brainstorming question, i.e. "Tell me all of the reasons we both should or should not be able to mathematically \"square the circle\"."'
           disabled={isRunning}
+        />
+        <TextFileUploader 
+          onFileLoaded={handleTextFileLoaded}
+          disabled={isRunning}
+          maxSizeMB={5}
+          showCharCount={true}
+          confirmIfNotEmpty={true}
+          existingPromptLength={config.userPrompt.length}
         />
       </div>
 

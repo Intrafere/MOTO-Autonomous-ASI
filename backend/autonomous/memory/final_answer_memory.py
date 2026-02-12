@@ -538,6 +538,13 @@ class FinalAnswerMemory:
         # Format the date
         gen_date = tracker.generation_date.strftime("%Y-%m-%d")
         
+        # Truncate prompt for attribution header to prevent embedding entire uploaded papers.
+        # The full prompt is preserved in session_metadata.json for reference.
+        MAX_PROMPT_LENGTH = 500
+        display_prompt = tracker.user_prompt
+        if len(display_prompt) > MAX_PROMPT_LENGTH:
+            display_prompt = display_prompt[:MAX_PROMPT_LENGTH].rstrip() + "... [truncated]"
+        
         # Build the attribution section
         lines = [
             "=" * 80,
@@ -545,7 +552,7 @@ class FinalAnswerMemory:
             "",
             "Disclaimer: This is an autonomous AI solution generated with the MOTO harness. This paper was not peer reviewed and was autonomously generated without user oversight or interaction beyond the original user prompt, therefore, this text may contain errors. These papers often contain ambitious content and/or extraordinary claims, all content should be viewed with extreme scrutiny.",
             "",
-            f"User's Research Prompt: {tracker.user_prompt}",
+            f"User's Research Prompt: {display_prompt}",
             "",
             f"AI Model Authors: {author_list}",
             "",

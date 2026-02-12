@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 cls
 echo ================================================================
-echo   ASI SYSTEM LAUNCHER
+echo   MOTO SYSTEM LAUNCHER
 echo ================================================================
 echo.
 

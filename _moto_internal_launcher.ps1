@@ -1,5 +1,6 @@
-# ASI Aggregator-Compiler System - PowerShell Launcher
-# Run this with: powershell -ExecutionPolicy Bypass -File launch.ps1
+# MOTO Internal Launcher (PowerShell)
+# This is an internal script. Use "Press to Launch MOTO.bat" instead.
+# If needed manually: powershell -ExecutionPolicy Bypass -File _moto_internal_launcher.ps1
 
 # ================================================================
 # CRITICAL: This prevents the window from closing on errors

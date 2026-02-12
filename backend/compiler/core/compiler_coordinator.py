@@ -215,6 +215,12 @@ class CompilerCoordinator:
         await paper_memory.initialize()
         await compiler_rejection_log.initialize()
         
+        # Initialize Wolfram Alpha client if enabled
+        if system_config.wolfram_alpha_enabled and system_config.wolfram_alpha_api_key:
+            from backend.shared.wolfram_alpha_client import initialize_wolfram_client
+            initialize_wolfram_client(system_config.wolfram_alpha_api_key)
+            logger.info("Wolfram Alpha client initialized for rigor mode")
+        
         # Note: Resume logic is handled in _main_workflow() to properly skip startup loops
         
         # Reset RAG manager state flags for fresh session
@@ -677,37 +683,10 @@ class CompilerCoordinator:
         """
         import re
         
-        # Check for "Abstract" header (case-insensitive, standalone line)
-        # Must be a line with ONLY "Abstract" (whitespace allowed)
-        abstract_pattern = r'^\s*Abstract\s*$'
-        if not re.search(abstract_pattern, content, re.MULTILINE | re.IGNORECASE):
-            # Try to identify what the first line actually is
-            first_line = content.strip().split('\n')[0] if content.strip() else "[empty]"
-            
-            return f"""PRE-VALIDATION FAILED: MISSING_REQUIRED_SECTION - Abstract
-
-WHAT I SAW IN YOUR SUBMISSION:
-First line: '{first_line[:100]}'
-
-WHAT I EXPECTED:
-First line: 'Abstract' (just this word, nothing else)
-
-FIX REQUIRED:
-Your outline MUST start with a line containing ONLY the word 'Abstract'.
-
-CORRECT FORMAT:
-Abstract
-
-I. Introduction
-   A. Subsection
-   ...
-
-WRONG FORMATS:
-❌ "Summary of the paper's core contribution..."  (descriptive text)
-❌ "Abstract: This paper..."  (content follows header)
-❌ Omitting "Abstract" entirely
-
-This is an OUTLINE (table of contents) showing section names. The Abstract section will be WRITTEN later during paper construction. For now, just list 'Abstract' as the first section name."""
+        # Abstract is OPTIONAL - if included, it must be properly formatted
+        # Valid formats: "Abstract", "I. Abstract", "0. Abstract" (case-insensitive)
+        # If Abstract is not present, that's also fine - outline can start with Introduction
+        # We don't enforce Abstract presence here - let validator handle acceptance logic
         
         # Check for "Introduction" header
         intro_pattern = r'^\s*(?:I\.\s*)?Introduction\s*$'
@@ -1796,6 +1775,21 @@ INVALID:
             await paper_memory.update_paper(updated_paper)
             
             self.rigor_acceptances += 1
+            
+            # Track Wolfram Alpha call if applicable (only for accepted submissions)
+            if submission.metadata.get("wolfram_query"):
+                if self.autonomous_mode and self._current_paper_tracker:
+                    # Autonomous mode (Part 3)
+                    self._current_paper_tracker.track_wolfram_call(
+                        submission.metadata["wolfram_query"]
+                    )
+                    logger.info(f"Tracked Wolfram Alpha call (autonomous): {submission.metadata['wolfram_query']}")
+                elif not self.autonomous_mode and self._paper_model_tracker:
+                    # Manual mode (Part 2)
+                    self._paper_model_tracker.track_wolfram_call(
+                        submission.metadata["wolfram_query"]
+                    )
+                    logger.info(f"Tracked Wolfram Alpha call (manual): {submission.metadata['wolfram_query']}")
             
             await compiler_rejection_log.add_acceptance(
                 submission.submission_id,
@@ -3345,6 +3339,7 @@ INVALID:
     def get_model_tracking_data(self) -> Optional[Dict]:
         """
         Get per-paper model tracking data (for manual Part 2 mode).
+        Includes Wolfram Alpha call counts.
         
         Returns:
             Dict with model_usage, total_calls, generation_date, or None if no tracking
@@ -3356,7 +3351,8 @@ INVALID:
             "model_usage": self._paper_model_tracker.get_models_dict(),
             "total_calls": self._paper_model_tracker.total_calls,
             "generation_date": self._paper_model_tracker.generation_date.isoformat(),
-            "authors": self._paper_model_tracker.get_author_list()
+            "authors": self._paper_model_tracker.get_author_list(),
+            "wolfram_calls": self._paper_model_tracker.get_wolfram_call_count()
         }
     
     async def clear_paper(self) -> None:

@@ -1,6 +1,6 @@
 """
 High-parameter submitter agent for compiler.
-Handles rigor enhancement mode.
+Handles rigor enhancement mode (2-step process).
 """
 import asyncio
 import logging
@@ -14,7 +14,11 @@ from backend.shared.models import CompilerSubmission
 from backend.shared.config import system_config, rag_config
 from backend.shared.json_parser import parse_json
 from backend.aggregator.validation.json_validator import json_validator
-from backend.compiler.prompts.rigor_prompts import build_rigor_prompt
+from backend.compiler.prompts.rigor_prompts import (
+    build_rigor_planning_prompt,
+    build_rigor_execution_prompt,
+    build_rigor_wolfram_execution_prompt
+)
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import paper_memory
 from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
@@ -52,7 +56,9 @@ class HighParamSubmitter:
     High-parameter, low-context submitter for compiler.
     
     Mode:
-    - rigor: Enhance scientific rigor of the paper
+    - rigor: Enhance scientific rigor (2-step process)
+      Step 1: Planning (unvalidated)
+      Step 2: Execution (with self-refusal option)
     """
     
     def __init__(self, model_name: str, user_prompt: str, websocket_broadcaster: Optional[Callable] = None):
@@ -91,182 +97,557 @@ class HighParamSubmitter:
     
     async def submit_rigor_enhancement(self) -> Optional[CompilerSubmission]:
         """
-        Submit rigor enhancement (or no-op if not needed).
+        Submit rigor enhancement using 2-step process.
+        
+        Step 1: Planning (unvalidated) - decide if work needed and choose mode
+        Step 2: Execution (with self-refusal) - carry out the work
         
         Returns:
-            CompilerSubmission if enhancement needed, None otherwise
+            CompilerSubmission if enhancement made, None otherwise
         """
-        logger.info("Starting rigor enhancement submission generation...")
+        logger.info("Starting rigor enhancement (Step 1: Planning)...")
         
         try:
-            # Get current outline and paper
-            logger.info("Loading outline and paper state...")
+            # STEP 1: PLANNING
+            planning_result = await self._step1_planning()
+            
+            if planning_result is None:
+                logger.error("Step 1 planning failed (JSON parse error)")
+                return None
+            
+            if not planning_result.get("needs_rigor_work", False):
+                logger.info("Step 1: No rigor work needed (declined)")
+                return None
+            
+            mode = planning_result.get("mode")
+            target_section = planning_result.get("target_section", "")
+            wolfram_query = planning_result.get("wolfram_query", "")
+            
+            logger.info(f"Step 1 complete: mode={mode}, target_section_len={len(target_section)}")
+            
+            # STEP 2: EXECUTION (mode-specific)
+            if mode == "wolfram_verification":
+                return await self._step2_wolfram_execution(
+                    target_section,
+                    wolfram_query
+                )
+            else:  # standard_enhancement or rewrite_focus
+                return await self._step2_standard_execution(
+                    mode,
+                    target_section
+                )
+                
+        except Exception as e:
+            logger.error(f"Rigor enhancement failed: {e}", exc_info=True)
+            raise
+    
+    async def _step1_planning(self) -> Optional[dict]:
+        """
+        Execute Step 1: Planning (unvalidated).
+        
+        LLM decides:
+        - Does document need rigor work?
+        - Which mode to use?
+        - What section to work on?
+        
+        Returns:
+            Planning JSON dict or None if parse fails
+        """
+        logger.info("Step 1: Loading document state for planning...")
+        
+        # Get current outline and paper
+        current_outline = await outline_memory.get_outline()
+        current_paper = await paper_memory.get_paper()
+        
+        logger.info(f"Step 1: State loaded - outline={len(current_outline)} chars, paper={len(current_paper)} chars")
+        
+        # Retrieve relevant paper sections via RAG (same as current rigor mode)
+        from backend.shared.utils import count_tokens
+        max_allowed_tokens = rag_config.get_available_input_tokens(
+            system_config.compiler_high_param_context_window,
+            system_config.compiler_high_param_max_output_tokens
+        )
+        
+        # Try initial RAG retrieval - may overflow if outline + system prompts are large
+        try:
+            logger.info("Step 1: Retrieving relevant paper sections via RAG...")
+            context_pack = await compiler_rag_manager.retrieve_for_mode(
+                query=self.user_prompt + " " + current_paper[-1000:],
+                mode="rigor"
+            )
+            logger.info(f"Step 1: RAG retrieval complete - {len(context_pack.text)} chars")
+            
+            # Build planning prompt
+            logger.info("Step 1: Building planning prompt...")
+            prompt = await build_rigor_planning_prompt(
+                user_prompt=self.user_prompt,
+                current_outline=current_outline,
+                current_paper=context_pack.text
+            )
+            
+            # Verify prompt size
+            actual_prompt_tokens = count_tokens(prompt)
+            
+            if actual_prompt_tokens > max_allowed_tokens:
+                raise ValueError(f"Prompt too large: {actual_prompt_tokens} tokens > {max_allowed_tokens} max")
+            
+            logger.debug(f"Step 1: Planning prompt {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
+            
+        except ValueError as e:
+            if "Prompt too large" not in str(e):
+                raise
+            
+            # Context overflow - reduce RAG budget
+            logger.warning("Step 1: Initial prompt too large, calculating reduced RAG budget...")
+            
+            mandatory_tokens = count_tokens(
+                await build_rigor_planning_prompt(self.user_prompt, current_outline, "")
+            )
+            
+            remaining_budget = max_allowed_tokens - mandatory_tokens - 200
+            
+            if remaining_budget < 500:
+                raise ValueError(
+                    f"Context window too small for rigor mode: outline + system prompts require "
+                    f"{mandatory_tokens} tokens, only {max_allowed_tokens} available. "
+                    f"Increase compiler_high_param_context_window or reduce outline size."
+                )
+            
+            logger.warning(f"Step 1: Retrying with reduced RAG budget: {remaining_budget} tokens")
+            context_pack = await compiler_rag_manager.retrieve_for_mode(
+                query=self.user_prompt + " " + current_paper[-1000:],
+                mode="rigor",
+                max_tokens=remaining_budget
+            )
+            
+            prompt = await build_rigor_planning_prompt(
+                user_prompt=self.user_prompt,
+                current_outline=current_outline,
+                current_paper=context_pack.text
+            )
+            
+            actual_prompt_tokens = count_tokens(prompt)
+            logger.info(f"Step 1: Adjusted prompt to {actual_prompt_tokens} tokens")
+        
+        # Generate task ID
+        task_id = self.get_current_task_id()
+        self.task_sequence += 1
+        
+        if self.task_tracking_callback:
+            self.task_tracking_callback("started", task_id)
+        
+        # Call LLM
+        logger.info(f"Step 1: Generating LLM completion (task_id={task_id})...")
+        response = await api_client_manager.generate_completion(
+            task_id=task_id,
+            role_id=self.role_id,
+            model=self.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=system_config.compiler_high_param_max_output_tokens
+        )
+        
+        # Extract content
+        message = response["choices"][0]["message"]
+        llm_output = message.get("content", "") or message.get("reasoning", "")
+        logger.info(f"Step 1: LLM completion received - {len(llm_output)} chars")
+        
+        # Parse JSON
+        try:
+            data = parse_json(llm_output)
+            logger.info("Step 1: JSON parsed successfully")
+            
+            # Handle array responses
+            if isinstance(data, list):
+                if len(data) == 0:
+                    logger.warning("Step 1: Empty array returned, treating as no work needed")
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
+                    return None
+                logger.warning(f"Step 1: Array of {len(data)} objects returned, using first")
+                data = data[0]
+            
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
+            
+            return data
+            
+        except Exception as e:
+            logger.error(f"Step 1: JSON parse failed - {e}")
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
+            return None
+    
+    async def _step2_standard_execution(
+        self,
+        mode: str,
+        target_section: str
+    ) -> Optional[CompilerSubmission]:
+        """
+        Execute Step 2: Standard or rewrite enhancement.
+        
+        Args:
+            mode: "standard_enhancement" or "rewrite_focus"
+            target_section: Target section from Step 1 (guidance label)
+        
+        Returns:
+            CompilerSubmission if enhancement made, None otherwise
+        """
+        logger.info(f"Starting Step 2: {mode} execution...")
+        
+        try:
+            # Get current state (same RAG retrieval as Step 1)
             current_outline = await outline_memory.get_outline()
             current_paper = await paper_memory.get_paper()
-            logger.info(f"State loaded: outline={len(current_outline)} chars, paper={len(current_paper)} chars")
             
-            # For rigor mode with low-context model:
-            # - Outline: ALWAYS fully injected (crucial for paper structure understanding)
-            # - Paper: RAG retrieval for relevant sections (context-efficient)
-            
+            # Use same RAG retrieval approach as Step 1
             from backend.shared.utils import count_tokens
-            max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_high_param_context_window, system_config.compiler_high_param_max_output_tokens)
+            max_allowed_tokens = rag_config.get_available_input_tokens(
+                system_config.compiler_high_param_context_window,
+                system_config.compiler_high_param_max_output_tokens
+            )
             
-            # Try initial RAG retrieval - may overflow if outline + system prompts are large
+            # Try RAG retrieval
             try:
-                # Retrieve relevant paper sections via RAG (uses paper as query context)
-                logger.info("Retrieving relevant paper sections via RAG for rigor analysis...")
+                logger.info("Step 2: Retrieving paper sections via RAG...")
                 context_pack = await compiler_rag_manager.retrieve_for_mode(
-                    query=self.user_prompt + " " + current_paper[-1000:],  # Use end of paper to guide retrieval
+                    query=self.user_prompt + " " + current_paper[-1000:],
                     mode="rigor"
                 )
-                logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
                 
-                # Build prompt with FULL outline injection + RAG'd paper content
-                logger.info("Building rigor enhancement prompt (full outline + RAG'd paper)...")
-                prompt = await build_rigor_prompt(
+                # Build execution prompt
+                logger.info("Step 2: Building execution prompt...")
+                prompt = await build_rigor_execution_prompt(
                     user_prompt=self.user_prompt,
-                    current_outline=current_outline,  # FULL INJECTION - critical for structure
-                    current_paper=context_pack.text  # RAG'd relevant sections
+                    current_outline=current_outline,
+                    current_paper=context_pack.text,  # FULL paper via RAG
+                    target_section=target_section,  # Guidance label
+                    mode=mode
                 )
-                logger.info(f"Prompt built: {len(prompt)} chars")
                 
-                # CRITICAL: Verify actual prompt size fits in context window
+                # Verify prompt size
                 actual_prompt_tokens = count_tokens(prompt)
                 
                 if actual_prompt_tokens > max_allowed_tokens:
                     raise ValueError(f"Prompt too large: {actual_prompt_tokens} tokens > {max_allowed_tokens} max")
                 
-                logger.debug(f"Rigor mode prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
+                logger.debug(f"Step 2: Execution prompt {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
                 
             except ValueError as e:
                 if "Prompt too large" not in str(e):
-                    raise  # Different error, propagate
+                    raise
                 
-                # Context overflow detected - calculate reduced RAG budget
-                logger.warning(f"Rigor mode: Initial prompt too large. Calculating reduced RAG budget...")
+                # Reduce RAG budget
+                logger.warning("Step 2: Prompt too large, reducing RAG budget...")
                 
-                # Calculate mandatory components (outline + system prompts + user prompt)
                 mandatory_tokens = count_tokens(
-                    await build_rigor_prompt(self.user_prompt, current_outline, "")  # Empty paper
+                    await build_rigor_execution_prompt(
+                        self.user_prompt, current_outline, "", target_section, mode
+                    )
                 )
                 
-                # Calculate reduced RAG budget with safety buffer
-                remaining_budget = max_allowed_tokens - mandatory_tokens - 200  # 200 token safety buffer
+                remaining_budget = max_allowed_tokens - mandatory_tokens - 200
                 
-                if remaining_budget < 500:  # Minimum viable RAG content
+                if remaining_budget < 500:
                     raise ValueError(
-                        f"Context window too small for rigor mode: outline + system prompts require "
-                        f"{mandatory_tokens} tokens, only {max_allowed_tokens} available. "
-                        f"Increase compiler_high_param_context_window or reduce outline size."
+                        f"Context window too small for Step 2: {mandatory_tokens} tokens required"
                     )
                 
-                # Retry with reduced budget
-                logger.warning(
-                    f"Rigor mode: Retrying RAG retrieval with reduced budget: {remaining_budget} tokens "
-                    f"(mandatory: {mandatory_tokens}, total: {max_allowed_tokens})"
-                )
+                logger.warning(f"Step 2: Retrying with reduced budget: {remaining_budget} tokens")
                 context_pack = await compiler_rag_manager.retrieve_for_mode(
                     query=self.user_prompt + " " + current_paper[-1000:],
                     mode="rigor",
                     max_tokens=remaining_budget
                 )
                 
-                # Rebuild prompt with reduced content
-                prompt = await build_rigor_prompt(
+                prompt = await build_rigor_execution_prompt(
                     user_prompt=self.user_prompt,
                     current_outline=current_outline,
-                    current_paper=context_pack.text
+                    current_paper=context_pack.text,
+                    target_section=target_section,
+                    mode=mode
                 )
                 
-                # Re-validate
                 actual_prompt_tokens = count_tokens(prompt)
-                logger.info(
-                    f"Rigor mode: Adjusted prompt to {actual_prompt_tokens} tokens "
-                    f"(budget: {max_allowed_tokens}, paper content reduced)"
-                )
+                logger.info(f"Step 2: Adjusted prompt to {actual_prompt_tokens} tokens")
             
-            # Generate task ID for tracking
+            # Generate task ID
             task_id = self.get_current_task_id()
             self.task_sequence += 1
             
-            # Notify task started (for workflow panel)
             if self.task_tracking_callback:
                 self.task_tracking_callback("started", task_id)
             
-            # Get completion via api_client_manager (handles boost and fallback)
-            logger.info(f"Generating LLM completion via api_client_manager (task_id={task_id})...")
+            # Call LLM
+            logger.info(f"Step 2: Generating LLM completion (task_id={task_id})...")
             response = await api_client_manager.generate_completion(
                 task_id=task_id,
                 role_id=self.role_id,
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,  # Deterministic generation - evolving context provides diversity
-                max_tokens=system_config.compiler_high_param_max_output_tokens  # User-configurable
+                temperature=0.0,
+                max_tokens=system_config.compiler_high_param_max_output_tokens
             )
             
-            # Extract content from either 'content' or 'reasoning' field
-            # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
+            # Extract content
             message = response["choices"][0]["message"]
             llm_output = message.get("content", "") or message.get("reasoning", "")
-            logger.info(f"LLM completion received: {len(llm_output)} chars")
+            logger.info(f"Step 2: LLM completion received - {len(llm_output)} chars")
             
-            # Parse response with retry
-            logger.info("Parsing JSON response...")
+            # Parse JSON
             data = await self._parse_json_response_with_retry(llm_output, prompt, task_id)
-            logger.info("JSON parsed successfully")
             
             if not data:
-                raise ValueError("Failed to parse JSON response from rigor enhancement")
+                logger.error("Step 2: JSON parse failed")
+                return None
             
-            # Handle case where model returns array instead of single object
+            # Handle array responses
             if isinstance(data, list):
                 if len(data) == 0:
-                    logger.warning("Rigor enhancement returned empty array, treating as no enhancement needed")
-                    # Notify task completed (even when no enhancement needed)
+                    logger.warning("Step 2: Empty array returned, treating as refusal")
                     if self.task_tracking_callback:
                         self.task_tracking_callback("completed", task_id)
                     return None
-                logger.warning(f"Rigor enhancement returned array of {len(data)} objects, using first object only")
+                logger.warning(f"Step 2: Array of {len(data)} objects returned, using first")
                 data = data[0]
             
-            # Check if enhancement needed
-            needs_enhancement = data.get("needs_enhancement", False)
-            
-            if not needs_enhancement:
-                # Notify task completed (even when no enhancement needed)
+            # Check if LLM refused (self-refusal option)
+            if not data.get("proceed", True):
+                logger.info("Step 2: LLM refused (Step 1 made mistake)")
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
-                logger.info("Rigor enhancement not needed")
+                return None
+            
+            # Check if enhancement needed
+            if not data.get("needs_enhancement", False):
+                logger.info("Step 2: No enhancement needed")
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
                 return None
             
             # Create submission
-            # Use new_string as content for logging
             new_string_content = _normalize_string_field(data.get("new_string", ""))
             
             submission = CompilerSubmission(
                 submission_id=str(uuid.uuid4()),
                 mode="rigor",
-                content=new_string_content,  # Use new_string as the content
+                content=new_string_content,
                 operation=data.get("operation", "replace"),
                 old_string=_normalize_string_field(data.get("old_string", "")),
-                new_string=new_string_content,  # Already normalized above
+                new_string=new_string_content,
                 reasoning=data.get("reasoning", ""),
-                metadata={}
+                metadata={"rigor_mode": mode}  # No Wolfram data for standard mode
             )
             
-            # Notify task completed successfully
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             
-            logger.info(f"Rigor enhancement submission generated: {submission.submission_id}")
+            logger.info(f"Step 2: Rigor enhancement submission generated - {submission.submission_id}")
             return submission
             
         except Exception as e:
-            logger.error(f"Failed to generate rigor enhancement submission: {e}", exc_info=True)
-            # Notify task completed (failed but still completed)
-            if self.task_tracking_callback and 'task_id' in dir():
+            logger.error(f"Step 2 execution failed: {e}", exc_info=True)
+            raise
+    
+    async def _step2_wolfram_execution(
+        self,
+        target_section: str,
+        wolfram_query: str
+    ) -> Optional[CompilerSubmission]:
+        """
+        Execute Step 2: Wolfram Alpha verification.
+        
+        Args:
+            target_section: Target section from Step 1 (guidance label)
+            wolfram_query: Natural language query for Wolfram Alpha
+        
+        Returns:
+            CompilerSubmission if verification added, None otherwise
+        """
+        logger.info("Starting Step 2: Wolfram Alpha verification...")
+        
+        # Check if Wolfram Alpha enabled
+        if not system_config.wolfram_alpha_enabled:
+            logger.warning("Step 2: Wolfram Alpha requested but not enabled in config")
+            return None
+        
+        # Get Wolfram Alpha client
+        from backend.shared.wolfram_alpha_client import get_wolfram_client
+        wolfram_client = get_wolfram_client()
+        
+        if not wolfram_client:
+            logger.error("Step 2: Wolfram Alpha client not initialized")
+            return None
+        
+        # Make Wolfram Alpha API query
+        logger.info(f"Step 2: Querying Wolfram Alpha - '{wolfram_query}'")
+        wolfram_result = await wolfram_client.query(wolfram_query)
+        
+        if not wolfram_result:
+            logger.warning("Step 2: Wolfram Alpha query failed - treating as decline")
+            return None
+        
+        logger.info(f"Step 2: Wolfram Alpha result - {wolfram_result[:200]}")
+        
+        # Get current state (same RAG retrieval as Step 1)
+        try:
+            current_outline = await outline_memory.get_outline()
+            current_paper = await paper_memory.get_paper()
+            
+            # Use same RAG retrieval approach
+            from backend.shared.utils import count_tokens
+            max_allowed_tokens = rag_config.get_available_input_tokens(
+                system_config.compiler_high_param_context_window,
+                system_config.compiler_high_param_max_output_tokens
+            )
+            
+            # Try RAG retrieval
+            try:
+                logger.info("Step 2 (Wolfram): Retrieving paper sections via RAG...")
+                context_pack = await compiler_rag_manager.retrieve_for_mode(
+                    query=self.user_prompt + " " + current_paper[-1000:],
+                    mode="rigor"
+                )
+                
+                # Build Wolfram execution prompt
+                logger.info("Step 2 (Wolfram): Building execution prompt...")
+                prompt = await build_rigor_wolfram_execution_prompt(
+                    user_prompt=self.user_prompt,
+                    current_outline=current_outline,
+                    current_paper=context_pack.text,  # FULL paper via RAG
+                    target_section=target_section,  # Guidance label
+                    wolfram_query=wolfram_query,
+                    wolfram_result=wolfram_result
+                )
+                
+                # Verify prompt size
+                actual_prompt_tokens = count_tokens(prompt)
+                
+                if actual_prompt_tokens > max_allowed_tokens:
+                    raise ValueError(f"Prompt too large: {actual_prompt_tokens} tokens > {max_allowed_tokens} max")
+                
+                logger.debug(f"Step 2 (Wolfram): Prompt {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
+                
+            except ValueError as e:
+                if "Prompt too large" not in str(e):
+                    raise
+                
+                # Reduce RAG budget
+                logger.warning("Step 2 (Wolfram): Prompt too large, reducing RAG budget...")
+                
+                mandatory_tokens = count_tokens(
+                    await build_rigor_wolfram_execution_prompt(
+                        self.user_prompt, current_outline, "", target_section, 
+                        wolfram_query, wolfram_result
+                    )
+                )
+                
+                remaining_budget = max_allowed_tokens - mandatory_tokens - 200
+                
+                if remaining_budget < 500:
+                    raise ValueError(
+                        f"Context window too small for Step 2 (Wolfram): {mandatory_tokens} tokens required"
+                    )
+                
+                logger.warning(f"Step 2 (Wolfram): Retrying with reduced budget: {remaining_budget} tokens")
+                context_pack = await compiler_rag_manager.retrieve_for_mode(
+                    query=self.user_prompt + " " + current_paper[-1000:],
+                    mode="rigor",
+                    max_tokens=remaining_budget
+                )
+                
+                prompt = await build_rigor_wolfram_execution_prompt(
+                    user_prompt=self.user_prompt,
+                    current_outline=current_outline,
+                    current_paper=context_pack.text,
+                    target_section=target_section,
+                    wolfram_query=wolfram_query,
+                    wolfram_result=wolfram_result
+                )
+                
+                actual_prompt_tokens = count_tokens(prompt)
+                logger.info(f"Step 2 (Wolfram): Adjusted prompt to {actual_prompt_tokens} tokens")
+            
+            # Generate task ID
+            task_id = self.get_current_task_id()
+            self.task_sequence += 1
+            
+            if self.task_tracking_callback:
+                self.task_tracking_callback("started", task_id)
+            
+            # Call LLM
+            logger.info(f"Step 2 (Wolfram): Generating LLM completion (task_id={task_id})...")
+            response = await api_client_manager.generate_completion(
+                task_id=task_id,
+                role_id=self.role_id,
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=system_config.compiler_high_param_max_output_tokens
+            )
+            
+            # Extract content
+            message = response["choices"][0]["message"]
+            llm_output = message.get("content", "") or message.get("reasoning", "")
+            logger.info(f"Step 2 (Wolfram): LLM completion received - {len(llm_output)} chars")
+            
+            # Parse JSON
+            data = await self._parse_json_response_with_retry(llm_output, prompt, task_id)
+            
+            if not data:
+                logger.error("Step 2 (Wolfram): JSON parse failed")
+                return None
+            
+            # Handle array responses
+            if isinstance(data, list):
+                if len(data) == 0:
+                    logger.warning("Step 2 (Wolfram): Empty array returned, treating as refusal")
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
+                    return None
+                logger.warning(f"Step 2 (Wolfram): Array of {len(data)} objects returned, using first")
+                data = data[0]
+            
+            # Check if LLM refused
+            if not data.get("proceed", True):
+                logger.info("Step 2 (Wolfram): LLM refused (query inappropriate or Step 1 wrong)")
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+                return None
+            
+            # Check if enhancement needed
+            if not data.get("needs_enhancement", False):
+                logger.info("Step 2 (Wolfram): No enhancement needed")
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+                return None
+            
+            # Create submission
+            new_string_content = _normalize_string_field(data.get("new_string", ""))
+            
+            submission = CompilerSubmission(
+                submission_id=str(uuid.uuid4()),
+                mode="rigor",
+                content=new_string_content,
+                operation=data.get("operation", "insert_after"),
+                old_string=_normalize_string_field(data.get("old_string", "")),
+                new_string=new_string_content,
+                reasoning=data.get("reasoning", ""),
+                metadata={
+                    "rigor_mode": "wolfram_verification",
+                    "wolfram_query": wolfram_query,
+                    "wolfram_result": wolfram_result
+                }
+            )
+            
+            if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
+            
+            logger.info(f"Step 2 (Wolfram): Verification submission generated - {submission.submission_id}")
+            return submission
+            
+        except Exception as e:
+            logger.error(f"Step 2 (Wolfram) execution failed: {e}", exc_info=True)
             raise
     
     async def _parse_json_response_with_retry(
@@ -324,15 +705,7 @@ class HighParamSubmitter:
             "3. For old_string: copy text EXACTLY from the document, just escape backslashes\n"
             "4. Escape quotes inside strings: use \\\" for literal quotes\n"
             "5. Avoid malformed unicode escapes (must be exactly \\uXXXX with 4 hex digits)\n\n"
-            "Please provide your response again in valid JSON format:\n"
-            "{\n"
-            '  "needs_enhancement": true or false,\n'
-            '  "operation": "replace | insert_after",\n'
-            '  "old_string": "exact text from paper (escape backslashes)",\n'
-            '  "new_string": "enhanced text (LaTeX allowed, escape backslashes)",\n'
-            '  "content": "full content for logging",\n'
-            '  "reasoning": "explanation"\n'
-            "}\n\n"
+            "Please provide your response again in valid JSON format.\n\n"
             "Respond with ONLY the JSON object, no markdown, no explanation."
         )
         
@@ -369,7 +742,7 @@ class HighParamSubmitter:
             else:
                 # Build conversation with truncated failed output
                 retry_response = await api_client_manager.generate_completion(
-                    task_id=f"{task_id}_retry",  # Track retry attempt
+                    task_id=f"{task_id}_retry",
                     role_id=self.role_id,
                     model=self.model_name,
                     messages=[
@@ -377,8 +750,8 @@ class HighParamSubmitter:
                         {"role": "assistant", "content": failed_output_preview},
                         {"role": "user", "content": retry_prompt}
                     ],
-                    temperature=0.0,  # Deterministic JSON formatting
-                    max_tokens=self.max_output_tokens  # Respect max_tokens on retry
+                    temperature=0.0,
+                    max_tokens=self.max_output_tokens
                 )
             
             if retry_response.get("choices"):
@@ -397,4 +770,3 @@ class HighParamSubmitter:
         # All retries failed
         logger.error(f"Compiler high-param submitter (rigor): JSON validation failed after retry: {error}")
         return None
-

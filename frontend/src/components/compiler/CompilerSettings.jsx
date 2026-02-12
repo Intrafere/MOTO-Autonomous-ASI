@@ -47,6 +47,12 @@ function CompilerSettings() {
   const [saveStatus, setSaveStatus] = useState('');
   const [isLoaded, setIsLoaded] = useState(false);
 
+  // Wolfram Alpha settings
+  const [wolframEnabled, setWolframEnabled] = useState(false);
+  const [wolframApiKey, setWolframApiKey] = useState('');
+  const [wolframTestResult, setWolframTestResult] = useState('');
+  const [testingWolfram, setTestingWolfram] = useState(false);
+
   // Critique prompt editor state
   const [critiquePromptExpanded, setCritiquePromptExpanded] = useState(false);
   const [customCritiquePrompt, setCustomCritiquePrompt] = useState('');
@@ -108,6 +114,9 @@ function CompilerSettings() {
           if (settings.critiqueSubmitterLmStudioFallback) setCritiqueSubmitterLmStudioFallback(settings.critiqueSubmitterLmStudioFallback);
           if (settings.critiqueSubmitterContextSize) setCritiqueSubmitterContextSize(settings.critiqueSubmitterContextSize);
           if (settings.critiqueSubmitterMaxOutput) setCritiqueSubmitterMaxOutput(settings.critiqueSubmitterMaxOutput);
+          // Wolfram Alpha
+          if (settings.wolframEnabled !== undefined) setWolframEnabled(settings.wolframEnabled);
+          // wolframApiKey not loaded from localStorage (sensitive data - must re-enter per session)
           // Free-only toggle
           if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
           // Restore cached model providers
@@ -116,6 +125,21 @@ function CompilerSettings() {
           console.error('Failed to load compiler settings:', error);
         }
       }
+      
+      // Load Wolfram Alpha status from backend
+      const loadWolframStatus = async () => {
+        try {
+          const response = await api.getWolframStatus();
+          if (response.enabled) {
+            setWolframEnabled(true);
+          }
+        } catch (err) {
+          console.error('Failed to load Wolfram Alpha status:', err);
+        }
+      };
+      
+      loadWolframStatus();
+      
       setIsLoaded(true);
       setLoadingModels(false);
     };
@@ -161,9 +185,11 @@ function CompilerSettings() {
       highParamContextSize, highParamMaxOutput,
       critiqueSubmitterProvider, critiqueSubmitterModel, critiqueSubmitterOpenrouterProvider, critiqueSubmitterLmStudioFallback,
       critiqueSubmitterContextSize, critiqueSubmitterMaxOutput,
+      wolframEnabled,
       freeOnly,
       modelProviders // Cache provider lists to avoid re-fetching
     };
+    // Note: wolframApiKey intentionally excluded from localStorage (sensitive data)
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     setSaveStatus('Settings saved ✓');
     const timer = setTimeout(() => setSaveStatus(''), 2000);
@@ -177,6 +203,7 @@ function CompilerSettings() {
     highParamContextSize, highParamMaxOutput,
     critiqueSubmitterProvider, critiqueSubmitterModel, critiqueSubmitterOpenrouterProvider, critiqueSubmitterLmStudioFallback,
     critiqueSubmitterContextSize, critiqueSubmitterMaxOutput,
+    wolframEnabled,
     freeOnly, modelProviders
   ]);
 
@@ -262,6 +289,50 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   };
 
   const isUsingCustomCritiquePrompt = customCritiquePrompt && customCritiquePrompt !== defaultCritiquePrompt;
+
+  // Wolfram Alpha handlers
+  const handleTestWolframConnection = async () => {
+    if (!wolframApiKey.trim()) {
+      setWolframTestResult('Please enter an API key');
+      return;
+    }
+    
+    setTestingWolfram(true);
+    setWolframTestResult('Testing...');
+    
+    try {
+      const response = await api.testWolframQuery({
+        query: 'What is 2+2?',
+        api_key: wolframApiKey
+      });
+      
+      if (response.success) {
+        setWolframTestResult(`✓ Success! Result: ${response.result}`);
+        // Save the key to backend
+        await api.setWolframApiKey(wolframApiKey);
+        setWolframEnabled(true);
+      } else {
+        setWolframTestResult('✗ Failed: ' + response.message);
+      }
+    } catch (err) {
+      setWolframTestResult('✗ Error: ' + err.message);
+    } finally {
+      setTestingWolfram(false);
+      setTimeout(() => setWolframTestResult(''), 5000);
+    }
+  };
+  
+  const handleClearWolframKey = async () => {
+    try {
+      await api.clearWolframApiKey();
+      setWolframApiKey('');
+      setWolframEnabled(false);
+      setWolframTestResult('Key cleared');
+      setTimeout(() => setWolframTestResult(''), 3000);
+    } catch (err) {
+      console.error('Failed to clear Wolfram Alpha key:', err);
+    }
+  };
 
   // Handler for "Use Aggregator Models" button
   const handleUseAggregatorModels = async () => {
@@ -607,6 +678,107 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <small style={{ color: '#888', display: 'block', marginTop: '0.75rem' }}>
           "Use Aggregator Models" copies your aggregator's model selection to all compiler roles.
         </small>
+      </div>
+
+      {/* Wolfram Alpha Integration */}
+      <div className="settings-section">
+        <h3>Wolfram Alpha Integration (Optional)</h3>
+        <small style={{ color: '#888', display: 'block', marginBottom: '1rem' }}>
+          Enable Wolfram Alpha API for computational verification in rigor mode. 
+          Get your API key from <a href="https://products.wolframalpha.com/api" target="_blank" rel="noopener noreferrer">developer.wolframalpha.com</a>
+        </small>
+        
+        <label style={{ display: 'flex', alignItems: 'center', marginBottom: '1rem' }}>
+          <input
+            type="checkbox"
+            checked={wolframEnabled}
+            onChange={async (e) => {
+              const checked = e.target.checked;
+              if (!checked) {
+                // Unchecking - clear key from backend
+                await handleClearWolframKey();
+              } else {
+                // Checking - just show UI (key will be saved on Test Connection)
+                setWolframEnabled(true);
+              }
+            }}
+            style={{ marginRight: '0.75rem' }}
+          />
+          <span style={{ fontWeight: '500' }}>Enable Wolfram Alpha Verification in Rigor Mode</span>
+        </label>
+        
+        {wolframEnabled && (
+          <div style={{ marginLeft: '1.75rem' }}>
+            <div className="form-group">
+              <label>Wolfram Alpha API Key:</label>
+              <input
+                type="password"
+                value={wolframApiKey}
+                onChange={(e) => setWolframApiKey(e.target.value)}
+                placeholder="Enter your Wolfram Alpha App ID"
+                style={{
+                  padding: '0.5rem',
+                  backgroundColor: '#2a2a2a',
+                  border: '1px solid #444',
+                  borderRadius: '4px',
+                  color: '#fff',
+                  width: '100%',
+                  marginBottom: '0.5rem'
+                }}
+              />
+            </div>
+            
+            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+              <button 
+                onClick={handleTestWolframConnection}
+                disabled={testingWolfram}
+                style={{
+                  padding: '0.5rem 1rem',
+                  backgroundColor: '#4CAF50',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: '#fff',
+                  cursor: testingWolfram ? 'wait' : 'pointer',
+                  opacity: testingWolfram ? 0.6 : 1
+                }}
+              >
+                {testingWolfram ? 'Testing...' : 'Test Connection'}
+              </button>
+              
+              <button 
+                onClick={handleClearWolframKey}
+                style={{
+                  padding: '0.5rem 1rem',
+                  backgroundColor: 'transparent',
+                  border: '1px solid #666',
+                  borderRadius: '4px',
+                  color: '#888',
+                  cursor: 'pointer'
+                }}
+              >
+                Clear Key
+              </button>
+            </div>
+            
+            {wolframTestResult && (
+              <div style={{ 
+                marginTop: '0.75rem', 
+                padding: '0.5rem', 
+                borderRadius: '4px',
+                backgroundColor: wolframTestResult.includes('✓') ? '#1a3a1a' : '#3a1a1a',
+                color: wolframTestResult.includes('✓') ? '#4CAF50' : '#ff6b6b',
+                fontSize: '0.85rem'
+              }}>
+                {wolframTestResult}
+              </div>
+            )}
+            
+            <small style={{ color: '#888', display: 'block', marginTop: '1rem' }}>
+              In rigor mode, the AI can request Wolfram Alpha verification of mathematical claims. 
+              This enables computational checking of theorems, solving equations, and verifying properties.
+            </small>
+          </div>
+        )}
       </div>
 
       <div className="settings-section">

@@ -130,6 +130,15 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
     return abstract.substring(0, maxLength) + '...';
   };
 
+  // Get color for critique rating badge
+  const getCritiqueColor = (rating) => {
+    if (rating >= 8) return '#10b981'; // Green
+    if (rating >= 6.25) return '#3b82f6'; // Blue
+    if (rating >= 4) return '#eab308'; // Yellow
+    if (rating >= 2) return '#f97316'; // Orange
+    return '#ef4444'; // Red
+  };
+
   // Open critique modal for a paper
   const handleOpenCritique = (e, paper) => {
     e.stopPropagation();
@@ -186,7 +195,27 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
               <span className="paper-word-count">{paper.word_count?.toLocaleString()} words</span>
             </div>
 
-            <div className="paper-card-title">{paper.title}</div>
+            <div className="paper-card-title">
+              {paper.title}
+              {paper.critique_avg !== null && paper.critique_avg !== undefined && (
+                <span
+                  style={{
+                    display: 'inline-block',
+                    marginLeft: '8px',
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    fontSize: '0.75rem',
+                    fontWeight: '600',
+                    backgroundColor: getCritiqueColor(paper.critique_avg),
+                    color: '#fff',
+                    verticalAlign: 'middle'
+                  }}
+                  title={`Auto-critique rating: ${paper.critique_avg}/10`}
+                >
+                  ⭐ {paper.critique_avg}
+                </span>
+              )}
+            </div>
 
             <div className="paper-card-abstract">
               {truncateAbstract(paper.abstract)}

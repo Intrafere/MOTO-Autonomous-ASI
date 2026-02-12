@@ -1,0 +1,432 @@
+---
+alwaysApply: true
+---
+
+# LaTeX Renderer System
+
+**Last Updated**: 2026-01-05
+
+---
+
+## 🔒 CRITICAL SECURITY REQUIREMENTS
+
+### DOMPurify MUST BE ENABLED
+
+**This is a MANDATORY security requirement. DOMPurify sanitization MUST be active in LatexRenderer.jsx.**
+
+The LatexRenderer component processes untrusted LLM output. Without DOMPurify:
+- Malicious scripts CAN execute in users' browsers
+- Session tokens CAN be stolen
+- Phishing forms CAN be injected
+- The application is vulnerable to XSS attacks (CVSS 8.8 HIGH)
+
+**Implementation Checklist** (all items MUST be true):
+- [ ] `import DOMPurify from 'dompurify';` exists in LatexRenderer.jsx
+- [ ] `DOMPURIFY_CONFIG` constant is defined with security settings
+- [ ] `renderedHtml` useMemo calls `DOMPurify.sanitize()` AFTER `renderLatexToHtml()`
+- [ ] `dangerouslySetInnerHTML` receives ONLY sanitized HTML
+
+**If any item above is NOT implemented, the application has a CRITICAL security vulnerability.**
+
+### DOMPurify Configuration (REQUIRED)
+
+```javascript
+const DOMPURIFY_CONFIG = {
+  ALLOWED_TAGS: [
+    'div', 'span', 'p', 'br', 'hr', 'strong', 'b', 'em', 'i', 'u', 's', 'sub', 'sup', 'small',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td',
+    'math', 'semantics', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'mroot', 
+    'msqrt', 'mtext', 'mspace', 'mtable', 'mtr', 'mtd', 'annotation', 'annotation-xml',
+    'svg', 'path', 'line', 'rect', 'circle', 'g', 'use', 'defs', 'clippath',
+  ],
+  ALLOWED_ATTR: [
+    'class', 'id', 'title', 'style',
+    'mathvariant', 'encoding', 'xmlns', 'displaystyle', 'scriptlevel',
+    'columnalign', 'rowalign', 'columnspacing', 'rowspacing', 'stretchy',
+    'symmetric', 'fence', 'separator', 'lspace', 'rspace', 'accent',
+    'accentunder', 'movablelimits', 'minsize', 'maxsize', 'width', 'height',
+    'd', 'viewBox', 'preserveAspectRatio', 'fill', 'stroke', 'stroke-width',
+    'transform', 'x', 'y', 'dx', 'dy', 'x1', 'y1', 'x2', 'y2', 'r', 'cx', 'cy',
+    'href', 'xlink:href', 'clip-path',
+  ],
+  ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false,
+  FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'option', 'link', 'style', 'base', 'meta'],
+  FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'onfocus', 'onblur', 'onchange', 'onsubmit', 'onkeydown', 'onkeyup', 'onmousedown', 'onmouseup'],
+  SANITIZE_DOM: true,
+};
+```
+
+### Sanitization Point (REQUIRED)
+
+```javascript
+const renderedHtml = useMemo(() => {
+  if (viewMode === 'raw' || !content) return null;
+  const rawHtml = renderLatexToHtml(content);
+  return DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
+}, [content, viewMode]);
+```
+
+**Why This Order**: LaTeX-to-HTML conversion may produce unsafe HTML → DOMPurify sanitizes before rendering → Only safe HTML reaches DOM.
+
+---
+
+## Overview
+
+The MOTO system uses a dual rendering approach:
+1. **Rendered LaTeX View** - Professional formatted output with KaTeX math rendering (dark theme on screen, white theme for PDFs)
+2. **Raw Text View** - Plain text monospace display (dark theme)
+
+Both views use dark theme for screen display. White background/black text only appears in PDFs through programmatic styling overrides in `downloadPDF()`.
+
+All rendering flows through `LatexRenderer.jsx`, which handles view toggling, LaTeX processing, security sanitization, and integrates with download utilities.
+
+---
+
+## Component: LatexRenderer.jsx
+
+**Location**: `frontend/src/components/LatexRenderer.jsx`
+
+### Key Features
+
+1. **Dual View Modes**: `rendered` (formatted LaTeX) / `raw` (plain text with dark theme)
+2. **Toggle Control**: `showToggle` prop enables Rendered/Raw view buttons
+3. **Security**: DOMPurify sanitization (MANDATORY), escapeHtml() for error messages, plain text for raw mode
+4. **LaTeX Processing**: KaTeX for math, custom parsing for theorem/proof/definition environments, section headers
+
+### Props API
+
+```javascript
+<LatexRenderer
+  content={string}           // Raw content to render
+  className={string}         // Optional CSS class
+  showToggle={boolean}       // Show Rendered/Raw toggle (default: false)
+  defaultRaw={boolean}       // Start in raw mode (default: false)
+  showLatex={boolean}        // External view mode control (optional)
+/>
+```
+
+### View Modes
+
+**Rendered Mode**:
+- Parses LaTeX commands/environments
+- Applies KaTeX for math rendering
+- Sanitizes with DOMPurify before rendering
+- Dark theme on screen (light gray text #e8e8e8 on dark background)
+- White background/black text ONLY in PDFs (applied programmatically)
+- Class: `.latex-rendered-content`
+
+**Raw Mode**:
+- Displays plain text in `<pre>` element
+- Class: `.latex-raw-content`
+- Dark theme: light gray text (#e0e0e0), monospace font
+- No HTML processing (safe for copy/paste)
+
+---
+
+## Rendering Pipeline (CRITICAL ORDER)
+
+The fixes MUST execute in this exact order in `renderLatexToHtml()`:
+
+1. **Decode HTML entities** (`decodeHtmlEntities()`) - FIRST
+2. **Auto-wrap unwrapped math** (`autoWrapMath()`)
+3. **Process theorem environments** (`processTheoremEnvironments()`)
+   - TikZ handling happens HERE (before theorem environments)
+   - Handles `\[...\]` wrapped, `$$...$$` wrapped, and standalone TikZ
+4. **Section commands** (`replaceSectionCommand()`)
+5. **Text formatting, citations, footnotes, lists, tables, QED symbols**
+6. **KaTeX rendering** (display math, then inline math via `renderKatexSafely()`)
+   - `maxExpand: 5000` applies HERE
+   - Skips content containing HTML placeholders
+7. **Line breaks and horizontal rules** (`\\` → `<br/>`, `\hrule` → `<hr/>`) - AFTER KaTeX
+8. **DOMPurify sanitization** - LAST (security layer)
+
+**Why Order Matters**:
+- HTML entities must be decoded before LaTeX parsing
+- TikZ environments must be replaced BEFORE KaTeX sees them
+- **Line break conversion MUST happen AFTER KaTeX** (`\\` is valid syntax in `aligned`, `matrix`, etc.)
+- DOMPurify sanitizes the final HTML output
+
+---
+
+## Download System
+
+### downloadPDF() Function
+
+**Location**: `frontend/src/utils/downloadHelpers.js`
+
+**Process**:
+1. Clone DOM element (avoid modifying original)
+2. Apply light theme colors (white background, black text, convert SVG to black)
+3. Add metadata header (title, word count, date, models)
+4. Wrap in white container
+5. Generate PDF with html2pdf.js (`backgroundColor: '#ffffff'`, A4 portrait, scale 2)
+6. Add page numbers ("Page X of Y")
+
+**Key Features**:
+- Light theme conversion for print-ready PDFs
+- Page break intelligence (no mid-paragraph splits)
+- Descender buffer zone (35mm bottom margin)
+- High quality (2x scale, JPEG 0.98)
+
+**Dependencies**:
+- `html2pdf.js` ^0.14.0 (fixes XSS vulnerability GHSA-w8x4-x68c-m6fc)
+- `jspdf` ^4.1.0 (fixes LFI/Path Traversal CVE-2025-68428 + PDF Injection CVE-2026-24737)
+
+### downloadRawText() Function
+
+**Process**: Combine outline + content → Create Blob (UTF-8) → Trigger browser download → Cleanup.
+
+### sanitizeFilename() Function
+
+Removes special characters, replaces whitespace with underscores, truncates to 200 chars.
+
+---
+
+## CSS Styling
+
+**Location**: `frontend/src/components/LatexRenderer.css`
+
+**IMPORTANT**: Both view modes use DARK theme on screen. White background/black text ONLY appears in PDFs through programmatic overrides in `downloadPDF()`.
+
+### Raw Text View
+
+```css
+.latex-raw-content {
+  /* No background (inherits #0a0a0a from container) */
+  color: #e0e0e0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+```
+
+### Rendered View (Screen Display)
+
+```css
+.latex-rendered-content {
+  /* No background (inherits #0a0a0a from container) */
+  color: #e8e8e8;
+  font-family: 'Crimson Pro', 'Crimson Text', 'Georgia', 'Times New Roman', serif;
+  font-size: 1.1rem;
+  line-height: 1.85;
+}
+```
+
+**Container** (provides dark background for both modes):
+```css
+.latex-content-container {
+  background: #0a0a0a;  /* Dark background */
+  padding: 3rem 4.5rem;
+}
+```
+
+**PDF Light Theme Conversion**: The `downloadPDF()` function programmatically overrides styles:
+- Sets `backgroundColor: '#ffffff'` in html2canvas config
+- Forces all text to black (`color: #000`)
+- Converts all SVG elements (KaTeX math) to black fill/stroke
+- Wraps in white container before capture
+
+---
+
+## Component Integration
+
+| Component | Location | PDF | Toggle | Notes |
+|-----------|----------|-----|--------|-------|
+| LivePaper.jsx | compiler/ | ✅ | ✅ | Real-time paper viewing |
+| PaperLibrary.jsx | autonomous/ | ✅ | ✅ | Paper library cards |
+| FinalAnswerView.jsx | autonomous/ | ✅ | ✅ | Tier 3 final answer (defaults to raw for performance) |
+| LiveResults.jsx | aggregator/ | ❌ | ✅ | Aggregator submissions |
+| BrainstormList.jsx | autonomous/ | ❌ | ❌ | Simple text display |
+
+### Usage Example
+
+```javascript
+// Basic usage with toggle
+<LatexRenderer
+  content={paperContent}
+  className="paper-content-display"
+  showToggle={true}
+  defaultRaw={false}
+/>
+
+// Parent-controlled view mode
+<LatexRenderer 
+  content={content} 
+  showLatex={showRendered} 
+/>
+
+// PDF download (from PaperLibrary.jsx)
+const element = paperContainerRef.current.querySelector('.latex-rendered-content');
+const metadata = {
+  title: paper.title,
+  wordCount: paper.word_count,
+  date: new Date(paper.created_at).toLocaleDateString(),
+  models: paper.model_usage ? Object.keys(paper.model_usage).join(', ') : null
+};
+await downloadPDF(element, metadata, sanitizeFilename(`${paper.paper_id}_${paper.title}`));
+```
+
+---
+
+## Paper Critique Modal
+
+**Location**: `frontend/src/components/PaperCritiqueModal.jsx`
+
+**Features**:
+- Three rating sections (Novelty, Correctness, Impact) with 1-10 scale progress bars
+- Color-coded ratings (green ≥8, blue ≥6, yellow ≥4, orange ≥2, red <2)
+- Critic identity display (model name, host provider, date/time)
+- History management (up to 10 past critiques, expandable accordion)
+- Regeneration with custom prompt support
+- Error handling (context overflow, validator not configured, API failures)
+
+**Integration Points**:
+- PaperLibrary.jsx → `autonomous_paper` → localStorage: `autonomous_critique_custom_prompt`
+- FinalAnswerView.jsx → `final_answer` → localStorage: `autonomous_critique_custom_prompt`
+- LivePaper.jsx → `compiler_paper` → localStorage: `compiler_critique_custom_prompt`
+
+---
+
+## Attack Scenarios (MUST BE BLOCKED)
+
+### Attack 1: Script Injection
+**Input**: `\begin{theorem}<script>alert('XSS')</script>\end{theorem}`
+**Without DOMPurify**: Script executes
+**With DOMPurify**: Script tag removed, safe HTML rendered
+
+### Attack 2: Event Handler Injection  
+**Input**: `\section{<img src=x onerror="alert(1)">}`
+**Without DOMPurify**: onerror executes when image fails
+**With DOMPurify**: onerror attribute stripped
+
+### Attack 3: Iframe Injection
+**Input**: `\begin{proof}<iframe src="https://evil.com"></iframe>\end{proof}`
+**Without DOMPurify**: Malicious iframe loads
+**With DOMPurify**: iframe tag removed
+
+### Attack 4: Form Injection (Phishing)
+**Input**: `\begin{definition}<form><input name="password"></form>\end{definition}`
+**Without DOMPurify**: Fake form appears
+**With DOMPurify**: form and input tags removed
+
+---
+
+## Security Test Suite (REQUIRED)
+
+```javascript
+// Test 1: Script tag injection
+const input1 = "\\begin{theorem}<script>alert('XSS')</script>\\end{theorem}";
+assert(!renderAndSanitize(input1).includes('<script>'));
+
+// Test 2: Event handler injection
+const input2 = "\\section{<img src=x onerror=alert(1)>}";
+assert(!renderAndSanitize(input2).includes('onerror'));
+
+// Test 3: Iframe injection
+const input3 = "\\begin{proof}<iframe src='evil.com'></iframe>\\end{proof}";
+assert(!renderAndSanitize(input3).includes('<iframe'));
+
+// Test 4: Form injection
+const input4 = "\\begin{lemma}<form><input></form>\\end{lemma}";
+assert(!renderAndSanitize(input4).includes('<form'));
+
+// Test 5: Legitimate content preserved
+const input5 = "\\begin{theorem}Let $x \\in \\mathbb{R}$\\end{theorem}";
+const output5 = renderAndSanitize(input5);
+assert(output5.includes('latex-theorem'));
+assert(output5.includes('<strong>Theorem.</strong>'));
+```
+
+---
+
+## Performance
+
+**PDF Generation** (1000-line doc): ~500ms total (~200ms capture, ~300ms PDF)
+**Raw Text View**: <10ms (instant mode switching)
+**DOMPurify Overhead**: ~7ms (15% increase) - acceptable for security
+
+---
+
+## Maintenance Checklist
+
+When modifying `LatexRenderer.jsx`:
+- [ ] Verify DOMPurify is imported and configured
+- [ ] Verify sanitization occurs BEFORE rendering
+- [ ] Verify `decodeHtmlEntities()` called FIRST
+- [ ] Verify TikZ handling has all three patterns
+- [ ] Verify `renderKatexSafely()` used for ALL KaTeX rendering
+- [ ] Verify `maxExpand: 5000` is set
+- [ ] Verify line break conversion happens AFTER KaTeX
+- [ ] Run security test suite
+- [ ] Test with real-world LLM output
+- [ ] Check PDF rendering (white background, placeholders correct)
+
+---
+
+## System Invariants
+
+1. **ALL model output MUST be sanitized** - No exceptions
+2. **DOMPurify MUST be configured to block scripts** - Never relax FORBID_TAGS
+3. **Sanitization MUST occur AFTER LaTeX conversion** - Order matters
+4. **HTML entities MUST be decoded before LaTeX processing** - First step
+5. **TikZ environments MUST be pre-processed** - KaTeX cannot render them
+6. **TikZ handling MUST remove surrounding math delimiters** - All three patterns
+7. **KaTeX maxExpand MUST be 5000** - Balances complexity with safety
+8. **Line break conversion MUST happen AFTER KaTeX** - Prevents SVG corruption
+9. **Rendering pipeline order MUST be preserved** - Each step depends on previous
+10. **Raw text view never processes HTML** - Plain text only
+11. **PDF generation captures sanitized content** - Security preserved in exports
+
+---
+
+## Related Files
+
+**Core**:
+- `frontend/src/components/LatexRenderer.jsx` - Main renderer
+- `frontend/src/components/LatexRenderer.css` - Styling
+
+**Utilities**:
+- `frontend/src/utils/downloadHelpers.js` - PDF/raw text downloads
+
+**Dependencies**:
+- `katex` - Math rendering
+- `html2pdf.js` ^0.14.0 - PDF generation (XSS vulnerability fixed)
+- `jspdf` ^4.1.0 - PDF assembly (LFI/Path Traversal + PDF Injection vulnerabilities fixed)
+- `dompurify` ^3.2.4 - HTML sanitization (mXSS vulnerability fixed)
+
+**Integration**:
+- `frontend/src/components/compiler/LivePaper.jsx`
+- `frontend/src/components/autonomous/PaperLibrary.jsx`
+- `frontend/src/components/autonomous/FinalAnswerView.jsx`
+- `frontend/src/components/aggregator/LiveResults.jsx`
+
+---
+
+## Security Audit History
+
+| Date | Finding | Status |
+|------|---------|--------|
+| 2026-01-05 | XSS vulnerability in theorem/section rendering | ✅ FIXED |
+| 2026-01-05 | Missing DOMPurify sanitization | ✅ FIXED |
+| 2026-01-05 | Event handler injection possible | ✅ FIXED |
+| 2026-01-05 | iframe/form injection possible | ✅ FIXED |
+| 2026-01-05 | HTML entity corruption breaking LaTeX | ✅ FIXED |
+| 2026-01-05 | TikZ environments causing parse errors | ✅ FIXED |
+| 2026-01-05 | maxExpand limit too low for complex math | ✅ FIXED |
+
+**Mitigation Status**: ✅ FIXED (as of 2026-01-05) - All vulnerabilities resolved, DOMPurify sanitization active.
+
+**OWASP Classification**: CWE-79 (Cross-Site Scripting)
+**CVSS Score**: 8.8 (HIGH) - if vulnerabilities were present
+
+---
+
+## References
+
+- [DOMPurify Documentation](https://github.com/cure53/DOMPurify)
+- [OWASP XSS Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html)
+- [KaTeX Security](https://katex.org/docs/security.html)

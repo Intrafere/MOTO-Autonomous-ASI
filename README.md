@@ -1,5 +1,6 @@
 # MOTO - S.T.E.M. Mathematics Variant V1
 # Autonomous AI Deep Research Harness
+**Version: 1.0.1**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
@@ -9,7 +10,7 @@
 
 MOTO may produce many brilliant papers as it runs, these start-up papers are answers that rival traditional paid cloud deep research functions. As the user, observe MOTO as often or as little as you'd like - skip its autonomy and force it into final answer generation, or stop it early and select one of its highly creative pre-final answer papers. If the operator allows, let MOTO run for many hours and produce a final answer from its experimental mode, a final answer beyond the growing collection of related papers. In this mode, we have found quality can vary - however that is because MOTO is capable of autonomously deciding if it should output a shortform answer, like traditional cloud deep research - or whether to collect existing pre-final answer papers and write a long-form academic volume. With models over 131,000 token context limits, the harness is easily capable of producing final volumes with over 40,000 words, and MOTO produces this book-length content autonomously. It should be noted that this long-form answer is often so detailed that for any AI critique it requires the system to fully direct-inject the paper content. Providing an attempt at a novel 40,000 academic volume to a cloud agent using RAG (summarization-like techniques) may provide mixed results. MOTO strives to direct inject all content where possible. The built in “critique” feature allows the user to direct inject the full 40,000+ word volume into nearly any AI model of their choice. If the system decides to do a long form answer it will collect any relevant papers it has written, take only the best and related ones, organize them into chapters, write any gap papers, write the conclusion, and then lastly write the introduction chapter. This reverse order, body first, conclusion second, then introduction portion(s) last is crucial to allow MOTO the ability to be creative as it write. The traditional introduction -> body -> conclusion writing style creates Markovian constraints on the creative process. In other words, if the system wrote its introduction first, the body paragraphs are locked in and bound to the rules the introduction set. Writing the body section first gives the system greater freedom to discover as it writes as it is not bound by a detailed introduction. MOTO is an experimental system, the AI(s) are producing this content partially unguided and all papers should be judged with extreme scrutiny.
 
-Give the program a try, MOTO is as cool as it sounds – there is a one-click installer. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green “< > Code” drop-down menu on the top right of this GitHub page, download the zip file, extract it to your desktop then press launch.bat. Put in your OpenRouter.AI API key (or optionally connect LM studio for faster  performance), select your agents in the settings profile – if desired and you are unsure you may use the preselected “fastest” profile.
+Give the program a try, MOTO is as cool as it sounds – there is a one-click installer. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green “< > Code” drop-down menu on the top right of this GitHub page, download the zip file, extract it to your desktop then double-click "Press to Launch MOTO.bat". Put in your OpenRouter.AI API key (or optionally connect LM studio for faster  performance), select your agents in the settings profile – if desired and you are unsure you may use the preselected “fastest” profile.
 
 ***Now you are set up and every time you press launch your home lab is ready for your prompt!*** **Give MOTO the toughest question you can think of and press start to begin YOUR creations!**
 
@@ -49,7 +50,7 @@ Before installation, you need:
 
 1. Clone or download this repository
 2. Start LM Studio and load your models and "nomic-embed-text-v1.5" agent **and/or** enter OpenRouter API key
-3. **Double-click `launch.bat`**
+3. **Double-click `Press to Launch MOTO.bat`**
 4. The launcher will:
    - Check all prerequisites
    - Install Python and Node.js dependencies automatically
@@ -139,8 +140,7 @@ moto-math-variant/
 │       └── services/        # API and WebSocket clients
 ├── .cursor/
 │   └── rules/               # AI agent design specifications (full system documentation)
-├── launch.bat               # One-click Windows launcher
-├── launch.ps1               # PowerShell launcher
+├── Press to Launch MOTO.bat  # One-click Windows launcher
 ├── requirements.txt         # Python dependencies
 └── package.json             # Node.js dependencies
 ```
@@ -244,8 +244,6 @@ All configurable per role:
 
 ## 📚 Documentation
 
-- **QUICKSTART.md**: Step-by-step setup guide
-- **START_HERE.txt**: Quick reference and prompting tips
 - **.cursor/rules/**: Complete system design specifications
   - `part-1-aggregator-tool-design-specifications.mdc`
   - `part-2-compiler-tool-design-specification.mdc`
@@ -257,8 +255,8 @@ All configurable per role:
 
 ```bash
 # Clone the repository
-git clone https://github.com/Intrafere/MOTO-Autonomous-AI
-cd moto-auotonomous-ai
+git clone https://github.com/Intrafere/MOTO-Autonomous-ASI
+cd MOTO-Autonomous-ASI
 
 # Install Python dependencies
 pip install -r requirements.txt
@@ -339,7 +337,7 @@ Papers generated by this system have not been peer-reviewed and were autonomousl
 - **News & Updates**: https://intrafere.com/moto-news/
 - **Donate**: https://intrafere.com/donate/
 - **Documentation**: See `.cursor/rules/` folder
-- **Issues**: https://github.com/Intrafere/MOTO-Autonomous-AI/issues
+- **Issues**: https://github.com/Intrafere/MOTO-Autonomous-ASI/issues
 - **LM Studio**: https://lmstudio.ai/
 - **OpenRouter**: https://openrouter.ai/
 - **Cursor IDE**: https://cursor.com/

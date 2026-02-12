@@ -1102,15 +1102,15 @@ FOR CRITERION #11 (NO PLACEHOLDER TEXT): This checks the SUBMISSION ONLY, not th
 ---
 
 REQUIRED SECTION STRUCTURE (MANDATORY):
-Every outline MUST include these exact sections with these exact names in this exact order:
-1. **Abstract** - Must be named exactly "Abstract" (appears first)
-2. **Introduction** - Must be named exactly "Introduction" or "I. Introduction" (after Abstract)
-3. **Body Sections** - At least one body section (II, III, IV, etc.) between Introduction and Conclusion
-4. **Conclusion** - Must be named exactly "Conclusion" or "N. Conclusion" (always LAST content section)
+Every outline MUST include these sections with these exact names in this exact order:
+1. **Abstract** - OPTIONAL - If included, must be named "Abstract", "I. Abstract", or "0. Abstract" (appears first if present)
+2. **Introduction** - Must be named exactly "Introduction" or "I. Introduction" (REQUIRED)
+3. **Body Sections** - At least one body section (II, III, IV, etc.) between Introduction and Conclusion (REQUIRED)
+4. **Conclusion** - Must be named exactly "Conclusion" or "N. Conclusion" (always LAST content section) (REQUIRED)
 
 OUTLINE VALIDATION CRITERIA:
-1. SECTION_STRUCTURE: MUST include Abstract, Introduction, at least one Body section, and Conclusion with exact names
-2. SECTION_ORDER: Abstract → Introduction → Body sections → Conclusion (this exact order)
+1. SECTION_STRUCTURE: MUST include Introduction, at least one Body section, and Conclusion with exact names (Abstract is optional but recommended)
+2. SECTION_ORDER: [Abstract →] Introduction → Body sections → Conclusion (this exact order, where Abstract is optional)
 3. COHERENCE: Logically structured with clear sections and subsections
 4. COMPLETENESS: Captures all relevant content from aggregator database in relation to what is relevant to the title set in the user prompt
 5. ALIGNMENT: Aligns with user's compiler-directing prompt goals
@@ -1127,9 +1127,9 @@ YOUR TASK:
 Verify the submission meets ALL criteria above. Accept only if ALL criteria pass. Reject if ANY criterion fails.
 
 REJECTION CATEGORIES (provide specific feedback):
-- MISSING_REQUIRED_SECTION: Missing Abstract, Introduction, or Conclusion (must have all three with exact names)
-- INCORRECT_SECTION_ORDER: Sections are out of order (must be: Abstract → Introduction → Body → Conclusion)
-- INCORRECT_SECTION_NAME: Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction")
+- MISSING_REQUIRED_SECTION: Missing Introduction or Conclusion (must have both with exact names; Abstract is optional)
+- INCORRECT_SECTION_ORDER: Sections are out of order (must be: [Abstract →] Introduction → Body → Conclusion, where Abstract is optional)
+- INCORRECT_SECTION_NAME: Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction"; if Abstract included, must be "Abstract", "I. Abstract", or "0. Abstract")
 - STRUCTURAL: Body sections not in logical mathematical progression order
 - INCOMPLETENESS: Missing critical content from aggregator database that's relevant to document title
 - MISALIGNMENT: Doesn't serve user's compiler-directing prompt goals
@@ -1141,12 +1141,14 @@ SECTION NAME VALIDATION (CRITICAL):
 
 You MUST check if the submission content contains these EXACT section headers:
 
-1. **Abstract Header Check**:
+1. **Abstract Header Check (OPTIONAL)**:
    ✓ VALID: A line containing ONLY "Abstract" (case-insensitive, may have whitespace)
    ✓ VALID: "Abstract" or "ABSTRACT" or "  Abstract  "
-   ❌ INVALID: "Summary of the paper" or "Abstract: This paper" or any descriptive text instead of just "Abstract"
+   ✓ VALID: "I. Abstract" or "0. Abstract" (numbered variants also acceptable)
+   ✓ VALID: Omitting Abstract entirely (it's optional - some outlines don't include it)
+   ❌ INVALID: "Summary of the paper" or "Abstract: This paper" (if including Abstract, use proper format)
    
-2. **Introduction Header Check**:
+2. **Introduction Header Check (REQUIRED)**:
    ✓ VALID: "Introduction" or "I. Introduction" (case-insensitive)
    ✓ VALID: "INTRODUCTION" or "I. INTRODUCTION"
    ❌ INVALID: "Overview" or "Background"
@@ -1156,27 +1158,27 @@ You MUST check if the submission content contains these EXACT section headers:
    ✓ VALID: "CONCLUSION" or "VII. CONCLUSION"
    ❌ INVALID: "Summary" or "Final Remarks"
 
-REJECTION FORMAT - If ANY header is missing or incorrect, reject with this EXACT format:
+REJECTION FORMAT - If ANY REQUIRED header is missing or incorrect, reject with this EXACT format:
 
-"MISSING_REQUIRED_SECTION: [Abstract|Introduction|Conclusion]
+"MISSING_REQUIRED_SECTION: [Introduction|Conclusion]
 
 WHAT I SAW IN YOUR SUBMISSION:
-Line 1: '[actual first line of submission]'
+[Description of what's missing or incorrect]
 
 WHAT I EXPECTED:
-Line 1: 'Abstract'
+[What the correct format should be]
 
 FIX REQUIRED:
-Change your first line from the descriptive text to ONLY the word 'Abstract'.
+[Specific instructions on how to fix]
 
-This is an OUTLINE showing section names - not the actual paper content. Use just 'Abstract' as a header, not a description of what the abstract will contain."
+This is an OUTLINE showing section names - not the actual paper content."
 
 """
         
         mode_specific = {
             "outline_create": """MODE-SPECIFIC CRITERIA (Outline Creation):
-- Outline MUST include: Abstract, Introduction, at least one Body section, Conclusion
-- Section names MUST match exactly: "Abstract", "Introduction", "Conclusion"
+- Outline MUST include: Introduction, at least one Body section, Conclusion (Abstract is optional)
+- Section names MUST match exactly: "Introduction", "Conclusion" (if Abstract included: "Abstract", "I. Abstract", or "0. Abstract")
 - Outline captures all relevant unique content from aggregator database
 - Outline provides clear structure for mathematical document construction
 - Outline aligns with user's compiler-directing prompt
@@ -1247,10 +1249,10 @@ I. Introduction
 Your feedback should help the submitter produce the best possible outline for guiding paper construction.
 
 ACCEPT if: All required sections present with correct names + all other criteria met
-REJECT if: Missing Abstract/Introduction/Conclusion, incorrect section names, or any other criterion fails""",
+REJECT if: Missing Introduction/Conclusion, incorrect section names, or any other criterion fails (Abstract is optional)""",
             
             "outline_update": """MODE-SPECIFIC CRITERIA (Outline Update):
-- Update MUST NOT remove or rename Abstract, Introduction, or Conclusion sections
+- Update MUST NOT remove or rename Introduction or Conclusion sections (Abstract is optional but if present, must not be removed/renamed)
 - Update is necessary (missing content or better structure needed)
 - Update follows the existing document's already-constructed format and section ordering
 - Update is STRICTLY ADDITIVE ONLY - only adds new sections, never modifies or removes existing structure
