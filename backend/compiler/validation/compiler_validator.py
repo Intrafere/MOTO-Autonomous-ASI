@@ -1045,9 +1045,7 @@ class CompilerValidator:
         parts.append(f"Operation: {submission.operation}\n")
         if submission.old_string:
             parts.append(f"Old String (to find): {submission.old_string}\n")
-        parts.append(f"New String: {submission.new_string}\n")
-        parts.append(f"Content: {submission.content}\n")
-        parts.append(f"Reasoning: {submission.reasoning}\n")
+        parts.append(f"New String (the actual content to add/replace):\n{submission.new_string}\n")
         parts.append("\n---\n")
         parts.append("Now validate this submission (respond as JSON):")
         
@@ -1394,7 +1392,23 @@ MATHEMATICAL RIGOR CHECK (CRITICAL):
 """
         
         mode_specific = {
-            "construction": """MODE-SPECIFIC CRITERIA (Document Construction):
+            "construction": """
+CRITICAL - OUT-OF-ORDER PAPER CONSTRUCTION:
+This system writes papers in a SPECIFIC ORDER that is DIFFERENT from reading order:
+1. BODY SECTIONS FIRST (e.g., "II. Preliminaries", "III. Main Results")
+2. CONCLUSION second
+3. INTRODUCTION third
+4. ABSTRACT last
+
+This means it is CORRECT and EXPECTED that:
+- The first submission starts with a body section (e.g., "II. Preliminaries"), NOT Abstract or Introduction
+- Abstract and Introduction DO NOT EXIST YET during body construction - they will be written in later phases
+- System-managed placeholders mark where Abstract, Introduction, and Conclusion will be written later
+- DO NOT reject because the submission "skips" Abstract or Introduction - they are written AFTER the body
+- For an empty paper, using operation="full_content" with body section content is CORRECT
+- The full_content operation on an empty paper does NOT "delete" placeholders - placeholders are added by the system AFTER the first body section is accepted
+
+MODE-SPECIFIC CRITERIA (Document Construction):
 - Outline Adherence: Follows the outline structure appropriately
 - Logical Flow: Builds logically from existing document content
 - Evidence Integration: Captures relevant aggregator database content
