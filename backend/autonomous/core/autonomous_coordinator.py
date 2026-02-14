@@ -133,6 +133,7 @@ class AutonomousCoordinator:
         self._exhaustion_signals: int = 0
         self._papers_completed_count: int = 0
         self._last_redundancy_check_at: int = 0
+        self._last_completion_review_at: int = 0  # Acceptance count at last completion review
         self._manual_paper_writing_triggered: bool = False
         self._resume_paper_phase: Optional[str] = None  # Saved phase for resume (body/conclusion/intro/abstract)
         
@@ -551,6 +552,7 @@ class AutonomousCoordinator:
             self._exhaustion_signals = workflow_state.get("exhaustion_signals", 0)
             self._papers_completed_count = workflow_state.get("papers_completed_count", 0)
             self._last_redundancy_check_at = workflow_state.get("last_redundancy_check_at", 0)
+            self._last_completion_review_at = workflow_state.get("last_completion_review_at", 0)
             self._last_tier3_check_at = workflow_state.get("last_tier3_check_at", 0)
             
             # Restore Tier 3 flags for proper resume
@@ -801,6 +803,7 @@ class AutonomousCoordinator:
             "exhaustion_signals": self._exhaustion_signals,
             "papers_completed_count": self._papers_completed_count,
             "last_redundancy_check_at": self._last_redundancy_check_at,
+            "last_completion_review_at": self._last_completion_review_at,
             "last_tier3_check_at": self._last_tier3_check_at,
             # Tier 3 Final Answer crash recovery fields
             "tier3_active": self._tier3_active,
@@ -1808,6 +1811,7 @@ class AutonomousCoordinator:
                 self._cleanup_removals = 0  # Reset cleanup removals for this brainstorm
                 self._consecutive_rejections = 0
                 self._exhaustion_signals = 0
+                self._last_completion_review_at = 0  # Reset completion review checkpoint
                 logger.info(f"Starting fresh brainstorm with {last_acceptances} acceptances")
             
             while self._running and not self._stop_event.is_set():
@@ -2198,11 +2202,17 @@ class AutonomousCoordinator:
             return {"success": False, "result": "error", "message": str(e)}
     
     def _should_run_completion_review(self) -> bool:
-        """Check if completion review should run."""
-        # Run every 10 acceptances
+        """Check if completion review should run.
+        
+        Uses threshold-based check instead of exact modulo to prevent skipping
+        when multiple acceptances land between polling cycles (2s interval).
+        With parallel submitters, acceptance count can jump e.g. 9→12, skipping
+        the exact modulo-10 alignment entirely.
+        """
         interval = system_config.autonomous_completion_review_interval
-        return (self._acceptance_count > 0 and 
-                self._acceptance_count % interval == 0)
+        if self._acceptance_count <= 0:
+            return False
+        return (self._acceptance_count - self._last_completion_review_at) >= interval
     
     async def _run_completion_review(self) -> bool:
         """
@@ -2211,6 +2221,9 @@ class AutonomousCoordinator:
         Returns:
             True if should write paper, False if should continue
         """
+        # Record checkpoint so threshold-based trigger doesn't re-fire until next interval
+        self._last_completion_review_at = self._acceptance_count
+        
         logger.info(f"Running completion review at {self._acceptance_count} acceptances")
         
         await self._broadcast("completion_review_started", {
@@ -2370,6 +2383,10 @@ class AutonomousCoordinator:
         
         if paper_content is None:
             logger.error("Paper compilation failed")
+            # CRITICAL: Clear stale paper_id to prevent future compilations from
+            # entering RESUME MODE for this failed paper with mismatched brainstorm data
+            self._current_paper_id = None
+            self._current_paper_title = None
             return False
         
         # Get final outline
@@ -4193,6 +4210,7 @@ class AutonomousCoordinator:
         self._exhaustion_signals = 0
         self._papers_completed_count = 0
         self._last_redundancy_check_at = 0
+        self._last_completion_review_at = 0
         self._manual_paper_writing_triggered = False
         self._force_tier3_after_paper = False
         self._force_tier3_immediate = False
