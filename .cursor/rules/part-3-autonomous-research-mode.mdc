@@ -1881,8 +1881,9 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 - Log error and continue brainstorm aggregation
 
 ### Paper Compilation Failure
-- If paper fails repeatedly (10+ rejections on same section), log critical error
-- User can intervene or system can return to topic selection (abandon paper)
+- Paper compilation is retried indefinitely until success or user stops - no skipping allowed
+- A completed brainstorm ALWAYS produces a paper; the system never abandons a brainstorm without writing its paper
+- Title selection retries indefinitely with rejection feedback threaded into each attempt
 
 ---
 

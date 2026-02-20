@@ -10,6 +10,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.models import PaperTitleSelection
+from backend.shared.utils import count_tokens
 from backend.autonomous.prompts.paper_title_prompts import (
     build_paper_title_prompt,
     build_paper_title_validation_prompt
@@ -56,38 +57,56 @@ class PaperTitleSelectorAgent:
         brainstorm_summary: str,
         existing_papers_from_brainstorm: List[Dict[str, Any]],
         reference_papers: List[Dict[str, Any]] = None,
-        max_attempts: int = 3
+        stop_event: Optional[asyncio.Event] = None
     ) -> Optional[str]:
         """
         Select and validate a paper title.
-        
+        Retries indefinitely until a valid title is accepted or stop_event is set.
+        Rejection feedback from each attempt is threaded into the next generation call
+        so the model can correct its mistakes.
+
         Args:
-            user_research_prompt: The user's high-level research goal
-            topic_prompt: The brainstorm topic prompt
-            brainstorm_summary: Summary of brainstorm database content
-            existing_papers_from_brainstorm: Papers already created from this brainstorm
-            reference_papers: Selected reference papers (if any)
-            max_attempts: Maximum validation attempts
-        
+            stop_event: If provided, the loop exits when the event is set (user stop).
+
         Returns:
-            Validated paper title or None if all attempts failed
+            Validated paper title, or None only if stop_event was set before success.
         """
-        for attempt in range(max_attempts):
-            logger.info(f"PaperTitleSelector: Attempt {attempt + 1}/{max_attempts}")
-            
-            # Generate title selection
+        rejection_history: List[str] = []
+        attempt = 0
+
+        while True:
+            # Honour user stop before each attempt
+            if stop_event is not None and stop_event.is_set():
+                logger.info("PaperTitleSelector: Stop event set - exiting title selection")
+                return None
+
+            attempt += 1
+            logger.info(f"PaperTitleSelector: Attempt {attempt}")
+
+            # Build accumulated rejection feedback string (keep last 5 for context budget)
+            rejection_feedback = ""
+            if rejection_history:
+                recent = rejection_history[-5:]
+                lines = []
+                for i, r in enumerate(recent):
+                    lines.append(f"Attempt {attempt - len(recent) + i}: {r}")
+                rejection_feedback = "\n".join(lines)
+
+            # Generate title selection (pass feedback so model learns from failures)
             selection = await self._generate_title(
                 user_research_prompt,
                 topic_prompt,
                 brainstorm_summary,
                 existing_papers_from_brainstorm,
-                reference_papers
+                reference_papers,
+                rejection_feedback=rejection_feedback
             )
-            
+
             if selection is None:
-                logger.error("PaperTitleSelector: Failed to generate title")
+                logger.error("PaperTitleSelector: Failed to generate title - will retry")
+                await asyncio.sleep(5)
                 continue
-            
+
             # Validate title
             is_valid, rejection_reason = await self._validate_title(
                 user_research_prompt,
@@ -97,15 +116,18 @@ class PaperTitleSelectorAgent:
                 selection.paper_title,
                 selection.reasoning
             )
-            
+
             if is_valid:
                 logger.info(f"PaperTitleSelector: Title accepted: '{selection.paper_title}'")
                 return selection.paper_title
             else:
-                logger.info(f"PaperTitleSelector: Title rejected: {rejection_reason}")
-        
-        logger.error("PaperTitleSelector: All attempts failed")
-        return None
+                logger.info(
+                    f"PaperTitleSelector: Title rejected (attempt {attempt}): {rejection_reason}"
+                )
+                rejection_history.append(
+                    f"Title '{selection.paper_title}' was rejected because: {rejection_reason}"
+                )
+                await asyncio.sleep(2)
     
     async def _generate_title(
         self,
@@ -113,19 +135,51 @@ class PaperTitleSelectorAgent:
         topic_prompt: str,
         brainstorm_summary: str,
         existing_papers_from_brainstorm: List[Dict[str, Any]],
-        reference_papers: List[Dict[str, Any]] = None
+        reference_papers: List[Dict[str, Any]] = None,
+        rejection_feedback: str = ""
     ) -> Optional[PaperTitleSelection]:
         """Generate a paper title selection."""
         try:
-            # Build prompt
+            max_input_tokens = self.context_window - self.max_output_tokens
+
+            # Build prompt with full rejection feedback first
             prompt = build_paper_title_prompt(
                 user_research_prompt=user_research_prompt,
                 topic_prompt=topic_prompt,
                 brainstorm_summary=brainstorm_summary,
                 existing_papers_from_brainstorm=existing_papers_from_brainstorm,
-                reference_papers=reference_papers
+                reference_papers=reference_papers,
+                rejection_feedback=rejection_feedback
             )
-            
+
+            # If prompt is too large, shed oldest rejection entries one at a time until it fits
+            if rejection_feedback and count_tokens(prompt) > max_input_tokens:
+                feedback_lines = [l for l in rejection_feedback.split("\n") if l.strip()]
+                while feedback_lines and count_tokens(prompt) > max_input_tokens:
+                    feedback_lines.pop(0)  # drop oldest entry
+                    trimmed_feedback = "\n".join(feedback_lines)
+                    prompt = build_paper_title_prompt(
+                        user_research_prompt=user_research_prompt,
+                        topic_prompt=topic_prompt,
+                        brainstorm_summary=brainstorm_summary,
+                        existing_papers_from_brainstorm=existing_papers_from_brainstorm,
+                        reference_papers=reference_papers,
+                        rejection_feedback=trimmed_feedback
+                    )
+                if count_tokens(prompt) > max_input_tokens:
+                    logger.warning(
+                        "PaperTitleSelector: Prompt still exceeds context even with no rejection "
+                        "feedback - sending without feedback"
+                    )
+                    prompt = build_paper_title_prompt(
+                        user_research_prompt=user_research_prompt,
+                        topic_prompt=topic_prompt,
+                        brainstorm_summary=brainstorm_summary,
+                        existing_papers_from_brainstorm=existing_papers_from_brainstorm,
+                        reference_papers=reference_papers,
+                        rejection_feedback=""
+                    )
+
             # Generate task ID for tracking
             task_id = self.get_current_task_id()
             self.task_sequence += 1

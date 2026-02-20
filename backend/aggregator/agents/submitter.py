@@ -15,6 +15,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.aggregator.core.context_allocator import context_allocator
+from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.local_training import LocalTrainingMemory
 from backend.aggregator.prompts.submitter_prompts import build_submitter_prompt
@@ -124,10 +125,18 @@ class SubmitterAgent:
                 
                 submission = await self._generate_submission()
                 if submission:
-                    # Add to queue via callback
-                    if self.submission_callback:
+                    # Hold submission until queue has capacity (prevents overflow when
+                    # the LLM call was already in-flight when the queue filled up)
+                    while self.is_running:
+                        queue_size = await queue_manager.size()
+                        if queue_size < system_config.queue_overflow_threshold:
+                            break
+                        logger.debug(f"Submitter {self.submitter_id}: Queue full ({queue_size}), holding submission")
+                        await asyncio.sleep(2)
+
+                    if self.submission_callback and self.is_running:
                         await self.submission_callback(submission)
-                    logger.info(f"Submitter {self.submitter_id} generated submission {submission.submission_id} (iteration {iteration})")
+                        logger.info(f"Submitter {self.submitter_id} generated submission {submission.submission_id} (iteration {iteration})")
                 else:
                     logger.warning(f"Submitter {self.submitter_id} iteration {iteration} - submission generation returned None (will retry)")
                 
