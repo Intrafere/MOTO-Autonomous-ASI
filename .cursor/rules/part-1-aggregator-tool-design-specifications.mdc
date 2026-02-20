@@ -22,12 +22,6 @@ The validator processes up to 3 submissions at once (batch validation). When deq
 
 **Queue Overflow Threshold**: If there are 10 or more submissions in the queue, submitters are paused until the queue drops below 10.
 
-- **Rationale**: Prevents queue overflow by temporarily stopping new submissions when the validator is backlogged. This ensures the validator can catch up without losing any submissions.
-- **Behavior**: When queue ≥10, all submitters pause generation. When queue <10, submitters resume.
-- **Implementation**: Queue size is checked and pause state updated BEFORE dequeuing in validator loop (proactive check) and AFTER validation batch completes (reactive check). This two-point checking prevents race conditions where multiple submitters generate simultaneously before pause flag is set.
-- **Applies to**: Both LM Studio and OpenRouter API calls - all submitters pause regardless of which API they use.
-- **Trade-off**: Temporary reduction in submission throughput to prevent queue overflow and ensure all submissions are validated.
-
 ## Batch Validation
 
 The validator can process 1, 2, or 3 submissions simultaneously using batch-specific prompts. This accelerates throughput while maintaining validation quality.

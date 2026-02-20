@@ -900,8 +900,21 @@ class AutonomousCoordinator:
                         # CRITICAL: Restore paper_id so compilation workflow knows to resume
                         self._current_topic_id = resume_topic
                         self._current_paper_id = resume_paper  # FIX: Restore paper_id
-                        await self._paper_compilation_workflow()
-                        resume_state = None  # Clear resume state after handling
+                        resume_state = None  # Clear resume state before retry loop
+
+                        # A resumed brainstorm MUST produce a paper - retry until success or stop
+                        _resume_paper_attempt = 0
+                        while not self._stop_event.is_set():
+                            _resume_paper_attempt += 1
+                            if _resume_paper_attempt > 1:
+                                logger.warning(
+                                    f"Resume paper compilation attempt {_resume_paper_attempt} "
+                                    f"for brainstorm {self._current_topic_id} - retrying..."
+                                )
+                                await asyncio.sleep(5)
+                            if await self._paper_compilation_workflow():
+                                break
+
                         continue
                     elif resume_tier == "tier1_aggregation" and resume_topic:
                         # Resume brainstorm aggregation
@@ -922,11 +935,22 @@ class AutonomousCoordinator:
                             break
                         
                         if write_paper:
-                            await self._paper_compilation_workflow()
-                            
+                            # A completed brainstorm MUST produce a paper - retry until success or stop
+                            _resume_paper_attempt = 0
+                            while not self._stop_event.is_set():
+                                _resume_paper_attempt += 1
+                                if _resume_paper_attempt > 1:
+                                    logger.warning(
+                                        f"Resume paper compilation attempt {_resume_paper_attempt} "
+                                        f"for brainstorm {self._current_topic_id} - retrying..."
+                                    )
+                                    await asyncio.sleep(5)
+                                if await self._paper_compilation_workflow():
+                                    break
+
                             if self._stop_event.is_set():
                                 break
-                            
+
                             await self._check_paper_redundancy()
                         
                         continue
@@ -1040,12 +1064,29 @@ class AutonomousCoordinator:
                     continue
                 
                 # Phase 3: Paper compilation
+                # A completed brainstorm MUST produce a paper.
+                # Retry indefinitely until success or user stops - no skipping allowed.
                 await self._save_workflow_state(tier="tier2_paper_writing")
-                paper_success = await self._paper_compilation_workflow()
-                
+
+                paper_success = False
+                _paper_attempt = 0
+                while not self._stop_event.is_set():
+                    _paper_attempt += 1
+                    if _paper_attempt > 1:
+                        logger.warning(
+                            f"Paper compilation attempt {_paper_attempt} for brainstorm "
+                            f"{self._current_topic_id} (previous attempt failed) - retrying..."
+                        )
+                        await asyncio.sleep(5)
+
+                    paper_success = await self._paper_compilation_workflow()
+
+                    if paper_success or self._stop_event.is_set():
+                        break
+
                 if self._stop_event.is_set():
                     break
-                
+
                 # Only check redundancy and log completion if paper was successful
                 if paper_success:
                     # Check for paper redundancy (every 3 papers)
@@ -1069,8 +1110,6 @@ class AutonomousCoordinator:
                             logger.info("Tier 3: More research needed, returning to topic selection")
                     
                     logger.info("Paper complete, returning to topic selection")
-                else:
-                    logger.warning("Paper compilation failed, returning to topic selection")
                 
         except Exception as e:
             logger.error(f"AutonomousCoordinator error: {e}")
@@ -1338,12 +1377,29 @@ class AutonomousCoordinator:
                     continue
                 
                 # Phase 3: Paper compilation
+                # A completed brainstorm MUST produce a paper.
+                # Retry indefinitely until success or user stops - no skipping allowed.
                 await self._save_workflow_state(tier="tier2_paper_writing")
-                paper_success = await self._paper_compilation_workflow()
-                
+
+                paper_success = False
+                _paper_attempt = 0
+                while not self._stop_event.is_set():
+                    _paper_attempt += 1
+                    if _paper_attempt > 1:
+                        logger.warning(
+                            f"Paper compilation attempt {_paper_attempt} for brainstorm "
+                            f"{self._current_topic_id} (previous attempt failed) - retrying..."
+                        )
+                        await asyncio.sleep(5)
+
+                    paper_success = await self._paper_compilation_workflow()
+
+                    if paper_success or self._stop_event.is_set():
+                        break
+
                 if self._stop_event.is_set():
                     break
-                
+
                 # Only check redundancy and log completion if paper was successful
                 if paper_success:
                     # Check for paper redundancy (every 3 papers)
@@ -1367,8 +1423,6 @@ class AutonomousCoordinator:
                             logger.info("Tier 3: More research needed, returning to topic selection")
                     
                     logger.info("Paper complete, returning to topic selection")
-                else:
-                    logger.warning("Paper compilation failed, returning to topic selection")
                 
         except Exception as e:
             logger.error(f"Error in resumed research loop: {e}")
@@ -2504,12 +2558,13 @@ class AutonomousCoordinator:
             self._current_topic_id
         )
         
-        # Select title
+        # Select title (pass stop_event so user stop is honoured mid-loop)
         title = await self._title_selector.select_title(
             user_research_prompt=self._user_research_prompt,
             topic_prompt=metadata.topic_prompt,
             brainstorm_summary=brainstorm_summary,
-            existing_papers_from_brainstorm=existing_papers
+            existing_papers_from_brainstorm=existing_papers,
+            stop_event=self._stop_event
         )
         
         return title
@@ -3900,7 +3955,8 @@ class AutonomousCoordinator:
             user_research_prompt=self._user_research_prompt,
             topic_prompt=f"[TIER 3 FINAL ANSWER] Certainty: {assessment.certainty_level}",
             brainstorm_summary=f"Known Certainties:\n{assessment.known_certainties_summary}",
-            existing_papers_from_brainstorm=[]  # No previous papers for this "brainstorm"
+            existing_papers_from_brainstorm=[],  # No previous papers for this "brainstorm"
+            stop_event=self._stop_event
         )
         
         return title
