@@ -138,6 +138,8 @@ try {
     } else {
         Write-Host "Node.js dependencies already installed" -ForegroundColor Green
     }
+    Write-Host "Fixing known vulnerabilities..." -ForegroundColor Yellow
+    npm audit fix 2>&1 | Out-Null
     Set-Location ..
     Write-Host ""
 

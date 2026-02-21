@@ -134,6 +134,8 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+echo Fixing known vulnerabilities - if a vulnerability was found restart your terminal after completion...
+call npm audit fix >nul 2>&1
 popd
 echo Node.js dependencies installed successfully!
 echo.
