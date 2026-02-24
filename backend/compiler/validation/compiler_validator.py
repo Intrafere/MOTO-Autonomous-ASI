@@ -121,6 +121,21 @@ def normalize_whitespace(text: str) -> str:
     return re.sub(r'  +', ' ', text)
 
 
+def normalize_backslashes_for_matching(text: str) -> str:
+    """
+    Collapse runs of 2+ consecutive backslashes to a single backslash for comparison.
+
+    Handles model over-escaping quirks where the model writes \\\\mathbb in JSON
+    (resulting in \\mathbb after json.loads) but the document has \\mathbb (single
+    backslash). This is a final-resort normalization layer used only when all other
+    matching strategies fail.
+    """
+    if not text:
+        return text
+    import re
+    return re.sub(r'\\{2,}', r'\\', text)
+
+
 def find_with_normalized_hyphens(needle: str, haystack: str) -> Tuple[int, str]:
     """
     Find needle in haystack, using Unicode hyphen normalization if exact match fails.
@@ -174,7 +189,42 @@ def find_with_normalized_hyphens(needle: str, haystack: str) -> Tuple[int, str]:
             logger.info(f"WHITESPACE_NORMALIZED_MATCH: Found at pos {match.start()}")
             logger.debug(f"   Whitespace normalization matched: '{needle[:50]}...' found as '{actual_text[:50]}...'")
             return (match.start(), actual_text)
-    
+
+    # Try backslash normalization (4th layer - handles model over-escaping quirks)
+    # e.g., model writes \\\\mathbb in JSON -> \\mathbb after json.loads, but document has \mathbb
+    bs_needle = normalize_backslashes_for_matching(ws_needle)
+    bs_haystack = normalize_backslashes_for_matching(ws_haystack)
+
+    if bs_needle != ws_needle:  # Only attempt if backslash normalization actually changed the needle
+        bs_pos = bs_haystack.find(bs_needle)
+        if bs_pos >= 0:
+            # Convert normalized needle to a regex that allows 1+ backslashes wherever
+            # the normalized form has a single backslash
+            import re
+            escaped = re.escape(bs_needle)
+            # re.escape converts \ to \\, so replace \\\\ (escaped single backslash) with \\\\+
+            flexible_pattern = escaped.replace('\\\\', '\\\\+')
+            match = re.search(flexible_pattern, haystack)
+            if match:
+                actual_text = match.group(0)
+                # Safety: ensure this actual text is unique in the document
+                # (uniqueness is re-checked by the caller, but log ambiguity here)
+                occurrence_count = haystack.count(actual_text)
+                if occurrence_count == 1:
+                    logger.warning(
+                        f"BACKSLASH_NORMALIZED_MATCH: Exact/hyphen/whitespace match failed but found "
+                        f"unique backslash-normalized match at pos {match.start()}. "
+                        f"This indicates a model over-escaping quirk."
+                    )
+                    logger.warning(f"  Model provided (normalized): {repr(bs_needle[:100])}...")
+                    logger.warning(f"  Document actual: {repr(actual_text[:100])}...")
+                    return (match.start(), actual_text)
+                else:
+                    logger.warning(
+                        f"BACKSLASH_NORMALIZED_MATCH: Found backslash-normalized match but "
+                        f"actual text appears {occurrence_count} times - ambiguous, skipping."
+                    )
+
     # === DEEP DIAGNOSTICS FOR COMPLETE FAILURE ===
     logger.warning(f"MATCH_FAILED_COMPLETELY - Deep diagnostic analysis:")
     logger.warning(f"   Needle (first 200 chars): {repr(needle[:200])}")

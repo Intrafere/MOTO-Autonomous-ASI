@@ -6,23 +6,16 @@ alwaysApply: true
 
 ## Overview
 
-The API Key Controls system enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic workflow prediction panel showing the next 20 API calls with click-to-toggle boost feature.
+Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic workflow prediction panel showing the next 20 API calls with boost feature.
 
 **Key Features:**
-- **Per-Role OpenRouter Selection**: Each role (submitter, validator, compiler roles) can independently use LM Studio or OpenRouter
-- **Global OpenRouter API Key**: Single API key for all per-role OpenRouter selections (separate from boost)
-- **LM Studio Fallback**: Optional fallback model for each role when using OpenRouter
-- **OpenRouter Provider/Host Selection**: Choose specific provider (e.g., Anthropic, Google) for each model
-- **Boost Mode (unchanged)**: Single boost API key for selective task acceleration
-- **Three boost selection modes:**
-  - **Boost Next X Calls**: Counter-based, applies to next X API calls regardless of task ID
+- **Per-Role OpenRouter Selection**: Each role independently uses LM Studio or OpenRouter
+- **Global OpenRouter API Key**: Single key for all per-role OpenRouter selections (separate from boost)
+- **LM Studio Fallback**: Optional fallback per role on credit exhaustion
+- **Boost Mode**: Separate boost API key for selective task acceleration via three modes:
+  - **Boost Next X Calls**: Counter-based, next X API calls regardless of task ID
   - **Category Boost**: Role-based, boosts all calls for specific role categories
-  - **Per-task Toggle**: Task ID based (legacy, click individual tasks)
-- Real-time workflow visualization (next 20 API calls)
-- Boost controls in WorkflowPanel (set count, toggle categories)
-- **Boost Logs tab** for viewing raw API outputs and statistics
-- Permanent fallback behavior (no retries after credit exhaustion)
-- Per-role fallback tracking
+  - **Per-task Toggle**: Task ID based (legacy)
 - **System works without LM Studio**: Defaults to OpenRouter when LM Studio unavailable
 
 ---
@@ -32,204 +25,58 @@ The API Key Controls system enables OpenRouter integration with automatic LM Stu
 ### Boost and Parallel Execution
 
 **Boost is a ROUTING decision, NOT a CONCURRENCY decision.**
-
-- **What boost affects**: Which API endpoint is used for each call (OpenRouter boost vs primary model)
-- **What boost does NOT affect**: Whether submitters run in parallel or serial
-- **Invariant**: Aggregation submitters ALWAYS run in parallel regardless of boost status (unless single-model mode is triggered by having ALL agents use the same LM Studio model)
-
-**Example:**
-- Without boost: 3 submitters generate in parallel → queue → validator processes
-- With boost (category boost for Submitter 1): 3 submitters generate in parallel (S1 uses OpenRouter, S2/S3 use LM Studio) → queue → validator processes
-- Same concurrency model, different API routing
-
-**Single-Model Mode vs Boost:**
-- Single-model mode is triggered when all submitters AND validator use the SAME configured model ID
-- Boost routing does NOT trigger single-model mode
-- If all agents use the same LM Studio model AND boost is enabled for some/all of them, they still run in parallel (boost calls go to OpenRouter, non-boost go to LM Studio)
+- Boost affects which API endpoint is used, NOT whether submitters run in parallel or serial
+- Aggregation submitters ALWAYS run in parallel regardless of boost status (unless single-model mode)
+- Single-model mode: triggered when all submitters AND validator use the SAME configured model ID. Boost routing does NOT trigger single-model mode.
 
 ### Backend Core
 
 #### OpenRouterClient (`backend/shared/openrouter_client.py`)
-- Async HTTP client for OpenRouter API
-- Base URL: `https://openrouter.ai/api/v1`
-- Handles API key in `Authorization` header
-- **App Attribution Headers** (for OpenRouter leaderboard visibility):
-  - `HTTP-Referer`: `https://intrafere.com/moto-autonomous-home-ai/`
-  - `X-Title`: `MOTO Deep Research Harness`
-  - Reference: https://openrouter.ai/docs/app-attribution
-- Detects credit exhaustion via:
-  - HTTP 402 (Payment Required) status code
-  - Error messages containing: "credit", "insufficient", "balance", "quota"
-- Raises `CreditExhaustionError` on credit exhaustion (no retries)
-- Retries transient errors (max 3 attempts)
-- Per-model semaphores for rate limiting (same as LM Studio)
-- Temperature=0.0 by default (deterministic generation)
-- Stop sequences included in all completion requests: `\n}\n\n`, `\n]\n\n`, `\n}\n\n\n`, `\n]\n\n\n` (prevents models from padding to max_tokens)
+- Async HTTP client. Base URL: `https://openrouter.ai/api/v1`
+- App Attribution Headers: `HTTP-Referer: https://intrafere.com/moto-autonomous-home-ai/`, `X-Title: MOTO Deep Research Harness`
+- Credit exhaustion detection: HTTP 402 OR error messages containing "credit", "insufficient", "balance", "quota"
+- Raises `CreditExhaustionError` on exhaustion (no retries). Retries transient errors (max 3).
+- Temperature=0.0 default. Stop sequences on all requests: `\n}\n\n`, `\n]\n\n`, `\n}\n\n\n`, `\n]\n\n\n`
 
 #### APIClientManager (`backend/shared/api_client_manager.py`)
-- Central router for all API calls
-- Routes to OpenRouter or LM Studio based on configuration
+- Central router for all API calls: boost check → role's OpenRouter (with permanent fallback) → LM Studio
 - Tracks fallback state per role: `_role_fallback_state: Dict[str, str]`
-- Tracks model configurations per role: `_role_model_configs: Dict[str, ModelConfig]`
-- **Lazy initialization**: OpenRouter client automatically initializes from `rag_config.openrouter_api_key` when first needed (handles server restarts gracefully)
+- Lazy initialization: OpenRouter client initializes from `rag_config.openrouter_api_key` when first needed
 
 **CRITICAL REQUIREMENT - Role Configuration:**
-- **EVERY role that calls `api_client_manager.generate_completion()` MUST be configured via `api_client_manager.configure_role()`**
-- Without configuration, the role will not have proper API routing (OpenRouter vs LM Studio)
-- Model tracking for credits/attribution will fail for unconfigured roles
-- All agents must have their `role_id` configured during coordinator initialization
-- This includes: aggregator submitters/validator, compiler submitters/validator/critique, autonomous agents, and Tier 3 final answer agents
+- **EVERY role calling `api_client_manager.generate_completion()` MUST be configured via `api_client_manager.configure_role()`**
+- This includes: aggregator submitters/validator, compiler submitters/validator/critique, autonomous agents, Tier 3 final answer agents
 
-**Routing Logic:**
-```python
-async def generate_completion(task_id, role_id, model, messages, **kwargs):
-    # 1. Check if task should use boost (any of three modes)
-    if boost_manager.should_use_boost(task_id):
-        try:
-            # Create temporary OpenRouter client with boost API key
-            boost_client = OpenRouterClient(boost_manager.boost_config.openrouter_api_key)
-            try:
-                response = await boost_client.generate_completion(boost_model, ...)
-                # Log the boost API call
-                boost_logger.log_api_call(task_id, role_id, boost_model, messages, response, duration, True)
-                # Consume "Boost Next X" counter if applicable
-                await boost_manager.consume_boost_count()
-                return response
-            finally:
-                await boost_client.close()
-        except CreditExhaustionError:
-            # Boost exhausted - fall through to primary
-            broadcast("boost_credits_exhausted")
-        except Exception as e:
-            # Log failed boost call
-            boost_logger.log_api_call(task_id, role_id, boost_model, messages, None, duration, False, str(e))
-    
-    # 2. Check role fallback state
-    if role_fallback_state[role_id] == "openrouter":
-        # Lazy-initialize OpenRouter client if needed
-        if not openrouter_client:
-            if rag_config.openrouter_api_key:
-                # Initialize from stored key
-                set_openrouter_api_key(rag_config.openrouter_api_key)
-            elif role_config.lm_studio_fallback_id:
-                # No key but fallback exists - use fallback
-                model = role_config.lm_studio_fallback_id
-                # Skip to LM Studio
-            else:
-                # No key and no fallback - error
-                raise RuntimeError("OpenRouter configured but no API key or fallback")
-        
-        if openrouter_client:
-            try:
-                return await openrouter_client.generate_completion(...)
-            except CreditExhaustionError:
-                # Check if fallback is configured
-                if not role_config.lm_studio_fallback_id:
-                    raise RuntimeError("Credits exhausted, no fallback configured")
-                # PERMANENT FALLBACK - mark role as fallen back
-                role_fallback_state[role_id] = "lm_studio"
-                broadcast("openrouter_fallback")
-                # Fall through to LM Studio
-    
-    # 3. Use LM Studio (primary or fallback)
-    return await lm_studio_client.generate_completion(...)
-```
+**Boost Mode Priority** (`should_use_boost(task_id)`):
+1. Boost Next X: `boost_next_count > 0` → True
+2. Category Boost: `_extract_role_prefix(task_id) in boosted_categories` → True
+3. Per-task Toggle: `task_id in boosted_task_ids` → True
 
-**Boost Mode Priority:**
-When checking `should_use_boost(task_id)`:
-1. **Boost Next X**: If `boost_next_count > 0`, returns True (counter-based)
-2. **Category Boost**: If `_extract_role_prefix(task_id) in boosted_categories`, returns True
-3. **Per-task Toggle**: If `task_id in boosted_task_ids`, returns True (legacy)
+**Counter Decrement:** `boost_next_count` decrements ONLY on successful boost API calls. Failed/exhausted calls do NOT decrement.
 
-**Counter Decrement Behavior:**
-The `boost_next_count` counter only decrements after a successful boost API call:
-- ✅ **Decrements**: When boost API call succeeds (200 OK response)
-- ❌ **Does NOT decrement**: When boost credits are exhausted (402 error, falls back to primary)
-- ❌ **Does NOT decrement**: When boost API error occurs (network error, timeout, etc.)
-- **Rationale**: "Boosted call" means a call that successfully used boost API. Failed attempts don't consume the counter.
-- **Example**: User sets count=5, boost credits exhaust on call #2 → Counter stays at 3 (only 2 calls actually used boost)
+**Permanent Fallback:** Once a role falls back to LM Studio due to credit exhaustion, it NEVER retries OpenRouter for that session. Each role has independent fallback state. If no fallback configured: raises RuntimeError.
 
-Categories are derived from role_id:
+**Categories from role_id:**
 - `aggregator_submitter_*` → "Aggregator Submitters"
 - `aggregator_validator` → "Aggregator Validator"
 - `compiler_high_context` → "Compiler High-Context"
 - `compiler_high_param` → "Compiler High-Param"
 - `compiler_validator` → "Compiler Validator"
-- `autonomous_*` → "Autonomous" (various)
-
-**Boost API Key Handling:**
-- Boost uses a **separate** OpenRouter API key (from `boost_manager.boost_config`)
-- A temporary `OpenRouterClient` is created for each boosted task
-- The client is closed immediately after use to avoid connection leaks
-- Primary OpenRouter (for roles) uses a different API key (configured per role)
-
-**Permanent Fallback Behavior:**
-- Once a role falls back to LM Studio due to credit exhaustion, it NEVER retries OpenRouter
-- Fallback state persists for the entire session (until restart)
-- Each role has independent fallback state (submitter 1 can fall back while submitter 2 still uses OpenRouter)
-- **If no fallback is configured**: System raises RuntimeError with clear message instead of attempting LM Studio call
+- `autonomous_*` → "Autonomous"
 
 #### BoostManager (`backend/shared/boost_manager.py`)
-- Singleton pattern - global instance across all coordinators
-- Manages boost configuration: `boost_config: Optional[BoostConfig]`
-- **Three boost modes:**
-  - `boost_next_count: int` - Counter for "Boost Next X Calls" mode
-  - `boosted_categories: Set[str]` - Categories for role-based boost
-  - `boosted_task_ids: Set[str]` - Specific task IDs (legacy mode)
-- Methods:
-  - `set_boost_config(config)` - Enable boost with OpenRouter API key
-  - `clear_boost()` - Disable boost and reset all modes
-  - `set_boost_next_count(count)` - Set "Boost Next X" counter
-  - `toggle_category_boost(category)` - Toggle category-based boost
-  - `toggle_task_boost(task_id)` - Add/remove task from boost set (legacy)
-  - `should_use_boost(task_id)` - **Main check** - returns True if any mode matches (used by coordinators for workflow panel)
-  - `consume_boost_count()` - Decrements boost_next_count ONLY after successful boost API call (not on failures)
-  - `is_task_boosted(task_id)` - Legacy check for per-task mode only (DO NOT USE in coordinators)
-  - `get_boost_status()` - Get current boost state with all modes
-- Broadcasts events: `boost_enabled`, `boost_disabled`, `task_boost_toggled`, `boost_next_count_set`, `category_boost_toggled`
-
-**Boost Counter Behavior:**
-- The `boost_next_count` counter **ONLY** decrements on **successful** boost API calls
-- If boost credits are exhausted: Counter is NOT decremented, call falls through to primary model
-- If boost API error occurs: Counter is NOT decremented, call falls through to primary model
-- **Rationale**: "Boosted call" means a call that successfully uses the boost API. Failed attempts don't count as "used boosts".
-- **User Impact**: If user sets count=5 but boost credits exhaust on call #2, the counter stays at 3 (only 2 calls actually used boost)
+- Singleton. Key methods: `set_boost_config`, `clear_boost`, `set_boost_next_count`, `toggle_category_boost`, `toggle_task_boost`, `should_use_boost` (main check for coordinators), `consume_boost_count` (only after successful boost call), `is_task_boosted` (DO NOT USE in coordinators — legacy only)
+- Boost uses a **separate** OpenRouter API key. Temporary `OpenRouterClient` created per boosted task, closed immediately after.
 
 #### BoostLogger (`backend/shared/boost_logger.py`)
-- Singleton pattern - logs all boost API call outputs
-- Log file: `backend/data/boost_api_log.txt`
-- Methods:
-  - `log_api_call(task_id, role_id, model, request, response, duration, success)` - Log API call details
-  - `get_logs(limit)` - Retrieve recent logs
-  - `clear_logs()` - Clear all logs
-  - `get_stats()` - Get statistics (total calls, success rate, avg duration)
-- Log entries include: timestamp, task_id, role_id, model, request preview, response preview, duration, success status
+- Singleton. Log file: `backend/data/boost_api_log.txt`
+- Methods: `log_api_call`, `get_logs(limit)`, `clear_logs`, `get_stats`
 
 #### Workflow Task Generation (Direct from Agent Sequences)
-**DEPRECATED: `WorkflowPredictor` module** - Coordinators now build tasks directly from agent state
-
-Coordinators generate workflow tasks by reading actual agent `task_sequence` counters:
-
-**Aggregator Task Generation:**
-- Reads `submitter.task_sequence` for each submitter (1-10)
-- Reads `validator.task_sequence` for validator
-- Generates task IDs: `agg_sub{N}_{seq:03d}`, `agg_val_{seq:03d}`
-- Pattern: Single-model mode (sequential S1→S2→S3→V), Multi-model mode (parallel S1,S2,S3→V)
-
-**Compiler Task Generation:**
-- Reads `high_context_submitter.task_sequence`, `high_param_submitter.task_sequence`, `validator.task_sequence`
-- Generates task IDs: `comp_hc_{seq:03d}`, `comp_hp_{seq:03d}`, `comp_val_{seq:03d}`
-- Pattern: Outline creation (HC→V alternating), Construction cycle (4×HC→V, HC outline→V, 2×HC review→V, HP rigor→V)
-
-**Autonomous Task Generation:**
-- Delegates to managed aggregator/compiler coordinators for their workflow tasks
-- For topic selection phase: reads `topic_selector.task_sequence`, `topic_validator.task_sequence`
-- Generates task IDs: `auto_ts_{seq:03d}`, `auto_tv_{seq:03d}`
-
-**Key Design Principle:**
-- No prediction - tasks are built from **actual agent state**
-- Task IDs exactly match what agents will generate on next call
-- Ensures boost selections work correctly (no ID mismatch)
+Coordinators read actual agent `task_sequence` counters — no prediction. Task IDs exactly match what agents will generate.
+- Aggregator: `agg_sub{N}_{seq:03d}`, `agg_val_{seq:03d}`
+- Compiler: `comp_hc_{seq:03d}`, `comp_hp_{seq:03d}`, `comp_val_{seq:03d}`
+- Autonomous: `auto_ts_{seq:03d}`, `auto_tv_{seq:03d}`
 
 ---
 
@@ -239,22 +86,10 @@ Coordinators generate workflow tasks by reading actual agent `task_sequence` cou
 ```python
 class ModelConfig(BaseModel):
     provider: Literal["lm_studio", "openrouter"] = "lm_studio"
-    model_id: str  # LM Studio model OR OpenRouter model based on provider
-    openrouter_model_id: Optional[str] = None  # For OpenRouter (different naming)
-    openrouter_provider: Optional[str] = None  # Specific OpenRouter provider (e.g., "Anthropic")
-    lm_studio_fallback_id: Optional[str] = None  # Fallback model if OpenRouter fails
-    context_window: int = 131072
-    max_output_tokens: int = 25000
-```
-
-### SubmitterConfig (Enhanced with OpenRouter)
-```python
-class SubmitterConfig(BaseModel):
-    submitter_id: int
-    provider: Literal["lm_studio", "openrouter"] = "lm_studio"
-    model_id: str  # LM Studio model OR OpenRouter model based on provider
-    openrouter_provider: Optional[str] = None  # Specific provider (e.g., "Anthropic")
-    lm_studio_fallback_id: Optional[str] = None  # Fallback if OpenRouter fails
+    model_id: str
+    openrouter_model_id: Optional[str] = None
+    openrouter_provider: Optional[str] = None  # e.g., "Anthropic"
+    lm_studio_fallback_id: Optional[str] = None
     context_window: int = 131072
     max_output_tokens: int = 25000
 ```
@@ -264,8 +99,8 @@ class SubmitterConfig(BaseModel):
 class BoostConfig(BaseModel):
     enabled: bool = False
     openrouter_api_key: str = ""
-    boost_model_id: str = ""  # OpenRouter model for boost
-    boost_provider: Optional[str] = None  # Specific provider, or None to let OpenRouter choose
+    boost_model_id: str = ""
+    boost_provider: Optional[str] = None
     boost_context_window: int = 131072
     boost_max_output_tokens: int = 25000
 ```
@@ -273,617 +108,96 @@ class BoostConfig(BaseModel):
 ### WorkflowTask
 ```python
 class WorkflowTask(BaseModel):
-    task_id: str  # Unique ID like "agg_sub1_001"
+    task_id: str          # e.g., "agg_sub1_001"
     sequence_number: int  # 1-20
-    role: str  # "Submitter 1", "Validator", "High-Context", etc.
+    role: str             # "Submitter 1", "Validator", "High-Context", etc.
     mode: Optional[str] = None  # "Construction", "Rigor", "Review", etc.
-    provider: str = "lm_studio"  # "openrouter" | "lm_studio"
+    provider: str = "lm_studio"
     using_boost: bool = False
     completed: bool = False
-    active: bool = False  # Currently executing
+    active: bool = False
 ```
-
----
-
-## Task ID Format
-
-Task IDs follow a structured format for tracking:
-
-**Aggregator:**
-- Submitters: `agg_sub{N}_{seq:03d}` (e.g., `agg_sub1_001`, `agg_sub2_005`)
-- Validator: `agg_val_{seq:03d}` (e.g., `agg_val_003`)
-
-**Compiler:**
-- High-Context: `comp_hc_{seq:03d}` (e.g., `comp_hc_001`)
-- High-Param: `comp_hp_{seq:03d}` (e.g., `comp_hp_015`)
-- Validator: `comp_val_{seq:03d}` (e.g., `comp_val_002`)
-
-**Autonomous Research:**
-- Topic Selector: `auto_ts_{seq:03d}` (e.g., `auto_ts_001`)
-- Topic Validator: `auto_tv_{seq:03d}` (e.g., `auto_tv_002`)
-- Brainstorm: Same as Aggregator format
-- Compiler: Same as Compiler format
 
 ---
 
 ## Coordinator Integration
 
-All coordinators (Aggregator, Compiler, Autonomous) have been enhanced with workflow tracking:
+All coordinators track workflow via: `workflow_tasks`, `completed_task_ids`, `current_task_sequence`, `current_task_id`.
 
-### Added Attributes
-```python
-self.workflow_tasks: List[WorkflowTask] = []  # Predicted next 20 tasks
-self.completed_task_ids: set = set()  # Track completed tasks
-self.current_task_sequence: int = 0  # Sequence counter
-self.current_task_id: Optional[str] = None  # Currently executing task
-```
+Key methods: `refresh_workflow_predictions()`, `get_next_task()`, `mark_task_completed(task_id)`, `mark_task_started(task_id)`.
 
-### Added Methods
-```python
-async def refresh_workflow_predictions() -> None:
-    """Refresh workflow tasks based on actual agent state."""
-    # Read current task_sequence from each agent
-    # Build next 20 tasks using actual sequences
-    # Apply boost state from boost_manager
-    # Update self.workflow_tasks
-    # Broadcast workflow_updated event
-
-async def get_next_task() -> Optional[WorkflowTask]:
-    """Get next uncompleted task from workflow queue."""
-    # Return first task where completed=False
-
-async def mark_task_completed(task_id: str) -> None:
-    """Mark task as completed."""
-    # Add to completed_task_ids
-    # Update task.completed = True
-    # Increment current_task_sequence
-    # Broadcast task_completed event
-    # Refresh predictions every 5 completions
-
-async def mark_task_started(task_id: str) -> None:
-    """Mark task as actively running."""
-    # Set self.current_task_id
-    # Update task.active = True for this task, False for others
-    # Broadcast task_started event
-```
-
-### Refresh Triggers
-Workflow predictions are refreshed:
-- After initialization
-- After each task completion (ensures workflow panel stays current)
-- After mode switches (compiler)
-- After phase transitions (compiler autonomous mode)
+Predictions refresh: after initialization, each task completion, mode switches, phase transitions.
 
 ---
 
 ## WebSocket Events
 
-### Workflow Events
-- `workflow_updated` - Workflow predictions refreshed
-  ```json
-  {
-    "tasks": [WorkflowTask, ...],
-    "mode": "aggregator" | "compiler" | "autonomous"
-  }
-  ```
+**Workflow:** `workflow_updated` (tasks+mode), `task_started` (task_id), `task_completed` (task_id+sequence)
 
-- `task_started` - Task began executing
-  ```json
-  {
-    "task_id": "agg_sub1_001"
-  }
-  ```
+**Boost:** `boost_enabled` (model_id, provider, context_window, max_output_tokens), `boost_disabled`, `task_boost_toggled` (task_id, boosted), `boost_next_count_set` (count), `category_boost_toggled` (category, boosted), `boost_credits_exhausted` (task_id, message)
 
-- `task_completed` - Task finished
-  ```json
-  {
-    "task_id": "agg_sub1_001",
-    "sequence": 1
-  }
-  ```
+**Fallback:** `openrouter_fallback` (role_id, reason, message, fallback_model), `openrouter_fallback_failed` (role_id, reason, message)
 
-### Boost Events
-- `boost_enabled` - Boost activated
-  ```json
-  {
-    "model_id": "openai/gpt-4-turbo",
-    "provider": "Anthropic",  // or null if auto-routing
-    "context_window": 131072,
-    "max_output_tokens": 25000
-  }
-  ```
+**Rate Limit:** `openrouter_rate_limit` (model, role_id, retry_after, message)
 
-- `boost_disabled` - Boost deactivated
-  ```json
-  {}
-  ```
-
-- `task_boost_toggled` - Task boost state changed (legacy per-task mode)
-  ```json
-  {
-    "task_id": "agg_sub1_005",
-    "boosted": true
-  }
-  ```
-
-- `boost_next_count_set` - "Boost Next X" counter changed
-  ```json
-  {
-    "count": 10
-  }
-  ```
-
-- `category_boost_toggled` - Category boost state changed
-  ```json
-  {
-    "category": "Aggregator Submitters",
-    "boosted": true
-  }
-  ```
-
-- `boost_credits_exhausted` - Boost credits ran out for a task
-  ```json
-  {
-    "task_id": "comp_hc_010",
-    "message": "OpenRouter credits exhausted..."
-  }
-  ```
-
-### Fallback Events
-- `openrouter_fallback` - Role permanently fell back to LM Studio
-  ```json
-  {
-    "role_id": "aggregator_submitter_1",
-    "reason": "credit_exhaustion",
-    "message": "OpenRouter credits exhausted...",
-    "fallback_model": "deepseek-r1:70b"
-  }
-  ```
-
-- `openrouter_fallback_failed` - OpenRouter exhausted but no fallback configured
-  ```json
-  {
-    "role_id": "aggregator_submitter_1",
-    "reason": "no_fallback_configured",
-    "message": "OpenRouter credits exhausted for role 'aggregator_submitter_1' and no LM Studio fallback configured..."
-  }
-  ```
+**Privacy:** `openrouter_privacy_error` (error_type, model, role_id, message, solution_url)
 
 ---
 
 ## Frontend Components
 
-### WorkflowPanel (`frontend/src/components/WorkflowPanel.jsx`)
-Collapsable/expandable right-side panel showing next 20 API calls with integrated boost controls:
-
-**Boost Controls (when boost enabled):**
-- **Boost Next X**: Number input + "Set" button
-
-
-**Task Card Display:**
-- Sequence number (#1, #2, #3...)
-- Role + Mode ("Submitter 1 (Construction)")
-- Provider badge ("OR" for OpenRouter, "LMS" for LM Studio)
-- Boost indicator (✨ icon if boosted by any mode)
-- Completed checkmark (✓)
-- Active spinner (⟳)
-
-**Color Coding:**
-- Default: Dark gray (#2a2a2a)
-- Boosted: Gold gradient (#ffd700 to #ffed4e)
-- Active: Blue with pulse animation (#2563eb)
-- Completed: Green fade (#2d5f2d)
-- Fallen back: Orange border (#ff6b35)
-
-**Interaction:**
-- Click any non-completed task to toggle per-task boost (legacy mode)
-- Use "Boost Next" input for counter-based boosting
-- Use category chips for role-based boosting
-- Visual feedback on hover
-- Completed tasks are not clickable
-
-**WebSocket Integration:**
-- Subscribes to: `workflow_updated`, `task_completed`, `task_started`, `task_boost_toggled`, `openrouter_fallback`, `boost_next_count_set`, `category_boost_toggled`
-- Updates task list in real-time
-- Filters out completed tasks (shows only next 20 uncompleted)
-- Requests fresh predictions from backend after each task_completed event
-- Preserves boost state across updates (merges incoming tasks with local state)
-- Syncs boost controls state with backend on status changes
-
-### BoostControlModal (`frontend/src/components/BoostControlModal.jsx`)
-Modal for configuring API boost.
-
-**Actions:**
-- "Test Connection" - Validate API key
-- "Load Models" - Fetch available OpenRouter models
-- "Enable Boost" - Activate boost
-- "Disable Boost" - Deactivate boost
-
-
-### BoostLogs (`frontend/src/components/BoostLogs.jsx`)
-Dedicated tab for viewing boost API call logs and statistics:
-
-**Features:**
-- Auto-refresh (toggleable, 5-second interval)
-- Manual refresh button
-- Clear all logs button (with confirmation)
-- Newest logs at top
-- Color-coded: green for success, red for failure
-
-**WebSocket Integration:**
-- Subscribes to boost events for real-time updates
-- Auto-refreshes when new boost calls are made
-
-### App Layout Integration
-- Boost button in top-right corner (fixed position)
-- WorkflowPanel conditionally rendered when any workflow is running
-- Modal overlay for boost configuration
-- **Boost Logs tab** in main tab bar (gold accent color when active)
+- **WorkflowPanel** (`WorkflowPanel.jsx`): Collapsible right-side panel, next 20 tasks, boost controls (Next X input, category chips), per-task click to toggle boost
+- **BoostControlModal** (`BoostControlModal.jsx`): Configure boost API key, model, provider, context/max tokens
+- **BoostLogs** (`BoostLogs.jsx`): Boost API call logs tab with auto-refresh and stats
+- **OpenRouterApiKeyModal** (`OpenRouterApiKeyModal.jsx`): Set/test/clear global OpenRouter API key
 
 ---
 
 ## API Endpoints
 
-### Boost Endpoints (`backend/api/routes/boost.py`)
+### Boost (`backend/api/routes/boost.py`)
+- `POST /api/boost/enable` — Enable boost (BoostConfig body)
+- `POST /api/boost/disable` — Disable boost, clear all modes
+- `GET /api/boost/status` — Current config, counts, categories
+- `POST /api/boost/set-next-count` — Set Boost Next X counter `{ "count": int }`
+- `POST /api/boost/toggle-category/{category}` — Toggle category boost
+- `GET /api/boost/categories?mode=` — Available categories for mode
+- `POST /api/boost/toggle-task/{task_id}` — Legacy per-task boost toggle
+- `GET /api/boost/openrouter-models` — Fetch OpenRouter models (Bearer key header)
+- `GET /api/boost/model-providers?model_id=` — Providers for a model
+- `GET /api/boost/logs?limit=` — Recent boost logs
+- `POST /api/boost/logs/clear` — Clear logs
 
-**POST /api/boost/enable**
-- Request: `BoostConfig` (API key, model, context, max tokens)
-- Validates API key by testing connection
-- Enables boost globally
-- Returns: Success status and config
+### OpenRouter (`backend/api/routes/openrouter.py`)
+- `GET /api/openrouter/lm-studio-availability` — LM Studio availability check
+- `POST /api/openrouter/set-api-key` — Set and validate global OpenRouter key
+- `DELETE /api/openrouter/api-key` — Clear key
+- `GET /api/openrouter/api-key-status` — `{ has_key, enabled }`
+- `GET /api/openrouter/models` — Available models
+- `GET /api/openrouter/providers/{model_id}` — Providers for model
+- `POST /api/openrouter/test-connection` — Test key without storing
+- `GET /api/model-cache` — Cached model ID mapping (display_name → api_id)
 
-**POST /api/boost/disable**
-- Disables boost
-- Clears all boosted tasks, categories, and next count
-- Returns: Success status
-
-**GET /api/boost/status**
-- Returns: Current boost configuration (including provider), boosted task count, boost_next_count, boosted_categories
-
-**POST /api/boost/set-next-count**
-- Request: `{ "count": int }` (0 to disable, >0 to enable)
-- Sets "Boost Next X Calls" counter
-- Counter decrements with each boosted call
-- Returns: Success status and new count
-
-**POST /api/boost/toggle-category/{category}**
-- Toggles category-based boosting
-- Valid categories: "Aggregator Submitters", "Aggregator Validator", "Compiler High-Context", etc.
-- Returns: New boost state for category
-
-**GET /api/boost/categories**
-- Query param: `mode` (optional: "aggregator", "compiler", "autonomous", "all")
-- Returns: Available categories for the specified mode
-
-**POST /api/boost/toggle-task/{task_id}**
-- Toggles boost for specific task (legacy per-task mode)
-- Returns: New boost state (true/false)
-
-**GET /api/boost/openrouter-models**
-- Header: `Authorization: Bearer <api_key>` (OpenRouter API key)
-- Fetches available OpenRouter models
-- Returns: List of models
-
-**GET /api/boost/model-providers**
-- Header: `Authorization: Bearer <api_key>` (OpenRouter API key)
-- Query param: `model_id` (model to get providers for)
-- Fetches available providers for a specific model
-- Returns: List of provider names (e.g., ["Anthropic", "Google AI", "AWS Bedrock"])
-- Empty list if no specific providers available (auto-routing only)
-
-### Boost Logging Endpoints
-
-**GET /api/boost/logs**
-- Query param: `limit` (default 100)
-- Returns: Recent boost API call logs with statistics
-- Each log entry: timestamp, task_id, role_id, model, request preview, response preview, duration_ms, success
-
-**POST /api/boost/logs/clear**
-- Clears all boost logs
-- Returns: Success status
-
-### Workflow Endpoints (`backend/api/routes/workflow.py`)
-
-**GET /api/workflow/predictions**
-- Returns: Predicted next 20 API calls
-- Includes: task IDs, roles, modes, boost states
-
-**GET /api/workflow/history**
-- Query param: `limit` (default 50)
-- Returns: Completed workflow tasks
-
----
-
-## Per-Role OpenRouter System
-
-### Overview
-The system supports per-role OpenRouter model selection, completely separate from boost mode. Each role in any workflow can be independently configured to use either LM Studio or OpenRouter.
-
-### Architecture
-```
-Frontend Settings → Role Config → API Client Manager → OpenRouter/LM Studio
-                                                    ↓
-                                           Fallback on credit exhaustion
-```
-
-### Global OpenRouter API Key
-- Single API key for all per-role OpenRouter selections
-- Stored in `rag_config.openrouter_api_key`
-- Also cached in localStorage (`openrouter_api_key`)
-- Separate from boost API key (boost uses `BoostConfig.openrouter_api_key`)
-
-### OpenRouter Routes (`backend/api/routes/openrouter.py`)
-
-**GET /api/openrouter/lm-studio-availability**
-- Checks if LM Studio server is available and has models
-- Returns: `{ available, has_models, model_count, models, error }`
-
-**POST /api/openrouter/set-api-key**
-- Sets the global OpenRouter API key
-- Validates by testing connection
-- Returns: `{ success, message, model_count }`
-
-**DELETE /api/openrouter/api-key**
-- Clears the global OpenRouter API key
-
-**GET /api/openrouter/api-key-status**
-- Returns: `{ has_key, enabled }`
-
-**GET /api/openrouter/models**
-- Header: `Authorization: Bearer <api_key>` (optional, uses stored key if not provided)
-- Returns: List of available OpenRouter models
-
-**GET /api/openrouter/providers/{model_id}**
-- Header: `Authorization: Bearer <api_key>` (optional, uses stored key if not provided)
-- Returns providers/hosts available for a specific model
-- E.g., Claude available via Anthropic, AWS Bedrock, Google Vertex
-
-**POST /api/openrouter/test-connection**
-- Tests API key without storing it
-- Returns: `{ connected, model_count, message }`
-
-### Frontend Components
-
-**OpenRouterApiKeyModal (`frontend/src/components/OpenRouterApiKeyModal.jsx`)**
-- Modal for setting global OpenRouter API key
-- Triggered when:
-  - User clicks "Set OpenRouter Key" button in header
-  - LM Studio unavailable and no key configured
-  - User toggles role to OpenRouter without key
-- Features: Test connection, save key, clear key
-
-**App.jsx Integration**
-- Checks LM Studio availability on startup
-- Shows warning when LM Studio offline
-- Shows OpenRouter key status button (green ✓ when set)
-- Prompts for key if LM Studio unavailable and no key
-
-### Settings Components (All Updated)
-
-**AggregatorSettings, CompilerSettings, AutonomousResearchSettings:**
-- Per-role provider toggle (LM Studio / OpenRouter)
-- When OpenRouter selected:
-  - OpenRouter model dropdown
-  - Host provider selector (optional, e.g., "Anthropic")
-  - LM Studio fallback selector (optional)
-- Context window and max output tokens for each role
-
-### Routing Priority in APIClientManager
-
-```python
-# 1. Check boost mode (unchanged)
-if boost_manager.should_use_boost(task_id):
-    # Use boost OpenRouter model
-    
-# 2. Check role's configured provider
-if role_config.provider == "openrouter":
-    # Use OpenRouter with role's model and provider
-    # On credit exhaustion: Fall back to LM Studio if configured
-    
-# 3. Default: Use LM Studio
-```
-
-## Settings Integration
-
-All settings components (Aggregator, Compiler, Autonomous) support OpenRouter configuration:
-
-### Per-Role Configuration
-Each role (submitter, validator, high-context, high-param) can be configured with:
-- **Provider Selection**: Dropdown ("LM Studio" | "OpenRouter")
-- **If LM Studio**: Show existing model dropdown
-- **If OpenRouter**: Show "OpenRouter Model ID" text input
-- **Fallback Model**: LM Studio model to use if OpenRouter fails
-- **Context Window**: Tokens (default 131072)
-- **Max Output Tokens**: Tokens (default 25000)
-
-### API Key Storage
-- OpenRouter API key stored in localStorage
-- Key is masked in UI (password input)
-- Key is sent to backend only for API calls (not stored server-side)
-
-### Fallback Display
-- Read-only status showing which roles have fallen back
-- Color-coded indicators (green=OpenRouter active, orange=fallen back to LM Studio)
-
----
-
-## Usage Flow
-
-### Setting Up OpenRouter Primary
-
-1. User opens Settings (Aggregator/Compiler/Autonomous)
-2. For each role, select "OpenRouter" as provider
-3. Enter OpenRouter model ID (e.g., "openai/gpt-4-turbo")
-4. Select LM Studio fallback model
-5. Configure context window and max tokens
-6. Start workflow
-
-**On Credit Exhaustion:**
-- System detects 402 error or credit-related error message
-- Logs: "OpenRouter credits exhausted for role 'X'. Permanently falling back to LM Studio model: Y"
-- Broadcasts `openrouter_fallback` event
-- UI shows orange "Fallen Back" indicator
-- All future calls for that role use LM Studio (no retries)
-
-### Using API Boost
-
-1. User clicks "⚡ API Boost" button (top-right)
-2. Modal opens
-3. Enter OpenRouter API key
-4. Click "Test Connection" to validate
-5. Click "Load Models" to fetch available models
-6. Select boost model from dropdown
-7. **Provider dropdown appears** - fetches available providers for the selected model
-8. **Select provider** (optional) - choose specific provider or leave as "Default (OpenRouter chooses)"
-9. Configure context window and max tokens
-10. Click "Enable Boost"
-11. Modal closes, boost is active
-12. Status banner shows model AND provider (if selected)
-
-**Three Ways to Select Tasks for Boosting:**
-
-**Method 1: Boost Next X Calls (Recommended)**
-
-**Method 2: Category Boost (Role-Based)**
-
-**Method 3: Per-Task Toggle**
+### Workflow (`backend/api/routes/workflow.py`)
+- `GET /api/workflow/predictions` — Next 20 predicted tasks
+- `GET /api/workflow/history?limit=` — Completed tasks
 
 ---
 
 ## Error Handling
 
-### Credit Exhaustion Detection
-OpenRouter credit exhaustion is detected via:
-1. HTTP 402 (Payment Required) status code
-2. Error messages containing keywords: "credit", "insufficient", "balance", "quota"
+**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota" → `CreditExhaustionError` → permanent LM Studio fallback for that role (or RuntimeError if no fallback).
 
-### Fallback Behavior
-- **Primary OpenRouter exhausted**: Permanent fallback to LM Studio for that role
-- **Boost OpenRouter exhausted**: Falls back to primary for that task, boost remains enabled
-- **Connection errors**: Retry up to 3 times, then fail
-- **Other API errors**: Logged and raised as exceptions
+**Boost Exhaustion:** Falls back to primary for that task; boost stays enabled; counter NOT decremented.
 
-### No Fallback Configured
-- If OpenRouter credits exhausted AND `lm_studio_fallback_id` is `None`
-- System raises `RuntimeError` with message: "OpenRouter credits exhausted for role 'X' and no LM Studio fallback configured. Please add credits to OpenRouter or configure an LM Studio fallback model in settings."
-- Broadcasts `openrouter_fallback_failed` event
-- Workflow stops gracefully with actionable error
+**Rate Limits (Free Models):** HTTP 429 or "rate limit" keywords → 1-hour pause per `:free` model. Temporary fallback to LM Studio if configured. Methods: `_is_free_model()`, `_is_model_rate_limited()`, `_record_rate_limit()` on `OpenRouterClient`.
 
-### Logging
-All fallback events are logged with:
-- Timestamp
-- Role ID
-- Reason (credit_exhaustion, connection_error, etc.)
-- Fallback model being used
-- Broadcast to WebSocket for UI notification
-
-### Rate Limit Handling (Free Models)
-
-**Detection**: HTTP 429 or rate limit keywords in error messages ("rate limit", "too many requests")
-**Behavior**: 1-hour pause per free model (identified by `:free` suffix in model ID)
-**Tracking**: Class-level `_rate_limited_models` dictionary with timestamps in `OpenRouterClient`
-**Frontend**: Orange banner shows paused models with countdown timer
-**Fallback**: Uses LM Studio fallback if configured (temporary, not permanent like credit exhaustion)
-**Logging**: Backend logs rate limit events, frontend shows indicator with minutes remaining
-
-**Implementation**:
-- `OpenRouterClient._is_free_model()` checks for `:free` suffix
-- `OpenRouterClient._is_model_rate_limited()` checks if model in cooldown window
-- `OpenRouterClient._record_rate_limit()` records timestamp when rate limit hit
-- `RateLimitError` exception raised when rate-limited model called within 1-hour window
-- After 1 hour, model automatically unblocked and requests resume
-
-**WebSocket Event** (`openrouter_rate_limit`):
-```json
-{
-  "model": "nousresearch/hermes-3-llama-3.1-405b:free",
-  "role_id": "aggregator_submitter_3",
-  "retry_after": "2026-02-03T15:30:00Z",
-  "message": "OpenRouter free model rate limit hit. Retrying after 1 hour."
-}
-```
-
-### OpenRouter Privacy Policy Errors
-
-OpenRouter free models require users to opt-in to data sharing for training. If privacy settings block free models:
-
-**Error Detection**:
-- HTTP 404 status code
-- Error message contains "data policy"
-- Raises `OpenRouterPrivacyPolicyError` (defined in `backend/shared/openrouter_client.py`)
-
-**Handling (Role-Based)**:
-1. Log error to autonomous API logger (if callback set)
-2. Broadcast `openrouter_privacy_error` WebSocket event with detailed instructions
-3. Check if LM Studio fallback configured (`role_config.lm_studio_fallback_id`)
-4. If fallback exists: Fall back to LM Studio (same behavior as credit exhaustion)
-5. If no fallback: Raise `RuntimeError` requiring user to fix privacy settings
-
-**Handling (Boost)**:
-1. Log error to boost_logger and autonomous API logger (if callback set)
-2. Broadcast `openrouter_privacy_error` WebSocket event with detailed instructions
-3. Raise `RuntimeError` (boost has no fallback concept - must fix privacy settings or use paid model)
-
-**Frontend Modal** (`OpenRouterPrivacyWarningModal.jsx`):
-- Displays when `openrouter_privacy_error` WebSocket event received
-- Shows affected model and role
-- Step-by-step instructions: Visit https://openrouter.ai/settings/privacy → Enable "Allow my data to be used for model training" → Save settings
-- Alternative solutions: Use paid model or configure LM Studio fallback
-- "Open Privacy Settings" button opens URL in new tab
-
-**WebSocket Event** (`openrouter_privacy_error`):
-```json
-{
-  "error_type": "privacy_policy",
-  "model": "tngtech/deepseek-r1t2-chimera:free",
-  "role_id": "autonomous_topic_selector",
-  "message": "OpenRouter privacy settings are blocking...",
-  "solution_url": "https://openrouter.ai/settings/privacy",
-  "solution_text": "Step-by-step instructions..."
-}
-```
-
----
-
-## Coordinator Workflow
-Each coordinator:
-1. Builds next 20 workflow tasks on initialization using **actual agent sequence counters**
-2. Sets task tracking callbacks on all agents during initialization
-3. Tracks task start/completion via callbacks from agents
-4. Refreshes workflow tasks after each task completion (reads current agent sequences)
-5. Broadcasts workflow events to frontend via WebSocket
-
-**Task ID Generation - Based on Actual Agent State:**
-- Each agent maintains its own `task_sequence` counter (independent)
-- Coordinators read these counters when building workflow tasks
-- Task IDs match what agents will actually generate
-- Example: If `submitter_1.task_sequence = 5`, next task ID will be `agg_sub1_005`
-
-**Task ID Format**: Structured IDs enable tracking and boost selection:
-- Aggregator: `agg_sub{N}_{seq:03d}`, `agg_val_{seq:03d}` (seq from each agent's counter)
-- Compiler: `comp_hc_{seq:03d}`, `comp_hp_{seq:03d}`, `comp_val_{seq:03d}` (seq from each agent's counter)
-- Autonomous: `auto_ts_{seq:03d}`, `auto_tv_{seq:03d}`, etc. (seq from each agent's counter)
-
-**Why Agent Sequences Matter:**
-- Prevents mismatch between predicted task IDs and actual agent-generated IDs
-- Ensures boost selections work correctly (boost `agg_sub1_005` → agent actually calls with `agg_sub1_005`)
-- Each agent's counter increments independently, not from a global sequence
+**Privacy Policy Errors:** HTTP 404 + "data policy" message → `OpenRouterPrivacyPolicyError`. Role-based: falls back to LM Studio if configured; Boost: raises RuntimeError. Fix: https://openrouter.ai/settings/privacy → enable data sharing.
 
 ---
 
 ## Configuration Persistence
 
-### localStorage Keys
-- `openrouter_api_key` - OpenRouter API key (boost)
-- `workflow_panel_collapsed` - Panel collapse state (true/false)
-- `aggregatorConfig` - Aggregator settings (includes provider configs)
-- `compiler_settings` - Compiler settings (includes provider configs)
-- `autonomousConfig` - Autonomous settings (includes provider configs)
+**localStorage:** `openrouter_api_key`, `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig`
 
-### Session State (In-Memory)
-- Fallback state per role (resets on restart)
-- Boosted task IDs (cleared when boost disabled)
-- Boost next count (counter, decrements with use)
-- Boosted categories (set of category names)
-- Completed task IDs (cleared on workflow stop)
-- Boost API call logs (persisted to file, survives restarts)
+**Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs. Boost logs persist to file (`boost_api_log.txt`).

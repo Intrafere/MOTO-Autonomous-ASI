@@ -380,59 +380,65 @@ def sanitize_json_response(raw_content: str) -> str:
     # List of dangerous LaTeX commands that start with valid JSON escape characters
     # Format: (pattern to match, safe replacement)
     # NOTE: Order matters for overlapping patterns - longer patterns first!
+    # 
+    # CRITICAL: Each pattern uses (?<!\\) negative lookbehind to ONLY match
+    # unescaped backslashes. Without this, when a model properly escapes its JSON
+    # (outputting \\begin), the regex matches \begin WITHIN \\begin and creates
+    # \\\begin, which json.loads() then interprets as \ + backspace + egin.
+    # The lookbehind ensures \\begin (already escaped) is left untouched.
     dangerous_latex_commands = [
         # Commands starting with \b (backspace) - longer patterns first
-        (r'\\boldsymbol', r'\\\\boldsymbol'),
-        (r'\\bigotimes', r'\\\\bigotimes'),
-        (r'\\bigoplus', r'\\\\bigoplus'),
-        (r'\\bigcap', r'\\\\bigcap'),
-        (r'\\bigcup', r'\\\\bigcup'),
-        (r'\\binom', r'\\\\binom'),
-        (r'\\boxed', r'\\\\boxed'),
-        (r'\\begin', r'\\\\begin'),
-        (r'\\beta', r'\\\\beta'),
-        (r'\\bar', r'\\\\bar'),
-        (r'\\big', r'\\\\big'),
+        (r'(?<!\\)\\boldsymbol', r'\\\\boldsymbol'),
+        (r'(?<!\\)\\bigotimes', r'\\\\bigotimes'),
+        (r'(?<!\\)\\bigoplus', r'\\\\bigoplus'),
+        (r'(?<!\\)\\bigcap', r'\\\\bigcap'),
+        (r'(?<!\\)\\bigcup', r'\\\\bigcup'),
+        (r'(?<!\\)\\binom', r'\\\\binom'),
+        (r'(?<!\\)\\boxed', r'\\\\boxed'),
+        (r'(?<!\\)\\begin', r'\\\\begin'),
+        (r'(?<!\\)\\beta', r'\\\\beta'),
+        (r'(?<!\\)\\bar', r'\\\\bar'),
+        (r'(?<!\\)\\big', r'\\\\big'),
         # Commands starting with \f (form-feed)
-        (r'\\forall', r'\\\\forall'),
-        (r'\\frac', r'\\\\frac'),
+        (r'(?<!\\)\\forall', r'\\\\forall'),
+        (r'(?<!\\)\\frac', r'\\\\frac'),
         # Commands starting with \n (newline) - longer patterns first
-        (r'\\nabla', r'\\\\nabla'),
-        (r'\\newline', r'\\\\newline'),
-        (r'\\notin', r'\\\\notin'),
-        (r'\\neq', r'\\\\neq'),
-        (r'\\neg', r'\\\\neg'),
-        (r'\\not', r'\\\\not'),
-        (r'\\nu', r'\\\\nu'),
+        (r'(?<!\\)\\nabla', r'\\\\nabla'),
+        (r'(?<!\\)\\newline', r'\\\\newline'),
+        (r'(?<!\\)\\notin', r'\\\\notin'),
+        (r'(?<!\\)\\neq', r'\\\\neq'),
+        (r'(?<!\\)\\neg', r'\\\\neg'),
+        (r'(?<!\\)\\not', r'\\\\not'),
+        (r'(?<!\\)\\nu', r'\\\\nu'),
         # Commands starting with \t (tab) - longer patterns first
         # CRITICAL: These are extremely common in mathematical LaTeX!
-        (r'\\textbf', r'\\\\textbf'),
-        (r'\\textit', r'\\\\textit'),
-        (r'\\textrm', r'\\\\textrm'),
-        (r'\\textsc', r'\\\\textsc'),
-        (r'\\textsf', r'\\\\textsf'),
-        (r'\\texttt', r'\\\\texttt'),
-        (r'\\triangle', r'\\\\triangle'),
-        (r'\\times', r'\\\\times'),
-        (r'\\tilde', r'\\\\tilde'),
-        (r'\\theta', r'\\\\theta'),
-        (r'\\text', r'\\\\text'),
-        (r'\\top', r'\\\\top'),
-        (r'\\tau', r'\\\\tau'),
-        (r'\\to', r'\\\\to'),  # CRITICAL: Very common arrow command!
+        (r'(?<!\\)\\textbf', r'\\\\textbf'),
+        (r'(?<!\\)\\textit', r'\\\\textit'),
+        (r'(?<!\\)\\textrm', r'\\\\textrm'),
+        (r'(?<!\\)\\textsc', r'\\\\textsc'),
+        (r'(?<!\\)\\textsf', r'\\\\textsf'),
+        (r'(?<!\\)\\texttt', r'\\\\texttt'),
+        (r'(?<!\\)\\triangle', r'\\\\triangle'),
+        (r'(?<!\\)\\times', r'\\\\times'),
+        (r'(?<!\\)\\tilde', r'\\\\tilde'),
+        (r'(?<!\\)\\theta', r'\\\\theta'),
+        (r'(?<!\\)\\text', r'\\\\text'),
+        (r'(?<!\\)\\top', r'\\\\top'),
+        (r'(?<!\\)\\tau', r'\\\\tau'),
+        (r'(?<!\\)\\to', r'\\\\to'),  # CRITICAL: Very common arrow command!
         # Commands starting with \r (carriage-return) - longer patterns first
-        (r'\\rightarrow', r'\\\\rightarrow'),
-        (r'\\Rightarrow', r'\\\\Rightarrow'),
-        (r'\\right', r'\\\\right'),
-        (r'\\rho', r'\\\\rho'),
-        (r'\\real', r'\\\\real'),
-        (r'\\ref', r'\\\\ref'),
+        (r'(?<!\\)\\rightarrow', r'\\\\rightarrow'),
+        (r'(?<!\\)\\Rightarrow', r'\\\\Rightarrow'),
+        (r'(?<!\\)\\right', r'\\\\right'),
+        (r'(?<!\\)\\rho', r'\\\\rho'),
+        (r'(?<!\\)\\real', r'\\\\real'),
+        (r'(?<!\\)\\ref', r'\\\\ref'),
         # Commands starting with \u (unicode escape prefix)
         # Note: \uXXXX is handled separately, but these are LaTeX commands
-        (r'\\upsilon', r'\\\\upsilon'),
-        (r'\\underset', r'\\\\underset'),
-        (r'\\underline', r'\\\\underline'),
-        (r'\\uparrow', r'\\\\uparrow'),
+        (r'(?<!\\)\\upsilon', r'\\\\upsilon'),
+        (r'(?<!\\)\\underset', r'\\\\underset'),
+        (r'(?<!\\)\\underline', r'\\\\underline'),
+        (r'(?<!\\)\\uparrow', r'\\\\uparrow'),
     ]
     
     sanitized = content

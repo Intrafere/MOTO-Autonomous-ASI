@@ -22,15 +22,6 @@ The live-constructing aggregation results should be viewable in one tab and also
 The live-constructing compiler-written paper should be viewable in one tab and also a save function that allows the user to save the whole current aggregation database to a .txt file. This paper should be viewable in real-time as the compiler constructs it.
 
 
-## PROMPT NOTES
-
-The part 1 tool and part 2 tools require seperate prompts from the user, as well as separate JSON context.
-Example:
-
-Aggregator Tool user-inserted prompt: Compile the important parts of the aggregate tool file into a comprehensive and holistically coherent academic paper with the title: "Vector Indefinability, Memory Constraints, and Decoherence: Unifying Quantum and Macroscopic Theory". The entire final paper should not exceed roughly 18,000 words. Supplement this paper with whatever additional knowledge you deem extremely pertinent to the paper content goals.
-
-Compiler Tool user-inserted prompt: Substantially, scientifically advance or extend the theory outlined in the paper CONSTRUCTION 1.txt.
-
 ## Autonomous Research Mode (Part 3) - User Controls
 
 **Manual Paper Writing Trigger**: During active brainstorm aggregation (Tier 1), the user can manually force transition to paper writing by clicking "Force Paper Writing" in the UI. This bypasses the automatic completion review and allows the user to act as a special submitter reviewer, deciding when the brainstorm is sufficient for paper compilation.
