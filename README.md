@@ -1,12 +1,12 @@
-# MOTO - S.T.E.M. Mathematics Variant V1
-# Autonomous AI Deep Research Harness
-**Version: 1.0.2**
+# MOTO - S.T.E.M. Mathematics Variant
+# Autonomous AI/ASI Deep Research Harness
+**Version: 1.0.3**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 16+](https://img.shields.io/badge/node-16+-green.svg)](https://nodejs.org/)
 
-**An autonomous AI research system that generates novel mathematical research papers through multi-agent aggregation and compilation. Useful for any discipline that has an interest in novel math: physicists, engineers, mathematicians, chemists, etc. This harness can easily be modified for other research topics such as general academic research, chat bots, niche research, robotics, or anything requiring useful creative output and general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention - if desired, research can be conducted for days or weeks without user input.**
+**An autonomous AI or ASI research system that generates novel mathematical research papers through multi-agent aggregation and compilation. Useful for any discipline that has an interest in novel math: physicists, engineers, mathematicians, chemists, etc. This harness can easily be modified for other research topics such as general academic research, chat bots, niche research, robotics, or anything requiring useful creative output and general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention - if desired, research can be conducted for days or weeks without user input.**
 
 The differentiator that allows us to call this early artificial superintelligence is the brainstorming mechanism when considered in context with how generative transformers (GPT LLMs) operate. Brainstorming may sound trivial; however, transformers predict what tokens will come next. If you provide the transformer with a bunch of previous ideas that it had, then it is more likely to produce something new that it hasn't said before. MOTO maintains and "cleans" or "purges" its brainstorm database as it runs. Once a later idea makes earlier ones redundant, the redundant idea is then removed from the database - this allows for a type of recursive improvement. Once brainstorming is complete, MOTO writes the research paper about its solution. This step then repeats, now the papers become a new "tier 2" brainstorm. Previous papers are referenced in future brainstorms and future papers. This set of tier 2 papers is another higher order brainstorm-like database, which also cleans/prunes itself of newly discovered incorrect or redundant papers just like the tier 1 short-hand idea brainstorm database does for each paper. A 3rd tier, slightly more complex mechanism exists for the final tier 3 answer generation that allows for the book-length volumes.
 

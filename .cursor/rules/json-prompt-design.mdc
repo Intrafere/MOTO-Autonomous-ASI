@@ -2064,7 +2064,7 @@ The rigor submitter uses a **2-step planning-then-execution process**:
 - Submitters provide exact text (`old_string`) to identify edit locations
 - The `old_string` is pre-validated to exist verbatim (exactly) in the document
 - The `old_string` is pre-validated to be unique (appear only once)
-- If exact match fails, system tries Unicode normalization, then consecutive fuzzy matching (conservative fallback)
+- If exact match fails, system tries in order: Unicode normalization → whitespace normalization → backslash normalization (collapses `\\\\cmd` → `\\cmd`, handles over-escaping) → consecutive fuzzy matching (conservative last resort)
 - If match fails or is ambiguous after all attempts, pre-validation rejects immediately with clear feedback (before LLM validation)
 - LLM validation then focuses on placement context and semantic appropriateness
 - Industry-standard approach used by Cursor, Claude Code, and similar tools
@@ -2094,7 +2094,7 @@ All compiler modes (construction, review, rigor, outline_update) use this schema
 
 
 ### Validation Rules
-- **REJECT** if `old_string` is not found after trying: exact match → Unicode normalization → consecutive fuzzy matching
+- **REJECT** if `old_string` is not found after trying: exact match → Unicode normalization → whitespace normalization → backslash normalization → consecutive fuzzy matching
 - **REJECT** if `old_string` matches multiple locations (not unique)
 - **REJECT** if `operation` doesn't match the intent (e.g., using "replace" for new content)
 - Validator confirms content flows naturally at the edit location
@@ -2102,9 +2102,9 @@ All compiler modes (construction, review, rigor, outline_update) use this schema
 
 ### Consecutive Fuzzy Matching Fallback (Conservative)
 
-**Triggers only when exact match AND Unicode normalization both fail.**
+**Triggers only when layers 1-4 (exact, Unicode normalization, whitespace normalization, backslash normalization) all fail.**
 
-**Purpose:** Handles model escaping quirks (over-escaping like `\\\\mathbb{Z}`, under-escaping like `\mathbb{Z}`) while maintaining safety.
+**Purpose:** Handles remaining model escaping quirks not caught by prior layers while maintaining safety.
 
 **Requirements (ALL must be met):**
 1. **85% Consecutive Characters**: At least 85% of `old_string` must appear consecutively in document

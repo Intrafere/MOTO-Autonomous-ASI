@@ -99,35 +99,12 @@ Writing body first, then conclusion, then introduction, then abstract ensures:
 - `backend/compiler/agents/high_context_submitter.py`: Uses phase-specific prompts based on current phase
 - `backend/shared/models.py`: `CompilerSubmission` model includes `section_complete` field
 
-**JSON SCHEMA FOR CONSTRUCTION (all phases)**:
-```json
-{
-  "needs_construction": true or false,
-  "content": "Your section text (MUST NOT be empty if needs_construction=true)",
-  "operation": "replace | insert_after | delete | full_content",
-  "old_string": "Exact text to find (for replace/insert_after/delete) - must be unique",
-  "new_string": "Replacement/insertion text (MUST NOT be empty if needs_construction=true)",
-  "section_complete": true or false,
-  "reasoning": "Explanation including completion status"
-}
-```
+JSON schema for construction is defined in `json-prompt-design.mdc`. Key constraint: `needs_construction=true` requires non-empty `content`/`new_string` — the contradictory pattern (`needs_construction=true` + empty content) causes infinite rejection loops.
 
-**Content Field Rules**:
-- When `needs_construction=true`: Both `content` and `new_string` must contain actual text (never empty)
-- When `needs_construction=false`: Both fields can be empty
-- Never set `needs_construction=true` with empty `content`/`new_string` - this contradictory pattern causes infinite rejection loops
-- The fields must never be empty strings ("") if `needs_construction=true`
-
-The `section_complete` field enables explicit phase transitions. The `operation`, `old_string`, and `new_string` fields use **exact string matching** with conservative fuzzy fallback for model escaping quirks. The `old_string` is pre-validated to exist (exactly, or via Unicode normalization, or via consecutive fuzzy matching) and be unique in the document before LLM validation occurs.
+The `section_complete` field enables explicit phase transitions. The `operation`, `old_string`, and `new_string` fields use **exact string matching** with conservative fallback layers for model escaping quirks. The `old_string` is pre-validated to exist (exactly, or via Unicode normalization, whitespace normalization, backslash normalization, or consecutive fuzzy matching) and be unique in the document before LLM validation occurs.
 
 **SECTION PLACEHOLDER SYSTEM**:
-The paper uses placeholder markers to make it crystal clear to the AI where sections will be written and that they do NOT exist yet:
-
-```
-ABSTRACT_PLACEHOLDER = "[PLACEHOLDER FOR THE ABSTRACT SECTION - TO BE WRITTEN AFTER THE INTRODUCTION IS COMPLETE]"
-INTRO_PLACEHOLDER = "[PLACEHOLDER FOR INTRODUCTION SECTION - TO BE WRITTEN AFTER THE CONCLUSION SECTION IS COMPLETE]"
-CONCLUSION_PLACEHOLDER = "[PLACEHOLDER FOR THE CONCLUSION SECTION - TO BE WRITTEN AFTER THE BODY SECTION IS COMPLETE]"
-```
+The paper uses placeholder markers (defined as constants in `paper_memory.py`) to make it crystal clear to the AI where sections will be written and that they do NOT exist yet.
 
 **How Placeholders Work**:
 1. When the first body section is accepted, `paper_memory.initialize_with_placeholders()` sets up the paper with all placeholders
@@ -258,14 +235,7 @@ After body construction completes, the system enters a critique phase to collect
 - If accepted critiques exist: Run rewrite decision
 - Rationale: With only 5 attempts, no early termination mechanism is needed
 
-**JSON Schema**:
-```json
-{
-  "critique_needed": true or false,
-  "submission": "Detailed critique (empty if critique_needed=false)",
-  "reasoning": "Why critique is/isn't needed"
-}
-```
+JSON schema for critique is defined in `json-prompt-design.mdc`.
 
 **WebSocket Events**:
 - `critique_decline_accepted` - Validator agrees body is acceptable
@@ -299,14 +269,6 @@ After body construction completes, the system enters a critique phase to collect
 - 400: Compiler not running
 - 400: Not currently in critique phase
 - 500: Failed to skip critique phase
-
-**Example Response**:
-```json
-{
-  "success": true,
-  "message": "Critique phase skipped, continuing to conclusion"
-}
-```
 
 ---
 
@@ -421,7 +383,7 @@ The submission JSON includes:
 - **"full_content"** → Adds entirely new content (for new sections); old_string should be empty
 
 **Key Principles (Pre-Validated):**
-- `old_string` must match using: exact match → Unicode normalization → consecutive fuzzy matching (if needed)
+- `old_string` must match using: exact match → Unicode normalization → whitespace normalization → backslash normalization → consecutive fuzzy matching (if needed)
 - `old_string` must be unique (appear only once) - pre-validation verifies uniqueness
 - If `old_string` not found or not unique after all attempts: pre-validation immediately rejects before LLM sees it
 - Submitters should include enough surrounding context in `old_string` to ensure uniqueness (typically 3-5 lines)
@@ -430,11 +392,13 @@ The submission JSON includes:
 **Matching Layers** (applied automatically in order when exact match fails):
 1. **Exact match** - Try verbatim string match first (preferred)
 2. **Unicode hyphen normalization** - Handle en-dash, em-dash, minus sign variants (LaTeX output)
-3. **Consecutive fuzzy matching** - Conservative fallback for model escaping quirks (see below)
+3. **Whitespace normalization** - Collapse 2+ spaces to single space (LaTeX double-spacing convention)
+4. **Backslash normalization** - Collapse 2+ consecutive backslashes to single (model over-escaping quirk: `\\mathbb` → `\mathbb`)
+5. **Consecutive fuzzy matching** - Conservative last resort for other model escaping quirks (see below)
 
 **Consecutive Fuzzy Matching Fallback:**
 
-Triggers only when exact match AND Unicode normalization both fail. Handles model escaping quirks while maintaining safety.
+Triggers only when layers 1-4 all fail. Handles remaining model escaping quirks while maintaining safety.
 
 **Requirements (ALL must be met):**
 - 85% consecutive characters from `old_string` must appear in document
@@ -479,28 +443,6 @@ When the paper is empty (first body section), the `full_content` operation is MA
 - Rarely triggered since prompt-level prevention guides models correctly
 - Logged when used: "AUTO-CORRECTING: Paper is empty but operation='replace'. Converting to 'full_content' operation automatically."
 
-**Example Correct JSON for Empty Paper:**
-```json
-{
-  "needs_construction": true,
-  "section_complete": false,
-  "operation": "full_content",
-  "old_string": "",
-  "new_string": "II. Preliminaries\n\nWe begin by establishing the foundational definitions...",
-  "reasoning": "Paper is empty - using full_content to write first body section"
-}
-```
-
-**Example WRONG JSON for Empty Paper (will be rejected):**
-```json
-{
-  "needs_construction": true,
-  "operation": "replace",
-  "old_string": "some text",  // ❌ Paper is empty - this won't be found!
-  "new_string": "..."
-}
-```
-
 ## Progressive Answer Generation and Output
 The current paper-build file should be viewable in a 3rd tab in the GUI. I should also be able to save a copy of the output up to its current state. The generate answer should just stop all calculation and save the output of the final paper to this point. The idea is that the user will be able to see how complete the paper is by how many rejections are occuring over time.
 
@@ -538,19 +480,6 @@ All compiler submitters (high-context and high-param) must validate assembled pr
 2. Count actual tokens in assembled prompt
 3. Compare against `rag_config.get_available_input_tokens(context_window)`
 4. If exceeds: log error and either raise exception (critical modes) or return None (skip submission)
-
-**Implementation Pattern:**
-```python
-prompt = build_MODE_prompt(...)
-actual_prompt_tokens = count_tokens(prompt)
-max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_MODE_context_window)
-
-if actual_prompt_tokens > max_allowed_tokens:
-    logger.error(f"{mode}: Assembled prompt ({actual_prompt_tokens} tokens) exceeds context window ({max_allowed_tokens} tokens)")
-    return None  # or raise ValueError for critical modes
-
-logger.debug(f"{mode} prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
-```
 
 **Modes Requiring Validation:**
 - ✅ outline_create (high_context_submitter) - raises ValueError
@@ -595,41 +524,7 @@ When saving a paper in manual mode, the content includes:
 2. **Paper Content** (the actual paper)
 3. **Model Credits Footer** (at end of paper)
 
-**Author Attribution Header Format**:
-```
-================================================================================
-AUTONOMOUS AI SOLUTION
-
-Disclaimer: This is an autonomous AI solution generated with the MOTO harness.
-This paper was not peer reviewed and was autonomously generated without user
-oversight or interaction beyond the original user prompt, therefore, this text
-may contain errors. These papers often contain ambitious content and/or
-extraordinary claims, all content should be viewed with extreme scrutiny.
-
-User's Research Prompt: [user's compiler-directing prompt]
-
-Paper Title: Compiler Paper
-
-AI Model Authors: deepseek-r1:70b, qwen-2.5:32b
-
-Generated: 2026-01-02
-================================================================================
-```
-
-**Model Credits Footer Format**:
-```
-================================================================================
-MODEL CREDITS
-
-This autonomous solution attempt was generated with the Intrafere LLC AI Harness,
-MOTO, and the following model(s):
-
-- deepseek-r1:70b (85 API calls)
-- qwen-2.5:32b (23 API calls)
-
-Total API Calls: 108
-================================================================================
-```
+Saved paper includes: Author Attribution Header (model list, disclaimer, prompt) → Paper Content → Model Credits Footer (models + API call counts). Format defined in `PaperModelTracker` in `paper_model_tracker.py`.
 
 ## Validation
 
@@ -655,17 +550,6 @@ When the compiler resumes from an existing paper file, it checks if placeholders
 ### Placeholder Preservation During Repair (CRITICAL - Bug Fix 2026-01-18)
 
 `ensure_markers_intact()` and `ensure_placeholders_exist()` must PRESERVE existing placeholders during repair operations.
-
-**Bug Fixed:**
-```python
-# OLD (buggy) condition - would remove placeholder if detection failed
-if not has_conclusion_placeholder and not has_conclusion_content:
-    new_paper_parts.append(CONCLUSION_PLACEHOLDER)
-
-# NEW (fixed) condition - preserves placeholder if content not written
-if not has_conclusion_content:
-    new_paper_parts.append(CONCLUSION_PLACEHOLDER)
-```
 
 **Why This Matters:**
 - Placeholders must exist for any section that hasn't been written yet

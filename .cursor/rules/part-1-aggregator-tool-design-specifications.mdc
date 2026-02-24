@@ -7,211 +7,98 @@ Description of entire rule: Main Architecture layout/design of the aggregator po
 # OVERVIEW
 
 ## Workflow for Aggregator Note
-The validator is what decides what submission attempts to add to the accepted-submission shared database. Aggregator-submitter's can run in parallel (unlike compiler/distillation submitter(s)). However there can only be one validator reviewing and updating the base. This ensures database alignment with user prompt.
+Submitters run in parallel; single validator reviews and updates the shared database sequentially. This ensures coherent Markov chain evolution and database alignment with user prompt.
 
-## AI node clusters and Validator Structure Rule For the Aggregator Mode:
-Independent AI instances combine to form a configurable group of submitters with a SINGLE validator (1-10 submitters, always exactly 1 validator) where they seek to submit optimal solutions and/or thoughts found valuable toward solving a novel solution to the validator's solution-validating queue. The default is 3 submitters, but users can configure anywhere from 1 to 10 submitters in the settings. Each submitter can have its own model, context window, and max output tokens - enabling multi-model exploration of different loss landscapes simultaneously. The first submitter is labeled "Main Submitter" in the UI for clarity.
+## AI Node Clusters and Validator Structure
+Configurable 1-10 submitters + exactly 1 validator (default 3 submitters). Each submitter has its own model, context window, and max output tokens. First submitter labeled "Main Submitter" in UI.
 
-**Single Validator Constraint** - There is only one validator allowed. Multiple validators would cause multiple evolution directions of the database simultaneously, breaking the coherent Markov chain evolution required for database alignment. The single validator ensures all submissions are evaluated against the same evolving database state, maintaining solution coherence and preventing conflicting validation decisions.
+**Single Validator Constraint**: Only one validator allowed — multiple validators would cause divergent database evolution, breaking coherent Markov chain alignment.
 
-If the validator finds the queue submission useful to the user-set validator goal then the validator updates a validator-distributed training set with the submitter's original submission that was validated. This validator-distributed updated database is then sent as some form of context to future prompts. This allows a continual probe of the various model(s) loss-landscape(s) sealed-basin resultants relative to the user-supplied context solution request.
+Validator accepts a submission if adding it makes the training database more useful toward finding solutions. Validator-distributed accepted submissions database starts blank, grows as submissions are accepted. Distributor updates it to all submitters after each acceptance.
 
 ## Queue Submissions and Overflow Behavior
 
-The validator processes up to 3 submissions at once (batch validation). When dequeuing, it takes whatever is available (1, 2, or 3) without waiting.
+Validator processes up to 3 submissions at once (batch validation). Takes whatever is available (1, 2, or 3) without waiting.
 
-**Queue Overflow Threshold**: If there are 10 or more submissions in the queue, submitters are paused until the queue drops below 10.
+**Queue Overflow Threshold**: ≥10 submissions in queue → submitters paused until queue drops below 10.
 
 ## Batch Validation
 
-The validator can process 1, 2, or 3 submissions simultaneously using batch-specific prompts. This accelerates throughput while maintaining validation quality.
+Validator processes 1, 2, or 3 submissions simultaneously using batch-specific prompts.
 
-### Independent Assessment Principle
-Each submission in a batch is assessed INDEPENDENTLY against the existing database. The question for each: "Does THIS submission provide unique value to the current knowledge base?" This assessment ignores other submissions in the same batch.
+**Independent Assessment**: Each submission assessed INDEPENDENTLY against existing database — does THIS submission provide unique value?
 
-### Intra-Batch Redundancy Prevention
-After independent assessment, if multiple submissions would be accepted, the validator checks for redundancy BETWEEN the accepted submissions:
-- If two or more accepted submissions cover similar ground, ONLY the strongest/most complete is accepted
-- The others are rejected with reasoning "Redundant with co-submitted submission X which is stronger/more complete"
-- This prevents the database from gaining redundant entries from a single batch
-- NEVER accept submissions that would add redundant information to the database
+**Intra-Batch Redundancy Prevention**: After independent assessment, if multiple submissions would be accepted, check for redundancy between them. Keep only strongest; reject others as "Redundant with co-submitted submission X". Goal: maximize UNIQUE value per batch.
 
-### Decision Logic by Batch Size
-- **1 submission**: Standard single-submission validation (no redundancy check needed)
-- **2 submissions**: Independent assessment + pairwise redundancy check
-- **3 submissions**: Independent assessment + all-pairs redundancy check (1-2, 1-3, 2-3)
+- 1 submission: standard validation
+- 2 submissions: independent + pairwise redundancy check
+- 3 submissions: independent + all-pairs check (1-2, 1-3, 2-3)
 
-### Possible Outcomes
-- Accept all (if all valuable AND non-redundant with each other)
-- Accept some, reject others (mixed value or intra-batch redundancy)
-- Reject all (none independently valuable)
+## Databases
 
-### Key Design Principle
-The goal is to maximize UNIQUE value added per batch, not maximize quantity of acceptances. A batch that produces 1 high-quality acceptance is better than a batch with 3 redundant acceptances.
+**USER SHARED DATABASE** — User uploaded files + original prompt. Primary source for submitters.
 
-## How a validator decides what's "useful" in order to update decide if it will validate a submission for training set update
-We definine a submitter submission as useful and something that should be validated by the validator if that the training database is now more-useful toward finding solutions with the validation attempt than it was without it, it should run isolated validator prompt that cross reference and asked the AI to "Tell me if the addition of the new submission increases potential solution availability in a significant way and/or provides a valuable solution space-constraint that narrows where we need to search in a significant way or if this new submission under review is redundant or trivial information given the current accepted submissions that are provided, user provided information and/or what is considered "common knowledge" for modern society." we want to ask this exactly in a context-coherent manner for the prompt. Essentially the validator isnt looking for new solutions to update its training set, it just sees if there are new solutions POTENTIALLY available if you add the new queue request under examination to the training database and if the solution space from the training set becomes stronger (in any way) then that respective queue submission is validated and added to the submitter-shared and validator-tested-against database.
+**Validator-Distributed Database** — Accepted submissions (built by validator only; submitters have read-only access). Starts blank; distributed to all submitters on each acceptance.
 
-## Self-Improvement Rule
-Both the validators and the submittors should learn. The network learns from its own validation mistakes and continuously updates its criteria for useful contributions, making the system progressively better at distinguishing valuable insights from noise, sabotage, spam, etc. However it should not need to specifically try to determine maliscious intent otherwise we may make the system unintentionally close-minded. The submittors also improve by building their own training local training set (in addition to the validator confirmed data set that the validator updates for all submitors). The submitter is able to adapt their training data based on what is rejected or accepted from their submissions too if they would like, they all have this option if they deem it an optimal way to learn in that respective instance.
+**Local Submitter Databases** — Per-submitter rejection log: last 5 rejections (validator summary ≤750 chars + submission preview ≤750 chars). File: `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{N}.txt`. Reset if submitter gets >15 consecutive rejections.
 
-## Goal Alignment Rule
-All network participants work toward a shared objective (like solving cancer or physics unification), with the cumulative AI deciding whether contributions advance this goal, creating natural alignment through economic incentives rather than top-down control. The user sets the validator goal with the traditional prompt. The validator should continually work toward a solution and if a solution is found it should circularly re-analyze and continually attempt to expand on their solutions external validation and there should be display that displays how long circular confirmation of the solution has been ongoing (aka gives the user a quantitative method to judge system confidence). The validator can take as long as it needs to validate the current queue item. Once if the queue item is validated, the shared memory is updated by the validator and the submittors are reprompted to solution solve with both their local database as of their last update (including if they made permanent updates on a reset-thought process due to an interrupting queue validation), and of course any respective submittors solution prior to the shared-training update will reset and begin solving from their updated training set(s) as well.
-
-## AI Design
-We will utilize the best open-source AI suitable for this AI hive-mind approach. We want to run multiple instances of the AI together designate one as a validator the rest as submittors and arrange their databases, communications, structure, etc accordingly as described in this document. We will use the LM studio app AI in multiple parallel instances for our starting AI architecture that we modify. The AI should read both training sets together, the local training set can be highly volatile in size and conservation (and it sometimes should be) due to the stability provided by the shared cummulative validated training set. This volatility (massive growth and shrinkage from training) is important to keep the local training set in synch with the validated training set as it evolves. If the submitter gets more than 15 rejections in a row their local database should be reset. The submittor AI's should be able to read their respective local training sets and the shared validated training set simultaneously. The validator AI only uses and updates the shared database. The validator AI is the only one that is allowed to update the shared database. The submittor AI's have read-only type permissions for the shared database. We should be able to select any AI we want that the LM studio app offers (Llama 3, Deepseek, etc). If the database is missing that should download and show with progress in the command line log, after the database download the research should begin.
-
-## Respective RAG (file based) and prompt based Databases for each AI submittor/valdiator.
-The AI's have different databases loaded into the RAG system depending on if they are a submittor or validator. have access to the shared database too and that all databases are working correctly, i.e. each submitor has the user shared database, its trained database, and the validators shared database (will be empty until the first accepted submission - then these submissions go to this database). The validator only has its database its updating for all to share, the user shared database and the prompt of course. The submitors also have the direct prompt as well. If the file is small enough with the other cumulative context considered for direct injection into the model then direct injection should be use.
-
-USER SHARED DATABASE (User uploaded files and original prompt) - This is what the submittors attempt to primarily solve. This is also 1/2 of the information the validator uses to see if a given submission is improving the current accepted data set and initial user prompt.
-
-Validator updated and distributed database (Validator builds this database, it is made up of the accepted submissions) - This database starts blank and once the first submission is accepted by the validator then that starts the database. This database is the other half of the information the validator uses to decide if a submission is truly improving of problem-set knowledge. The validator distributes the updated database to each model everytime it accepts a new submission. The validator uses the current validator updated distributed database and the user uploaded prompt and files (if applicable), then the validator takes a given submission and compares it against the pool of user data and validator accepted data to see if a submittors given submission substantially improves the cumulative knowledge of this compound data set that is currently under judgement.
-
-The Local Submittors respective databases - The local submittors each have a RAG file that outlines the last 5 rejections from the validator and the submission preview (the first 750 characters of the rejected submission are this preview). This RAG file should be titled something like "Summary Of the Last 5 Validator Rejections For Submitter (and then insert the submitter number here)". These respective rag files should update each time the respective submittor has a rejection. It should only include the validators summary of the rejection (750 characters max) and the summary of the rejected submission (750 characters max). This database allows each submittor to learn from its relevant mistakes. 
-
-Note on a submitter's submission's context-injection type: The submission review should be full context injection and be sent through the prompt. If the prompt is too large then the prompt can use RAG. The only time a submission-submitted for review and/or a user-prompt should use RAG is when the prompt itself is too large. If the user-prompt and submission combined are to large for a given validator review instance you should RAG the submission and upload it as a file, notate the review prompt accordingly for the reviewing validator to reflect the main file to review is now in this RAG respective file. The user-prompt should still stay full context injection as the new cumulative context will be much shorter with the newly RAG augmented submission. Files in the user-prompt that were already chosen to use RAG and not direct injection should continue to use RAG. If a file(s) are using full context injection and the RAG submission+full injection user-prompt does not work then make sure all user-prompt files are being RAG'ed and try again. If the user-prompt itself is too large even once all files use RAG then return an output that user prompt too large and display the relevent diagnosis information on the limits.
+**Submission context injection**: Direct inject if fits. If too large: RAG the submission as file, keep user prompt direct. If user prompt + RAG'd submission still too large: RAG all user-prompt files. If user prompt itself too large after all RAG: halt with error + diagnostic.
 
 ## Context Allocation
 
-Context for a given prompt for a respective model load is able to be user set in the main tool settings. The program should then seek to utilize as much context as it can in every prompt (unless it runs out of content then that is fine). ALso, the users original text prompt should always be fully injected. If there is an overflow from this prompt then this should be stated in the logs clearly.
+User prompt ALWAYS direct injected. Use as much context as possible in every prompt.
 
 ### CONTEXT DISTRIBUTION RULES
 
-User prompt is ALWAYS direct injected (non-negotiable). If all context for the prompt that is required fits in direct injection then direct injection should be used, otherwise RAG should be used in order for the items that have RAG off-load priority until the required context for the prompt fits. Remaining context allocated as: ~85% RAG retrieval, ~15% other direct injections (JSON, user files). If user prompt exceeds (context_window - minimum_RAG_allocation), halt with error explaining user prompt too large.
+Direct injection first; RAG only when doesn't fit. ~85% RAG retrieval, ~15% other direct injections (JSON, user files). Halt with error if user prompt exceeds (context_window - minimum_RAG_allocation).
 
-There should be no context from the previous prompt in any successive prompt. The only context that should transfer is system-intended communication transfers for database update, submission review to the validator, etc.
+No context carryover between prompts (only system-intended DB/submission transfers).
 
-## Role Selection and Role Overlap Functionality for Loaded-Model Roles
-The user can select which model is selected for which role, and can chose to select a model(s) for multiple roles if desired.
+**RAG Offload Priority — Submitter:** Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files
 
-The user should be able to select which AI models currently running on the server that it wants to use for its task. If the model is not running but downloaded/available it should be loaded with the specified context the user set.
+**RAG Offload Priority — Validator:** Shared Training DB → User Upload Files → Submission under review (last resort)
 
-The user should be able to set the context size for each respective model in the settings.
+## Role Selection
 
-## Single-Model Mode Behavior
-When ALL submitters use the same model AND that model is also the validator model, the system automatically switches to single-model mode:
-- **Detection**: At initialization, the coordinator checks if all submitter models match the validator model. If they all match, single_model_mode is enabled.
-- **Sequential Submitters**: Submitters run SEQUENTIALLY (S1 → S2 → S3 → ... → Sn) instead of in parallel asyncio tasks.
-- **Round-Based Workflow**: After all configured submitters complete one generation cycle, the validator processes all queued submissions before the next round begins.
-- **Prevents Queue Overflow**: This prevents the queue overflow that would occur from parallel asyncio tasks all waiting for the same LLM and then flooding the queue when their requests complete.
-- **Automatic Switching**: When different models are used (either between submitters, or between any submitter and the validator), the system uses the normal parallel execution mode.
-- **Logging**: Mode selection is logged at startup: "Single-model mode ENABLED" or "Multi-model mode" with details.
+User selects model per role. Multiple roles can share a model. Models load with user-set context sizes.
 
-**BOOST MODE COMPATIBILITY:**
-- Boost does NOT affect single-model mode detection
-- Single-model mode only looks at CONFIGURED model IDs (what's set in settings), not routing decisions
-- If all agents use the same LM Studio model, single-model mode activates regardless of whether boost is enabled
-- If agents use different LM Studio models, they run in parallel regardless of boost status
+## Single-Model Mode
+When ALL submitters AND validator use the same model → single-model mode:
+- Submitters run SEQUENTIALLY (S1 → S2 → ... → Sn)
+- Validator processes all queued submissions after each full submitter round
+- Prevents queue overflow from parallel tasks flooding when LLM completes
+- Boost does NOT affect single-model detection (routing only, not model config)
 
 ## Multi-Submitter Configuration
-Each submitter can be configured independently with:
-- **Provider Selection**: LM Studio or OpenRouter (each role can use different provider)
-- **Model Selection**: Different models can explore different solution basins
-- **OpenRouter Host Provider**: Specific provider/host (e.g., Anthropic, Google) when using OpenRouter
-- **LM Studio Fallback**: Optional fallback model when using OpenRouter (used on credit exhaustion)
-- **Context Window**: Larger windows for models that support extended context
-- **Max Output Tokens**: Configurable output limits (recommended 25000+ for reasoning models)
 
-The UI provides:
-- A "Number of Submitters" selector (1-10)
-- Per-submitter provider toggle (LM Studio / OpenRouter)
-- OpenRouter model and host provider selection (when OpenRouter selected)
-- Optional LM Studio fallback selector (when OpenRouter selected)
-- Per-submitter context and max tokens configuration
-- A "Copy Main to All" button to quickly apply Main Submitter settings to all others
-- "Submitter 1 (Main Submitter)" label for the first submitter for clarity
+Per-submitter: provider (LM Studio / OpenRouter), model, OpenRouter host provider, LM Studio fallback, context window, max output tokens. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
 
-**Note:** The system works without LM Studio. If LM Studio is unavailable, users can configure OpenRouter for all roles. This includes **embeddings for RAG** - when LM Studio is unavailable, embedding requests automatically fall back to OpenRouter (using `openai/text-embedding-3-small`).
-
-## Notes on the User Prompt Injection and Direct Injections
-
-The user prompt should always be direct injected in all validator and submittor operations and always the first part of the prompt injection (unless something is required to be first for the JSON format request - the JSON is the only thing allowed to supercede the user prompts direct injection). The validators prompt will also require the context/content direct injected to give context to the users request in response to validating against the RAG database, etc and all it's requirements. 
-
-The JSON required formating requests should always be direct injected as needed to get the proper output from the AI.
+Embeddings for RAG: LM Studio first, falls back to OpenRouter (`openai/text-embedding-3-small`) if LM Studio unavailable.
 
 ## Database Management
 
-Accepted Submissions Database - Accepted submission logs in the validator-distributed accepted-submission database should never have its submission results truncated. The live-research-aggregation-preview should display this exact non-truncated log for each submission. The validator results and valdiator reasoning does not get included in the submission aggregation database.
+Accepted submissions database: never truncated. Live preview shows exact non-truncated log. Validator reasoning/results NOT included in the database (accepted submissions only).
 
 ## Database Cleanup Review
 
-Every 7 accepted submissions, the validator performs a cleanup review of the existing accepted submissions database to maintain quality over time.
+Every 7th acceptance (`total_acceptances % 7 == 0`, minimum 7 before first review):
 
-### Trigger Condition
-- Cleanup review runs after every 7th acceptance (total_acceptances % 7 == 0)
-- Must have at least 7 acceptances before first cleanup review
+**Phase 1**: Validator reviews ALL accepted submissions, identifies AT MOST ONE for removal (redundant, contradicted, superseded, or provides no unique value).
 
-### Cleanup Review Workflow
+**Phase 2** (only if removal proposed): Validator self-validates its removal proposal. Conservative default: if uncertain, reject removal. If validated: execute removal + trigger RAG rechunk.
 
-**Phase 1 - Cleanup Review:**
-1. Validator reviews ALL currently accepted submissions
-2. Identifies if ANY ONE submission should be removed based on:
-   - Now REDUNDANT with other submissions (content fully covered elsewhere)
-   - CONTRADICTS other accepted submissions
-   - SUPERSEDED by better, more complete submissions
-   - Provides no unique value given current database state
-3. Can identify AT MOST ONE submission for removal (or none)
-4. If no removal needed: workflow ends, normal rotation resumes
+**Critical selection rule**: When multiple submissions redundant, remove the WEAKEST (least unique value). Never remove a more complete submission.
 
-**Phase 2 - Removal Validation (only if removal proposed):**
-1. Validator validates its own removal proposal (self-check)
-2. Binary decision: accept (proceed with removal) or reject (keep submission)
-3. Conservative default: if uncertain, reject the removal
-4. If removal validated: execute removal, trigger RAG rechunk
-5. If removal rejected: log and resume normal rotation
+**Stats tracked**: `cleanup_reviews_performed`, `removals_proposed`, `removals_executed`
 
-### Design Principles
-- **Conservative approach**: When in doubt, do NOT remove
-- **Self-validation required**: Removal proposal must be validated before execution
-- **Maximum 1 removal per cycle**: Prevents cascading removals
-- **Quality over quantity**: Smaller, higher-quality database is preferred
-- **Non-blocking**: Cleanup runs inline after acceptance, does not block queue processing
+**WebSocket events**: `cleanup_review_started`, `cleanup_removal_proposed`, `cleanup_submission_removed`, `cleanup_review_complete`, `cleanup_review_error`
 
-### Removal Criteria
-A submission should be removed if it:
-1. Is now REDUNDANT with other accepted submissions
-2. CONTRADICTS other accepted submissions
-3. Contains information SUPERSEDED by better submissions
-4. Provides no unique value given current database state
-5. Contains claims that CONFLICT with established mathematical principles
+## RAG Refresh
 
-### Critical Selection Rule
-When multiple submissions are redundant with each other, the validator MUST select the WEAKEST one for removal - the one that provides the LEAST unique value. NEVER remove a more complete submission in favor of keeping a less complete one.
-
-### Reasons to Keep (do NOT remove)
-A submission should be kept if it:
-1. Provides ANY unique information not covered elsewhere
-2. Offers a different perspective or approach
-3. Contains specific mathematical details, proofs, or techniques
-4. Contributes to solution diversity in any meaningful way
-
-### Statistics Tracked
-- `cleanup_reviews_performed`: Total number of cleanup reviews run
-- `removals_proposed`: Number of times a removal was proposed
-- `removals_executed`: Number of times a removal was validated and executed
-
-### WebSocket Events
-- `cleanup_review_started`: When cleanup review begins
-- `cleanup_removal_proposed`: When a removal is proposed
-- `cleanup_submission_removed`: When a submission is successfully removed
-- `cleanup_review_complete`: When cleanup review ends (with results)
-- `cleanup_review_error`: If cleanup review encounters an error
+New submission acceptance → immediately RAG'd and added incrementally to existing RAG (no full re-RAG). Submitters see fresh context on next API call.
 
 ## Validation
 
-JSON formatting API call requests are used to communicate the neccesary validation syntax for the submission/validation chain.
+JSON formatting used for all submission/validation communication. Submissions must be rooted in sound mathematical reasoning with no unfounded claims or logical fallacies.
 
-### Mathematical Rigor Requirements
-Submissions must be rooted in sound mathematical reasoning with no unfounded claims or logical fallacies. All claims must be based on established mathematical principles and valid logical arguments.
-
-
-## How often to redo the RAG on the shared aggregate database for the aggregator-submitter(s) and aggregator-validator.
-    
-The aggregator gets any new submission addition RAGed right away for the aggregator-submitters to review on their next API call. We should RAG the new submission and add it to the previous RAG, in order to cumulatively update the RAG information without having to re-RAG the whole database redundantly each time.
-
-## Other Notes
-
-IMPORTANT: When a JSON result for validation does not work you should reject the submission and alert the submitter the content and the reason isfor JSON rejection, this context should be sent to the submitters local failure feedback memory that we have defined in other areas.
-
-
+JSON validation failure: reject submission, send reason + content to submitter's local failure feedback memory.

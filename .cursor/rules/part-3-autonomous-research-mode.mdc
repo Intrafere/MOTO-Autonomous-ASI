@@ -117,48 +117,7 @@ When choosing between new / continue / combine:
 - **Continue Existing**: When an incomplete brainstorm has more value to explore before starting something new
 - **Combine Topics**: When multiple existing brainstorms are related and would benefit from unified exploration
 
-### JSON Schema
-
-```json
-{
-  "action": "new_topic | continue_existing | combine_topics",
-  "topic_id": "string - Required if action is continue_existing",
-  "topic_ids": ["array of topic_ids - Required if action is combine_topics"],
-  "topic_prompt": "string - Required if action is new_topic or combine_topics. The brainstorm question/avenue to explore",
-  "reasoning": "string - Why this is the best choice right now"
-}
-```
-
-### Example Output (New Topic)
-
-```json
-{
-  "action": "new_topic",
-  "topic_prompt": "Explore connections between modular forms and Galois representations in the context of the Langlands program",
-  "reasoning": "The existing brainstorms have covered L-functions and automorphic representations. Modular forms provide a concrete computational entry point to the Langlands correspondence that hasn't been explored yet."
-}
-```
-
-### Example Output (Continue Existing)
-
-```json
-{
-  "action": "continue_existing",
-  "topic_id": "topic_003",
-  "reasoning": "The brainstorm on reciprocity laws has only 7 submissions and has not yet covered explicit formulas or computational approaches. Continuing this topic will provide more complete understanding before moving to a new avenue."
-}
-```
-
-### Example Output (Combine Topics)
-
-```json
-{
-  "action": "combine_topics",
-  "topic_ids": ["topic_002", "topic_005"],
-  "topic_prompt": "Unified exploration of local and global class field theory with applications to the Langlands program",
-  "reasoning": "Topics 002 (local class field theory) and 005 (global reciprocity) are closely related and would benefit from unified treatment. Combining them will reveal deeper connections."
-}
-```
+JSON schema and examples defined in `json-prompt-design.mdc`. Fields: `action` (new_topic/continue_existing/combine_topics), `topic_id`, `topic_ids`, `topic_prompt`, `reasoning`.
 
 ---
 
@@ -190,14 +149,7 @@ Receives the SAME context as the topic submitter:
 4. Choice ignores more valuable research avenues
 5. Reasoning is flawed or lacks mathematical rigor
 
-### JSON Schema
-
-```json
-{
-  "decision": "accept | reject",
-  "reasoning": "string - Detailed explanation for the decision"
-}
-```
+JSON schema defined in `json-prompt-design.mdc`. Fields: `decision` (accept/reject), `reasoning`.
 
 ### Rejection Feedback
 When rejected, the validator's reasoning is added to the topic submitter's rolling feedback cache (last 5 rejections), similar to aggregator submitter rejection logs.
@@ -242,29 +194,6 @@ After topic selection is validated, the reference selector:
 - Outlines provide "semantic anchors" that prime the model for recognizing connections
 - The model can identify mathematical concepts, proof structures, and methodological approaches from the outline alone
 
-**Display Format:**
-```
---- Paper ID: paper_003 ---
-Title: "Modular Forms and Galois Representations"
-Abstract: "This paper explores the deep connections..."
-Outline:
-Abstract
-
-I. Introduction
-   A. Historical context
-   B. Problem statement
-
-II. Preliminaries
-   A. Modular forms
-   B. Galois representations
-
-III. Main Results
-   ...
-
-Word Count: 8543
-Source Brainstorms: topic_001
-```
-
 **Context Handling:**
 - Outlines are fetched from `paper_{paper_id}_outline.txt`
 - If outline is unavailable, displays "[Not available]"
@@ -282,107 +211,9 @@ Context: Direct inject if fits (~40% budget), RAG if too large. No truncation.
 ### Context for Pre-Brainstorm Reference Selection
 - User's high-level research prompt (direct injection)
 - Current brainstorm topic prompt (direct injection)
-- ALL Tier 2 paper titles + abstracts (direct injection if fits, RAG if too large)
-- Instruction: "Select papers that would help inform and enhance exploration of this brainstorm topic"
+- ALL Tier 2 paper titles + abstracts + outlines (direct injection if fits, RAG if too large)
 
----
-Outline:
-Abstract
-
-I. Introduction
-   A. Historical Context
-   B. Problem Statement
-
-II. Preliminaries
-   A. Modular Forms
-   B. Galois Representations
-
-III. Main Results
-   [...]
-
-Word Count: 8543
-Source Brainstorms: topic_001
-```
-
-The submitter reviews all abstracts and outlines, then decides which papers look promising enough to see in full. The submitter then requests expansion by providing paper IDs:
-
-```json
-{
-  "expand_papers": ["paper_003", "paper_007", "paper_011"],
-  "proceed_without_references": false,
-  "reasoning": "Papers 003, 007, and 011 appear highly relevant based on their abstracts. Paper 003 covers modular forms which connects directly to our brainstorm on Galois representations. Papers 007 and 011 discuss automorphic forms and computational techniques respectively, both central to our upcoming exploration. Need to see full content to assess their utility for brainstorm context."
-}
-```
-
-**Alternative - Proceed Without References:**
-
-If no papers meet the "very useful" threshold, the submitter can skip reference selection:
-
-```json
-{
-  "expand_papers": [],
-  "proceed_without_references": true,
-  "reasoning": "After reviewing all existing paper abstracts, none meet the 'very useful for brainstorming' threshold. The existing papers focus on different aspects of Langlands program (L-functions, reciprocity laws) that don't provide direct value for this specific brainstorm on modular forms and Galois representations."
-}
-```
-
-**Step 2: Full Content Review Phase**
-
-The reference selector shows the OUTLINE and FULL CONTENT of all requested papers:
-
-```
-============================================================
-Paper ID: paper_003
-Title: "Modular Forms and Galois Representations in the Langlands Program"
-Word Count: 8543
-============================================================
-
-OUTLINE:
-Abstract
-
-I. Introduction
-   A. Historical Context
-   B. Problem Statement
-
-II. Preliminaries and Definitions
-   A. Modular forms and their properties
-   B. Galois representations
-   C. L-functions and automorphic forms
-
-III. Main Results
-   [...]
-
-V. Conclusion
-
-------------------------------------------------------------
-
-FULL PAPER CONTENT:
-
-Abstract
-
-This paper explores the deep connections between modular forms...
-
-I. Introduction
-
-The Langlands program represents one of the most ambitious...
-
-[... COMPLETE PAPER CONTENT ...]
-
-V. Conclusion
-
-We have established rigorous connections between...
-
-============================================================
-```
-
-After reviewing the full content of all expanded papers, the submitter makes the final selection:
-
-```json
-{
-  "selected_papers": ["paper_003", "paper_011"],
-  "reasoning": "After reviewing full content, papers 003 and 011 provide the most useful reference material for brainstorm exploration. Paper 003 establishes the theoretical foundations for Galois representations we'll need to build upon. Paper 011's computational techniques will inform our exploration of concrete examples. Paper 007, while relevant, overlaps too much with our brainstorm topic and would be redundant during exploration."
-}
-```
+JSON schemas defined in `json-prompt-design.mdc`. Two-step: submitter requests paper expansions (`expand_papers`, `proceed_without_references`), then makes final selection (`selected_papers`). Max 6 papers total.
 
 **Context Handling (DIRECT INJECTION FIRST, RAG SECOND):**
 
@@ -406,25 +237,6 @@ After reviewing the full content of all expanded papers, the submitter makes the
 - Current brainstorm topic prompt (direct injection)
 - ALL Tier 2 paper titles + abstracts (direct injection if fits, RAG if too large)
 - Instruction: "Select papers that would help inform and enhance exploration of this brainstorm topic"
-
-### JSON Schema (Expansion Request)
-
-```json
-{
-  "expand_papers": ["array of paper_ids to see full content"],
-  "proceed_without_references": false,
-  "reasoning": "string - Why these papers should be expanded OR why no papers meet threshold"
-}
-```
-
-### JSON Schema (Final Selection)
-
-```json
-{
-  "selected_papers": ["array of up to 6 paper_ids"],
-  "reasoning": "string - Why these papers are very useful for brainstorm exploration"
-}
-```
 
 ### Key Design Points
 - **Same references persist**: References selected here are used for BOTH brainstorming AND paper writing
@@ -515,17 +327,6 @@ Runs every 10 accepted submissions (includes both new acceptances AND pruning re
 
 **API Endpoint**: `POST /api/auto-research/force-paper-writing`
 
-**Response**:
-```json
-{
-  "success": true,
-  "message": "Brainstorm topic_003 will now transition to paper writing",
-  "topic_id": "topic_003",
-  "topic_prompt": "Explore connections between modular forms...",
-  "submission_count": 15
-}
-```
-
 **Error Cases**:
 - 400: Autonomous research not running
 - 400: Not in tier1_aggregation (can only force during brainstorm)
@@ -573,24 +374,7 @@ Assess whether the current brainstorm has been sufficiently explored relative to
    - If CONTINUE_BRAINSTORM: Add feedback to rolling cache, return to aggregation
    - If WRITE_PAPER: Proceed to paper writing workflow (Tier 2)
 
-### JSON Schema (Completion Submitter)
-
-```json
-{
-  "decision": "continue_brainstorm | write_paper",
-  "reasoning": "string - Detailed explanation of assessment",
-  "suggested_additions": "string - If continue_brainstorm, what mathematical areas remain unexplored (optional)"
-}
-```
-
-### JSON Schema (Self-Validation)
-
-```json
-{
-  "validated": true | false,
-  "reasoning": "string - Why the assessment is or isn't accurate"
-}
-```
+JSON schemas defined in `json-prompt-design.mdc`. Completion submitter: `decision` (continue_brainstorm/write_paper), `reasoning`, `suggested_additions`. Self-validator: `validated` (bool), `reasoning`.
 
 ### Completion Review Context
 - User's high-level research prompt
@@ -631,113 +415,7 @@ Once completion review decides WRITE_PAPER (and self-validates), the system tran
 
 ### Two-Step Browsing Workflow (Additional Mode)
 
-**Step 1: Abstract Review Phase (with Already-Selected Context)**
-
-The reference selector shows the submitter which papers are already selected, then shows abstracts of remaining papers:
-
-```
-ALREADY SELECTED PAPERS (3 papers, 3 slots remaining):
-  - paper_003: "Modular Forms and Galois Representations"
-  - paper_007: "Automorphic Forms in the Langlands Program"
-  - paper_011: "Computational Techniques for Modular Forms"
-
-ADDITIONAL PAPERS AVAILABLE FOR SELECTION (can add up to 3 more):
-
---- Paper ID: paper_015 ---
-Title: "Explicit Formulas in Class Field Theory"
-Abstract: "This paper develops explicit computational formulas for class field theory constructions..."
-Word Count: 7234
-Source Brainstorms: topic_005
-
---- Paper ID: paper_018 ---
-Title: "Baker's Theorem and Transcendence"
-Abstract: "We present a comprehensive treatment of Baker's theorem on linear forms in logarithms..."
-Word Count: 9120
-Source Brainstorms: topic_007
-```
-
-The submitter reviews the brainstorm insights and decides if any additional papers would be valuable:
-
-```json
-{
-  "expand_papers": ["paper_015"],
-  "proceed_without_references": false,
-  "reasoning": "During brainstorming, explicit computational techniques emerged as a key area. Paper 015 on explicit class field theory formulas would complement our existing references. Paper 018 on Baker's theorem is tangentially related but doesn't address the computational aspects we explored. Will review paper 015's full content before deciding."
-}
-```
-
-**Alternative - Already-Selected Papers Sufficient:**
-
-```json
-{
-  "expand_papers": [],
-  "proceed_without_references": true,
-  "reasoning": "The three papers already selected (modular forms, automorphic forms, computational techniques) provide comprehensive coverage for the paper we'll write. During brainstorming, we didn't identify any gaps that would require additional reference papers."
-}
-```
-
-**Step 2: Full Content Review Phase (Additional Selection)**
-
-The reference selector shows full content of requested papers:
-
-```
-============================================================
-Paper ID: paper_015
-Title: "Explicit Formulas in Class Field Theory"
-Word Count: 7234
-============================================================
-
-[... COMPLETE PAPER CONTENT ...]
-```
-
-The submitter makes final selection of additional papers:
-
-```json
-{
-  "selected_papers": ["paper_015"],
-  "reasoning": "After reviewing full content, paper 015's explicit computational formulas align perfectly with the algorithmic approaches we developed during brainstorming. Adding this as 4th reference paper. Combined with our existing 3 papers, we now have comprehensive reference coverage."
-}
-```
-
-**Final Result**: Already-selected (3) + newly-selected (1) = 4 total reference papers
-
-**Step 1: Show Abstracts**
-
-The submitter receives:
-- User's high-level research prompt
-- Current brainstorm topic prompt
-- Completed brainstorm database (RAG)
-- Papers ALREADY SELECTED (shown as list)
-- REMAINING paper titles + abstracts (direct injection if fits, RAG if too large)
-- Instruction: "Select ADDITIONAL papers based on insights from brainstorming"
-
-**Step 1 JSON Schema**:
-
-```json
-{
-  "expand_papers": ["array of paper_ids to see full content before deciding"],
-  "proceed_without_references": false,
-  "reasoning": "string - Why these papers should be expanded OR why already-selected papers are sufficient"
-}
-```
-
-**If `proceed_without_references: true`**: Skip to Paper Title Selection (keep already-selected papers)
-
-**Step 2: Show Full Papers (if expansion requested)**
-
-The submitter receives:
-- Same context as Step 1
-- FULL CONTENT of all requested papers (RAG if needed)
-- Instruction: "Make your final selection of ADDITIONAL papers. Already-selected papers will be kept."
-
-**Step 2 JSON Schema**:
-
-```json
-{
-  "selected_papers": ["array of additional paper_ids to add"],
-  "reasoning": "string - Why these specific papers are valuable based on brainstorm insights"
-}
-```
+Same two-step browsing workflow as pre-brainstorm selection (expand request → final selection). JSON schemas defined in `json-prompt-design.mdc`. Already-selected papers shown as context; submitter requests expansion of remaining papers, then selects additional ones. Already-selected papers cannot be removed.
 
 **Validator Role**: 
 - Topic validator reviews selection decisions
@@ -757,14 +435,7 @@ The submitter receives:
 
 **Purpose**: Choose a title for the paper that will be compiled from this brainstorm.
 
-**JSON Schema**:
-
-```json
-{
-  "paper_title": "string - The complete title for the mathematical research paper",
-  "reasoning": "string - Why this title appropriately captures the brainstorm content and differentiates from existing papers (if any)"
-}
-```
+JSON schema defined in `json-prompt-design.mdc`. Fields: `paper_title`, `reasoning`.
 
 **DISTINCTION FOR TITLE VALIDATION:**
 
@@ -998,17 +669,9 @@ When abstract is written and validated, the paper is considered COMPLETE. Additi
    - User's high-level research prompt
    - Instruction: "Review all papers and determine if ANY ONE paper should be REMOVED due to redundancy"
 
-2. **JSON Schema**:
+JSON schema defined in `json-prompt-design.mdc`. Fields: `should_remove` (bool), `paper_id` (or null), `reasoning`.
 
-```json
-{
-  "should_remove": true | false,
-  "paper_id": "string - The paper_id to remove (or null if should_remove is false)",
-  "reasoning": "string - Detailed explanation of why this paper should be removed OR why no removal is needed"
-}
-```
-
-3. **Removal Criteria**:
+2. **Removal Criteria**:
    - Paper is REDUNDANT with other papers (content fully covered elsewhere)
    - Paper was MARGINALLY useful but other papers provide better coverage
    - Paper's unique contributions are minimal compared to other papers
@@ -1074,14 +737,7 @@ Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answe
 | `appears_impossible` | The question appears mathematically impossible |
 | `other` | Special cases |
 
-**JSON Schema (Certainty Assessment)**:
-```json
-{
-  "certainty_level": "total_answer | partial_answer | no_answer_known | appears_impossible | other",
-  "known_certainties_summary": "string - Detailed summary of what is established with certainty",
-  "reasoning": "string - Why this certainty level was chosen"
-}
-```
+JSON schema defined in `json-prompt-design.mdc`. Fields: `certainty_level` (total_answer/partial_answer/no_answer_known/appears_impossible/other), `known_certainties_summary`, `reasoning`.
 
 **Special Case - `no_answer_known`**:
 - If certainty assessment returns `no_answer_known`, Tier 3 exits
@@ -1107,13 +763,7 @@ Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answe
 - Whether single coherent narrative is possible
 - Whether papers naturally form a cohesive volume
 
-**JSON Schema (Format Selection)**:
-```json
-{
-  "answer_format": "short_form | long_form",
-  "reasoning": "string - Why this format is appropriate"
-}
-```
+JSON schema defined in `json-prompt-design.mdc`. Fields: `answer_format` (short_form/long_form), `reasoning`.
 
 **Validation**: Topic validator reviews format selection (10-rejection feedback loop)
 
@@ -1130,13 +780,7 @@ Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answe
 
 **Paper Title Requirement**: Title must DIRECTLY and TRANSPARENTLY answer the user's question.
 
-**JSON Schema (Final Paper Title)**:
-```json
-{
-  "paper_title": "string - Title that directly answers the user's question",
-  "reasoning": "string - Why this title appropriately answers the question"
-}
-```
+JSON schema same as paper title selection (defined in `json-prompt-design.mdc`). Title must directly and transparently answer the user's question.
 
 ### Phase 3B: Long Form Answer (Volume)
 
@@ -1160,23 +804,7 @@ Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answe
 | `introduction` | Introduction paper (frames the volume, written LAST) |
 | `conclusion` | Conclusion paper (synthesizes findings, written second-to-last) |
 
-**JSON Schema (Volume Organization)**:
-```json
-{
-  "volume_title": "string - Title of the complete volume",
-  "chapters": [
-    {
-      "chapter_type": "existing_paper | gap_paper | introduction | conclusion",
-      "paper_id": "string or null",
-      "title": "string",
-      "order": "number (1-based)",
-      "description": "string - Brief description of chapter content"
-    }
-  ],
-  "outline_complete": true | false,
-  "reasoning": "string - Why this organization effectively answers the question"
-}
-```
+JSON schema defined in `json-prompt-design.mdc`. Fields: `volume_title`, `chapters` (array with chapter_type/paper_id/title/order/description), `outline_complete`, `reasoning`.
 
 **Paper Writing Order (Long Form)**:
 1. **Gap Papers** (if any): Write in chapter order
@@ -1393,63 +1021,13 @@ When Tier 3 assembles a final answer (short-form or long-form), the system autom
 ### Tier 3 API Endpoints
 
 #### GET /api/auto-research/tier3/status
-Get current Tier 3 final answer status.
-
-**Response**:
-```json
-{
-  "is_active": true | false,
-  "status": "idle | assessing | format_selecting | organizing_volume | writing | complete",
-  "answer_format": "short_form | long_form | null",
-  "certainty_assessment": {
-    "level": "partial_answer",
-    "summary": "..."
-  },
-  "volume": {
-    "title": "...",
-    "total_chapters": 6,
-    "chapters_complete": 4,
-    "chapters": [...]
-  },
-  "rejections": {
-    "assessment": 0,
-    "format": 0,
-    "volume": 0,
-    "writing": 0
-  }
-}
-```
+Returns: is_active, status, answer_format, certainty_assessment, volume progress, rejection counts.
 
 #### GET /api/auto-research/tier3/final-answer
-Get the final answer content (short form paper or assembled volume).
-
-**Response**:
-```json
-{
-  "has_final_answer": true | false,
-  "format": "short_form | long_form",
-  "title": "...",
-  "content": "Full paper or volume text...",
-  "word_count": 15000,
-  "status": "complete | in_progress"
-}
-```
+Returns: has_final_answer, format, title, content, word_count, status.
 
 #### GET /api/auto-research/tier3/volume-progress
-Get current volume writing progress (long form answers).
-
-**Response**:
-```json
-{
-  "is_long_form": true,
-  "volume_title": "...",
-  "outline_complete": true,
-  "current_writing_chapter": 4,
-  "total_chapters": 6,
-  "completed_chapters": 3,
-  "chapters": [...]
-}
-```
+Returns: is_long_form, volume_title, outline_complete, current/total/completed chapters.
 
 ### Tier 3 WebSocket Events
 
@@ -1528,20 +1106,7 @@ Main component for displaying Tier 3 status and content:
 
 Each brainstorm has its own database file containing accepted submissions, formatted identically to Part 1's `rag_shared_training.txt`.
 
-**Metadata File**: `data/auto_brainstorms/brainstorm_{topic_id}_metadata.json`
-
-```json
-{
-  "topic_id": "topic_001",
-  "topic_prompt": "Explore connections between modular forms and Galois representations",
-  "status": "complete",
-  "submission_count": 23,
-  "created_at": "2025-01-15T10:30:00Z",
-  "completed_at": "2025-01-15T12:45:00Z",
-  "last_activity": "2025-01-15T12:45:00Z",
-  "papers_generated": ["paper_001", "paper_005"]
-}
-```
+**Metadata File**: `data/auto_brainstorms/brainstorm_{topic_id}_metadata.json` — Fields: topic_id, topic_prompt, status, submission_count, timestamps, papers_generated.
 
 ### Paper Files
 
@@ -1980,5 +1545,5 @@ Out-of-order paper writing: The sequential paper writing order (body → conclus
 - All LLM responses preprocessed by `sanitize_json_response()` in `backend/shared/json_parser.py`
 - Handles reasoning tokens (`<think>...</think>`), markdown wrappers, control tokens
 - Extracts first complete JSON object when multiple present
-- Handles LaTeX escape sequences comprehensively: fixes invalid `\u{word}` patterns, fixes invalid `\uXXXX` non-hex escapes, **pre-escapes dangerous LaTeX commands BEFORE any json.loads() attempt** (prevents `\to` becoming tab+o, `\text` becoming tab+ext, etc.) - dangerous commands include `\to`, `\text`, `\textbf`, `\times`, `\top`, `\tau`, `\theta`, `\triangle`, `\frac`, `\forall`, `\beta`, `\bar`, `\big*`, `\begin`, `\nu`, `\nabla`, `\neq`, `\not*`, `\rho`, `\right*`, `\rightarrow`, `\Rightarrow`, `\upsilon`, `\underline`, `\uparrow`
+- Handles LaTeX escape sequences comprehensively: fixes invalid `\u{word}` patterns, fixes invalid `\uXXXX` non-hex escapes, **pre-escapes dangerous LaTeX commands BEFORE any json.loads() attempt** using `(?<!\\)` negative lookbehind (prevents `\to` becoming tab+o, `\text` becoming tab+ext, etc., while also preserving already-escaped `\\begin` from being double-corrupted) - dangerous commands include `\to`, `\text`, `\textbf`, `\times`, `\top`, `\tau`, `\theta`, `\triangle`, `\frac`, `\forall`, `\beta`, `\bar`, `\big*`, `\begin`, `\nu`, `\nabla`, `\neq`, `\not*`, `\rho`, `\right*`, `\rightarrow`, `\Rightarrow`, `\upsilon`, `\underline`, `\uparrow`
 - Agent-level array handling for models that return arrays instead of objects
