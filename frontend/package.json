@@ -11,7 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "dompurify": "^3.2.4",
+    "dompurify": "^3.3.3",
     "html2pdf.js": "^0.14.0",
     "jspdf": "^4.1.0",
     "katex": "^0.16.27",
