@@ -3,7 +3,6 @@
 .latex-renderer {
   display: flex;
   flex-direction: column;
-  height: 100%;
 }
 
 .latex-toggle-bar {
@@ -64,7 +63,7 @@
 
 .latex-content-container {
   flex: 1;
-  overflow-y: auto;
+  overflow-y: visible;
   padding: 3rem 4.5rem;
   background: #0a0a0a;
   min-height: 400px;
@@ -769,4 +768,54 @@
     background: #e8eef8;
     color: #333;
   }
+}
+
+/* ================================
+   CHUNKED RENDERING STYLES
+   ================================ */
+
+.latex-chunk {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.latex-chunk-placeholder {
+  background: rgba(255, 255, 255, 0.01);
+  border-radius: 4px;
+}
+
+.latex-chunked-indicator {
+  color: #888 !important;
+  font-size: 0.75rem !important;
+  margin-left: 0.5rem;
+}
+
+.latex-large-doc-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  background: rgba(255, 183, 77, 0.1);
+  border-bottom: 1px solid rgba(255, 183, 77, 0.3);
+  font-size: 0.82rem;
+  color: #ffb74d;
+  gap: 1rem;
+  flex-shrink: 0;
+}
+
+.latex-large-doc-btn {
+  padding: 0.3rem 0.75rem;
+  background: rgba(255, 183, 77, 0.2);
+  border: 1px solid rgba(255, 183, 77, 0.4);
+  color: #ffb74d;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.latex-large-doc-btn:hover {
+  background: rgba(255, 183, 77, 0.35);
 }

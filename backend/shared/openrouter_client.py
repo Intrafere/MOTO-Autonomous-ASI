@@ -430,6 +430,9 @@ class OpenRouterClient:
                     logger.error(
                         f"OpenRouter credit exhaustion detected (402): {error_text}"
                     )
+                    if self._is_free_model(model):
+                        from backend.shared.free_model_manager import free_model_manager
+                        free_model_manager.mark_account_exhausted()
                     raise CreditExhaustionError(
                         f"OpenRouter credits exhausted for model '{model}'. "
                         f"Falling back to LM Studio."
@@ -499,9 +502,9 @@ class OpenRouterClient:
                         f"Free models on OpenRouter require this setting to be enabled."
                     )
                 
-                # Check for credit-related errors in message
-                if any(keyword in error_detail.lower() for keyword in ["credit", "insufficient", "balance", "quota"]):
-                    logger.error(f"OpenRouter credit exhaustion detected in error message: {error_detail}")
+                # Check for credit/key-limit-related errors in message
+                if any(keyword in error_detail.lower() for keyword in ["credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"]):
+                    logger.error(f"OpenRouter credit/key exhaustion detected in error message: {error_detail}")
                     raise CreditExhaustionError(
                         f"OpenRouter credits exhausted for model '{model}'. "
                         f"Falling back to LM Studio."
@@ -650,9 +653,9 @@ class OpenRouterClient:
                     f"the option to allow your data to be used for model training."
                 )
             
-            # Check for credit-related errors in message
-            if any(keyword in error_detail.lower() for keyword in ["credit", "insufficient", "balance", "quota"]):
-                logger.error(f"OpenRouter credit exhaustion in embedding error: {error_detail}")
+            # Check for credit/key-limit-related errors in message
+            if any(keyword in error_detail.lower() for keyword in ["credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"]):
+                logger.error(f"OpenRouter credit/key exhaustion in embedding error: {error_detail}")
                 raise CreditExhaustionError("OpenRouter credits exhausted for embeddings")
             
             logger.error(f"OpenRouter embedding HTTP error: {error_detail}")
@@ -661,6 +664,39 @@ class OpenRouterClient:
             logger.error(f"OpenRouter embedding error: {e}")
             raise
     
+    def get_rate_limited_models(self) -> Dict[str, float]:
+        """
+        Get a snapshot of currently rate-limited models.
+        
+        Returns:
+            Dict mapping model_id to timestamp when rate limit was recorded.
+            Expired entries (past cooldown) are NOT filtered here for thread safety;
+            callers should check against RATE_LIMIT_COOLDOWN.
+        """
+        return dict(self._rate_limited_models)
+    
+    def get_soonest_retry(self) -> Optional[float]:
+        """
+        Get the earliest timestamp when any rate-limited model becomes available.
+        
+        Returns:
+            Unix timestamp of soonest cooldown expiry, or None if no models tracked.
+        """
+        if not self._rate_limited_models:
+            return None
+        
+        current_time = time.time()
+        soonest = None
+        
+        for model_id, limit_time in self._rate_limited_models.items():
+            retry_at = limit_time + self.RATE_LIMIT_COOLDOWN
+            if retry_at <= current_time:
+                continue
+            if soonest is None or retry_at < soonest:
+                soonest = retry_at
+        
+        return soonest
+
     async def close(self):
         """Close the HTTP client and cleanup resources."""
         try:
@@ -704,4 +740,19 @@ class RateLimitError(Exception):
         super().__init__(message)
         self.model = model
         self.retry_after = retry_after
+
+
+class FreeModelExhaustedError(Exception):
+    """
+    Raised when all free model options are exhausted (looping + auto-selector + fallback).
+    
+    Contains soonest_retry timestamp so coordinators can implement SERIAL BOTTLENECK
+    pause behavior instead of infinite retry loops.
+    
+    Attributes:
+        soonest_retry: Unix timestamp when the earliest model cooldown expires, or None
+    """
+    def __init__(self, message: str, soonest_retry: Optional[float] = None):
+        super().__init__(message)
+        self.soonest_retry = soonest_retry
 

@@ -11,6 +11,8 @@ function CompilerSettings() {
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [loadingModels, setLoadingModels] = useState(true);
   const [freeOnly, setFreeOnly] = useState(false);
+  const [freeModelLooping, setFreeModelLooping] = useState(true);
+  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(true);
 
   // Validator settings
   const [validatorProvider, setValidatorProvider] = useState('lm_studio');
@@ -119,7 +121,8 @@ function CompilerSettings() {
           // wolframApiKey not loaded from localStorage (sensitive data - must re-enter per session)
           // Free-only toggle
           if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
-          // Restore cached model providers
+          if (settings.freeModelLooping !== undefined) setFreeModelLooping(settings.freeModelLooping);
+          if (settings.freeModelAutoSelector !== undefined) setFreeModelAutoSelector(settings.freeModelAutoSelector);
           if (settings.modelProviders) setModelProviders(settings.modelProviders);
         } catch (error) {
           console.error('Failed to load compiler settings:', error);
@@ -187,9 +190,10 @@ function CompilerSettings() {
       critiqueSubmitterContextSize, critiqueSubmitterMaxOutput,
       wolframEnabled,
       freeOnly,
-      modelProviders // Cache provider lists to avoid re-fetching
+      freeModelLooping,
+      freeModelAutoSelector,
+      modelProviders
     };
-    // Note: wolframApiKey intentionally excluded from localStorage (sensitive data)
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
     setSaveStatus('Settings saved ✓');
     const timer = setTimeout(() => setSaveStatus(''), 2000);
@@ -204,7 +208,7 @@ function CompilerSettings() {
     critiqueSubmitterProvider, critiqueSubmitterModel, critiqueSubmitterOpenrouterProvider, critiqueSubmitterLmStudioFallback,
     critiqueSubmitterContextSize, critiqueSubmitterMaxOutput,
     wolframEnabled,
-    freeOnly, modelProviders
+    freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders
   ]);
 
   const fetchOpenRouterModels = async (freeFilter = freeOnly) => {
@@ -670,8 +674,42 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   onChange={(e) => setFreeOnly(e.target.checked)}
                   style={{ marginRight: '0.5rem' }}
                 />
-                Show free models only
+                Show only free models
               </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+                  <input
+                    type="checkbox"
+                    checked={freeModelLooping}
+                    onChange={(e) => {
+                      setFreeModelLooping(e.target.checked);
+                      openRouterAPI.setFreeModelSettings(e.target.checked, freeModelAutoSelector).catch(() => {});
+                    }}
+                    style={{ marginRight: '0.5rem' }}
+                  />
+                  Enable Free Model Looping
+                  <span
+                    title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
+                    style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
+                  >(?)</span>
+                </label>
+                <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+                  <input
+                    type="checkbox"
+                    checked={freeModelAutoSelector}
+                    onChange={(e) => {
+                      setFreeModelAutoSelector(e.target.checked);
+                      openRouterAPI.setFreeModelSettings(freeModelLooping, e.target.checked).catch(() => {});
+                    }}
+                    style={{ marginRight: '0.5rem' }}
+                  />
+                  Use OpenRouter Free Models Auto-Selector as Backup
+                  <span
+                    title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
+                    style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
+                  >(?)</span>
+                </label>
+              </div>
             </>
           )}
         </div>

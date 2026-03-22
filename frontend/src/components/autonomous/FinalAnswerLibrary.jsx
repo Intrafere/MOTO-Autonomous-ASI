@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import LatexRenderer from '../LatexRenderer';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
-import { downloadRawText, downloadPDF, sanitizeFilename } from '../../utils/downloadHelpers';
+import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 import './FinalAnswerLibrary.css';
 
 /**
@@ -122,69 +122,46 @@ function FinalAnswerLibrary() {
   
   // Download PDF without expanding card first (loads content on demand)
   const downloadAnswerPDF = async (e, answer) => {
-    e.stopPropagation(); // Prevent card expansion
-    
+    e.stopPropagation();
+
     if (downloadingPDF) {
-      alert('Already generating a PDF, please wait...');
+      alert('Already preparing a PDF, please wait...');
       return;
     }
-    
-    setDownloadingPDF(answer.answer_id);
-    
+
     try {
-      // Fetch content
-      console.log('Fetching content for PDF generation...');
       const response = await fetch(`/api/auto-research/final-answer-library/${answer.answer_id}`);
       const data = await response.json();
-      
+
       if (!data.success || !data.content) {
         throw new Error('Failed to load content');
       }
-      
-      // Warn for large documents
-      if (answer.word_count > 30000) {
-        console.warn(`Large document (${answer.word_count} words) - PDF generation may take 30-60 seconds...`);
-      }
-      
-      // Create temporary container for rendering
-      const tempContainer = document.createElement('div');
-      tempContainer.style.position = 'absolute';
-      tempContainer.style.left = '-9999px';
-      tempContainer.style.top = '0';
-      document.body.appendChild(tempContainer);
-      
-      // Import and render with LatexRenderer logic
-      const LatexRenderer = (await import('../LatexRenderer')).default;
-      const { renderLatexToHtml } = await import('../LatexRenderer');
-      
-      // Render content
-      const renderedHtml = renderLatexToHtml(data.content);
-      const contentDiv = document.createElement('div');
-      contentDiv.className = 'latex-rendered-content';
-      contentDiv.innerHTML = renderedHtml;
-      tempContainer.appendChild(contentDiv);
-      
-      // Wait for rendering to complete
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // Generate PDF
+
+      const filename = sanitizeFilename(`Final_Answer_${answer.title}`);
       const metadata = {
         title: answer.title,
         wordCount: answer.word_count,
         date: formatDate(answer.completion_date),
-        models: null
+        models: null,
       };
-      const filename = sanitizeFilename(`Final_Answer_${answer.title}`);
-      
-      await downloadPDF(contentDiv, metadata, filename, null);
-      
-      // Cleanup
-      document.body.removeChild(tempContainer);
+
+      await downloadPDFViaBackend(
+        data.content,
+        metadata,
+        filename,
+        null,
+        () => setDownloadingPDF(answer.answer_id),
+        () => setDownloadingPDF(null),
+        (error) => {
+          setDownloadingPDF(null);
+          console.error('PDF generation failed:', error);
+          alert(`PDF generation failed: ${error.message}`);
+        },
+      );
     } catch (error) {
-      console.error('PDF generation failed:', error);
-      alert(`Failed to generate PDF: ${error.message}\n\nFor very large documents (>40K words), try "Download Raw" instead.`);
-    } finally {
       setDownloadingPDF(null);
+      console.error('PDF generation failed:', error);
+      alert(`Failed to generate PDF: ${error.message}`);
     }
   };
 
@@ -263,7 +240,7 @@ function FinalAnswerLibrary() {
       {/* Header */}
       <div className="library-header">
         <h2>📚 Final Answer Library</h2>
-        <p>Browse all completed research volumes and papers from your autonomous research sessions</p>
+        <p>If you have enabled Tier 3 experimental final answer generation, any completed answers will appear here. Browse all completed research volumes and papers from your autonomous research sessions.</p>
         <div className="library-stats">
           <span className="stat-badge">
             {finalAnswers.length} {finalAnswers.length === 1 ? 'Answer' : 'Answers'}
@@ -382,7 +359,7 @@ function FinalAnswerLibrary() {
                     disabled={downloadingPDF === answer.answer_id}
                     title="Generate and download PDF"
                   >
-                    {downloadingPDF === answer.answer_id ? '⏳ Generating...' : '📑 Download PDF'}
+                    {downloadingPDF === answer.answer_id ? '⏳ Preparing PDF...' : '📑 Download PDF'}
                   </button>
                 </div>
               </div>
@@ -494,8 +471,4 @@ function FinalAnswerLibrary() {
 }
 
 export default FinalAnswerLibrary;
-
-
-
-
 

@@ -16,6 +16,7 @@ from backend.shared.config import system_config, rag_config
 from backend.shared.models import CompilerState, CompilerSubmission, CompilerValidationResult, WorkflowTask, SubmitterConfig, ValidationResult, ModelConfig
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.compiler.agents.high_context_submitter import HighContextSubmitter
 from backend.compiler.agents.high_param_submitter import HighParamSubmitter
@@ -107,6 +108,7 @@ class CompilerCoordinator:
         
         # Per-paper model tracking for manual mode (Part 2)
         self._paper_model_tracker: Optional[PaperModelTracker] = None
+        self._current_paper_tracker: Optional[PaperModelTracker] = None
         
         # Workflow tracking
         self.workflow_tasks: List[WorkflowTask] = []
@@ -662,10 +664,33 @@ class CompilerCoordinator:
                 
         except asyncio.CancelledError:
             logger.info("Compiler workflow cancelled")
+        except FreeModelExhaustedError as e:
+            if e.soonest_retry:
+                wait_secs = max(0, e.soonest_retry - time.time())
+                wait_mins = round(wait_secs / 60, 1)
+                logger.warning(
+                    f"SERIAL BOTTLENECK: Compiler paused for {wait_mins} minutes "
+                    f"(all free models rate-limited)"
+                )
+                await self._broadcast("serial_bottleneck_paused", {
+                    "role_id": "compiler",
+                    "model": str(e),
+                    "wait_seconds": round(wait_secs),
+                    "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
+                })
+                await asyncio.sleep(wait_secs)
+                await self._broadcast("serial_bottleneck_resumed", {"role_id": "compiler"})
+                if self.is_running:
+                    asyncio.create_task(self._main_workflow())
+            else:
+                logger.error(f"Compiler: all free models exhausted, no cooldown: {e}")
+                self.is_running = False
+                await self._broadcast("all_free_models_exhausted", {
+                    "message": f"All free models exhausted for compiler: {e}"
+                })
         except Exception as e:
             logger.error(f"Compiler workflow error: {e}", exc_info=True)
             self.is_running = False
-            # Broadcast error to frontend
             await self._broadcast("compiler_error", {
                 "error": str(e),
                 "traceback": traceback.format_exc(),
@@ -748,7 +773,15 @@ INVALID:
             logger.info(f"\n--- Outline Creation Iteration {iteration}/{MAX_ITERATIONS} ---")
             
             # Generate outline (creation or refinement)
-            submission = await self.high_context_submitter.submit_outline_create()
+            try:
+                submission = await self.high_context_submitter.submit_outline_create()
+            except FreeModelExhaustedError:
+                raise
+            except Exception as e:
+                logger.error(f"Iteration {iteration}: Outline submission failed with error: {e} - retrying")
+                await asyncio.sleep(5)
+                iteration -= 1
+                continue
             
             if submission is None:
                 logger.error(f"Iteration {iteration}: Failed to generate outline submission")
@@ -913,72 +946,53 @@ INVALID:
         self.current_mode = "construction"
         
         initial_portion_accepted = False
-        max_retries = 5
-        retry_count = 0
+        attempt = 0
         rejection_feedback = None  # Store rejection feedback for retry
         
         while self.is_running and not initial_portion_accepted:
             # High-context submitter writes first portion
             submission = None
+            attempt += 1
+            backoff_time = min(2 ** (attempt - 1), 16)  # 1s, 2s, 4s, 8s, 16s max
             
-            # Retry with exponential backoff if submission fails
-            for attempt in range(max_retries):
-                try:
-                    section_phase = self.autonomous_section_phase if self.autonomous_mode else None
-                    submission = await self.high_context_submitter.submit_construction(
-                        is_first_portion=True,
-                        section_phase=section_phase,
-                        rejection_feedback=rejection_feedback  # Pass rejection feedback for retry
+            try:
+                section_phase = self.autonomous_section_phase if self.autonomous_mode else None
+                submission = await self.high_context_submitter.submit_construction(
+                    is_first_portion=True,
+                    section_phase=section_phase,
+                    rejection_feedback=rejection_feedback  # Pass rejection feedback for retry
+                )
+                
+                if submission is None:
+                    logger.warning(
+                        f"Construction submission returned None (attempt {attempt}). "
+                        f"Retrying in {backoff_time}s..."
                     )
-                    
-                    if submission is None:
-                        retry_count += 1
-                        backoff_time = min(2 ** attempt, 16)  # 1s, 2s, 4s, 8s, 16s max
-                        logger.warning(
-                            f"Construction submission returned None (attempt {attempt + 1}/{max_retries}). "
-                            f"Retrying in {backoff_time}s..."
-                        )
-                        
-                        await self._broadcast("compiler_retry", {
-                            "mode": "construction",
-                            "attempt": attempt + 1,
-                            "max_retries": max_retries,
-                            "reason": "Empty submission returned"
-                        })
-                        
-                        await asyncio.sleep(backoff_time)
-                        continue
-                    else:
-                        # Success!
-                        if attempt > 0:
-                            logger.info(f"Construction submission succeeded after {attempt + 1} attempts")
-                        break
-                        
-                except Exception as e:
-                    retry_count += 1
-                    backoff_time = min(2 ** attempt, 16)
-                    logger.error(
-                        f"Construction submission failed with error (attempt {attempt + 1}/{max_retries}): {e}"
-                    )
-                    
                     await self._broadcast("compiler_retry", {
                         "mode": "construction",
-                        "attempt": attempt + 1,
-                        "max_retries": max_retries,
-                        "reason": str(e)
+                        "attempt": attempt,
+                        "reason": "Empty submission returned"
                     })
+                    await asyncio.sleep(backoff_time)
+                    continue
+                else:
+                    if attempt > 1:
+                        logger.info(f"Construction submission succeeded after {attempt} attempts")
                     
-                    if attempt < max_retries - 1:
-                        logger.info(f"Retrying in {backoff_time}s...")
-                        await asyncio.sleep(backoff_time)
-                    else:
-                        logger.error(f"Construction submission failed permanently after {max_retries} attempts")
-                        raise
+            except FreeModelExhaustedError:
+                raise
+            except Exception as e:
+                logger.error(f"Construction submission failed with error (attempt {attempt}): {e}")
+                await self._broadcast("compiler_retry", {
+                    "mode": "construction",
+                    "attempt": attempt,
+                    "reason": str(e)
+                })
+                logger.info(f"Retrying in {backoff_time}s...")
+                await asyncio.sleep(backoff_time)
+                continue
             
-            # Check if we got a valid submission
-            if submission is None:
-                logger.error(f"Failed to get construction submission after {max_retries} attempts")
-                raise RuntimeError("Construction submission failed permanently - returned None after all retries")
+            # submission is valid if we reach here
             
             self.total_submissions += 1
             
@@ -1497,7 +1511,11 @@ INVALID:
         """Submit and validate outline update. Returns True if accepted."""
         self.current_mode = "outline_update"
         
-        submission = await self.high_context_submitter.submit_outline_update()
+        try:
+            submission = await self.high_context_submitter.submit_outline_update()
+        except Exception as e:
+            logger.error(f"Outline update submission failed with error: {e} - skipping this cycle")
+            return False
         
         if submission is None:
             logger.info("No outline update needed")
@@ -2473,7 +2491,7 @@ INVALID:
             
             # Extract text from response dict
             message = response.get("choices", [{}])[0].get("message", {})
-            response_text = message.get("content", "") or message.get("reasoning", "")
+            response_text = message.get("content") or message.get("reasoning") or ""
             
             # Parse response
             data = parse_json(response_text)
@@ -2550,7 +2568,7 @@ INVALID:
             
             # Extract text from response dict
             message = response.get("choices", [{}])[0].get("message", {})
-            response_text = message.get("content", "") or message.get("reasoning", "")
+            response_text = message.get("content") or message.get("reasoning") or ""
             
             # Parse response
             data = parse_json(response_text)
@@ -2885,9 +2903,19 @@ INVALID:
                     continue
                 
                 # Apply the validated edit
-                success = await self._apply_edit(operation, old_string, new_string)
+                edit_submission = CompilerSubmission(
+                    submission_id=f"partial_revision_edit_{len(edits_applied) + 1}",
+                    mode="review",
+                    content=new_string,
+                    operation=operation,
+                    old_string=old_string,
+                    new_string=new_string,
+                    reasoning=reasoning
+                )
+                updated_paper = self._apply_edit(current_paper, edit_submission)
                 
-                if success:
+                if updated_paper is not None:
+                    await paper_memory.update_paper(updated_paper)
                     logger.info(f"Edit #{len(edits_applied) + 1} applied successfully")
                     edits_applied.append(edit_proposal)
                     successful_edits += 1

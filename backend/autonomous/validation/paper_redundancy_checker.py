@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List, Callable
 
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.models import PaperRedundancyReviewResult
 from backend.autonomous.prompts.paper_redundancy_prompts import build_paper_redundancy_prompt
@@ -103,7 +104,7 @@ class PaperRedundancyChecker:
             
             # Extract content (check both content and reasoning fields)
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 return self._create_no_removal("No content in response")
             
@@ -151,9 +152,10 @@ class PaperRedundancyChecker:
                     self.task_tracking_callback("completed", task_id)
                 return self._create_no_removal(f"JSON parse error: {str(e)}")
                 
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"PaperRedundancyChecker: Error during check: {e}")
-            # Notify task completed (failed but still completed)
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
             return self._create_no_removal(f"Error: {str(e)}")

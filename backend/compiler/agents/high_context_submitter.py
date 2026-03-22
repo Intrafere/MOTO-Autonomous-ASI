@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable
 
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission
 from backend.shared.config import system_config, rag_config
 from backend.shared.utils import count_tokens
@@ -205,7 +206,7 @@ class HighContextSubmitter:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             logger.info(f"LLM completion received: {len(llm_output)} chars")
             
             # Check for empty content
@@ -262,6 +263,8 @@ class HighContextSubmitter:
             logger.info(f"Outline creation submission generated: {submission.submission_id}, outline_complete={outline_complete}")
             return submission
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Failed to generate outline creation submission: {e}", exc_info=True)
             # Notify task completed (failed but still completed)
@@ -349,7 +352,7 @@ class HighContextSubmitter:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             logger.info(f"LLM completion received: {len(llm_output)} chars")
             
             # Check for empty content
@@ -406,6 +409,8 @@ class HighContextSubmitter:
             logger.info(f"Outline update submission generated: {submission.submission_id}")
             return submission
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Failed to generate outline update submission: {e}", exc_info=True)
             # Notify task completed (failed but still completed)
@@ -560,7 +565,7 @@ class HighContextSubmitter:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             logger.info(f"LLM completion received: {len(llm_output)} chars")
             
             # Check for empty content
@@ -649,6 +654,8 @@ class HighContextSubmitter:
             logger.info(f"Construction submission generated: {submission.submission_id} (section_complete={section_complete})")
             return submission
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Failed to generate construction submission: {e}", exc_info=True)
             # Notify task completed (failed but still completed)
@@ -721,7 +728,7 @@ class HighContextSubmitter:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             logger.info(f"LLM completion received: {len(llm_output)} chars")
             
             # Parse response with retry
@@ -783,6 +790,8 @@ class HighContextSubmitter:
             logger.info(f"Review submission generated: {submission.submission_id} (miniscule={is_miniscule})")
             return submission
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Failed to generate review submission: {e}", exc_info=True)
             # Notify task completed (failed but still completed)
@@ -843,7 +852,7 @@ class HighContextSubmitter:
             
             if retry_response.get("choices"):
                 message = retry_response["choices"][0]["message"]
-                retry_output = message.get("content", "") or message.get("reasoning", "")
+                retry_output = message.get("content") or message.get("reasoning") or ""
                 
                 try:
                     parsed = parse_json(retry_output)

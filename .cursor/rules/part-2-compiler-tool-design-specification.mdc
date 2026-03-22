@@ -5,587 +5,219 @@ alwaysApply: true
 Main Architecture layout/design of the distillation/compiler portion of the two-part aggregation-distillation LLM workflow.
 
 ## Workflow Compiler Note
-The compiler run-sequence is independent from the aggregator. The compiler starts manually via API only. The compiler runs in a strict Markov-chain. The respective version of the compiler-submitter runs and then submits to validator, the compiler-submitter cannot rerun until the validator has finished validating to see if the validator accepted the submission and changed the submitter's context. Only one compiler-submitter runs at a time, and each compiler-submission must be reviewed by the validator before resuming. This ensures constructing-paper is aligned with user prompt and ensures there is no multi-modal divergent content drift in the papers discussion(s).
+Compiler runs independently from aggregator (manual start via API only). Strict Markov-chain: one compiler-submitter runs, submits to validator, waits for validation result before resuming. Only 1 submission in queue at a time.
 
-## Compile/Distillation Tool Outline 
+## Compile/Distillation Tool Outline
 
-As the aggregation database builds, the full content saved output which includes all user provided text uploads and initial prompt, the large result file is continuously run through compiler tool, if desired. This compiler tool seeks to combine all insights, discoveries, and information from the collective result file and utilizes LM studio AI server API calls to combine all of the information from the result file into a single paper of undefined length on the topic the user defines in the initial compiler-directing prompt. The alignment rejection/acceptance is similar to the main solution producing tool. However a key difference is there is only 1 solving AI and 1 validating AI that are running at once.
+Reads aggregator database + user prompt, distills into a single coherent paper. 1 high-context submitter + 1 high-param submitter + 1 validator. Sequential workflow (no parallel submitters).
 
-**Context Anchors**: Both the paper and outline automatically include hardcoded anchor markers at the end that serve as non-chronological stop tokens, preventing content from being added beyond the intended endpoint. These anchors are visible in all AI contexts and GUI displays.
-- **Paper Anchor** (single line): `[HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]`
-- **Outline Anchor** (two lines): 
-  - Line 1: `[HARD CODED BRACKETED DESIGNATION THAT SHOWS END-OF-PAPER DESIGNATION MARK]`
-  - Line 2: `[HARD CODED END-OF-OUTLINE MARK -- ALL OUTLINE CONTENT SHOULD BE ABOVE THIS LINE]`
+**Context Anchors**:
+- **Paper Anchor**: `[HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]`
+- **Outline Anchor** (two lines): `[HARD CODED BRACKETED DESIGNATION THAT SHOWS END-OF-PAPER DESIGNATION MARK]` then `[HARD CODED END-OF-OUTLINE MARK -- ALL OUTLINE CONTENT SHOULD BE ABOVE THIS LINE]`
 
 **Section Placeholders** (paper only):
 - `[HARD CODED PLACEHOLDER FOR THE ABSTRACT SECTION - TO BE WRITTEN AFTER THE INTRODUCTION IS COMPLETE]`
 - `[HARD CODED PLACEHOLDER FOR INTRODUCTION SECTION - TO BE WRITTEN AFTER THE CONCLUSION SECTION IS COMPLETE]`
 - `[HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION - TO BE WRITTEN AFTER THE BODY SECTION IS COMPLETE]`
 
-These placeholders are STRUCTURAL MARKERS ONLY. Submissions should never intentionally include placeholder text - any that appear will be silently stripped before validation.
+Placeholders are STRUCTURAL MARKERS ONLY. Submissions must never include them — any that appear will be silently stripped before validation.
 
 **Marker Integrity System (Automatic Repair)**:
+Before every `_pre_validate_exact_string_match()`, system calls `paper_memory.ensure_markers_intact()` (or `outline_memory.ensure_anchor_intact()` for outline_update). If markers were missing, they are added and document is re-fetched before validation. Mode-aware: paper operations check placeholders + anchor; outline operations check outline anchor only.
 
-The system automatically checks and repairs missing markers BEFORE every old_string match operation:
-- **When**: Before `_pre_validate_exact_string_match()` in validator
-- **What**: Checks for all required markers (placeholders and anchors)
-- **How**: Calls `paper_memory.ensure_markers_intact()` or `outline_memory.ensure_anchor_intact()`
-- **Why**: Prevents old_string match failures caused by pruned markers during normal operation
-- **Result**: If markers were missing, they are added and the document is re-fetched before validation
+**Outline is ALWAYS fully injected (never RAGed)** into all compiler mode prompts.
 
-This runs in addition to the resume-time placeholder check (`ensure_placeholders_exist()`). The marker integrity check is lightweight and mode-aware:
-- For paper operations (construction, review, rigor): Checks paper markers (placeholders + anchor)
-- For outline operations (outline_update): Checks outline anchor only
+**Provider Selection**: Each compiler role (validator, high-context, high-param, critique submitter) can independently use LM Studio or OpenRouter with optional host provider and LM Studio fallback.
 
-The the compiler-submitter varient analyzes the shared accepted aggregator submissions, reviews them along with the 2nd prompt set by the user for the compiler, the users prompt as always-full-context injected. The compiler-submitter seeks to solve the users prompt given the solved-database file and the current build progress of its the paper/outline that were accepted by the validator in previous accepted submissions (if applicable and not the start of the outline or paper).
+**Aggregator RAG refresh**: Every 10 accepted aggregator submissions (not immediate like aggregator).
 
-The validators objective is to solve the user's prompt and output a single coherent paper directed by the users secondary compiler prompt, which is assisted by the aggregate database from the users first prompt. The validator does not worry about length, however it seeks to only accept submissions that buid the paper towards a single, coherent paper solving the users prompt request while also capturing all non-redundant, unique information from the provided uncompiled solution database thats relevent to the users compiler-directing prompt. In addition to accepting coherence-improving edits, unique/non-redundant/relevent content-capturing edits, the AI validator also accepts edits that improve mathematical rigor of the document. The validator must reject a submission if it at all compromises grammatical/sentence coherency and progress-towards wholistic document coherency. The validator should also reject a submission if it meaningfully reduces the mathematical rigor of the document or if the submission is asserting incorrect information.
+**Enhanced Rejection Feedback Format** (`compiler_rejection_log.py`):
+- Header: "🚫 REJECTED BECAUSE: [Failure Reason]"
+- `validation_stage`: pre-validation (exact string check) or LLM validation (placement context)
+- Full validator reasoning + 300-char submission preview
+- "WHAT TO FIX" with specific instructions per failure type
+- Diagnostics: needle/haystack previews (first/last 200 chars) when exact match fails
 
-**Mathematical Rigor Requirements**: All document content must be rooted in sound mathematical reasoning with no unfounded claims or logical fallacies. Content must be based on established mathematical principles.
+Last 10 rejections and 10 acceptances: direct injected if fit, RAG only if too large.
 
-The validators rejections and the context as to why it rejected should be included as additional context to the AI submitter. The last 10 rejections and last 10 acceptances should be DIRECT INJECTED if they fit in available context (which they almost always will), and RAGed ONLY if too large to fit. This follows the core principle: direct injection first, RAG only if content doesn't fit.
-
-**Enhanced Rejection Feedback Format**: Rejections are logged in a structured, prominent format designed to help models learn from failures. Each rejection entry includes:
-- **Prominent header**: "🚫 REJECTED BECAUSE: [Failure Reason]" with visual separator
-- **Failure criterion identification**: Clearly states which validation criterion failed (Coherence/Rigor/Placement Context)
-- **validation_stage field**: Explicitly tracks whether rejection came from pre-validation (exact string check) or LLM validation (placement context)
-- **Detailed validator reasoning**: The full validator explanation of why the submission was rejected
-- **Submission content preview**: First 300 characters of the rejected submission for context
-- **Actionable guidance**: "WHAT TO FIX" section with specific instructions based on the failure type:
-  - **Exact string match failures (pre-validation)**: Examples showing how to include more context in old_string to ensure uniqueness
-  - **Placement context failures (LLM validation)**: Explanation of why content doesn't fit naturally at that location
-  - **Coherence failures**: Guidance on maintaining grammatical correctness and document flow
-  - **Rigor failures**: Reminder to base claims on established mathematical principles
-- **Enhanced diagnostics (developer logs)**: When exact match fails, outputs needle/haystack previews (first/last 200 chars), detects specific issues (whitespace differences, partial matches, line endings), and provides explicit "NO_MATCH_FOUND" with common causes when no match exists
-This enhanced format (implemented in `compiler_rejection_log.py`) significantly improves model learning by making rejection reasons clear and providing concrete examples of correct patterns.
-
-Crucially, the AI compiler-submitter will switch between two models/profiles, one model that is a low context model with high parameters. This model is the mathematical rigor addition mode of the compile tool. The other model will be lower parameters but much higher context window. The higher context model is what is the compile mode/distillation mode that distills/compiles the uncompiled database and makes sure its adding all missing information from the paper that is relevent from the aggregate database into the paper in a coherent way.
-
-**Provider Selection**: Each compiler role (validator, high-context, high-param, critique submitter) can independently use LM Studio or OpenRouter. When OpenRouter is selected, users can choose a specific host provider (e.g., Anthropic, Google) and optionally set an LM Studio fallback model. The system works without LM Studio - if LM Studio is unavailable, users can configure OpenRouter for all roles.
-
-The high-context submitter has two modes. Every other task it switches back and forth between the modes. One mode is the one described above where it distills the information into the coherent paper submission attempts for the validator. And the other is to continually edit or chose not to edit the outline of how the paper should look as per the current vision. **Note: This outline must be injected at full context into all compiler modes (construction, outline_update, review, and rigor). The outline is never RAGed - it is always fully injected for structural framework integrity.** Crucially regarding the markov/markov-chain process, the compiler-submitter can only submit 1 submisssion for review at a time, and each submission must be judged by the compiler-validator before the compiler-submitter can resume their rotation with the updated database(s)/feedback from the validator (if applicable)- essentially the compiler-submitter can only produce 1 compile in the queue. Even though there are two compiler-submitter profiles, only 1 compile-submission can be sent for review at a time and these compiler-submitters cannot run simultaneously, they must follow the rotation outlined in the rules. The compiler submitter waits for validation to complete before generating the next submission.
-
-## How often to redo the RAG on the shared aggregate database for the compiler-submitter(s) and compiler-validator (NOTE: this does not apply to the aggregator - the aggregator gets its new submission addition RAGed right away for the aggregator-submitters to review.)
-- RAG the aggregation database for the compiler-submitter(s) and compiler-validator every 10 accepted submission additions to the aggregate file.z
-- The previous RAG from the shared aggregation file should simply be updated with its new submission additions every 10 accepted submissions, the whole aggregation file should not be have its RAG redundantly redone entirely just to add the new submissions.
+---
 
 ## Phase-Based Paper Construction
 
-Paper construction follows a strict phase-based approach to ensure proper structure:
+**PHASE ORDER (strictly enforced):** BODY → CONCLUSION → INTRODUCTION → ABSTRACT
 
-**PHASE ORDER (strictly enforced):**
-1. **BODY** - All main content sections from the outline
-2. **CONCLUSION** - Summary of findings and implications
-3. **INTRODUCTION** - Preview of content (written AFTER body so it can accurately describe what follows)
-4. **ABSTRACT** - Final summary (signals paper completion)
+**Explicit completion signals**: Submitter sets `section_complete: true` when phase is done. Coordinator advances ONLY on explicit signal AND verifies section header exists via regex. Paper complete when abstract phase receives `section_complete: true`.
 
-**EXPLICIT COMPLETION SIGNALS**: Each phase uses dedicated prompts with explicit `section_complete` feedback:
-- Submitter explicitly sets `section_complete: true` when current phase is finished
-- Coordinator advances to next phase ONLY on explicit `section_complete` signal AND validates section exists in paper
-- **Content validation enforced**: Before transitioning phases, coordinator verifies the required section header exists using regex patterns (not just placeholders)
-- Replaces unreliable regex-based detection of section headers
-- Paper is complete when abstract phase receives `section_complete: true`
-- Abstract phase always sets section_complete=true when submitting abstract content - writing abstract completes the paper
+**Implementation**:
+- Phase-specific prompt functions in `construction_prompts.py`
+- Phase tracking via `autonomous_section_phase` in `compiler_coordinator.py`
+- `CompilerSubmission` model includes `section_complete` field
 
-Writing body first, then conclusion, then introduction, then abstract ensures:
-- The introduction accurately previews content that actually exists
-- The abstract summarizes the actual paper content
-- The conclusion properly summarizes findings from the body
-- No forward-looking language that refers to content not yet written
+`needs_construction=true` requires non-empty `content`/`new_string` — contradictory pattern causes infinite rejection loops.
 
-**IMPLEMENTATION**:
-- `backend/compiler/prompts/construction_prompts.py`: Contains 4 phase-specific prompt functions
-- `backend/compiler/core/compiler_coordinator.py`: Tracks current phase via `autonomous_section_phase`
-- `backend/compiler/agents/high_context_submitter.py`: Uses phase-specific prompts based on current phase
-- `backend/shared/models.py`: `CompilerSubmission` model includes `section_complete` field
-
-JSON schema for construction is defined in `json-prompt-design.mdc`. Key constraint: `needs_construction=true` requires non-empty `content`/`new_string` — the contradictory pattern (`needs_construction=true` + empty content) causes infinite rejection loops.
-
-The `section_complete` field enables explicit phase transitions. The `operation`, `old_string`, and `new_string` fields use **exact string matching** with conservative fallback layers for model escaping quirks. The `old_string` is pre-validated to exist (exactly, or via Unicode normalization, whitespace normalization, backslash normalization, or consecutive fuzzy matching) and be unique in the document before LLM validation occurs.
-
-**SECTION PLACEHOLDER SYSTEM**:
-The paper uses placeholder markers (defined as constants in `paper_memory.py`) to make it crystal clear to the AI where sections will be written and that they do NOT exist yet.
-
-**How Placeholders Work**:
-1. When the first body section is accepted, `paper_memory.initialize_with_placeholders()` sets up the paper with all placeholders
-2. As each phase completes, `paper_memory.replace_placeholder()` replaces the placeholder with validated content
-3. The AI sees placeholders in CURRENT DOCUMENT PROGRESS and knows those sections don't exist yet
-4. This fixes the bug where models falsely claimed sections were "already written" when they weren't
+**Section Placeholder System**:
+1. First body section accepted → `paper_memory.initialize_with_placeholders()` sets up all placeholders
+2. Each phase completion → `paper_memory.replace_placeholder()` replaces placeholder with validated content
+3. AI sees placeholders in CURRENT DOCUMENT PROGRESS = section not yet written
 
 **Placeholder Boundary Invariant**:
-The placeholder system creates hard boundaries that enforce correct document structure:
 ```
-[ABSTRACT_PLACEHOLDER]    <-- Abstract boundary
-[INTRO_PLACEHOLDER]       <-- Introduction boundary  
-II. Body Section 1
-III. Body Section 2       <-- Body content goes here
-...more body sections...
+[ABSTRACT_PLACEHOLDER]
+[INTRO_PLACEHOLDER]
+II. Body Section 1        <-- Body content goes here
 [CONCLUSION_PLACEHOLDER]  <-- HARD BOUNDARY: Body content NEVER crosses this
 [PAPER_ANCHOR]
 ```
+Body content is ALWAYS inserted BEFORE CONCLUSION_PLACEHOLDER. `_apply_edit()` auto-corrects: if old_string anchor falls after placeholder, automatically relocates insertion to just before it.
 
-**Body content is ALWAYS inserted BEFORE the CONCLUSION_PLACEHOLDER**, never after it. This is enforced in `_apply_edit()` via **auto-correction**: if the model's `old_string` anchor falls after the CONCLUSION_PLACEHOLDER, the system automatically relocates the insertion point to just BEFORE the placeholder (rather than rejecting, which would cause infinite loops). This single invariant ensures body sections accumulate correctly above the conclusion marker.
+**Paper state is ALWAYS shown** in all construction phases. Empty paper shows "(EMPTY - no content written yet)" so model uses `operation='full_content'`.
 
-**Phase Context Requirements**:
-Each phase has different context needs based on what the AI must see to do its job:
-
-| Phase | Current Paper Required? | Reason |
-|-------|------------------------|--------|
-| BODY (first) | YES (shows as EMPTY) | Must see paper is empty to use full_content operation |
-| BODY (continuation) | YES | Must see existing sections to continue |
-| CONCLUSION | YES | Must see body sections to summarize them |
-| INTRODUCTION | YES | Must see body+conclusion to preview them |
-| ABSTRACT | YES | Must see entire paper to summarize it |
-
-**IMPLEMENTATION**: Paper state is **ALWAYS shown** in all phases. When empty, displays "(EMPTY - no content written yet)" so model knows to use `operation='full_content'`. This prevents models from confusing outline structure with paper content and using invalid `insert_after` operations on empty documents.
-
-## Live Activity Logging
-
-The frontend `CompilerLogs` component displays real-time critique phase progress via WebSocket events:
-
-**Critique Events Broadcast:**
-- `critique_phase_started` - Phase begins
-- `critique_progress` - Real-time updates (X accepted, Y rejected, Z/5 attempts)
-- `critique_accepted` / `critique_rejected` - Individual critique results
-- `critique_decline_accepted` / `critique_decline_rejected` - Body acceptability assessments
-- `critique_removed` - Cleanup removals
-- `critique_phase_ended` - Phase complete
-- `critique_phase_skipped` - No critiques accepted
-
-**Rewrite Events:**
-- `rewrite_decision_rejected` - Validator rejected decision
-- `rewrite_decision_max_retries_exceeded` - Max retries exceeded
-- `body_rewrite_started` - Rewrite initiated
-
-**Phase Transitions:**
-- `phase_transition` - Phase changes (body→critique→conclusion→intro→abstract)
-- `phase_completion_signal` - Section complete signals
-
-**Frontend Display:**
-- Critique stats card shows (accepted/rejected/total) with paper version
-- Events formatted as human-readable messages with color-coded styling (green=success, red=error, blue=info, orange=warning)
-- Eliminates perceived "stall" during critique aggregation with continuous activity updates
-
----
-
-## Body-Only Modes (Outline Update and Rigor Enhancement)
-
-Outline updates and rigor enhancements are only performed during the body construction phase. Once body is complete, these modes are skipped entirely.
-
-**Rationale**:
-- Outline updates are only needed while body structure is being developed
-- Rigor enhancements should strengthen body content, not alter conclusion/intro/abstract
-- Prevents structural changes to the paper after body is finalized
-
-**Detection**:
-- **Autonomous mode**: Check if `autonomous_section_phase == "body"`
-- **Manual mode**: Check if Conclusion section exists in paper (body complete when conclusion written)
-
-**Behavior after body complete**:
-- Outline update mode: Skipped entirely
-- Rigor enhancement mode: Skipped entirely
-- Construction and review modes: Continue as normal
-
-**Implementation**: The `_is_body_complete()` helper method in `compiler_coordinator.py` handles detection for both autonomous and manual modes.
-
----
-
-## Critique Phase (Post-Body, Pre-Conclusion)
-
-After body construction completes, the system enters a critique phase to collect peer review feedback before proceeding to conclusion.
-
-**TERMINOLOGY CLARIFICATION**: 
-- **"5 total attempts"** = Sum of (accepted + rejected + declined) critiques, NOT just accepted critiques
-- Typically yields 1-3 **accepted** critiques out of 5 total attempts
-- Example: 2 accepted + 2 rejected + 1 declined = 5 total attempts reached → triggers rewrite decision with 2 accepted critiques
-
-**Purpose**: Ensure body section is mathematically sound and properly aligned before writing conclusion/intro/abstract.
-
-**Maximum Rewrites**: The system allows a **maximum of 1 completed rewrite**. A rewrite is considered "completed" only after the first successful body section acceptance following rewrite initiation. After 1 completed rewrite, the critique phase is skipped entirely.
-
-**Workflow**:
-1. **Max Rewrite Check**: If rewrite_count >= 1 (completed rewrites), skip critique phase entirely and proceed to conclusion
-2. **Critique Aggregation**: Target 5 total attempts (accepted + rejected + declined)
-3. **Pre-Critique Snapshot**: Paper body is snapshotted at critique phase start (for rewrite context)
-4. **Rewrite Decision**: If 5 total attempts reached with ≥1 acceptance, decide: continue / partial_revision / total_rewrite; if 0 acceptances, skip rewrite
-5. **Execution**: 
-   - **CONTINUE**: Proceed to conclusion (critiques minor/incorrect)
-   - **PARTIAL_REVISION**: **ITERATIVE** edits - proposes ONE edit at a time, validates, applies, sees result, then proposes next edit. Loop continues until `more_edits_needed=false` or max iterations.
-   - **TOTAL_REWRITE**: Clear entire body, rebuild from scratch with full context
-
-**Context for Both PARTIAL_REVISION and TOTAL_REWRITE**:
-- Pre-critique paper (body at START of critique phase - shows what failed)
-- Accepted critique feedback ONLY (rejected critiques NOT included)
-- Accumulated critique history from previous failed versions
-- Original aggregator database and reference papers
-
-**Decline Mechanism (Academically Acceptable Body)**:
-- Submitter can assess "no critique needed" when body is academically acceptable
-- **Academically Acceptable Criteria**:
-  - No mathematical errors or unsound reasoning
-  - No missing proofs or incomplete arguments
-  - No logical gaps affecting correctness
-  - Structural organization is coherent
-  - All outline requirements are met
-  - Content aligns with paper title and goals
-  - Mathematical rigor meets academic standards
-
-**Behavior When Target Met**:
-- If NO accepted critiques: Skip rewrite, transition directly to conclusion
-- If accepted critiques exist: Run rewrite decision
-- Rationale: With only 5 attempts, no early termination mechanism is needed
-
-JSON schema for critique is defined in `json-prompt-design.mdc`.
-
-**WebSocket Events**:
-- `critique_decline_accepted` - Validator agrees body is acceptable
-- `critique_decline_rejected` - Validator found issues
-- `critique_phase_skipped` - No critiques accepted, skipping rewrite OR user manually skipped
-
----
-
-## Skip Critique Phase (User Override)
-
-**Purpose**: Allow users to manually skip the critique/rewrite phase and proceed directly to writing the conclusion, introduction, and abstract.
-
-**Use Case**: User may determine that the body section is satisfactory and wants to bypass the peer review process to continue paper generation faster.
-
-**API Endpoint**: `POST /api/compiler/skip-critique`
-
-**Behavior**:
-- Only available when compiler is actively in critique phase (`in_critique_phase = True`)
-- Immediately ends the critique phase without triggering a rewrite
-- Transitions directly to the conclusion phase
-- Broadcasts `critique_phase_skipped` with `reason: "user_override"`
-- Cannot be undone once executed
-
-**Frontend Integration**:
-- "Skip Critique & Continue" button appears in critique phase banner
-- Requires user confirmation before executing
-- Button shows "Skipping..." state during execution
-- Error handling displays user-friendly messages
-
-**Error Conditions**:
-- 400: Compiler not running
-- 400: Not currently in critique phase
-- 500: Failed to skip critique phase
-
----
-
-## Required Section Structure (MANDATORY)
-
-All outlines and completed papers MUST include these exact sections with these exact names:
-
-| Section | Exact Name | Required | Position |
-|---------|-----------|----------|----------|
-| Abstract | "Abstract" | YES | First in outline/paper |
-| Introduction | "Introduction" or "I. Introduction" | YES | After Abstract |
-| Body | Flexible (II., III., etc.) | YES (at least 1) | Between Intro and Conclusion |
-| Conclusion | "Conclusion" or "N. Conclusion" | YES | Last content section |
-
-**VALIDATION ENFORCEMENT**:
-- The validator will REJECT any outline missing Abstract, Introduction, or Conclusion
-- The validator will REJECT outlines with incorrectly named sections (e.g., "Summary" instead of "Conclusion")
-- Section names are validated case-insensitively but must match exactly otherwise
-
-**NOTE ON WRITING ORDER**:
-- The Abstract appears FIRST in the outline and final paper
-- But the Abstract is WRITTEN LAST during construction (per phase-based system)
-- Writing order: Body → Conclusion → Introduction → Abstract
-- Final paper order: Abstract → Introduction → Body → Conclusion
+| Phase | Paper Shown | Reason |
+|-------|-------------|--------|
+| BODY (first) | YES (EMPTY) | Must use full_content |
+| BODY (continuation) | YES | See existing sections |
+| CONCLUSION | YES | Summarize body |
+| INTRODUCTION | YES | Preview body+conclusion |
+| ABSTRACT | YES | Summarize entire paper |
 
 ---
 
 ## Submitter-Validator Cycle
 
-NOTE: One one submitter should be running at a time, they should only run in sequence with eachother to build successively off eachothers works. The user is able to set the validator AI model, submitter high context model, and submitter high parameter model selections in the compile tool settings.
+**Outline Creation (Phase 1 — Iterative):**
+1. HC submitter generates outline → validator reviews (accept/reject + feedback)
+2. If accepted: submitter decides outline_complete=true (lock) or false (refine further)
+3. Hard limit: 15 iterations; outline locked → fully injected into all future prompts
 
-STARTUP CYCLE STEPS - CREATING THE INITIAL OUTLINE (ITERATIVE):
+**Construction Loop (repeating):**
+- 4× HC construction → validator
+- 1× HC outline update → validator *(skipped if body complete)*
+- 2× HC review → validator
+- 1× HP rigor → validator *(skipped if body complete)*
 
-Phase 1: Initial Outline Creation (Iterative Refinement)
+**Rigor Mode (2-Step):**
+- Step 1 (unvalidated): HP model chooses mode (standard_enhancement, rewrite_focus, wolfram_verification) and target_section
+- Step 2 (with self-refusal): sees full paper + target_section reminder, can set `proceed=false` to refuse
+- Wolfram mode: system makes API call between steps, passes result to Step 2. Accepted Wolfram calls tracked in model credits separately.
+- Loop 2 ends on first rigor rejection/decline → return to Loop 1
 
-1. High-context submitter generates initial outline based on aggregator database and user prompt
-2. Validator reviews outline (accept/reject + detailed feedback)
-3. Feedback stored in rolling window (last 5)
-4. If rejected: submitter sees feedback, generates improved outline, return to step 2
-5. If accepted: submitter reviews feedback and decides:
-   - outline_complete=false: refine further, return to step 2
-   - outline_complete=true: lock outline, proceed to step 6
-6. Hard limit: 15 iterations (force completion if exceeded)
-7. Outline locked and will be FULLY INJECTED (never RAGed) into all future compiler mode prompts for structural framework consistency
-8. Proceed to paper construction
+**Decline Mechanisms:**
+- `outline_update`: `needs_update: boolean`
+- `construction`: `needs_construction: boolean`
+- `review`: `needs_edit: boolean`
+- `rigor`: `needs_enhancement: boolean`
 
-(Phase 2: Outline Update during body construction - unchanged, runs once per construction loop cycle)
+Declines logged to `compiler_last_10_declines.txt`.
 
-STARTUP CYCLE STEPS - CREATING THE INITIAL PAPER (once outline is locked)
-3. High context, low parameter submitter attempts to create the first PORTION of the paper that aligns with the current up to date outline that was accepted by the validator. The AI submitter is directed in a coherent context to create the most logical and obvious starting point for this paper that follows the outline.
-4. validator reviews submission and decides to accept or reject and update the database(s) if applicable. If rejected reset to the beginning of this startup cycle until the first part of the paper is accepted and formed.
+---
 
-CONTINUATION OF STARTUP CYCLE LOOP 1 (once the intitial outline and then the paper start is accepted)
-5. High context, low parameter submitter decides if further construction is needed, and if so, creates the next PORTION of the paper that aligns with the current up to date outline that was accepted by the validator. If the guide already covers all outline topics adequately, the submitter may decline (needs_construction=false). The AI submitter is directed in a coherent context to create the next obvious continuation of this paper that follows the outline, captures the information from the aggregated database, and does not comprompise the in-progress coherent construction of the paper.
-6. validator reviews the submission and decides to accept or reject and update the database(s) if applicable. If the submitter declined, the decline is logged and the workflow continues.
-7. High context, low parameter submitter decides if further construction is needed, and if so, creates the next PORTION of the paper that aligns with the current up to date outline that was accepted by the validator. If the guide already covers all outline topics adequately, the submitter may decline (needs_construction=false). The AI submitter is directed in a coherent context to create the next obvious continuation of this paper that follows the outline, captures the information from the aggregated database, and does not comprompise the in-progress coherent construction of the paper.
-8. validator reviews the submission and decides to accept or reject and update the database(s) if applicable. If the submitter declined, the decline is logged and the workflow continues.
-9. High context, low parameter submitter decides if further construction is needed, and if so, creates the next PORTION of the paper that aligns with the current up to date outline that was accepted by the validator. If the guide already covers all outline topics adequately, the submitter may decline (needs_construction=false). The AI submitter is directed in a coherent context to create the next obvious continuation of this paper that follows the outline, captures the information from the aggregated database, and does not comprompise the in-progress coherent construction of the paper.
-10. validator reviews the submission and decides to accept or reject and update the database(s) if applicable. If the submitter declined, the decline is logged and the workflow continues.
-11. High context, low parameter submitter decides if further construction is needed, and if so, creates the next PORTION of the paper that aligns with the current up to date outline that was accepted by the validator. If the guide already covers all outline topics adequately, the submitter may decline (needs_construction=false). The AI submitter is directed in a coherent context to create the next obvious continuation of this paper that follows the outline, captures the information from the aggregated database, and does not comprompise the in-progress coherent construction of the paper.
-12. validator reviews the submission and decides to accept or reject and update the database(s) if applicable. If the submitter declined, the decline is logged and the workflow continues.
-13. high context, low paramter submitter reviews if it needs to update the outline as per another review of the uncompiled solution aggregate database and the current paper construction progress. The submitter may decline (needs_update=false) if the outline is already complete. **NOTE: This step is SKIPPED if body construction is complete (Conclusion exists in paper).**
-14. validator reviews the outline and decides whether to accept or reject the change. **NOTE: Skipped if step 13 is skipped.** 
-15. (SPECIAL HIGH-CONTEXT SUBMITTER MODE - The submitter switches to purely deciding if it needs to edit the current paper and if so editing it) High context, low parameter submitter removes the aggregate solution database for just this prompt (from its context), then the high context submittor is prompted to review the in-progress paper to see if there "is any kind of next obvious errors or tweaks" that it should alter in the in-progress paper. It may chose to do nothing (needs_edit=false) if the paper is currently acceptable for a "draft in progress". If it choses it may suggest edit(s) on anything to improve the paper including (but not limited to): grammatical issues, coherency issues, improving explanatory efficiency of he paper, removing redundant or overplanatory content, and constructive changes from specific suggested content deletion(s). This edit request is then submitted to the validator to be reviewed from the validator for acceptance or rejection. If rejected the edit should not be made to the paper, if accepted the exact edit should be executed. If the submitter declined, the decline is logged and the workflow continues.
-16. validator reviews the special submission edit and decides to accept or reject, if accepted the coordinator updates the applicable database(s) to reflect the paper change.
-17. (SPECIAL HIGH-CONTEXT SUBMITTER MODE - The submitter switches to purely deciding if it needs to edit the current paper and if so editing it) High context, low parameter submitter removes the aggregate solution database for just this prompt (from its context), then the high context submittor is prompted to review the in-progress paper to see if there "is any kind of next obvious errors or tweaks" that it should alter in the in-progress paper. It may chose to do nothing (needs_edit=false) if the paper is currently acceptable for a "draft in progress". If it choses it may suggest edit(s) on anything to improve the paper including (but not limited to): grammatical issues, coherency issues, improving explanatory efficiency of he paper, removing redundant or overplanatory content, and constructive changes from specific suggested content deletion(s). This edit request is then submitted to the validator to be reviewed from the validator for acceptance or rejection. If rejected the edit should not be made to the paper, if accepted the exact edit should be executed. If the submitter declined, the decline is logged and the workflow continues.
-18. validator reviews the special submission edit and decides to accept or reject, if accepted the coordinator updates the applicable database(s) to reflect the paper change.
-Continuation of startup cycle LOOP 2 - rigor enhancement with high parameter low context model
-**NOTE: Loop 2 is SKIPPED entirely if body construction is complete (Conclusion exists in paper). Rigor enhancements are only for body sections.**
-19. RIGOR MODE (2-Step Process):
-    Step 1 (unvalidated): High-param model sees full paper via RAG, decides if rigor work 
-    needed, and chooses mode (standard_enhancement, rewrite_focus, or wolfram_verification 
-    if Wolfram Alpha enabled). Specifies target_section as guidance for Step 2.
-    
-    Step 2 (with self-refusal): Sees full paper (same RAG retrieval as Step 1) plus 
-    target_section as reminder label. Can refuse if Step 1 made mistake (proceed=false). 
-    If proceeds with changes, submits to validator.
-    
-    If Wolfram mode: System makes Wolfram Alpha API call between steps, passes result 
-    to Step 2 for interpretation. API failures treated as declines.
-    
-    Accepted Wolfram Alpha calls tracked in model credits separately from LLM API calls.
+## Body-Only Modes
 
-20. The validator reviews actual paper changes (if Step 2 didn't refuse or decline).
-21. Loop 2 is repeated until the first rigor-enhancing submission rejection or decline. Once the first rigor rejection/decline occurs (including Step 1 decline, Step 2 refusal, Wolfram API failure, or validator rejection) return back to loop 1 start sequence to resume the work-flow loops.
+Outline updates and rigor enhancements are skipped once body is complete:
+- **Autonomous mode**: `autonomous_section_phase == "body"`
+- **Manual mode**: Conclusion section exists in paper
 
-## Decline Mechanisms for All Submitter Modes
+Detection via `_is_body_complete()` in `compiler_coordinator.py`.
 
-All compiler submitter modes can decline to make changes when no work is needed:
+---
 
-- **outline_create**: No decline (must succeed for startup)
-- **outline_update**: `needs_update: boolean` - declines if outline is complete
-- **construction**: `needs_construction: boolean` - declines if guide is complete
-- **review**: `needs_edit: boolean` - declines if no errors found
-- **rigor**: `needs_enhancement: boolean` - declines if rigor is adequate
+## Critique Phase (Post-Body, Pre-Conclusion)
 
-When a submitter returns None (decline), the coordinator treats it as a valid "no work needed" response, not an error. Declines are logged separately from rejections and acceptances in `compiler_last_10_declines.txt` to track when the guide is considered complete versus actively being worked on.
+**"5 total attempts"** = accepted + rejected + declined (not just accepted).
 
-NOTE ON SUBMITTERS AND EXACT STRING MATCHING: The submitter provides exact string references for editing the document. The system uses **exact string matching** with automated pre-validation, plus a conservative fuzzy matching fallback.
+**Max 1 completed rewrite**. Rewrite "completed" only after first successful body acceptance post-rewrite. After 1 completed rewrite, critique phase is skipped entirely.
 
-**EXACT STRING MATCHING SYSTEM:**
+**Workflow:**
+1. If `rewrite_count >= 1` completed rewrites → skip critique, proceed to conclusion
+2. Critique aggregation: target 5 total attempts
+3. Pre-critique snapshot of paper body
+4. If 5 attempts with ≥1 accepted → rewrite decision; if 0 accepted → skip rewrite
+5. Decisions: **CONTINUE** (minor/incorrect critiques) | **PARTIAL_REVISION** (iterative one-edit-at-a-time loop until `more_edits_needed=false`) | **TOTAL_REWRITE** (catastrophic flaws only)
 
-The submission JSON includes:
-- `operation`: One of "replace", "insert_after", "delete", or "full_content"
-- `old_string`: The EXACT text to find in the document (pre-validated to exist verbatim and be unique before LLM sees submission)
-- `new_string`: The replacement/insertion text
+Context for rewrites: pre-critique paper + accepted critiques only (rejected excluded) + accumulated history from prior failed versions.
 
-**Operation Types:**
-- **"replace"** → Finds `old_string` exactly in document, replaces it with `new_string`
-- **"insert_after"** → Finds `old_string` exactly, inserts `new_string` immediately after it
-- **"delete"** → Finds `old_string` exactly, removes it from document (new_string should be empty)
-- **"full_content"** → Adds entirely new content (for new sections); old_string should be empty
+**Decline**: Submitter can assess "no critique needed" if body is academically acceptable (no errors, complete, meets rigor). If 0 accepted critiques at end of 5 attempts → skip rewrite.
 
-**Key Principles (Pre-Validated):**
-- `old_string` must match using: exact match → Unicode normalization → whitespace normalization → backslash normalization → consecutive fuzzy matching (if needed)
-- `old_string` must be unique (appear only once) - pre-validation verifies uniqueness
-- If `old_string` not found or not unique after all attempts: pre-validation immediately rejects before LLM sees it
-- Submitters should include enough surrounding context in `old_string` to ensure uniqueness (typically 3-5 lines)
-- If submitter provides insufficient context, pre-validation feedback guides them to add more
+**Skip Critique (User Override)**: `POST /api/compiler/skip-critique` — available only during active critique phase (`in_critique_phase=True`). Immediately ends critique, transitions to conclusion, broadcasts `critique_phase_skipped` with `reason: "user_override"`. Irreversible.
 
-**Matching Layers** (applied automatically in order when exact match fails):
-1. **Exact match** - Try verbatim string match first (preferred)
-2. **Unicode hyphen normalization** - Handle en-dash, em-dash, minus sign variants (LaTeX output)
-3. **Whitespace normalization** - Collapse 2+ spaces to single space (LaTeX double-spacing convention)
-4. **Backslash normalization** - Collapse 2+ consecutive backslashes to single (model over-escaping quirk: `\\mathbb` → `\mathbb`)
-5. **Consecutive fuzzy matching** - Conservative last resort for other model escaping quirks (see below)
+**WebSocket Events:** `critique_phase_started`, `critique_progress`, `critique_accepted`, `critique_rejected`, `critique_decline_accepted`, `critique_decline_rejected`, `critique_removed`, `critique_phase_ended`, `critique_phase_skipped`, `rewrite_decision_rejected`, `body_rewrite_started`, `phase_transition`, `phase_completion_signal`
 
-**Consecutive Fuzzy Matching Fallback:**
+---
 
-Triggers only when layers 1-4 all fail. Handles remaining model escaping quirks while maintaining safety.
+## Required Section Structure (MANDATORY)
 
-**Requirements (ALL must be met):**
-- 85% consecutive characters from `old_string` must appear in document
-- Last 5% of `old_string` (minimum 20 chars) must match EXACTLY (tail anchor)
-- Exactly ONE match meeting both criteria (rejects if ambiguous)
-- `old_string` must be >= 20 characters (minimum length for reliability)
+| Section | Exact Name | Required | Position |
+|---------|-----------|----------|----------|
+| Abstract | "Abstract" | YES | First |
+| Introduction | "Introduction" or "I. Introduction" | YES | After Abstract |
+| Body | Flexible (II., III., etc.) | YES (at least 1) | Between Intro and Conclusion |
+| Conclusion | "Conclusion" or "N. Conclusion" | YES | Last content section |
 
-**Safety:** Rejects multiple matches, short strings. Logs warnings when used. Updates `old_string` to actual document text before proceeding.
+Writing order: Body → Conclusion → Introduction → Abstract. Final paper order: Abstract → Introduction → Body → Conclusion.
 
-**Why Exact String Matching with Fallbacks:**
-- Eliminates ambiguity from keyword matching
-- Prevents incorrect edits from partial matches
-- Handles model escaping quirks without compromising safety
-- Industry-standard approach (used by Cursor, Claude Code, etc.)
-- Pre-validation provides immediate feedback if match fails (before LLM validation)
-- LLM validator focuses on placement context (does content fit naturally), not string verification
-- Clean separation: automated checks for string matching, LLM checks for semantic appropriateness
+---
 
-**Empty Paper Handling:**
+## Exact String Matching System
 
-When the paper is empty (first body section), the `full_content` operation is MANDATORY:
+Submission JSON: `operation`, `old_string` (exact, pre-validated), `new_string`.
 
-| Paper State | Required Operation | old_string | new_string |
-|-------------|-------------------|------------|------------|
-| Empty (0 chars) | `full_content` | "" (empty string) | Actual section content |
-| Non-empty | `replace` / `insert_after` / `delete` | Exact text from document | Replacement/insertion text |
+**Operations:** `replace` (find+replace), `insert_after` (find+insert after), `delete` (find+remove), `full_content` (new section, old_string empty).
 
-**Pre-validation Enforcement:**
-- The compiler validator's `_pre_validate_exact_string_match()` method detects empty documents and validates old_string matching
-- **Mode-aware validation**: For `outline_update` mode, validates against the outline; for all other modes (construction, review, rigor), validates against the paper
-- If an empty document receives `replace`, `insert_after`, or `delete` operation, the submission is rejected by pre-validation
-- The rejection message explicitly instructs the LLM to use `full_content` with example JSON
+**Matching layers (in order):**
+1. Exact match
+2. Unicode hyphen normalization (en-dash, em-dash variants)
+3. Whitespace normalization (2+ spaces → single space)
+4. Backslash normalization (`\\mathbb` → `\mathbb`)
+5. Consecutive fuzzy matching: 85% consecutive chars + last 5% exact tail anchor + unique (≥20 char minimum)
 
-**Prompt-Level Prevention:**
-- Paper state is **always shown** in construction prompts (displays "(EMPTY - no content written yet)" when empty)
-- For first body section on empty paper, prompt includes explicit warning: "🚨 CRITICAL: The paper is EMPTY. You MUST use operation='full_content'..."
-- This prevents models from confusing outline structure with paper content
+Pre-validation rejects immediately if not found/not unique. LLM validator focuses on placement context, not string verification. Mode-aware: `outline_update` validates against outline; all other modes validate against paper.
 
-**Auto-Correction (Secondary Fail-Safe):**
-- The coordinator's `_apply_edit()` method includes auto-correction logic as final safety net
-- If paper is empty and operation is `replace` or `insert_after`, it automatically converts to `full_content`
-- Rarely triggered since prompt-level prevention guides models correctly
-- Logged when used: "AUTO-CORRECTING: Paper is empty but operation='replace'. Converting to 'full_content' operation automatically."
+**Empty paper**: `full_content` operation is MANDATORY. Pre-validation rejects other operations on empty doc. Auto-correction fallback in `_apply_edit()` converts to `full_content` if needed.
 
-## Progressive Answer Generation and Output
-The current paper-build file should be viewable in a 3rd tab in the GUI. I should also be able to save a copy of the output up to its current state. The generate answer should just stop all calculation and save the output of the final paper to this point. The idea is that the user will be able to see how complete the paper is by how many rejections are occuring over time.
-
-## Progress Indication Logs
-
-- Record accepted to rejected ratios separately of rigor enhancing submission acceptances/rejects and paper-constructing submission acceptances/rejections. Show a graph of both over time as well so we can see the convergence over the whole calculation time interval.
-
-- The high context submitter should crucially always state if only a miniscule edit could be found then the AI should also state this in the JSON output so the validator may also consider this. If the submitter outputs a miniscule change event then this should be recorded as a metric in the compiler log screen (note: this log should only apply to compiler-high-context submission attempts not paper-reworking-high-context submission attempts that also happen to clean up the paper).
-
-- Prior to the final solution stop by the user the solution generation window should show the draft paper the validator is compiling/revising (it's only called a draft because the user stop has not occured).
-
-
-## GUI Notes
-The compile tool interface and compile tool settings should be two separate tabs in the program GUI. The logging tools for the compiler can be in a third tab. They should not combine with the initial solution aggregator windows in any way. 
-
-## Context Allocation
-
-Context for a given prompt for each respective compiler role (validator, high-context submitter, high-param submitter) is able to be user set separately in the compiler settings. Each role has its own independent context window limit:
-- **Validator**: Default 131072 tokens (user-configurable)
-- **High-Context Submitter**: Default 131072 tokens (user-configurable)  
-- **High-Parameter Submitter**: Default 131072 tokens (user-configurable). Rigor mode dynamically adjusts RAG retrieval if outline + system prompts exceed available context.
-
-The program should then seek to utilize as much context as it can in every prompt (unless it runs out of content then that is fine). Also, the users original text prompt should always be fully injected. If there is an overflow from this prompt then this should be stated in the logs clearly.
-
-### CONTEXT DISTRIBUTION RULES
-
-User prompt is ALWAYS direct injected (non-negotiable). If all context for the prompt that is required fits in direct injection then direct injection should be used, otherwise RAG should be used in order for the items that have RAG off-load priority until the required context for the prompt fits. Remaining context allocated as: ~85% RAG retrieval, ~15% other direct injections (JSON, user files). If user prompt exceeds (context_window - minimum_RAG_allocation), halt with error explaining user prompt too large.
-
-### PROMPT SIZE VALIDATION
-
-All compiler submitters (high-context and high-param) must validate assembled prompt size before sending to LLM.
-
-**Required Validation Steps:**
-1. Build complete prompt using prompt builder
-2. Count actual tokens in assembled prompt
-3. Compare against `rag_config.get_available_input_tokens(context_window)`
-4. If exceeds: log error and either raise exception (critical modes) or return None (skip submission)
-
-**Modes Requiring Validation:**
-- ✅ outline_create (high_context_submitter) - raises ValueError
-- ✅ outline_update (high_context_submitter) - raises ValueError  
-- ✅ construction (high_context_submitter) - returns None
-- ✅ review (high_context_submitter) - returns None
-- ✅ rigor (high_param_submitter) - raises ValueError
-- ✅ validator (compiler_validator) - rejects submission
-
-This prevents silent failures and provides clear diagnostics when prompts exceed context limits.
-
-### Context Placement and Database Editing
-
-NOTE ON EXACT STRING MATCHING FOR EDITS: The submitter provides exact string matches (`old_string`) to specify where edits should be applied. The `old_string` must be exact (verbatim match) and unique in the document. Pre-validation automatically verifies exact matches before LLM validation. If the exact string is not found or is not unique, the submission is immediately REJECTED by pre-validation (before LLM sees it) and the submitter receives feedback to provide more context to make the match unique. The LLM validator focuses on placement context (whether content fits naturally), not string verification.
-
-There should be no context from the previous prompt in any successive prompt. The only context that should transfer is system-intended communication transfers for database update, submission review to the validator, etc.
-
-## Reputation Queue Penalties
-
-Linearly displace a submittor in the queue at maximum 1 full submittor cycle worth of submittor submissions (from all submittors even the slow ones - so go by respective submissions from each submitter). A 1 full cycle displacement would be for a reputation of .1 or less. A submitter is never denied from a queue submission due to reputation.
-
-## Notes on the User Prompt Injection and Direct Injections
-
-The user prompt should always be direct injected in all validator and submittor operations and always the first part of the prompt injection (unless something is required to be first for the JSON format request - the JSON is the only thing allowed to supercede the user prompts direct injection). The validators prompt will also require the context/content direct injected to give context to the users request in response to validating against the RAG database, etc and all it's requirements. 
-
-The JSON required formating requests should always be direct injected as needed to get the proper output from the AI.
-
-## Model Tracking (Manual Mode)
-
-When the compiler runs in manual mode (Part 2, not autonomous mode), it tracks all API calls for author attribution:
-
-**Tracking Mechanism**:
-- When compiler initializes (not in autonomous mode), a `PaperModelTracker` is initialized
-- A callback is set on `api_client_manager` that tracks every API call during compilation
-- Same model used in multiple instances counts as ONE author, but all API calls are tallied
-- Model tracking data is included when saving the paper via `/api/compiler/save-paper`
-
-**Paper Save Includes Author Attribution**:
-
-When saving a paper in manual mode, the content includes:
-1. **Author Attribution Header** (at beginning of paper)
-2. **Paper Content** (the actual paper)
-3. **Model Credits Footer** (at end of paper)
-
-Saved paper includes: Author Attribution Header (model list, disclaimer, prompt) → Paper Content → Model Credits Footer (models + API call counts). Format defined in `PaperModelTracker` in `paper_model_tracker.py`.
-
-## Validation
-
-JSON formatting API call requests are used to communicate the neccesary validation syntax, and if applicable to the output type, editing syntax, for the submission/validation chain.
-
-## Special Context Modified Modes
-
-Rigor Mode - This mode does not include the shared aggregator database. Outline is always fully injected; paper content is RAG-retrieved with dynamic budget adjustment to fit available context.
+---
 
 ## Placeholder Resume Repair (Critical for Crash Recovery)
 
-When the compiler resumes from an existing paper file, it checks if placeholders exist and adds them if missing:
-- **Problem**: Papers created before the placeholder system or from older code versions may not have placeholders
-- **Symptom**: "old_string not found in document" pre-validation failures when the model tries to use placeholder text as old_string
-- **Solution**: `paper_memory.ensure_placeholders_exist()` is called when resuming from an existing paper
-- **Behavior**:
-  1. Checks if ABSTRACT_PLACEHOLDER, INTRO_PLACEHOLDER, CONCLUSION_PLACEHOLDER, and PAPER_ANCHOR exist
-  2. If any are missing, extracts the body content and reconstructs the paper with all placeholders in correct positions
-  3. Logs: "Placeholders were missing and have been added to the paper"
-- **Implementation**: Called in `compiler_coordinator._main_workflow()` when `is_resuming_paper=True`
-- **Files**: `backend/compiler/memory/paper_memory.py` (ensure_placeholders_exist method), `backend/compiler/core/compiler_coordinator.py` (resume logic)
+`paper_memory.ensure_placeholders_exist()` called when `is_resuming_paper=True` in `compiler_coordinator._main_workflow()`. Checks all 4 markers; if any missing, extracts body content and reconstructs paper with correct placeholder positions.
 
-### Placeholder Preservation During Repair (CRITICAL - Bug Fix 2026-01-18)
+**Placeholder Preservation Invariant (Bug Fix 2026-01-18):**
+Both `ensure_placeholders_exist()` and `ensure_markers_intact()` must PRESERVE existing placeholders. Repair only ADDs missing ones, never removes. If `has_*_content = False`, placeholder MUST exist. Failure causes infinite rejection loops in phase transitions.
 
-`ensure_markers_intact()` and `ensure_placeholders_exist()` must PRESERVE existing placeholders during repair operations.
+**Fake Placeholder Detection (Bug Fix 2026-01-22):**
+- Full content >300 chars → ALWAYS real
+- <300 chars WITH keywords ("will be replaced", "placeholder") → FAKE
+- <300 chars, no keywords, >50 chars → real
 
-**Why This Matters:**
-- Placeholders must exist for any section that hasn't been written yet
-- Repair should only ADD missing placeholders, NEVER remove existing ones
-- Condition should check ONLY whether section content is written, NOT whether placeholder was detected
-- Previous logic could remove placeholder during repair, causing infinite rejection loops in conclusion/introduction/abstract phases
+Prevents models' fake placeholder text (e.g., "XI. Conclusion\n*placeholder*") from being treated as written sections.
 
-**Both Functions Affected:**
-- `ensure_placeholders_exist()` (called on resume from crash)
-- `ensure_markers_intact()` (called before every validation)
+---
 
-**Invariant Maintained:**
-- If section hasn't been written (`has_*_content = False`), placeholder MUST exist
-- Repair operations rebuild paper structure while preserving ALL placeholders
-- Failure to preserve causes infinite rejection loops during phase transitions
+## Context Allocation
 
-**Files Modified:**
-- `backend/compiler/memory/paper_memory.py`: Updated both functions with corrected logic
+Per-role context windows (all user-configurable, default 131072):
+- Validator, High-Context Submitter, High-Parameter Submitter: 131072 tokens each
+- Rigor mode dynamically adjusts RAG budget if outline + system prompts exceed available context
 
-### Fake Placeholder Detection (CRITICAL - Bug Fix 2026-01-22)
+**Context rules:** User prompt ALWAYS direct injected. Direct injection first; RAG only when doesn't fit. ~85% RAG retrieval, ~15% direct injections. Halt with error if user prompt exceeds context_window - minimum_RAG_allocation.
 
-Models sometimes insert fake placeholder text during body construction (e.g., "XI. Conclusion\n*This placeholder will be replaced...*"). The system distinguishes real content from fake placeholders by checking FULL content length (not just sample):
+**Prompt Size Validation** (all submitters before LLM call):
+- `outline_create`, `outline_update`, `rigor`: raises ValueError if exceeds
+- `construction`, `review`: returns None if exceeds
+- `validator`: rejects submission if exceeds
 
-**Detection Logic:**
-- **FULL content >300 chars**: ALWAYS real (substantial content, keywords ignored)
-- **FULL content <300 chars WITH keywords** ("will be replaced", "placeholder"): FAKE
-- **<300 chars NO keywords**: Real if >50 chars
+**Rigor Mode context**: no aggregator database; outline fully injected; paper content RAG-retrieved.
 
-**Why This Matters:**
-Without detection: Model inserts fake "XI. Conclusion\n*placeholder*" during body → system thinks Conclusion is written → stops adding real `CONCLUSION_PLACEHOLDER` → coordinator fails when trying to replace missing marker. With detection: Fake placeholders ignored, real marker preserved.
+---
 
-**Functions Affected:**
-- `ensure_placeholders_exist()` (resume), `ensure_markers_intact()` (every validation), premature decline detection
+## Model Tracking (Manual Mode)
+
+`PaperModelTracker` initialized on compiler start (non-autonomous). Tracks API calls via callback on `api_client_manager`. Saved paper includes: Author Attribution Header → Paper Content → Model Credits Footer (models + API call counts + Wolfram Alpha verifications if any). Format in `paper_model_tracker.py`.
+
+---
 
 ## Other Notes
 
-IMPORTANT: When a JSON result for validation does not work you should reject the submission and alert the submitter the content and what the reason is for JSON rejection, this context should be sent to the submitters local failure feedback memory that we have defined in other areas.
-
-The paper writing compiler uses a sequential Markov chain workflow with its validator with no queue (only one submission at a time). Each submission is generated, validated, and processed before the next one begins.
+- JSON validation failure: reject submission, send reason to submitter's local failure feedback
+- User prompt always direct injected first (JSON schema only exception)
+- No context carryover between prompts (only system-intended DB/submission transfers)
+- Reputation queue penalty: linear displacement, max 1 full cycle; submitter never fully denied

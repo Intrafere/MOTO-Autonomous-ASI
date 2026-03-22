@@ -1,25 +1,32 @@
-import html2pdf from 'html2pdf.js';
+/**
+ * Download helpers for papers and documents.
+ *
+ * PDF generation uses a Playwright (headless Chromium) backend endpoint for full
+ * rendering fidelity — KaTeX math, theorem boxes, styled sections — without
+ * freezing the browser UI. The frontend renders the content to HTML using the same
+ * pipeline as the screen renderer, then POSTs it to /api/download/pdf.
+ */
+import { renderLatexToHtml, DOMPURIFY_CONFIG } from '../components/LatexRenderer';
+import DOMPurify from 'dompurify';
 
 /**
- * Download raw text content
+ * Download raw text content as a .txt file.
  * @param {string} content - The text content
  * @param {string} filename - The filename (without extension)
- * @param {string} outline - Optional outline to prepend
+ * @param {string|null} outline - Optional outline to prepend
  */
 export const downloadRawText = (content, filename, outline = null) => {
   let fullContent = '';
-  
-  // Add outline if provided
+
   if (outline) {
     fullContent += 'OUTLINE\n';
-    fullContent += '=' .repeat(80) + '\n\n';
+    fullContent += '='.repeat(80) + '\n\n';
     fullContent += outline + '\n\n';
-    fullContent += '=' .repeat(80) + '\n\n';
+    fullContent += '='.repeat(80) + '\n\n';
   }
-  
-  // Add main content
+
   fullContent += content;
-  
+
   const blob = new Blob([fullContent], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -32,174 +39,84 @@ export const downloadRawText = (content, filename, outline = null) => {
 };
 
 /**
- * Download PDF from rendered HTML with metadata header
- * @param {HTMLElement} element - The DOM element to convert
- * @param {Object} metadata - Paper metadata {title, wordCount, date, models}
- * @param {string} filename - The filename (without extension)
- * @param {string} outline - Optional outline to prepend to the document
+ * Generate and download a PDF via the backend Playwright renderer.
+ *
+ * The content is rendered to HTML on the frontend (same pipeline as screen display),
+ * then sent to POST /api/download/pdf where Playwright converts it to a proper PDF.
+ * This runs in a backend thread pool so the UI stays fully responsive.
+ *
+ * @param {string} rawContent - Raw text content (LaTeX source)
+ * @param {Object} metadata   - { title, wordCount, date, models }
+ * @param {string} filename   - Filename without extension
+ * @param {string|null} outline - Optional outline text to prepend
+ * @param {Function|null} onStart    - Called immediately when request starts
+ * @param {Function|null} onComplete - Called when PDF download begins
+ * @param {Function|null} onError    - Called with Error on failure
  */
-export const downloadPDF = async (element, metadata, filename, outline = null) => {
-  // Add logging for large documents
-  const wordCount = metadata.wordCount || 0;
-  if (wordCount > 40000) {
-    console.warn(`Large document (${wordCount} words) - PDF generation may take 30-60 seconds...`);
-  }
-  
-  // Clone element to avoid modifying original
-  const clonedElement = element.cloneNode(true);
-  
-  // Set explicit white background and black text on cloned element
-  clonedElement.style.setProperty('color', '#000', 'important');
-  clonedElement.style.setProperty('background-color', '#ffffff', 'important');
-  clonedElement.style.setProperty('background', '#ffffff', 'important');
-  
-  // Override all elements for proper light theme PDF rendering
-  const allElements = clonedElement.querySelectorAll('*');
-  allElements.forEach(el => {
-    const tagName = el.tagName.toLowerCase();
-    
-    // Code blocks - dark text with light gray background
-    if (tagName === 'code' || tagName === 'pre') {
-      el.style.setProperty('color', '#222', 'important');
-      el.style.setProperty('background-color', '#f5f5f5', 'important');
-      el.style.setProperty('background', '#f5f5f5', 'important');
-    } else {
-      // Force all other text to black
-      el.style.setProperty('color', '#000', 'important');
-      // Force backgrounds to transparent (white container shows through)
-      el.style.setProperty('background-color', 'transparent', 'important');
-      el.style.setProperty('background', 'transparent', 'important');
-    }
-    
-    // Handle SVG elements (KaTeX math rendering)
-    if (tagName === 'svg') {
-      // Force SVG to use black as current color
-      el.style.setProperty('color', '#000', 'important');
-    }
-    
-    // Force SVG text/tspan to black
-    if (tagName === 'text' || tagName === 'tspan') {
-      el.setAttribute('fill', '#000');
-      el.style.setProperty('fill', '#000', 'important');
-    }
-    
-    // Force SVG shapes to black (paths, lines, circles, rects)
-    if (tagName === 'path' || tagName === 'line' || tagName === 'circle' || tagName === 'rect') {
-      // Check computed fill - handle 'currentColor' and 'none' cases
-      const computedFill = window.getComputedStyle(el).fill;
-      if (computedFill === 'none') {
-        // Path with no fill but possibly a stroke (like lines)
-        el.setAttribute('stroke', '#000');
-        el.style.setProperty('stroke', '#000', 'important');
-      } else {
-        // Filled shapes - set both fill and stroke to black
-        el.setAttribute('fill', '#000');
-        el.setAttribute('stroke', '#000');
-        el.style.setProperty('fill', '#000', 'important');
-        el.style.setProperty('stroke', '#000', 'important');
-      }
-    }
-    
-    // Handle border colors - convert to visible grey for PDF
-    const computedStyle = window.getComputedStyle(el);
-    const borderColor = computedStyle.borderColor;
-    if (borderColor && borderColor !== 'rgba(0, 0, 0, 0)') {
-      el.style.setProperty('border-color', '#ccc', 'important');
-    }
-  });
-  
-  // Create metadata header
-  const header = document.createElement('div');
-  header.style.cssText = 'margin-bottom: 20px; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; background-color: transparent;';
-  header.innerHTML = `
-    <h1 style="margin: 0 0 10px 0; color: #000; background: transparent;">${metadata.title || 'Untitled Paper'}</h1>
-    <p style="margin: 5px 0; color: #333; background: transparent;">
-      Word Count: ${metadata.wordCount?.toLocaleString() || 'N/A'} | 
-      Generated: ${metadata.date || new Date().toLocaleDateString()}
-    </p>
-    ${metadata.models ? `<p style="margin: 5px 0; color: #333; font-size: 0.9em; background: transparent;">
-      AI Models: ${metadata.models}
-    </p>` : ''}
-  `;
-  
-  // Prepend header to cloned content
-  clonedElement.insertBefore(header, clonedElement.firstChild);
-  
-  // Add outline if provided
-  if (outline) {
-    const outlineSection = document.createElement('div');
-    outlineSection.style.cssText = 'margin-bottom: 30px; padding: 15px; background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 4px;';
-    outlineSection.innerHTML = `
-      <h2 style="margin: 0 0 15px 0; color: #000; font-size: 1.3rem; border-bottom: 2px solid #4CAF50; padding-bottom: 8px; background: transparent;">OUTLINE</h2>
-      <pre style="white-space: pre-wrap; word-wrap: break-word; font-family: 'Georgia', 'Times New Roman', serif; font-size: 0.95rem; line-height: 1.6; color: #000; margin: 0; background: transparent;">${outline}</pre>
-    `;
-    clonedElement.insertBefore(outlineSection, clonedElement.children[1]); // Insert after header
-  }
-  
-  // Wrap cloned element in a white container to ensure background is captured
-  const wrapper = document.createElement('div');
-  wrapper.style.cssText = 'background-color: #ffffff !important; padding: 20px; min-height: 100%;';
-  wrapper.appendChild(clonedElement);
-  
-  const options = {
-    // Margins: [Top, Right, Bottom, Left] in mm
-    // Bottom margin: 25mm for page numbers + ~10mm buffer for descenders to bleed into
-    margin: [15, 15, 35, 15],
-    filename: `${filename}.pdf`,
-    image: { type: 'jpeg', quality: 0.98 },
-    html2canvas: { 
-      scale: 2, 
-      useCORS: true, 
-      letterRendering: true,
-      backgroundColor: '#ffffff'  // Force white background in canvas capture
-    },
-    jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-  };
-  
+export const downloadPDFViaBackend = async (
+  rawContent,
+  metadata,
+  filename,
+  outline = null,
+  onStart = null,
+  onComplete = null,
+  onError = null,
+) => {
+  onStart?.();
+
   try {
-    console.log('Step 1/3: Preparing content...');
-    // Use advanced API to add page numbers
-    const worker = html2pdf().set(options).from(wrapper);
-    
-    console.log('Step 2/3: Rendering to canvas...');
-    // Generate PDF with page numbers
-    const pdf = await worker.toPdf().get('pdf');
-    
-    console.log('Step 3/3: Adding page numbers...');
-    const totalPages = pdf.internal.getNumberOfPages();
-    
-    // Add page numbers to each page (bottom right)
-    for (let i = 1; i <= totalPages; i++) {
-      pdf.setPage(i);
-      pdf.setFontSize(10);
-      pdf.setTextColor(100);
-      
-      // Position: bottom right corner (210mm - 15mm margin = 195mm, 297mm - 10mm margin = 287mm)
-      const pageWidth = pdf.internal.pageSize.getWidth();
-      const pageHeight = pdf.internal.pageSize.getHeight();
-      pdf.text(`Page ${i} of ${totalPages}`, pageWidth - 15, pageHeight - 10, { align: 'right' });
+    // Render LaTeX → HTML using the same pipeline as the screen renderer
+    const rawHtml = renderLatexToHtml(rawContent);
+    const sanitizedHtml = DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
+
+    const response = await fetch('/api/download/pdf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        html_body: sanitizedHtml,
+        title: metadata.title || 'Document',
+        word_count: metadata.wordCount || null,
+        date: metadata.date || new Date().toLocaleDateString(),
+        models: metadata.models || null,
+        outline: outline || null,
+        filename: filename || 'document',
+      }),
+    });
+
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const err = await response.json();
+        detail = err.detail || detail;
+      } catch (_) { /* ignore */ }
+      throw new Error(detail);
     }
-    
-    console.log('PDF generation complete!');
-    // Save the PDF
-    pdf.save(`${filename}.pdf`);
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${filename}.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    onComplete?.();
   } catch (error) {
-    console.error('PDF generation error:', error);
-    if (wordCount > 40000) {
-      throw new Error(`PDF generation failed for large document (${wordCount} words). Try "Download Raw" instead.`);
-    }
+    onError?.(error);
     throw error;
   }
 };
 
 /**
- * Sanitize filename (remove special characters)
+ * Sanitize a filename by removing special characters.
+ * @param {string} filename
+ * @returns {string}
  */
 export const sanitizeFilename = (filename) => {
-  return filename
+  return (filename || 'document')
     .replace(/[^a-z0-9_\-\s]/gi, '')
     .replace(/\s+/g, '_')
     .substring(0, 100);
 };
-
-

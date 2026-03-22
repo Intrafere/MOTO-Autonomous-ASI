@@ -510,7 +510,7 @@ class FinalAnswerMemory:
         ================================================================================
         AUTONOMOUS AI SOLUTION
 
-        This was an autonomous AI solution generated with the MOTO harness.
+        Disclaimer: This content is for informational purposes only...
 
         User's Research Prompt: [prompt text here]
 
@@ -550,7 +550,7 @@ class FinalAnswerMemory:
             "=" * 80,
             "AUTONOMOUS AI SOLUTION",
             "",
-            "Disclaimer: This is an autonomous AI solution generated with the MOTO harness. This paper was not peer reviewed and was autonomously generated without user oversight or interaction beyond the original user prompt, therefore, this text may contain errors. These papers often contain ambitious content and/or extraordinary claims, all content should be viewed with extreme scrutiny.",
+            "Disclaimer: This content is for informational purposes only. This paper was autonomously generated with the novelty-seeking MOTO harness without peer review or user oversight beyond the original prompt. AI-generated content may contain fabricated or unverified claims presented with high confidence. All content should be viewed with extreme scrutiny and independently verified before use.",
             "",
             f"User's Research Prompt: {display_prompt}",
             "",

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 import logging
 
 from backend.api.middleware import setup_middleware
-from backend.api.routes import aggregator, websocket, compiler, autonomous, boost, workflow, openrouter
+from backend.api.routes import aggregator, websocket, compiler, autonomous, boost, workflow, openrouter, download
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.aggregator.core.coordinator import coordinator
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ASI Aggregator System",
     description="AI-powered aggregator with RAG and multi-agent validation",
-    version="1.0.3",
+    version="1.0.4",
     lifespan=lifespan
 )
 
@@ -108,6 +108,7 @@ app.include_router(autonomous.router)
 app.include_router(boost.router)
 app.include_router(workflow.router)
 app.include_router(openrouter.router)
+app.include_router(download.router)
 app.include_router(websocket.router)
 
 
@@ -116,7 +117,7 @@ async def root():
     """Root endpoint."""
     return {
         "name": "ASI Aggregator System",
-        "version": "1.0.3",
+        "version": "1.0.4",
         "status": "running"
     }
 

@@ -898,6 +898,31 @@ export const openRouterAPI = {
     }
     return response.json();
   },
+
+  async getFreeModelSettings() {
+    const response = await fetch(`${API_BASE}/openrouter/free-model-settings`);
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || 'Failed to fetch free model settings');
+    }
+    return response.json();
+  },
+
+  async setFreeModelSettings(loopingEnabled, autoSelectorEnabled) {
+    const response = await fetch(`${API_BASE}/openrouter/free-model-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        looping_enabled: loopingEnabled,
+        auto_selector_enabled: autoSelectorEnabled,
+      }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || 'Failed to update free model settings');
+    }
+    return response.json();
+  },
 };
 
 // Add helper methods to main api object

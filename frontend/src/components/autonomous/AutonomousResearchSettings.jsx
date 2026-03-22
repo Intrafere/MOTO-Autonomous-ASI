@@ -19,10 +19,10 @@ const DEFAULT_SUBMITTER_CONFIG = {
   maxOutputTokens: 25000
 };
 
-// Single recommended profile with hard-coded model IDs (NO pattern matching)
+// Recommended profiles with hard-coded model IDs (NO pattern matching)
 const RECOMMENDED_PROFILES = {
   'recommended_fastest_cheapest': {
-    name: 'Recommended - Fastest, cheapest, lowest knowledge',
+    name: 'Fastest, cheapest, least knowledge',
     numSubmitters: 3,
     submitters: [
       { 
@@ -81,6 +81,68 @@ const RECOMMENDED_PROFILES = {
       lmStudioFallbackId: null,
       contextWindow: 131000,
       maxOutputTokens: 25000
+    }
+  },
+  'recommended_fast_affordable_mid': {
+    name: 'Fast, affordable, mid-tier knowledge',
+    numSubmitters: 3,
+    submitters: [
+      {
+        modelId: 'moonshotai/kimi-k2.5',
+        provider: 'openrouter',
+        openrouterProvider: 'SiliconFlow',
+        lmStudioFallbackId: null,
+        contextWindow: 262000,
+        maxOutputTokens: 40000
+      },
+      {
+        modelId: 'openai/gpt-oss-120b',
+        provider: 'openrouter',
+        openrouterProvider: 'Groq',
+        lmStudioFallbackId: null,
+        contextWindow: 131072,
+        maxOutputTokens: 25000
+      },
+      {
+        modelId: 'deepseek/deepseek-v3.2',
+        provider: 'openrouter',
+        openrouterProvider: 'AtlasCloud',
+        lmStudioFallbackId: null,
+        contextWindow: 163800,
+        maxOutputTokens: 30000
+      }
+    ],
+    validator: {
+      modelId: 'x-ai/grok-4.1-fast',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 2000000,
+      maxOutputTokens: 30000
+    },
+    highContext: {
+      modelId: 'moonshotai/kimi-k2.5',
+      provider: 'openrouter',
+      openrouterProvider: 'SiliconFlow',
+      lmStudioFallbackId: null,
+      contextWindow: 262000,
+      maxOutputTokens: 40000
+    },
+    highParam: {
+      modelId: 'google/gemini-3.1-pro-preview',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500
+    },
+    critique: {
+      modelId: 'google/gemini-3.1-pro-preview',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500
     }
   }
 };
@@ -271,6 +333,9 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
+  const [freeModelLooping, setFreeModelLooping] = useState(true);
+  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(true);
+  const [tier3Enabled, setTier3Enabled] = useState(false);
   const [isLoadedFromStorage, setIsLoadedFromStorage] = useState(false);
   const [showKothTooltip, setShowKothTooltip] = useState(false);
   const [showTestedModelsTooltip, setShowTestedModelsTooltip] = useState(false);
@@ -427,7 +492,9 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
             setLocalConfig(prev => ({ ...prev, ...settings.localConfig }));
           }
           if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
-          // Restore cached model providers
+          if (settings.freeModelLooping !== undefined) setFreeModelLooping(settings.freeModelLooping);
+          if (settings.freeModelAutoSelector !== undefined) setFreeModelAutoSelector(settings.freeModelAutoSelector);
+          if (settings.tier3Enabled !== undefined) setTier3Enabled(settings.tier3Enabled);
           if (settings.modelProviders) setModelProviders(settings.modelProviders);
         } catch (err) {
           console.error('Failed to load autonomous research settings:', err);
@@ -508,10 +575,13 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
       submitterConfigs: submitterConfigs.slice(0, numSubmitters),
       localConfig,
       freeOnly,
-      modelProviders // Cache provider lists to avoid re-fetching
+      freeModelLooping,
+      freeModelAutoSelector,
+      tier3Enabled,
+      modelProviders
     };
     localStorage.setItem('autonomous_research_settings', JSON.stringify(settings));
-  }, [isLoadedFromStorage, numSubmitters, submitterConfigs, localConfig, freeOnly, modelProviders]);
+  }, [isLoadedFromStorage, numSubmitters, submitterConfigs, localConfig, freeOnly, freeModelLooping, freeModelAutoSelector, tier3Enabled, modelProviders]);
 
   // Update LM Studio models when prop changes
   useEffect(() => {
@@ -519,6 +589,12 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
       setLmStudioModels(models);
     }
   }, [models]);
+
+  // Propagate tier3Enabled to parent config whenever it changes
+  useEffect(() => {
+    if (!isLoadedFromStorage) return;
+    onConfigChange({ ...localConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters), tier3_enabled: tier3Enabled });
+  }, [tier3Enabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize from config only once on mount
   const [initialized, setInitialized] = useState(false);
@@ -1101,13 +1177,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   left: '50%',
                   transform: 'translateX(-50%)'
                 }}>
-                  These models and/or hosts are not affiliated with the MOTO program, or Intrafere LLC. This chart contains potential models and related roles to help guide users through developer-tested configurations. Any statements about pricing, cost, models, roles, rankings, effects, or otherwise are speculative and based on individual developer testing experience. Intrafere LLC (Intrafere Research Group), and the MOTO developement team make no guarantees or warranties about the accuracy or truth of this chart. MOTO is a harness that works with the majority of models, including many more models that are not listed here.
+                  These models and/or hosts are not affiliated with the MOTO program, or Intrafere LLC. This chart contains compatible models to help guide users through developer-tested configurations. Any statements about pricing, cost, models, roles, rankings, effects, or otherwise are speculative and based on individual developer testing experience. Intrafere LLC (Intrafere Research Group), and the MOTO developement team make no guarantees or warranties about the accuracy or truth of this chart. MOTO is a harness that works with the majority of models, including many more models that are not listed here.
                 </div>
               )}
             </div>
           </h3>
           <p style={{ fontSize: '.70rem', color: '#888', marginTop: '0.5rem', marginBottom: '1rem', lineHeight: '1.4', marginLeft: '20px' }}>
-            Note: Computer science and/or non-general purpose models may have trouble performing as validators, critique submitters, or in the tier 2 compilation stage. These models generally perform fine for brainstorming. Note that some models in this category may work without issue.
+            Note: Computer science and/or non-general purpose models may have trouble performing as validators, critique submitters, or in the tier 2 compilation stage. These models generally perform fine for brainstorming. Most text based models over 20 billion parameters are compatible with MOSO, including ones not shown.
           </p>
           <div className="models-list">
             {/* King of the Hill - Gold */}
@@ -1233,54 +1309,74 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             {/* Alphabetical list (rest of models) */}
             
             <div className="model-item">
-              <div className="model-item-name">Claude Opus 4.5</div>
+              <div className="model-item-name">Amazon Nova</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">DeepSeek V3.2 Speciale</div>
+              <div className="model-item-name">Claude Opus</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Gemini 3.0 Pro</div>
+              <div className="model-item-name">Claude Sonnet</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Gemini Flash 2.5</div>
+              <div className="model-item-name">DeepSeek Speciale</div>
+              <div className="model-item-badge">Highly knowledgeable</div>
+            </div>
+            
+            <div className="model-item">
+              <div className="model-item-name">Gemini Flash</div>
               <div className="model-item-badge">Fast validator</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Gemini Flash 2.5 Light</div>
+              <div className="model-item-name">Gemini Flash Light</div>
               <div className="model-item-badge">Fast validator</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Gemini Flash 3.0 Preview</div>
-              <div className="model-item-badge">Fast validator</div>
+              <div className="model-item-name">Gemini Pro</div>
+              <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">GPT OSS 20B</div>
+              <div className="model-item-name">GLM</div>
+              <div className="model-item-badge">Highly knowledgeable</div>
+            </div>
+            
+            <div className="model-item">
+              <div className="model-item-name">GPT Codex</div>
+              <div className="model-item-badge">Computer science</div>
+            </div>
+            
+            <div className="model-item">
+              <div className="model-item-name">GPT OSS</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
               <div className="model-item-note">(outputs may corrupt over time depending on host)</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Kimi K2</div>
+              <div className="model-item-name">Grok</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">GPT 5.2 Pro</div>
+              <div className="model-item-name">Kimi K</div>
+              <div className="model-item-badge">Highly knowledgeable</div>
+            </div>
+            
+            <div className="model-item">
+              <div className="model-item-name">ChatGPT</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
 
             <div className="model-item">
-              <div className="model-item-name">GPT 5.2 Codex</div>
-              <div className="model-item-badge">Computer science</div>
+              <div className="model-item-name">Nous Hermes</div>
+              <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
@@ -1289,8 +1385,18 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Qwen3 Coder 480B</div>
+              <div className="model-item-name">Microsoft's Phi</div>
+              <div className="model-item-badge">Balanced knowledge and speed</div>
+            </div>
+            
+            <div className="model-item">
+              <div className="model-item-name">Qwen Coder</div>
               <div className="model-item-badge">Computer science</div>
+            </div>
+            
+            <div className="model-item">
+              <div className="model-item-name">Qwen</div>
+              <div className="model-item-badge">Highly knowledgeable</div>
             </div>
           </div>
         </div>
@@ -1327,7 +1433,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           >
             <option value="">-- Custom Settings --</option>
             <optgroup label="Recommended Profiles">
-              {['recommended_fastest_cheapest']
+              {['recommended_fastest_cheapest', 'recommended_fast_affordable_mid']
                 .filter(key => RECOMMENDED_PROFILES[key])
                 .map(key => (
                   <option key={key} value={key}>
@@ -1460,6 +1566,52 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </p>
         </div>
       )}
+
+      {/* Show only free models + model refresh controls — grouped at top */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+        <button 
+          className="secondary"
+          onClick={async () => {
+            try {
+              const freshModels = await api.getModels();
+              setLmStudioModels(freshModels);
+            } catch (err) {
+              console.error('Failed to refresh LM Studio models:', err);
+            }
+          }}
+          disabled={isRunning}
+        >
+          Refresh LM Studio Models
+        </button>
+        {hasOpenRouterKey && (
+          <>
+            <button 
+              className="secondary"
+              onClick={() => fetchOpenRouterModels(freeOnly)}
+              disabled={isRunning || loadingOpenRouter}
+            >
+              {loadingOpenRouter ? 'Loading...' : 'Refresh OpenRouter Models'}
+            </button>
+            <button
+              className="secondary"
+              onClick={() => window.open('https://openrouter.ai/models', '_blank', 'noopener,noreferrer')}
+              title="Browse all available OpenRouter models"
+            >
+              🔗 OpenRouter Model List
+            </button>
+            <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem', cursor: isRunning ? 'not-allowed' : 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={freeOnly}
+                onChange={(e) => setFreeOnly(e.target.checked)}
+                disabled={isRunning}
+                style={{ marginRight: '0.5rem' }}
+              />
+              Show only free models
+            </label>
+          </>
+        )}
+      </div>
 
       {/* Brainstorm Submitters Section */}
       <div className="settings-group">
@@ -1741,6 +1893,24 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         )}
       </div>
 
+      {/* Tier 3 Final Answer Toggle */}
+      <div className="settings-group" style={{ borderLeft: '4px solid #ff6b6b', paddingLeft: '12px' }}>
+        <h4>Stage 3: Final Answer Generation</h4>
+        <p className="settings-info">
+          Feature in construction. Enabling this is optional and not recommended. Stage 3 is a highly experimental mode. Most users should not enable this feature — it is expensive and wasteful at this current stage of development. When enabled, the system will automatically synthesize all completed Stage 2 papers into a final answer that is often book-length or greater. This feature is highly hallucinatory — Stage 2 papers are the recommended final output. Disabled by default; final paper quality is currently much lower than Stage 2 papers. Once optimized and better-functioning, this mode will be advertised more.
+        </p>
+        <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.95rem', cursor: isRunning ? 'not-allowed' : 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={tier3Enabled}
+            onChange={(e) => setTier3Enabled(e.target.checked)}
+            disabled={isRunning}
+            style={{ marginRight: '0.5rem' }}
+          />
+          Enable Stage 3 Final Answer Generation (Very Experimental)
+        </label>
+      </div>
+
       {/* Validator Critique Prompt Editor */}
       <div className="settings-group">
         <div 
@@ -1882,54 +2052,43 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         </div>
       )}
 
-      {/* Refresh buttons */}
-      <div style={{ marginTop: '1rem' }}>
-        <button 
-          className="secondary"
-          onClick={async () => {
-            try {
-              const freshModels = await api.getModels();
-              setLmStudioModels(freshModels);
-            } catch (err) {
-              console.error('Failed to refresh LM Studio models:', err);
-            }
-          }}
-          disabled={isRunning}
-          style={{ marginRight: '0.5rem' }}
-        >
-          Refresh LM Studio Models
-        </button>
-        {hasOpenRouterKey && (
-        <>
-          <button 
-            className="secondary"
-            onClick={() => fetchOpenRouterModels(freeOnly)}
-            disabled={isRunning || loadingOpenRouter}
-            style={{ marginRight: '0.5rem' }}
-          >
-            {loadingOpenRouter ? 'Loading...' : 'Refresh OpenRouter Models'}
-          </button>
-          <button
-            className="secondary"
-            onClick={() => window.open('https://openrouter.ai/models', '_blank', 'noopener,noreferrer')}
-            style={{ marginRight: '0.5rem' }}
-            title="Browse all available OpenRouter models"
-          >
-            🔗 OpenRouter Model List
-          </button>
+      {/* Free model looping/auto-selector options */}
+      {hasOpenRouterKey && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
           <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
             <input
               type="checkbox"
-              checked={freeOnly}
-              onChange={(e) => setFreeOnly(e.target.checked)}
-              disabled={isRunning}
+              checked={freeModelLooping}
+              onChange={(e) => {
+                setFreeModelLooping(e.target.checked);
+                openRouterAPI.setFreeModelSettings(e.target.checked, freeModelAutoSelector).catch(() => {});
+              }}
               style={{ marginRight: '0.5rem' }}
             />
-            Show free models only
+            Enable Free Model Looping
+            <span
+              title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
+              style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
+            >(?)</span>
           </label>
-        </>
-        )}
-      </div>
+          <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+            <input
+              type="checkbox"
+              checked={freeModelAutoSelector}
+              onChange={(e) => {
+                setFreeModelAutoSelector(e.target.checked);
+                openRouterAPI.setFreeModelSettings(freeModelLooping, e.target.checked).catch(() => {});
+              }}
+              style={{ marginRight: '0.5rem' }}
+            />
+            Use OpenRouter Free Models Auto-Selector as Backup
+            <span
+              title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
+              style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
+            >(?)</span>
+          </label>
+        </div>
+      )}
     </div>
     </div>
   );

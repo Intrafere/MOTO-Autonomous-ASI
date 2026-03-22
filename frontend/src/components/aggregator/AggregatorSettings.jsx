@@ -38,6 +38,8 @@ export default function AggregatorSettings({ config, setConfig }) {
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
+  const [freeModelLooping, setFreeModelLooping] = useState(true);
+  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(true);
   const [isLoaded, setIsLoaded] = useState(false);
 
   // Load settings from localStorage on mount
@@ -55,7 +57,8 @@ export default function AggregatorSettings({ config, setConfig }) {
           if (settings.validatorLmStudioFallback) setValidatorLmStudioFallback(settings.validatorLmStudioFallback);
           if (settings.validatorMaxOutput) setValidatorMaxOutput(settings.validatorMaxOutput);
           if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
-          // Restore cached model providers
+          if (settings.freeModelLooping !== undefined) setFreeModelLooping(settings.freeModelLooping);
+          if (settings.freeModelAutoSelector !== undefined) setFreeModelAutoSelector(settings.freeModelAutoSelector);
           if (settings.modelProviders) setModelProviders(settings.modelProviders);
         } catch (error) {
           console.error('Failed to load aggregator settings:', error);
@@ -95,10 +98,12 @@ export default function AggregatorSettings({ config, setConfig }) {
       validatorLmStudioFallback,
       validatorMaxOutput,
       freeOnly,
-      modelProviders // Cache provider lists to avoid re-fetching
+      freeModelLooping,
+      freeModelAutoSelector,
+      modelProviders
     };
     localStorage.setItem('aggregator_settings', JSON.stringify(settings));
-  }, [isLoaded, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorLmStudioFallback, validatorMaxOutput, freeOnly, modelProviders]);
+  }, [isLoaded, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorLmStudioFallback, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders]);
 
   useEffect(() => {
     fetchModels();
@@ -642,8 +647,42 @@ export default function AggregatorSettings({ config, setConfig }) {
                   onChange={(e) => setFreeOnly(e.target.checked)}
                   style={{ marginRight: '0.5rem' }}
                 />
-                Show free models only
+                Show only free models
               </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+                  <input
+                    type="checkbox"
+                    checked={freeModelLooping}
+                    onChange={(e) => {
+                      setFreeModelLooping(e.target.checked);
+                      openRouterAPI.setFreeModelSettings(e.target.checked, freeModelAutoSelector).catch(() => {});
+                    }}
+                    style={{ marginRight: '0.5rem' }}
+                  />
+                  Enable Free Model Looping
+                  <span
+                    title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
+                    style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
+                  >(?)</span>
+                </label>
+                <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+                  <input
+                    type="checkbox"
+                    checked={freeModelAutoSelector}
+                    onChange={(e) => {
+                      setFreeModelAutoSelector(e.target.checked);
+                      openRouterAPI.setFreeModelSettings(freeModelLooping, e.target.checked).catch(() => {});
+                    }}
+                    style={{ marginRight: '0.5rem' }}
+                  />
+                  Use OpenRouter Free Models Auto-Selector as Backup
+                  <span
+                    title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
+                    style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
+                  >(?)</span>
+                </label>
+              </div>
             </>
           )}
         </>

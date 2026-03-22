@@ -72,20 +72,6 @@ The live-constructing compiler-written paper should be viewable in one tab and a
 - Settings are passed through API routes and stored in `rag_config` (aggregator) and `system_config` (compiler)
 - Reasoning models (e.g., those with `<think>` tags or separate `reasoning` fields) may use significant tokens on internal reasoning before generating JSON output
 
-## Model Corruption reload and fix (model drift)
-
-We use the JSON repair strategy to detect when the model drift has corrupted the loaded model. If loaded-model corruption is detected the model should have its load settings cached, the model should be ejected fully, and then the model should be reloaded with that exact unique identifier ID and load-settings that were cached so the program may resume.
-
-This should happen for every type of API call interaction that involves JSON parsing.
-
-When this model reload happens no future operation API calls should be resent until the model has been ejected, and reloaded properly with the same UID.
-
-If we only eject 1 at a time and reload it then LM studio will regive that model its same UID it had before. NOTE: We must fully eject the model to reset its corrupted state, we cannot simply reload the model.
-
-To correctly do this we should unload all models, then reload 1 at a time, waiting for the model to finish loading entirely before starting the next load model. If a model load fails it should keep trying for up to 10 times, we should wait 10 minutes between reload refresh attempts at loading as models may take a while to load. All part 1 and part 2 workflow should be halted until all models have been reloaded.
-
-The above model load and unload mechanism activates for all models after any given model fails to have its JSON attempts parsed 5 times in a row.
-
 ## Other Notes
 
 IMPORTANT: When a JSON result for validation does not work you should reject the submission and alert the submitter the content and the reason isfor JSON rejection, this context should be sent to the submitters local failure feedback memory that we have defined in other areas.

@@ -4,7 +4,7 @@ alwaysApply: true
 
 # Three Code and Rule Interaction Rules
 
-1.) The code is a product in Beta development but is LARGELY a perfectly functioning program. When making fixes, corrections, etc. DO NOT OVER BUILD, keep the code elegant, simple and optimized for future edits and readability. Always remove and cleanup old code, do not comment out code or leave broken/unused code in this program unless specifically directed by the user.
+1.) The code is a product actively in development but is LARGELY a perfectly functioning program. When making fixes, corrections, etc. DO NOT OVER BUILD, keep the code elegant, simple and optimized for future edits and readability. Always remove and cleanup old code, do not comment out code or leave broken/unused code in this program unless specifically directed by the user.
 
 1.) Always obey the rules in regards to how the code should work. The only time you should deviate from the rules is if there is a fix required in the code or the user is requesting an edit that should change the code and any accompanying rules. The rules should always be brought back in line with the code however the rules should guide the code development and navigation.
 

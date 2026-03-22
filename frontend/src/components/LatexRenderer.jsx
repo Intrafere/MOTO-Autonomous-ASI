@@ -11,7 +11,7 @@
  * 
  * Uses KaTeX for fast client-side rendering with extensive error recovery.
  */
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import './LatexRenderer.css';
@@ -896,23 +896,23 @@ const renderLatexToHtml = (text) => {
   // Safe approach: Use a function to only replace newlines in TEXT CONTENT, not inside tags.
   // This iterates through the string and only replaces \n when we're outside any HTML tag.
   {
+    const parts = [];
     let inTag = false;
-    let newResult = '';
+    let segStart = 0;
     for (let i = 0; i < result.length; i++) {
       const char = result[i];
       if (char === '<') {
         inTag = true;
-        newResult += char;
       } else if (char === '>') {
         inTag = false;
-        newResult += char;
       } else if (char === '\n' && !inTag) {
-        newResult += '<br/>';
-      } else {
-        newResult += char;
+        if (i > segStart) parts.push(result.slice(segStart, i));
+        parts.push('<br/>');
+        segStart = i + 1;
       }
     }
-    result = newResult;
+    if (segStart < result.length) parts.push(result.slice(segStart));
+    result = parts.join('');
   }
   
   // Step 15: Clean up multiple consecutive <br> tags
@@ -922,7 +922,126 @@ const renderLatexToHtml = (text) => {
 };
 
 /**
- * LatexRenderer Component
+ * Fast string hash for stable React keys. Not cryptographic — just needs to
+ * produce different values for different chunk contents so React reconciles correctly.
+ */
+const simpleHash = (str) => {
+  let h = 0;
+  const len = Math.min(str.length, 128);
+  for (let i = 0; i < len; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+  }
+  return h.toString(36);
+};
+
+/**
+ * Split content into chunks at section boundaries for progressive rendering.
+ * Splits at double-newlines, section headers (Roman numerals, "Abstract", etc.),
+ * and hard-coded markers. Ensures math environments are not split mid-expression.
+ */
+const CHUNK_TARGET_SIZE = 3000;
+
+const splitIntoChunks = (text) => {
+  if (!text || text.length <= CHUNK_TARGET_SIZE) return [text];
+
+  const sectionPattern = /\n(?=(?:#{1,6}\s|[IVXLCDM]+\.\s|Abstract|Introduction|Conclusion|(?:\\section|\\subsection|\\chapter)\s*\{|\[HARD CODED))/gi;
+
+  const chunks = [];
+  let lastIdx = 0;
+
+  let match;
+  while ((match = sectionPattern.exec(text)) !== null) {
+    if (match.index - lastIdx >= CHUNK_TARGET_SIZE * 0.3) {
+      chunks.push(text.slice(lastIdx, match.index));
+      lastIdx = match.index + 1;
+    }
+  }
+  if (lastIdx < text.length) {
+    chunks.push(text.slice(lastIdx));
+  }
+
+  const result = [];
+  for (const chunk of chunks) {
+    if (chunk.length <= CHUNK_TARGET_SIZE * 2) {
+      result.push(chunk);
+      continue;
+    }
+    let remaining = chunk;
+    while (remaining.length > CHUNK_TARGET_SIZE * 2) {
+      let splitAt = -1;
+      const searchEnd = Math.min(remaining.length, CHUNK_TARGET_SIZE * 1.5);
+      for (let i = CHUNK_TARGET_SIZE * 0.5; i < searchEnd; i++) {
+        if (remaining[i] === '\n' && i + 1 < remaining.length && remaining[i + 1] === '\n') {
+          splitAt = i;
+          break;
+        }
+      }
+      if (splitAt === -1) splitAt = Math.round(CHUNK_TARGET_SIZE);
+      result.push(remaining.slice(0, splitAt));
+      remaining = remaining.slice(splitAt);
+    }
+    if (remaining.length > 0) result.push(remaining);
+  }
+
+  return result.length > 0 ? result : [text];
+};
+
+/**
+ * A single rendered chunk with IntersectionObserver-based lazy rendering.
+ * Only runs renderLatexToHtml when the chunk scrolls into or near the viewport.
+ */
+const RenderedChunk = memo(({ text, index }) => {
+  const containerRef = useRef(null);
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsVisible(true);
+        }
+      },
+      { rootMargin: '600px 0px' }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const renderedHtml = useMemo(() => {
+    if (!isVisible || !text) return null;
+    const rawHtml = renderLatexToHtml(text);
+    return DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
+  }, [text, isVisible]);
+
+  if (!isVisible) {
+    const estimatedHeight = Math.max(40, Math.round(text.length * 0.15));
+    return (
+      <div
+        ref={containerRef}
+        className="latex-chunk latex-chunk-placeholder"
+        style={{ minHeight: `${estimatedHeight}px` }}
+        data-chunk={index}
+      />
+    );
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="latex-chunk"
+      data-chunk={index}
+      dangerouslySetInnerHTML={{ __html: renderedHtml }}
+    />
+  );
+});
+
+const LARGE_DOC_THRESHOLD = 50000;
+
+/**
+ * LatexRenderer Component — chunked, virtualized rendering for large documents.
  */
 const LatexRenderer = ({ 
   content, 
@@ -931,30 +1050,61 @@ const LatexRenderer = ({
   showToggle = true,
   showLatex
 }) => {
-  const [internalViewMode, setInternalViewMode] = useState(defaultRaw ? 'raw' : 'rendered');
-  
+  const isLargeDoc = content && content.length > LARGE_DOC_THRESHOLD;
+  const [internalViewMode, setInternalViewMode] = useState(
+    defaultRaw ? 'raw' : 'rendered'
+  );
+  const [largeDocWarningDismissed, setLargeDocWarningDismissed] = useState(false);
+
+  // Auto-switch to raw when content grows past threshold (for live/growing documents).
+  // Only fires if the user has not explicitly opted into rendered mode.
+  useEffect(() => {
+    if (isLargeDoc && !largeDocWarningDismissed) {
+      setInternalViewMode('raw');
+    }
+  }, [isLargeDoc, largeDocWarningDismissed]);
+
+  const debouncedContent = useDebouncedValue(content, 1500);
+
   const viewMode = showLatex !== undefined 
     ? (showLatex ? 'rendered' : 'raw')
     : internalViewMode;
-  
-  const renderedHtml = useMemo(() => {
-    if (viewMode === 'raw' || !content) return null;
-    // Step 1: Convert LaTeX to HTML
-    const rawHtml = renderLatexToHtml(content);
-    // Step 2: Sanitize to prevent XSS attacks
+
+  const renderContent = viewMode === 'rendered' ? debouncedContent : content;
+
+  const chunks = useMemo(() => {
+    if (viewMode === 'raw' || !renderContent) return [];
+    return splitIntoChunks(renderContent);
+  }, [renderContent, viewMode]);
+
+  const renderedHtmlSmall = useMemo(() => {
+    if (viewMode === 'raw' || !renderContent) return null;
+    if (chunks.length > 1) return null;
+    const rawHtml = renderLatexToHtml(renderContent);
     return DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
-  }, [content, viewMode]);
-  
+  }, [renderContent, viewMode, chunks.length]);
+
   const hasLatex = useMemo(() => {
     if (!content) return false;
-    // Check for delimited math OR common LaTeX commands
-    return /\$[\s\S]*?\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\\[a-zA-Z]+[\s{]/.test(content);
+    const sample = content.length > 2000 ? content.slice(0, 2000) : content;
+    return /\$[\s\S]*?\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\\[a-zA-Z]+[\s{]/.test(sample);
   }, [content]);
-  
+
+  const wordCount = useMemo(() => {
+    if (!content) return 0;
+    // Estimate: ~5 chars per word on average (avoids allocating a 250k-element array)
+    return Math.round(content.length / 5);
+  }, [content]);
+
   if (!content) {
     return <div className={`latex-renderer ${className}`}>No content</div>;
   }
-  
+
+  const handleSwitchToRendered = () => {
+    setLargeDocWarningDismissed(true);
+    setInternalViewMode('rendered');
+  };
+
   return (
     <div className={`latex-renderer ${className}`}>
       {showToggle && showLatex === undefined && (
@@ -962,10 +1112,16 @@ const LatexRenderer = ({
           <div className="latex-toggle-buttons">
             <button
               className={`latex-toggle-btn ${viewMode === 'rendered' ? 'active' : ''}`}
-              onClick={() => setInternalViewMode('rendered')}
+              onClick={() => {
+                if (isLargeDoc && !largeDocWarningDismissed) {
+                  handleSwitchToRendered();
+                } else {
+                  setInternalViewMode('rendered');
+                }
+              }}
               title="Show rendered LaTeX"
             >
-              📐 Rendered (Experimental)
+              📐 Rendered {isLargeDoc ? '' : '(Experimental)'}
             </button>
             <button
               className={`latex-toggle-btn ${viewMode === 'raw' ? 'active' : ''}`}
@@ -975,6 +1131,11 @@ const LatexRenderer = ({
               Raw Text
             </button>
           </div>
+          {viewMode === 'rendered' && chunks.length > 1 && (
+            <span className="latex-indicator latex-chunked-indicator">
+              {chunks.length} sections
+            </span>
+          )}
           {hasLatex && viewMode === 'rendered' && (
             <span className="latex-indicator">
               ✓ LaTeX rendered
@@ -988,18 +1149,50 @@ const LatexRenderer = ({
         </div>
       )}
       
+      {isLargeDoc && viewMode === 'raw' && !largeDocWarningDismissed && showLatex === undefined && (
+        <div className="latex-large-doc-banner">
+          <span>Large document ({wordCount.toLocaleString()} words). Rendered view uses progressive loading for performance.</span>
+          <button onClick={handleSwitchToRendered} className="latex-large-doc-btn">
+            Switch to Rendered View
+          </button>
+        </div>
+      )}
+
       <div className="latex-content-container">
         {viewMode === 'raw' ? (
           <pre className="latex-raw-content">{content}</pre>
-        ) : (
+        ) : chunks.length <= 1 ? (
           <div 
             className="latex-rendered-content"
-            dangerouslySetInnerHTML={{ __html: renderedHtml }}
+            dangerouslySetInnerHTML={{ __html: renderedHtmlSmall }}
           />
+        ) : (
+          <div className="latex-rendered-content">
+            {chunks.map((chunk, i) => (
+              <RenderedChunk key={`${i}-${simpleHash(chunk)}`} text={chunk} index={i} />
+            ))}
+          </div>
         )}
       </div>
     </div>
   );
 };
 
+/**
+ * Custom hook: debounce a value so rendered-mode processing doesn't fire on every rapid update.
+ */
+function useDebouncedValue(value, delayMs) {
+  const [debounced, setDebounced] = useState(value);
+  const timeoutRef = useRef(null);
+
+  useEffect(() => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => setDebounced(value), delayMs);
+    return () => { if (timeoutRef.current) clearTimeout(timeoutRef.current); };
+  }, [value, delayMs]);
+
+  return debounced;
+}
+
+export { renderLatexToHtml, DOMPURIFY_CONFIG };
 export default LatexRenderer;

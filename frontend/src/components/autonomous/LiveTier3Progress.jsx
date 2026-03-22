@@ -10,7 +10,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDF, sanitizeFilename } from '../../utils/downloadHelpers';
+import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 
 const LiveTier3Progress = ({ api, status }) => {
   const [paperData, setPaperData] = useState(null);
@@ -20,7 +20,6 @@ const LiveTier3Progress = ({ api, status }) => {
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const containerRef = useRef(null);
-  const contentRef = useRef(null);
 
   // Check banner shimmer setting from localStorage
   const getBannerShimmerEnabled = () => {
@@ -108,29 +107,29 @@ const LiveTier3Progress = ({ api, status }) => {
   };
 
   const handleDownloadPdf = async () => {
-    if (!paperData?.content || !contentRef.current) return;
-    
-    setIsDownloadingPdf(true);
-    try {
-      const filename = sanitizeFilename(paperData.title || 'tier3_final_answer');
-      const metadata = {
-        title: paperData.title || 'Final Answer',
-        wordCount: paperData.word_count,
-        date: new Date().toLocaleDateString(),
-        models: 'Tier 3 Final Answer'
-      };
-      
-      const renderedElement = contentRef.current.querySelector('.latex-rendered-content') || 
-                             contentRef.current.querySelector('.latex-raw-content') ||
-                             contentRef.current;
-      
-      await downloadPDF(renderedElement, metadata, filename, paperData.outline);
-    } catch (error) {
-      console.error('PDF download failed:', error);
-      alert('Failed to generate PDF. Please try downloading as raw text instead.');
-    } finally {
-      setIsDownloadingPdf(false);
-    }
+    if (!paperData?.content) return;
+
+    const filename = sanitizeFilename(paperData.title || 'tier3_final_answer');
+    const metadata = {
+      title: paperData.title || 'Final Answer',
+      wordCount: paperData.word_count,
+      date: new Date().toLocaleDateString(),
+      models: null,
+    };
+
+    await downloadPDFViaBackend(
+      paperData.content,
+      metadata,
+      filename,
+      paperData.outline || null,
+      () => setIsDownloadingPdf(true),
+      () => setIsDownloadingPdf(false),
+      (error) => {
+        setIsDownloadingPdf(false);
+        console.error('PDF download failed:', error);
+        alert('PDF generation failed: ' + error.message);
+      },
+    );
   };
 
   const handleResetPaper = async () => {
@@ -306,7 +305,7 @@ const LiveTier3Progress = ({ api, status }) => {
                   disabled={!paperData?.content || isDownloadingPdf}
                   title="Download as PDF"
                 >
-                  {isDownloadingPdf ? 'Generating...' : 'Download PDF'}
+                  {isDownloadingPdf ? 'Preparing PDF...' : 'Download PDF'}
                 </button>
                 <button
                   className="tier3-btn-reset"
@@ -323,7 +322,7 @@ const LiveTier3Progress = ({ api, status }) => {
           {/* Paper Content */}
           <div className="live-tier3-container" ref={containerRef}>
             {paperData?.content ? (
-              <div className="paper-section" ref={contentRef}>
+              <div className="paper-section">
                 <h4>{paperData.title || 'Final Answer Content'}</h4>
                 <LatexRenderer 
                   content={

@@ -19,5 +19,8 @@ python-dotenv>=1.0.0
 aiofiles>=23.2.1
 tiktoken>=0.5.2
 
+# PDF generation (headless Chromium via Playwright - full rendering fidelity)
+playwright>=1.40.0
+
 # Security Updates
 protobuf>=5.29.5  # Fixes CVE-2024-7254 (JSON recursion DoS)

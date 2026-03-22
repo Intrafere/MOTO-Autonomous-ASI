@@ -12,6 +12,7 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 - **Per-Role OpenRouter Selection**: Each role independently uses LM Studio or OpenRouter
 - **Global OpenRouter API Key**: Single key for all per-role OpenRouter selections (separate from boost)
 - **LM Studio Fallback**: Optional fallback per role on credit exhaustion
+- **Free Model Cooldown Handling**: SERIAL BOTTLENECK pause, free model looping, and auto-selector backup (see below)
 - **Boost Mode**: Separate boost API key for selective task acceleration via three modes:
   - **Boost Next X Calls**: Counter-based, next X API calls regardless of task ID
   - **Category Boost**: Role-based, boosts all calls for specific role categories
@@ -34,7 +35,7 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 #### OpenRouterClient (`backend/shared/openrouter_client.py`)
 - Async HTTP client. Base URL: `https://openrouter.ai/api/v1`
 - App Attribution Headers: `HTTP-Referer: https://intrafere.com/moto-autonomous-home-ai/`, `X-Title: MOTO Deep Research Harness`
-- Credit exhaustion detection: HTTP 402 OR error messages containing "credit", "insufficient", "balance", "quota"
+- Credit exhaustion detection: HTTP 402 OR error messages containing "credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"
 - Raises `CreditExhaustionError` on exhaustion (no retries). Retries transient errors (max 3).
 - Temperature=0.0 default. Stop sequences on all requests: `\n}\n\n`, `\n]\n\n`, `\n}\n\n\n`, `\n]\n\n\n`
 
@@ -80,46 +81,6 @@ Coordinators read actual agent `task_sequence` counters — no prediction. Task 
 
 ---
 
-## Configuration Models
-
-### ModelConfig
-```python
-class ModelConfig(BaseModel):
-    provider: Literal["lm_studio", "openrouter"] = "lm_studio"
-    model_id: str
-    openrouter_model_id: Optional[str] = None
-    openrouter_provider: Optional[str] = None  # e.g., "Anthropic"
-    lm_studio_fallback_id: Optional[str] = None
-    context_window: int = 131072
-    max_output_tokens: int = 25000
-```
-
-### BoostConfig
-```python
-class BoostConfig(BaseModel):
-    enabled: bool = False
-    openrouter_api_key: str = ""
-    boost_model_id: str = ""
-    boost_provider: Optional[str] = None
-    boost_context_window: int = 131072
-    boost_max_output_tokens: int = 25000
-```
-
-### WorkflowTask
-```python
-class WorkflowTask(BaseModel):
-    task_id: str          # e.g., "agg_sub1_001"
-    sequence_number: int  # 1-20
-    role: str             # "Submitter 1", "Validator", "High-Context", etc.
-    mode: Optional[str] = None  # "Construction", "Rigor", "Review", etc.
-    provider: str = "lm_studio"
-    using_boost: bool = False
-    completed: bool = False
-    active: bool = False
-```
-
----
-
 ## Coordinator Integration
 
 All coordinators track workflow via: `workflow_tasks`, `completed_task_ids`, `current_task_sequence`, `current_task_id`.
@@ -144,15 +105,6 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ---
 
-## Frontend Components
-
-- **WorkflowPanel** (`WorkflowPanel.jsx`): Collapsible right-side panel, next 20 tasks, boost controls (Next X input, category chips), per-task click to toggle boost
-- **BoostControlModal** (`BoostControlModal.jsx`): Configure boost API key, model, provider, context/max tokens
-- **BoostLogs** (`BoostLogs.jsx`): Boost API call logs tab with auto-refresh and stats
-- **OpenRouterApiKeyModal** (`OpenRouterApiKeyModal.jsx`): Set/test/clear global OpenRouter API key
-
----
-
 ## API Endpoints
 
 ### Boost (`backend/api/routes/boost.py`)
@@ -173,8 +125,10 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 - `POST /api/openrouter/set-api-key` — Set and validate global OpenRouter key
 - `DELETE /api/openrouter/api-key` — Clear key
 - `GET /api/openrouter/api-key-status` — `{ has_key, enabled }`
-- `GET /api/openrouter/models` — Available models
+- `GET /api/openrouter/models` — Available models (also caches free models for rotation)
 - `GET /api/openrouter/providers/{model_id}` — Providers for model
+- `GET /api/openrouter/free-model-settings` — `{ looping_enabled, auto_selector_enabled, ... }`
+- `POST /api/openrouter/free-model-settings` — Update free model settings (body: `FreeModelSettings`)
 - `POST /api/openrouter/test-connection` — Test key without storing
 - `GET /api/model-cache` — Cached model ID mapping (display_name → api_id)
 
@@ -186,18 +140,54 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ## Error Handling
 
-**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota" → `CreditExhaustionError` → permanent LM Studio fallback for that role (or RuntimeError if no fallback).
+**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota"/"key limit"/"limit exceeded" → `CreditExhaustionError` → permanent LM Studio fallback for that role (or RuntimeError if no fallback).
 
 **Boost Exhaustion:** Falls back to primary for that task; boost stays enabled; counter NOT decremented.
 
-**Rate Limits (Free Models):** HTTP 429 or "rate limit" keywords → 1-hour pause per `:free` model. Temporary fallback to LM Studio if configured. Methods: `_is_free_model()`, `_is_model_rate_limited()`, `_record_rate_limit()` on `OpenRouterClient`.
+**Rate Limits (Free Models):** HTTP 429 or "rate limit" keywords → 1-hour pause per `:free` model. Handled by Free Model Cooldown system (see below).
 
 **Privacy Policy Errors:** HTTP 404 + "data policy" message → `OpenRouterPrivacyPolicyError`. Role-based: falls back to LM Studio if configured; Boost: raises RuntimeError. Fix: https://openrouter.ai/settings/privacy → enable data sharing.
 
 ---
 
+## Free Model Cooldown & Rotation System
+
+**Singleton:** `free_model_manager` in `backend/shared/free_model_manager.py`. Two global settings (both default ON):
+- `looping_enabled` — rotate to next available free model on rate limit (highest context first)
+- `auto_selector_enabled` — fall back to `openrouter/free` (131072 context) when all free models exhausted
+
+**Rotation chain** (in `api_client_manager._try_free_model_rotation()` called from RateLimitError handler):
+1. If `looping_enabled`: **iterate through ALL** non-rate-limited free models (highest context first) using `tried_models` set to avoid re-trying. On each `RateLimitError`, refresh rate-limited dict and continue to next model. On `CreditExhaustionError`, stop looping.
+2. If all looping candidates exhausted and `auto_selector_enabled`: try `openrouter/free`
+3. If still failed: check LM Studio fallback (fall-through to LM Studio)
+4. If no fallback: raise `FreeModelExhaustedError(soonest_retry=...)`
+
+`get_alternative_free_model()` accepts optional `skip_models: set` parameter to skip already-tried models.
+
+**SERIAL BOTTLENECK:** When `FreeModelExhaustedError` propagates to coordinators:
+- Autonomous coordinator: caught INSIDE the `while` loop — sleeps until `soonest_retry`, broadcasts `serial_bottleneck_paused/resumed`, then the loop re-iterates naturally (research resumes)
+- Compiler coordinator: caught at workflow level — sleeps then spawns new `_main_workflow()` task via `asyncio.create_task()`
+- Aggregator submitters: per-submitter pause (others continue); validator loop pauses entire validator
+- Prevents infinite retry loops (the 2000+ attempt bug)
+
+**Account Exhaustion:** HTTP 402 on any `:free` model sets `_account_credits_exhausted` flag. All subsequent free model calls short-circuit immediately. Flag clears on next successful free model call.
+
+**Error Classes:**
+- `FreeModelExhaustedError` — all options exhausted, contains `soonest_retry` timestamp
+- Agents re-raise `FreeModelExhaustedError` through generic `except Exception` blocks
+
+**API Endpoints:**
+- `GET /api/openrouter/free-model-settings` — current looping/auto-selector state
+- `POST /api/openrouter/free-model-settings` — update settings `{looping_enabled, auto_selector_enabled}`
+
+**WebSocket Events:** `free_model_rotated`, `free_model_auto_selector_used`, `serial_bottleneck_paused`, `serial_bottleneck_resumed`, `all_free_models_exhausted`, `account_credits_exhausted`
+
+**Frontend:** Two checkboxes in all settings panels (Aggregator, Compiler, Autonomous) near "Show free models only". Both default checked, persist to localStorage, control same backend singleton.
+
+---
+
 ## Configuration Persistence
 
-**localStorage:** `openrouter_api_key`, `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig`
+**localStorage:** `openrouter_api_key`, `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`)
 
-**Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs. Boost logs persist to file (`boost_api_log.txt`).
+**Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs, free model manager state. Boost logs persist to file (`boost_api_log.txt`).

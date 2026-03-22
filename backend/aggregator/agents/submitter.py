@@ -13,6 +13,7 @@ from backend.shared.config import rag_config, system_config
 from backend.shared.models import Submission, SubmitterState
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.core.queue_manager import queue_manager
@@ -143,6 +144,19 @@ class SubmitterAgent:
                 # Brief delay between submissions
                 await asyncio.sleep(2)
                 
+            except FreeModelExhaustedError as e:
+                if e.soonest_retry:
+                    import time as _time
+                    wait_secs = max(0, e.soonest_retry - _time.time())
+                    wait_mins = round(wait_secs / 60, 1)
+                    logger.warning(
+                        f"SERIAL BOTTLENECK: Submitter {self.submitter_id} paused for "
+                        f"{wait_mins} minutes (all free models rate-limited)"
+                    )
+                    await asyncio.sleep(wait_secs)
+                else:
+                    logger.error(f"Submitter {self.submitter_id}: all free models exhausted: {e}")
+                    await asyncio.sleep(60)
             except Exception as e:
                 logger.error(f"Submitter {self.submitter_id} error on iteration {iteration}: {e}", exc_info=True)
                 await asyncio.sleep(5)
@@ -274,7 +288,7 @@ class SubmitterAgent:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Cache model config on first successful API call (only relevant for LM Studio)
             try:

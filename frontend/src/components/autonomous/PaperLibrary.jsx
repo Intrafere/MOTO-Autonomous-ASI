@@ -1,10 +1,10 @@
 /**
  * PaperLibrary - Displays grid of completed papers.
  */
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import './AutonomousResearch.css';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDF, sanitizeFilename } from '../../utils/downloadHelpers';
+import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 
@@ -15,7 +15,6 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
-  const paperContainerRef = useRef(null);
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -87,37 +86,33 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
 
   const handleDownloadPDF = async (e, paper) => {
     e.stopPropagation();
-    
-    if (!expandedContent || typeof expandedContent !== 'object' || !paperContainerRef.current) {
+
+    if (!expandedContent || typeof expandedContent !== 'object') {
       alert('Paper content not loaded. Please expand the paper first.');
       return;
     }
 
-    setIsGeneratingPDF(true);
-    try {
-      const element = paperContainerRef.current.querySelector('.latex-rendered-content') || 
-                      paperContainerRef.current.querySelector('.paper-content-renderer');
-      
-      if (!element) {
-        throw new Error('Could not find paper content element');
-      }
+    const filename = sanitizeFilename(`${paper.paper_id}_${paper.title}`);
+    const metadata = {
+      title: expandedContent.title || paper.title,
+      wordCount: paper.word_count,
+      date: paper.created_at ? new Date(paper.created_at).toLocaleDateString() : new Date().toLocaleDateString(),
+      models: paper.model_usage ? Object.keys(paper.model_usage).join(', ') : null,
+    };
 
-      const metadata = {
-        title: expandedContent.title || paper.title,
-        wordCount: paper.word_count,
-        date: paper.created_at ? new Date(paper.created_at).toLocaleDateString() : new Date().toLocaleDateString(),
-        models: paper.model_usage ? Object.keys(paper.model_usage).join(', ') : null
-      };
-      
-      const filename = sanitizeFilename(`${paper.paper_id}_${paper.title}`);
-      // Don't pass outline - it's already included in the rendered content (line 237-238)
-      await downloadPDF(element, metadata, filename, null);
-    } catch (error) {
-      console.error('PDF generation error:', error);
-      alert('Failed to generate PDF: ' + error.message);
-    } finally {
-      setIsGeneratingPDF(false);
-    }
+    await downloadPDFViaBackend(
+      expandedContent.content || '',
+      metadata,
+      filename,
+      expandedContent.outline || null,
+      () => setIsGeneratingPDF(true),
+      () => setIsGeneratingPDF(false),
+      (error) => {
+        setIsGeneratingPDF(false);
+        console.error('PDF generation error:', error);
+        alert('PDF generation failed: ' + error.message);
+      },
+    );
   };
 
   const formatDate = (dateStr) => {
@@ -171,13 +166,29 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   return (
     <div className="paper-library">
       <div className="paper-library-header">
-        <h3>Paper Library ({papers.length} Papers)</h3>
+        <h3>
+          Paper Library ({papers.length} Papers)
+          <span className="paper-library-help-icon" tabIndex={0}>
+            ?
+            <span className="paper-library-tooltip">
+              <strong>HOW THIS PAGE WORKS</strong>
+              <br /><br />
+              This paper database will continue to accumulate until the AI harness autonomously decides to generate the final answer or until the user forces final answer generation. Papers utilize their respective brainstorm topics during writing and may undergo critique-revision before final appearance on this page.
+              <br /><br />
+              Papers may start off mediocre, however will improve over time as the AI selects internal papers for future reference or removal. Paper quality greatly improves with higher parameter models.
+              <br /><br />
+              Accumulating a large amount of papers before final answer generation is normal (i.e. 10 to 20 papers with several pruned/deleted). When forcing final answer generation the AI will decide either: 1.) not enough info — brainstorm more, 2.) write answer — new short form paper, 3.) write answer, longform volume — organize select accepted papers into a longform volume with chapters, write gap papers (if applicable), conclusion chapter then introduction chapter.
+              <br /><br />
+              <span style={{ color: '#f0a' }}>📁 Manual file retrieval:</span> Paper files are saved at <code>backend/data/auto_sessions/[session_folder]/papers/</code> — each paper is stored as <code>paper_[id].txt</code> with a matching <code>paper_[id]_abstract.txt</code> and <code>paper_[id]_outline.txt</code>. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
+            </span>
+          </span>
+        </h3>
         <button onClick={onRefresh} className="btn-refresh">
           Refresh
         </button>
       </div>
-      <div className="paper-library-warning">
-        (HOW THIS PAGE WORKS: This paper database will continue to accumulate until the AI harness autonomously decides to generate the final answer or until the user forces final answer generation. Papers utilize their respective brainstorm topics during writing and may undergo critique-revision before final appearance on this page. Papers may start off mediocre, however will improve over time as the AI selects internal papers for future reference or removal, if you are unhappy with your paper quality try a higher parameter model. Paper quality greatly improves with higher parameter models. Any given paper may be pruned/deleted if the AI deems it to hurt the collective database quality - back up any paper you certainly want to save. Accumulating a large amount of papers before final answer generation is normal (i.e. 10 to 20 papers with several pruned/deleted. When forcing final answer generation the AI will decide either: 1.) not enough info, brainstorm more, 2.) write answer - new short form paper, 3.) write answer, longform volume - organize select accepted papers into a longform volume with chapters, write gap papers (if applicable), conclusion chapter then introduction chapter).)
+      <div className="paper-library-persist-warning">
+        (WARNING: Any given paper may be pruned/deleted if the AI deems it to hurt the collective database quality — back up any paper you certainly want to save.)
       </div>
       <div className="paper-library-pruned-counter">
         Pruned Papers: {archivedCount}
@@ -241,7 +252,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
                     disabled={isGeneratingPDF || !expandedContent}
                     title="Download as PDF"
                   >
-                    {isGeneratingPDF ? 'Generating...' : 'Download PDF'}
+                    {isGeneratingPDF ? 'Preparing PDF...' : 'Download PDF'}
                   </button>
                   
                   <button
@@ -299,7 +310,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
                     </button>
                   )}
                 </div>
-                <div className="paper-full-content" ref={paperContainerRef}>
+                <div className="paper-full-content">
                   {loading ? (
                     <div className="loading">Loading content...</div>
                   ) : expandedContent && typeof expandedContent === 'object' ? (

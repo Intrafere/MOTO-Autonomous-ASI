@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, Tuple, Callable
 
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
@@ -242,7 +243,7 @@ class CompletionReviewerAgent:
             
             # Extract content from response (check both content and reasoning fields)
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 logger.error("CompletionReviewer: No content in response")
                 return None
@@ -274,9 +275,10 @@ class CompletionReviewerAgent:
                     self.task_tracking_callback("completed", task_id)
                 return None
                 
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"CompletionReviewer: Error generating assessment: {e}")
-            # Notify task completed (failed but still completed)
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
             return None
@@ -346,7 +348,7 @@ class CompletionReviewerAgent:
             
             # Extract content from response (check both content and reasoning fields)
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 logger.error("CompletionReviewer: No content in self-validation response")
                 return False
@@ -384,9 +386,10 @@ class CompletionReviewerAgent:
                     self.task_tracking_callback("completed", task_id)
                 return False
                 
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"CompletionReviewer: Error in self-validation: {e}")
-            # Notify task completed (failed but still completed)
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
             return False

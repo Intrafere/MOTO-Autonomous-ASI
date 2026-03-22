@@ -607,6 +607,96 @@
   margin: 0.25rem 0 0.5rem 0;
 }
 
+.paper-library-persist-warning {
+  color: #e74c3c;
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin: 0.25rem 0 0.5rem 0;
+}
+
+/* Help icon tooltip */
+.paper-library-help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ccc;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  margin-left: 8px;
+  position: relative;
+  vertical-align: middle;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.paper-library-help-icon:hover,
+.paper-library-help-icon:focus {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  outline: none;
+}
+
+.paper-library-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 380px;
+  background: #1e1e2e;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  padding: 14px 16px;
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: #ccc;
+  line-height: 1.55;
+  z-index: 9999;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+}
+
+.paper-library-tooltip code {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  padding: 0.1em 0.3em;
+  font-size: 0.85em;
+  color: #c5c5c5;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.paper-library-help-icon:hover .paper-library-tooltip,
+.paper-library-help-icon:focus .paper-library-tooltip {
+  display: block;
+}
+
+.paper-library-file-location {
+  color: #aaa;
+  font-size: 0.75rem;
+  font-weight: 400;
+  margin-top: 0.4rem;
+  line-height: 1.5;
+}
+
+.paper-library-file-location code {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  padding: 0.1em 0.35em;
+  font-size: 0.9em;
+  color: #c5c5c5;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
 .paper-library-pruned-counter {
   color: var(--text-secondary, #aaa);
   font-size: 0.85rem;

@@ -1,15 +1,5 @@
 # Security Policy
 
-## Supported Versions
-
-We release patches for security vulnerabilities. Currently supported versions:
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
-
----
-
 ## Reporting a Vulnerability
 
 **Please do not report security vulnerabilities through public GitHub issues.**
@@ -65,10 +55,11 @@ Include in your report:
 ### Generated Content
 
 **AI-generated papers contain disclaimers:**
+- All generated content is for informational purposes only
 - Papers include "AUTONOMOUS AI SOLUTION" disclaimers
 - Content has not been peer-reviewed
-- May contain errors or unverified claims
-- All content should be verified independently
+- May contain fabricated or unverified claims presented with high confidence
+- All content should be independently verified before use
 
 ---
 
@@ -82,17 +73,22 @@ Include in your report:
 - All LaTeX-rendered content is sanitized before display
 - Prevents malicious script injection in generated papers
 - Configuration blocks: `<script>`, `<iframe>`, `<form>`, event handlers
-- See `.cursor/rules/latex-renderer-security.mdc` for details
+- See `.cursor/rules/latex-renderer.mdc` for details
 
 **Status**: ✅ Fixed (DOMPurify v3.2.4+ includes CVE-2025-26791 fix)
 
 ### 2. PDF Generation Security
 
-**Dependencies**:
-- `html2pdf.js` v0.14.0+ (fixes GHSA-w8x4-x68c-m6fc XSS vulnerability)
-- `jspdf` v4.0.0+ (fixes CVE-2025-68428 LFI/Path Traversal)
+**Component**: `backend/api/routes/download.py` + `frontend/src/utils/downloadHelpers.js`
 
-**Status**: ✅ Fixed (both vulnerabilities patched)
+**Approach**: Backend Playwright (headless Chromium) PDF rendering
+- All content is DOMPurify-sanitized on the frontend **before** being sent to the backend
+- Backend receives only sanitized HTML — no raw LLM output ever reaches the PDF renderer
+- User-supplied metadata (title, outline) is HTML-escaped via `_escape_html()` before interpolation into the HTML template
+- Playwright runs as an isolated subprocess — no impact on the FastAPI event loop
+- `html2pdf.js` and `jspdf` (and their CVEs) have been removed entirely
+
+**Status**: ✅ Secure (html2pdf.js and jspdf CVEs eliminated by removal)
 
 ### 3. JSON Parsing
 
@@ -120,15 +116,21 @@ Include in your report:
 
 ### Recent Security Fixes
 
+**2026-03-20**: PDF generation migrated from html2pdf.js/jspdf to Playwright (headless Chromium)
+- Removed `html2pdf.js` and `jspdf` and all associated CVEs from the dependency tree
+- PDF generation now runs server-side via Playwright in a thread pool (non-blocking)
+- DOMPurify sanitization still applied client-side before content is sent to the backend
+- Eliminates GHSA-w8x4-x68c-m6fc (html2pdf.js XSS), CVE-2025-68428 and CVE-2026-24737 (jspdf)
+
 **2026-01-15**: html2pdf.js XSS vulnerability (GHSA-w8x4-x68c-m6fc)
 - Updated html2pdf.js from v0.12.1 to v0.14.0
 - Affects PDF download functionality in all components
 - See COMMITS_PENDING.txt for details
 
 **2025-12-20**: jspdf LFI/Path Traversal (CVE-2025-68428)
-- Pinned jspdf to v4.0.0 via overrides
+- Pinned jspdf to v4.1.0 via overrides
 - Affects PDF generation in all download features
-- Both direct dependency and npm overrides enforce v4.0.0
+- Both direct dependency and npm overrides enforce v4.1.0
 
 **2025-12-15**: DOMPurify mXSS vulnerability (CVE-2025-26791)
 - Updated DOMPurify to v3.2.4
@@ -150,7 +152,7 @@ We use:
 
 Security-sensitive dependencies reviewed regularly:
 - `dompurify` (HTML sanitization)
-- `html2pdf.js` and `jspdf` (PDF generation)
+- `playwright` (headless Chromium PDF generation)
 - `fastapi` (API framework)
 - `chromadb` (vector database)
 
@@ -193,18 +195,7 @@ Before merging:
 
 ---
 
-## Security Audit History
-
-| Date | Component | Issue | Status |
-|------|-----------|-------|--------|
-| 2026-01-15 | html2pdf.js | XSS vulnerability (GHSA-w8x4-x68c-m6fc) | ✅ Fixed |
-| 2025-12-20 | jspdf | LFI/Path Traversal (CVE-2025-68428) | ✅ Fixed |
-| 2025-12-15 | DOMPurify | mXSS vulnerability (CVE-2025-26791) | ✅ Fixed |
-| 2025-12-05 | LatexRenderer | Missing XSS sanitization | ✅ Fixed |
-
----
-
-## Scope
+## Scope for Reporting
 
 ### In Scope
 
@@ -217,9 +208,9 @@ Before merging:
 ### Out of Scope
 
 - Issues in third-party services (LM Studio, OpenRouter)
-- Model-generated content quality
+- Model-generated content quality (including incorrect LaTeX)
 - Performance optimization
-- Feature requests
+- Feature requests (use the discussion section of the GitHub)
 - General support questions
 
 ---
@@ -229,6 +220,7 @@ Before merging:
 - **OWASP Top 10**: https://owasp.org/www-project-top-ten/
 - **GitHub Security Advisories**: https://github.com/advisories
 - **npm Security Advisories**: https://www.npmjs.com/advisories
+- **DOMPurify**: https://github.com/cure53/DOMPurify
 - **Python Security**: https://python.org/dev/security/
 
 ---

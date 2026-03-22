@@ -709,10 +709,12 @@ Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answe
 
 ### Trigger Condition
 
-- **Every 5 papers in library**: Triggers when `actual_library_count - last_check >= 5`
+- **Disabled by default**: `tier3_enabled` defaults to `False`. Tier 3 never triggers automatically unless the user enables it in Settings.
+- **Every 5 papers in library** (when enabled): Triggers when `actual_library_count - last_check >= 5`
 - Based on actual papers saved in the paper library, not internal counters
 - Uses `paper_library.count_papers()["active"]` to get the true count
 - Example trigger points: 5, 10, 15, 20 papers in library
+- **Force override**: The Force Tier 3 button bypasses the `tier3_enabled` gate but is hidden in the UI when Tier 3 is disabled
 
 ### Phase 1: Certainty Assessment
 
@@ -844,11 +846,11 @@ The system implements **two tiers of model tracking**:
 ================================================================================
 AUTONOMOUS AI SOLUTION
 
-Disclaimer: This is an autonomous AI solution generated with the MOTO harness.
-This paper was not peer reviewed and was autonomously generated without user
-oversight or interaction beyond the original user prompt, therefore, this text
-may contain errors. These papers often contain ambitious content and/or
-extraordinary claims, all content should be viewed with extreme scrutiny.
+Disclaimer: This content is for informational purposes only. This paper was
+autonomously generated with the novelty-seeking MOTO harness without peer review
+or user oversight beyond the original prompt. AI-generated content may contain
+fabricated or unverified claims presented with high confidence. All content
+should be viewed with extreme scrutiny and independently verified before use.
 
 User's Research Prompt: [user's original prompt here]
 
@@ -937,7 +939,11 @@ Tier 3 tracks all models used during final answer generation for author attribut
 ================================================================================
 AUTONOMOUS AI SOLUTION
 
-This was an autonomous AI solution generated with the MOTO harness.
+Disclaimer: This content is for informational purposes only. This paper was
+autonomously generated with the novelty-seeking MOTO harness without peer review
+or user oversight beyond the original prompt. AI-generated content may contain
+fabricated or unverified claims presented with high confidence. All content
+should be viewed with extreme scrutiny and independently verified before use.
 
 User's Research Prompt: [user's original prompt here]
 
@@ -1487,17 +1493,18 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 13. **Tier 3 papers do NOT use brainstorm databases** - Only reference Tier 2 completed papers (context isolation)
 14. **Tier 3 has INDEPENDENT rejection feedback** - Separate 10-rejection cache from Tiers 1/2
 15. **System STOPS after final answer is complete** - No more paper generation after Tier 3 completes
-16. **Tier 3 triggers every 5 papers IN THE LIBRARY** - Based on actual `paper_library.count_papers()["active"]`, not internal counters
-17. **`no_answer_known` exits Tier 3** - Returns to normal research, more papers needed
-18. **Long-form volume writing order is FIXED** - Gap papers → Conclusion → Introduction (last)
-19. **Model tracking is ENABLED during Tier 3** - All API calls tracked for author attribution and model credits
-20. **Same model = single author** - Model used in multiple instances counts as ONE author entry, but all API calls tallied
-21. **Paper redundancy is DISABLED during Tier 3** - `_tier3_active` flag prevents redundancy checks from purging papers being used in the final volume
-22. **Brainstorm hard limit is 80 acceptances** - After 80 acceptances, paper writing is forced (no completion review)
-23. **Maximum 1 completed rewrite per paper** - Rewrite counts as "completed" only after first successful body acceptance; prevents infinite loops from failed rewrite attempts
-24. **Partial revision option available** - Allows targeted edits without full body rewrite
-25. **Total rewrite is last resort** - Only for catastrophic issues that can't be fixed with targeted edits
-26. **Rejection hard limit is 10 consecutive rejections (with 5+ acceptances)** - Prevents infinite rejection loops
+16. **Tier 3 is DISABLED by default** — `tier3_enabled=False`; must be explicitly enabled in Settings. System stops at Tier 2 paper library by default.
+17. **Tier 3 triggers every 5 papers IN THE LIBRARY** (when enabled) - Based on actual `paper_library.count_papers()["active"]`, not internal counters
+18. **`no_answer_known` exits Tier 3** - Returns to normal research, more papers needed
+19. **Long-form volume writing order is FIXED** - Gap papers → Conclusion → Introduction (last)
+20. **Model tracking is ENABLED during Tier 3** - All API calls tracked for author attribution and model credits
+21. **Same model = single author** - Model used in multiple instances counts as ONE author entry, but all API calls tallied
+22. **Paper redundancy is DISABLED during Tier 3** - `_tier3_active` flag prevents redundancy checks from purging papers being used in the final volume
+23. **Brainstorm hard limit is 80 acceptances** - After 80 acceptances, paper writing is forced (no completion review)
+24. **Maximum 1 completed rewrite per paper** - Rewrite counts as "completed" only after first successful body acceptance; prevents infinite loops from failed rewrite attempts
+25. **Partial revision option available** - Allows targeted edits without full body rewrite
+26. **Total rewrite is last resort** - Only for catastrophic issues that can't be fixed with targeted edits
+27. **Rejection hard limit is 10 consecutive rejections (with 5+ acceptances)** - Prevents infinite rejection loops
 
 ---
 

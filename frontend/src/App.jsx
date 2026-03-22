@@ -208,7 +208,8 @@ function App() {
           critique_submitter_openrouter_provider: localConfig.critique_submitter_openrouter_provider,
           critique_submitter_lm_studio_fallback: localConfig.critique_submitter_lm_studio_fallback,
           critique_submitter_context_window: localConfig.critique_submitter_context_window,
-          critique_submitter_max_tokens: localConfig.critique_submitter_max_tokens
+          critique_submitter_max_tokens: localConfig.critique_submitter_max_tokens,
+          tier3_enabled: settings.tier3Enabled ?? false
         };
       } catch (e) {
         console.error('Failed to parse autonomous_research_settings:', e);
@@ -245,7 +246,8 @@ function App() {
       critique_submitter_openrouter_provider: 'Google',
       critique_submitter_lm_studio_fallback: null,
       critique_submitter_context_window: 131072,
-      critique_submitter_max_tokens: 25000
+      critique_submitter_max_tokens: 25000,
+      tier3_enabled: false
     };
   });
 
@@ -283,7 +285,8 @@ function App() {
         critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
         critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens
       },
-      freeOnly: false // Default value
+      freeOnly: false, // Default value
+      tier3Enabled: autonomousConfig.tier3_enabled ?? false
     };
     localStorage.setItem('autonomous_research_settings', JSON.stringify(settingsToSave));
   }, [autonomousConfig]);
@@ -785,7 +788,67 @@ function App() {
         ...data
       });
     }));
-    
+
+    unsubscribers.push(websocket.on('free_model_rotated', (data) => {
+      console.info('Free model rotated:', data);
+      addActivity({
+        event: 'free_model_rotated',
+        timestamp: new Date().toISOString(),
+        message: `🔄 Model rotated: ${data.from_model} → ${data.to_model} (${data.role_id})`,
+        ...data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('free_model_auto_selector_used', (data) => {
+      console.info('Free model auto-selector used:', data);
+      addActivity({
+        event: 'free_model_auto_selector_used',
+        timestamp: new Date().toISOString(),
+        message: `🔄 Auto-selector backup: openrouter/free used for ${data.role_id}`,
+        ...data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('serial_bottleneck_paused', (data) => {
+      console.warn('Serial bottleneck - workflow paused:', data);
+      addActivity({
+        event: 'serial_bottleneck_paused',
+        timestamp: new Date().toISOString(),
+        message: `⏸️ SERIAL BOTTLENECK: ${data.role_id} paused for ${Math.round((data.wait_seconds || 0) / 60)} min`,
+        ...data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('serial_bottleneck_resumed', (data) => {
+      console.info('Serial bottleneck resolved:', data);
+      addActivity({
+        event: 'serial_bottleneck_resumed',
+        timestamp: new Date().toISOString(),
+        message: `▶️ SERIAL BOTTLENECK resolved: ${data.role_id} resumed`,
+        ...data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('all_free_models_exhausted', (data) => {
+      console.error('All free models exhausted:', data);
+      addActivity({
+        event: 'all_free_models_exhausted',
+        timestamp: new Date().toISOString(),
+        message: `❌ All free models exhausted: ${data.message}`,
+        ...data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('account_credits_exhausted', (data) => {
+      console.error('Account credits exhausted:', data);
+      addActivity({
+        event: 'account_credits_exhausted',
+        timestamp: new Date().toISOString(),
+        message: `❌ Account free credits depleted: ${data.message}`,
+        ...data
+      });
+    }));
+
     unsubscribers.push(websocket.on('final_answer_complete', (data) => {
       addActivity({
         event: 'final_answer_complete',
@@ -932,7 +995,8 @@ function App() {
         critique_submitter_openrouter_provider: autonomousConfig.critique_submitter_openrouter_provider,
         critique_submitter_lm_studio_fallback: autonomousConfig.critique_submitter_lm_studio_fallback,
         critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
-        critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens
+        critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
+        tier3_enabled: autonomousConfig.tier3_enabled ?? false
       });
       setAutonomousRunning(true);
       setAutonomousActivity([]);
@@ -1043,13 +1107,15 @@ function App() {
     { id: 'auto-interface', label: 'Start Here: Autonomous Deep Research Controller', group: 'autonomous-main' },
     { id: 'auto-brainstorms', label: 'Stage 1: Brainstorms', group: 'autonomous-main' },
     { id: 'auto-papers', label: 'Stage 2: Short-Form Final Answer(s)', subtext: '(Less Hallucinatory - Short-Form Final Answers)', subtextClass: 'green', group: 'autonomous-main' },
-    { id: 'auto-final-answer', label: getFinalAnswerLabel(), subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
-    { id: 'auto-final-answer-library', label: 'Long-Form Final Answer History', subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
+    ...(autonomousConfig.tier3_enabled ? [
+      { id: 'auto-final-answer', label: getFinalAnswerLabel(), subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
+    ] : []),
   ];
 
   const autonomousSettingsTabs = [
-    { id: 'auto-settings', label: 'Autonomous Model Selection & Settings', group: 'autonomous-settings' },
+    { id: 'auto-final-answer-library', label: 'Long-Form Final Answer History', subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-settings' },
     { id: 'auto-logs', label: 'API Call Logs', group: 'autonomous-settings' },
+    { id: 'auto-settings', label: 'Autonomous Model Selection & Settings', group: 'autonomous-settings' },
   ];
 
   const singlePaperWriterTabs = {
@@ -1397,18 +1463,18 @@ function App() {
       {/* Users can configure boost (set next count, toggle categories) at any time */}
       <WorkflowPanel isRunning={anyWorkflowRunning} />
       
-      {/* Beta Disclaimer Modal - Shows on every app load */}
+      {/* Disclaimer Modal - Shows on every app load */}
       {showDisclaimer && (
         <>
           <div className="disclaimer-overlay" onClick={(e) => e.stopPropagation()} />
           <div className="disclaimer-modal">
             <div className="disclaimer-content">
               <h2 style={{ marginTop: 0, marginBottom: '1.5rem', color: '#f1c40f' }}>
-                  Beta Prototype Warning
+                  In-Development Program Disclaimer
               </h2>
               <p style={{ fontSize: '0.95rem', lineHeight: '1.5', marginBottom: '1.5rem' }}>
-                Disclaimer: This program is a prototype and in its beta development phase. This NOT meant to produce a single paper, the first paper may lack in quality, MOTO is intended to generate you dozens of papers and improve with each completely new paper, best results show after 10+ papers.
-                Watch your systems and API keys for infinite loops, wasted API calls, and any other bugs. This first version of the program is powerful but currently has many bugs. The paper text rendering system is experimental—display issues are <em>not</em> reflective of paper quality. If formatting appears messy, try a 3rd-party LaTeX renderer or copy the raw text into another LLM chat for verification.
+                Disclaimer: This program is a prototype super intelligence and is actively in development. MOTO operates by forcing your selected AI to attempt to output novel solutions toward your user prompt. Quality, correctness or any other aspects of a given solution are not guaranteed and should be examined with care and scrutiny. MOTO is not meant to produce a single paper, the first paper may lack in quality, MOTO is intended to generate many papers and improve with each completely new paper, best results show after 10+ papers.
+                Monitor the harness, logs and API keys for infinite loops, wasted API calls, and any other bugs. The paper text rendering system is experimental—display issues are <em>not</em> reflective of paper quality. If formatting appears messy, try a 3rd-party LaTeX renderer or copy the raw text into another LLM chat for verification.
               </p>
               <p style={{ fontSize: '1.1rem', lineHeight: '1.6', marginBottom: '1.5rem', color: '#ffcc00' }}>
                 <strong>QUICKSTART:</strong> (Optional) Load your Nomic embedding agent on LM STUDIO, or use an OpenRouter API key-only instead of LM STUDIO and go straight to picking your models, and then start the program - expect it to run for at the VERY LEAST hours to days once you hit run. You must leave your PC on and awake during runtime.
@@ -1480,7 +1546,7 @@ function App() {
           <div className="footer-section footer-license">
             <span>MIT License</span>
             <span className="footer-divider">|</span>
-            <span className="footer-copyright">© 2025 Intrafere LLC</span>
+            <span className="footer-copyright">© 2026 Intrafere LLC</span>
           </div>
           
           <div className="footer-section footer-links">
@@ -1493,6 +1559,15 @@ function App() {
               <span className="footer-icon">ℹ️</span>
               About M.O.T.O.
             </a>
+            <a
+              href="https://intrafere.com/structured-brainstorming-validated-feedback/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="footer-link"
+            >
+              <span className="footer-icon">ℹ️</span>
+              How MOTO's Superintelligence Works
+            </a>
             <a 
               href="https://intrafere.com/moto-news/" 
               target="_blank" 
@@ -1500,17 +1575,6 @@ function App() {
               className="footer-link footer-link-news"
             >
               MOTO News and Updates
-            </a>
-          </div>
-          
-          <div className="footer-section footer-donate">
-            <a 
-              href="https://intrafere.com/donate/" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="donate-btn"
-            >
-              Donate - Support open source!
             </a>
           </div>
         </div>

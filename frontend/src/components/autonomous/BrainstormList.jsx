@@ -15,7 +15,16 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
   const [deleting, setDeleting] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [showLatex, setShowLatex] = useState(true);
+  const [userChoseLatex, setUserChoseLatex] = useState(false);
   const unsubscribeRef = useRef(null);
+
+  // Auto-disable LaTeX rendering when brainstorm grows large (>50k chars).
+  // Only fires if the user has not explicitly toggled the LaTeX checkbox.
+  useEffect(() => {
+    if (!userChoseLatex && fileContent && fileContent.length > 50000) {
+      setShowLatex(false);
+    }
+  }, [fileContent, userChoseLatex]);
 
   // Auto-refresh expanded brainstorm every 2 seconds
   useEffect(() => {
@@ -34,7 +43,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
     refreshContent();
 
     // Set up interval
-    const interval = setInterval(refreshContent, 2000);
+    const interval = setInterval(refreshContent, 5000);
     return () => clearInterval(interval);
   }, [expandedId, autoRefresh, api]);
 
@@ -225,7 +234,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
                         <input
                           type="checkbox"
                           checked={showLatex}
-                          onChange={(e) => setShowLatex(e.target.checked)}
+                          onChange={(e) => { setUserChoseLatex(true); setShowLatex(e.target.checked); }}
                         />
                         LaTeX Rendering
                       </label>
