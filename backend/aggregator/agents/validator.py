@@ -11,6 +11,7 @@ from backend.shared.config import rag_config
 from backend.shared.models import Submission, ValidationResult
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.shared_training import shared_training_memory
@@ -105,6 +106,8 @@ class ValidatorAgent:
             
             return quality_result
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Validation failed: {e}")
             return ValidationResult(
@@ -279,7 +282,7 @@ class ValidatorAgent:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Cache model config on first successful API call (only relevant for LM Studio)
             try:
@@ -644,7 +647,7 @@ class ValidatorAgent:
             
             # Extract content
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Parse JSON
             try:
@@ -739,6 +742,8 @@ class ValidatorAgent:
             
             return results
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Batch quality assessment failed: {e}", exc_info=True)
             return [
@@ -1015,7 +1020,7 @@ class ValidatorAgent:
             
             # Extract content from either 'content' or 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             logger.info(f"CLEANUP DEBUG: LLM output length: {len(llm_output)} chars")
             logger.info(f"CLEANUP DEBUG: Raw LLM output (first 1000 chars):\n{llm_output[:1000]}")
@@ -1062,6 +1067,8 @@ class ValidatorAgent:
                 "reasoning": reasoning
             }
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"CLEANUP DEBUG: EXCEPTION in perform_cleanup_review: {e}", exc_info=True)
             logger.error(f"Cleanup review failed: {e}", exc_info=True)
@@ -1210,7 +1217,7 @@ class ValidatorAgent:
             
             # Extract content from either 'content' or 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             logger.info(f"CLEANUP DEBUG: LLM output length: {len(llm_output)} chars")
             logger.info(f"CLEANUP DEBUG: Raw LLM output (first 1000 chars):\n{llm_output[:1000]}")
@@ -1249,6 +1256,8 @@ class ValidatorAgent:
                 )
                 return False
                 
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"CLEANUP DEBUG: EXCEPTION in validate_removal: {e}", exc_info=True)
             logger.error(f"Removal validation failed: {e}", exc_info=True)

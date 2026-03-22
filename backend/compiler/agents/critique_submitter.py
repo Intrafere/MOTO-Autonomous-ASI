@@ -11,6 +11,7 @@ from datetime import datetime
 from backend.shared.config import rag_config, system_config
 from backend.shared.models import Submission
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
 from backend.compiler.prompts.critique_prompts import (
@@ -161,7 +162,7 @@ class CritiqueSubmitterAgent:
                 return None
             
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Parse JSON response
             data = parse_json(llm_output)
@@ -214,6 +215,8 @@ class CritiqueSubmitterAgent:
             
             return submission
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Error generating critique: {e}", exc_info=True)
             return None
@@ -312,7 +315,7 @@ class CritiqueSubmitterAgent:
                 return None
             
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Parse JSON response
             data = parse_json(llm_output)
@@ -348,6 +351,8 @@ class CritiqueSubmitterAgent:
             
             return data
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Error generating rewrite decision: {e}", exc_info=True)
             return None
@@ -442,7 +447,7 @@ class CritiqueSubmitterAgent:
                 return None
             
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Parse JSON response
             data = parse_json(llm_output)
@@ -481,6 +486,8 @@ class CritiqueSubmitterAgent:
             
             return data
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Error generating iterative edit: {e}", exc_info=True)
             return None

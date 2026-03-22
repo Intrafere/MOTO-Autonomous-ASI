@@ -16,8 +16,11 @@ project-root/
 │   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion detection)
 │   │   ├── api_client_manager.py        # Unified API router (OpenRouter/LM Studio fallback + boost)
 │   │   ├── boost_manager.py             # Singleton boost manager (tracks boosted tasks)
+│   │   ├── boost_logger.py              # Boost API call logger (persists to boost_api_log.txt)
 │   │   ├── workflow_predictor.py        # Predicts next 20 API calls (mode-specific algorithms)
+│   │   ├── free_model_manager.py        # Free model rotation/cooldown singleton (looping + auto-selector backup)
 │   │   ├── rag_lock.py                  # Global RAG operation lock (prevents Aggregator/Compiler collision)
+│   │   ├── wolfram_alpha_client.py      # Wolfram Alpha API client
 │   │   ├── utils.py                     # Common utilities
 │   │   ├── json_parser.py               # JSON parsing with sanitization for LLM quirks
 │   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
@@ -54,7 +57,7 @@ project-root/
 │   │       ├── submitter_prompts.py     # Submitter system prompts + JSON schemas
 │   │       └── validator_prompts.py     # Validator system prompts + JSON schemas
 │   │
-│   ├── compiler/                        # COMPILER (Phase 2 - TO BE IMPLEMENTED)
+│   ├── compiler/                        # COMPILER (Phase 2)
 │   │   ├── __init__.py                  # Package initialization
 │   │   ├── core/
 │   │   │   ├── __init__.py              # Package initialization
@@ -77,6 +80,8 @@ project-root/
 │   │       ├── __init__.py              # Package initialization
 │   │       ├── outline_memory.py        # Current outline state (direct inject/RAG)
 │   │       ├── paper_memory.py          # Current paper state (direct inject/RAG)
+│   │       ├── critique_memory.py       # Accepted critiques database for peer review phase
+│   │       ├── critique_rejection_memory.py # Last 5 critique rejection feedback logs
 │   │       └── compiler_rejection_log.py # Last 10 rejections & acceptances
 │   │
 │   ├── autonomous/                      # AUTONOMOUS RESEARCH (Phase 3)
@@ -131,6 +136,7 @@ project-root/
 │   │       ├── autonomous.py            # Autonomous Research API endpoints
 │   │       ├── boost.py                 # Boost API endpoints (enable/disable/toggle/status)
 │   │       ├── workflow.py              # Workflow API endpoints (predictions/history)
+│   │       ├── download.py              # PDF generation endpoint via Playwright (POST /api/download/pdf)
 │   │       ├── openrouter.py            # OpenRouter API endpoints (global key, models, providers, LM Studio availability, **GET /api/model-cache** for model ID caching)
 │   │       └── websocket.py             # WebSocket for real-time updates
 │   │
@@ -205,14 +211,26 @@ project-root/
 │   │   │       ├── AutonomousResearchLogs.jsx      # Metrics, graphs, event log
 │   │   │       ├── LivePaperProgress.jsx    # Real-time Tier 2 paper display (embedded in interface)
 │   │   │       ├── LiveTier3Progress.jsx    # Real-time Tier 3 final answer display (embedded in interface)
-│   │   │       └── FinalAnswerView.jsx      # TIER 3 - Final answer tab (separate tab for completed answers)
+│   │   │       ├── FinalAnswerView.jsx      # TIER 3 - Final answer tab (separate tab for completed answers)
+│   │   │       ├── FinalAnswerLibrary.jsx   # All sessions final answer library viewer
+│   │   │       └── ArchiveViewerModal.jsx   # Research lineage archive viewer (papers + brainstorms)
 │   │   │
 │   │   ├── OpenRouterApiKeyModal.jsx    # Modal for global OpenRouter API key configuration
 │   │   ├── PaperCritiqueModal.jsx       # Modal for displaying validator paper critiques (ratings, feedback, history)
+│   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥7.0 avg)
+│   │   ├── BoostLogs.jsx                # Boost API call log viewer
+│   │   ├── BoostControlModal.jsx        # Modal for boost configuration (next-X, category, per-task)
+│   │   ├── WorkflowPanel.jsx            # Workflow prediction panel (next 20 API calls display)
+│   │   ├── TextFileUploader.jsx         # User file upload component
+│   │   ├── OpenRouterPrivacyWarningModal.jsx # Privacy policy error modal (OpenRouter data sharing)
 │   │   │
 │   │   ├── services/
 │   │   │   ├── api.js                   # Backend API calls (includes openRouterAPI)
 │   │   │   └── websocket.js             # WebSocket connection 
+│   │   │
+│   │   ├── utils/
+│   │   │   ├── downloadHelpers.js       # PDF/raw download helpers (Playwright backend PDF)
+│   │   │   └── modelCache.js            # Frontend model cache utilities (display_name → api_id lookup)
 │   │   │
 │   │   ├── App.jsx                      # Main app with tab navigation
 │   │   ├── index.css                    # Styles
@@ -236,7 +254,10 @@ project-root/
 - `openrouter_client.py`: OpenRouter HTTP client (credit exhaustion detection, fallback)
 - `api_client_manager.py`: Unified API router (OpenRouter/LM Studio fallback + boost + model tracking)
 - `boost_manager.py`: Singleton boost manager (tracks boosted tasks, broadcasts events)
+- `boost_logger.py`: Boost API call logger (persists to `boost_api_log.txt`)
 - `workflow_predictor.py`: Predicts next 20 API calls (mode-specific algorithms)
+- `free_model_manager.py`: Free model rotation/cooldown singleton (looping, auto-selector `openrouter/free`, account exhaustion detection)
+- `wolfram_alpha_client.py`: Wolfram Alpha API client for rigor verification
 - `rag_lock.py`: Global RAG operation lock (prevents collision, retry logic for reads)
 - `utils.py`: Token counting, text compression, file I/O
 - `json_parser.py`: JSON parsing with sanitization for LLM responses; sanitizes reasoning tokens, markdown blocks, control tokens, LaTeX escapes, control characters; **rejects truncated JSON** (raises ValueError with diagnostics) to prevent corrupted content from passing validation
@@ -248,6 +269,8 @@ project-root/
 - `compiler_coordinator.py`: Orchestrates Markov chain workflow, mode switching
 - `compiler_rag_manager.py`: Per-role context windows, direct→RAG priority
 - `outline_memory.py`, `paper_memory.py`, `compiler_rejection_log.py`: File I/O and logging
+- `critique_memory.py`: Accepted critiques database for peer review aggregation phase
+- `critique_rejection_memory.py`: Last 5 critique rejection feedback logs (helps critique submitter learn)
 - `high_context_submitter.py`, `high_param_submitter.py`, `critique_submitter.py`: Submitter agents
 - `compiler_validator.py`: Validates coherence, rigor, placement
 - Prompts: `outline_prompts.py`, `construction_prompts.py`, `review_prompts.py`, `rigor_prompts.py`, `critique_prompts.py`
@@ -271,6 +294,6 @@ project-root/
 
 - **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
 - **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`
-- **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`
-- **Shared**: `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
-- **Utils**: `downloadHelpers.js` (PDF/raw download), `api.js`, `websocket.js`
+- **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx`, `ArchiveViewerModal.jsx`
+- **Shared**: `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `BoostLogs.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
+- **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `api.js`, `websocket.js`

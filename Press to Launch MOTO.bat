@@ -102,6 +102,26 @@ echo Python dependencies installed successfully!
 echo.
 
 REM ================================================================
+REM STEP 4b: Install Playwright Chromium (for PDF generation)
+REM ================================================================
+echo [4b/8] Installing Playwright Chromium browser for PDF generation...
+echo This is a one-time ~150MB download and may take a few minutes...
+echo.
+python -m playwright install chromium
+if errorlevel 1 (
+    echo.
+    echo WARNING: Playwright Chromium install failed.
+    echo PDF generation will not be available until this is resolved.
+    echo You can retry manually: python -m playwright install chromium
+    echo.
+    echo Continuing startup anyway...
+    echo.
+) else (
+    echo Playwright Chromium ready!
+    echo.
+)
+
+REM ================================================================
 REM STEP 5: Install Node.js Dependencies
 REM ================================================================
 echo [5/8] Installing Node.js dependencies...

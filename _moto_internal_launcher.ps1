@@ -104,6 +104,22 @@ try {
     }
     Write-Host ""
 
+    # Install Playwright Chromium browser (one-time ~150MB download for PDF generation)
+    Write-Host "[4b/6] Installing Playwright Chromium browser for PDF generation..." -ForegroundColor Yellow
+    Write-Host "This is a one-time download (~150MB) and may take a few minutes..." -ForegroundColor Yellow
+    Write-Host ""
+    python -m playwright install chromium 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "WARNING: Playwright Chromium install failed." -ForegroundColor Yellow
+        Write-Host "PDF generation will not be available until resolved." -ForegroundColor Yellow
+        Write-Host "Retry manually: python -m playwright install chromium" -ForegroundColor Yellow
+        Write-Host "Continuing startup anyway..." -ForegroundColor Yellow
+    } else {
+        Write-Host "Playwright Chromium ready!" -ForegroundColor Green
+    }
+    Write-Host ""
+
     # Check/Install Node.js dependencies
     Write-Host "[5/6] Checking Node.js dependencies..." -ForegroundColor Yellow
     if (-not (Test-Path "frontend")) {

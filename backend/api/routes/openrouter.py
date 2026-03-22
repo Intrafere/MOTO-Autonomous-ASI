@@ -20,6 +20,8 @@ from backend.shared.config import rag_config
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import OpenRouterClient
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.free_model_manager import free_model_manager
+from backend.shared.models import FreeModelSettings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -189,6 +191,9 @@ async def get_models(api_key: Optional[str] = None, free_only: bool = False) -> 
         try:
             models = await client.list_models(free_only=free_only)
             
+            # Cache free models for rotation (filter extracts free models internally)
+            free_model_manager.update_cached_models(models)
+            
             return {
                 "success": True,
                 "models": models,
@@ -282,6 +287,33 @@ async def get_model_cache() -> Dict[str, str]:
     except Exception as e:
         logger.error(f"Failed to read model cache: {e}")
         return {}
+
+
+@router.get("/api/openrouter/free-model-settings")
+async def get_free_model_settings() -> Dict[str, Any]:
+    """Get current free model looping and auto-selector settings."""
+    return {
+        "success": True,
+        **free_model_manager.get_status()
+    }
+
+
+@router.post("/api/openrouter/free-model-settings")
+async def set_free_model_settings(request: FreeModelSettings) -> Dict[str, Any]:
+    """Update free model looping and auto-selector settings."""
+    try:
+        free_model_manager.configure(
+            looping=request.looping_enabled,
+            auto_selector=request.auto_selector_enabled
+        )
+        return {
+            "success": True,
+            "message": "Free model settings updated",
+            **free_model_manager.get_status()
+        }
+    except Exception as e:
+        logger.error(f"Failed to update free model settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/openrouter/test-connection")

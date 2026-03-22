@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any, List, Tuple, Callable
 
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.models import PaperTitleSelection
 from backend.shared.utils import count_tokens
@@ -205,7 +206,7 @@ class PaperTitleSelectorAgent:
             
             # Extract content (check both content and reasoning fields)
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 return None
             
@@ -226,9 +227,10 @@ class PaperTitleSelectorAgent:
                 reasoning=data.get("reasoning", "")
             )
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"PaperTitleSelector: Error generating title: {e}")
-            # Notify task completed (failed but still completed)
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
             return None
@@ -284,7 +286,7 @@ class PaperTitleSelectorAgent:
             
             # Extract content (check both content and reasoning fields)
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 return False, "No content in validation response"
             
@@ -303,9 +305,10 @@ class PaperTitleSelectorAgent:
             else:
                 return False, reasoning
                 
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"PaperTitleSelector: Error validating title: {e}")
-            # Notify task completed (failed but still completed)
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
             return False, f"Validation error: {str(e)}"

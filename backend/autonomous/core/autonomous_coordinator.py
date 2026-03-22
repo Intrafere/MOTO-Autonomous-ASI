@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from typing import Optional, Dict, Any, List, Callable
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from backend.shared.models import (
     ModelConfig
 )
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.workflow_predictor import workflow_predictor
 
 # Memory managers
@@ -140,6 +142,7 @@ class AutonomousCoordinator:
         # Tier 3 Final Answer tracking
         self._last_tier3_check_at: int = 0  # Paper count at last Tier 3 check
         self._tier3_active: bool = False  # Is Tier 3 final answer generation active
+        self._tier3_enabled: bool = False  # User setting: allow automatic Tier 3 triggering (default OFF)
         self._force_tier3_after_paper: bool = False  # Force Tier 3 after current paper completes
         self._force_tier3_immediate: bool = False  # Force Tier 3 immediately (skip incomplete work)
         
@@ -193,7 +196,9 @@ class AutonomousCoordinator:
         # OpenRouter provider configs for critique submitter
         critique_submitter_provider: str = "lm_studio",
         critique_submitter_openrouter_provider: Optional[str] = None,
-        critique_submitter_lm_studio_fallback: Optional[str] = None
+        critique_submitter_lm_studio_fallback: Optional[str] = None,
+        # Tier 3 Final Answer setting
+        tier3_enabled: bool = False
     ) -> None:
         """Initialize the coordinator with configuration."""
         # Store configuration
@@ -235,6 +240,7 @@ class AutonomousCoordinator:
         self._critique_submitter_provider = critique_submitter_provider
         self._critique_submitter_openrouter_provider = critique_submitter_openrouter_provider
         self._critique_submitter_lm_studio_fallback = critique_submitter_lm_studio_fallback
+        self._tier3_enabled = tier3_enabled
         
         logger.info(f"Autonomous coordinator initializing with {len(submitter_configs)} submitters")
         for config in submitter_configs:
@@ -557,6 +563,7 @@ class AutonomousCoordinator:
             
             # Restore Tier 3 flags for proper resume
             self._tier3_active = workflow_state.get("tier3_active", False)
+            self._tier3_enabled = workflow_state.get("tier3_enabled", False)
             
             # CRITICAL: Restore paper phase for proper resume
             # This ensures the compiler continues from the correct phase (body/conclusion/intro/abstract)
@@ -807,6 +814,7 @@ class AutonomousCoordinator:
             "last_tier3_check_at": self._last_tier3_check_at,
             # Tier 3 Final Answer crash recovery fields
             "tier3_active": self._tier3_active,
+            "tier3_enabled": self._tier3_enabled,
             "tier3_format": tier3_format,
             "tier3_phase": tier3_state.status if tier3_state and tier3_state.is_active else None,
             "model_config": {
@@ -870,6 +878,7 @@ class AutonomousCoordinator:
         try:
             # Main research loop
             while self._running and not self._stop_event.is_set():
+              try:
                 # Check if resuming from interrupted state (CHECK THIS FIRST)
                 if resume_state:
                     resume_tier = resume_state.get("current_tier")
@@ -955,7 +964,12 @@ class AutonomousCoordinator:
                         
                         continue
                     elif resume_tier == "tier3_final_answer":
-                        # Resume Tier 3 final answer generation
+                        # Resume Tier 3 final answer generation only if tier3 is enabled
+                        if not self._tier3_enabled:
+                            logger.info("Tier 3 disabled — skipping Tier 3 resume, returning to topic selection")
+                            resume_state = None
+                            continue
+                        
                         tier3_state = final_answer_memory.get_state()
                         
                         logger.info(f"Resuming Tier 3 final answer: format={tier3_state.answer_format}, "
@@ -1110,10 +1124,33 @@ class AutonomousCoordinator:
                             logger.info("Tier 3: More research needed, returning to topic selection")
                     
                     logger.info("Paper complete, returning to topic selection")
-                
+
+              except FreeModelExhaustedError as e:
+                if e.soonest_retry:
+                    wait_secs = max(0, e.soonest_retry - time.time())
+                    wait_mins = round(wait_secs / 60, 1)
+                    logger.warning(
+                        f"SERIAL BOTTLENECK: Autonomous research paused for {wait_mins} minutes "
+                        f"(all free models rate-limited)"
+                    )
+                    await self._broadcast("serial_bottleneck_paused", {
+                        "role_id": "autonomous",
+                        "model": str(e),
+                        "wait_seconds": round(wait_secs),
+                        "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
+                    })
+                    await asyncio.sleep(wait_secs)
+                    await self._broadcast("serial_bottleneck_resumed", {"role_id": "autonomous"})
+                else:
+                    logger.error(f"AutonomousCoordinator: all free models exhausted, no cooldown: {e}")
+                    await self._broadcast("all_free_models_exhausted", {
+                        "message": f"All free models exhausted: {e}"
+                    })
+                    await self._save_workflow_state()
+                    break
+
         except Exception as e:
             logger.error(f"AutonomousCoordinator error: {e}")
-            # Save workflow state before raising (for crash recovery)
             await self._save_workflow_state()
             raise
         finally:
@@ -1323,6 +1360,7 @@ class AutonomousCoordinator:
         try:
             # Main research loop - same as in start() method
             while self._running and not self._stop_event.is_set():
+              try:
                 # Check for forced immediate Tier 3 (skip_incomplete mode)
                 if self._force_tier3_immediate:
                     logger.info("Forced Tier 3 (skip_incomplete): Triggering immediately")
@@ -1423,17 +1461,38 @@ class AutonomousCoordinator:
                             logger.info("Tier 3: More research needed, returning to topic selection")
                     
                     logger.info("Paper complete, returning to topic selection")
-                
+
+              except FreeModelExhaustedError as e:
+                if e.soonest_retry:
+                    wait_secs = max(0, e.soonest_retry - time.time())
+                    wait_mins = round(wait_secs / 60, 1)
+                    logger.warning(
+                        f"SERIAL BOTTLENECK: Resumed research paused for {wait_mins} minutes "
+                        f"(all free models rate-limited)"
+                    )
+                    await self._broadcast("serial_bottleneck_paused", {
+                        "role_id": "autonomous_resumed",
+                        "model": str(e),
+                        "wait_seconds": round(wait_secs),
+                        "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
+                    })
+                    await asyncio.sleep(wait_secs)
+                    await self._broadcast("serial_bottleneck_resumed", {"role_id": "autonomous_resumed"})
+                else:
+                    logger.error(f"Resumed research: all free models exhausted, no cooldown: {e}")
+                    await self._broadcast("all_free_models_exhausted", {
+                        "message": f"All free models exhausted: {e}"
+                    })
+                    await self._save_workflow_state()
+                    break
+
         except Exception as e:
             logger.error(f"Error in resumed research loop: {e}")
-            # Save workflow state before cleanup (for crash recovery)
             await self._save_workflow_state()
         finally:
             self._running = False
             self._state.is_running = False
             
-            # Clear shared training memory in-memory cache to prevent data pollution
-            # The insights list will be reloaded from the file when needed
             shared_training_memory.insights.clear()
             shared_training_memory.submission_count = 0
             shared_training_memory.last_ragged_submission_count = 0
@@ -3015,7 +3074,7 @@ class AutonomousCoordinator:
             response_content = ""
             if response.get("choices"):
                 message = response["choices"][0].get("message", {})
-                response_content = message.get("content", "") or message.get("reasoning", "")
+                response_content = message.get("content") or message.get("reasoning") or ""
             
             if not response_content:
                 logger.error(f"Empty response from validator model for paper {paper_id}")
@@ -3164,7 +3223,7 @@ class AutonomousCoordinator:
         Triggers every 5 papers in the library, or if manually forced.
         Uses actual paper library count, not internal counters.
         """
-        # Check force flags first
+        # Check force flags first (always respected regardless of tier3_enabled)
         if self._force_tier3_immediate:
             logger.info("Tier 3 trigger: Force immediate flag set")
             self._force_tier3_immediate = False  # Clear flag
@@ -3174,6 +3233,10 @@ class AutonomousCoordinator:
             logger.info("Tier 3 trigger: Force after paper flag set")
             self._force_tier3_after_paper = False  # Clear flag
             return True
+        
+        # Automatic trigger disabled unless user enabled Tier 3
+        if not self._tier3_enabled:
+            return False
         
         # Normal trigger: every 5 papers in library
         interval = 5  # Check every 5 papers

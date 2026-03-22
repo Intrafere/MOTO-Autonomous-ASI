@@ -6,7 +6,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { websocket } from '../../services/websocket';
 import ArchiveViewerModal from './ArchiveViewerModal';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDF, sanitizeFilename } from '../../utils/downloadHelpers';
+import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 import './AutonomousResearch.css';
@@ -83,83 +83,58 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
   // Handle download PDF
   const handleDownloadPDF = async (e) => {
     e.stopPropagation();
-    
-    setIsGeneratingPDF(true);
-    
-    try {
-      // Load content if not already loaded
-      if (!volumeContent && !shortFormPaper) {
-        console.log('Content not loaded, loading now...');
-        await loadFinalAnswerContent();
-        // Wait a bit for React to update state
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-      
-      if (!containerRef.current) {
-        throw new Error('Content container not available');
-      }
-      
-      let element = containerRef.current.querySelector('.latex-rendered-content');
-      const wasInRawMode = !element;
-      
-      // If not already rendered, temporarily switch to rendered mode
-      if (!element) {
-        console.log('Content not rendered, switching to rendered mode for PDF...');
-        setShowLatex(true);
-        
-        // Wait for React re-render and LaTeX processing (1 second for large docs)
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        element = containerRef.current.querySelector('.latex-rendered-content');
-        
-        if (!element) {
-          throw new Error('Failed to render content for PDF generation');
-        }
-      }
 
-      // Get metadata and filename
-      let metadata = {};
-      let filename = '';
-      
-      if (finalAnswerData?.answer_format === 'short_form' && shortFormPaper) {
-        metadata = {
-          title: shortFormPaper.title || 'Final Answer - Short Form',
-          wordCount: shortFormPaper.word_count,
-          date: new Date().toLocaleDateString(),
-          models: shortFormPaper.model_usage ? Object.keys(shortFormPaper.model_usage).join(', ') : null
-        };
-        filename = sanitizeFilename(`Final_Answer_${shortFormPaper.title}`);
-      } else if (finalAnswerData?.answer_format === 'long_form' && volumeContent) {
-        metadata = {
-          title: volumeContent.title || finalAnswerData?.volume?.volume_title || 'Final Answer - Volume',
-          wordCount: volumeContent.word_count,
-          date: new Date().toLocaleDateString(),
-          models: null
-        };
-        filename = sanitizeFilename(`Final_Answer_${volumeContent.title || 'Volume'}`);
-      } else {
-        throw new Error('Content not available');
-      }
-      
-      // Warn for very large documents
-      if (metadata.wordCount > 30000) {
-        console.warn(`Large document (${metadata.wordCount} words) - PDF may take 30-60 seconds...`);
-      }
-      
-      // Generate PDF
-      await downloadPDF(element, metadata, filename, null);
-      
-      // Switch back to raw mode if we temporarily rendered
-      if (wasInRawMode) {
-        console.log('Switching back to raw text mode');
-        setShowLatex(false);
-      }
-    } catch (error) {
-      console.error('PDF generation error:', error);
-      alert(`Failed to generate PDF: ${error.message}\n\nFor very large documents (>40K words), try "Download Raw" instead.`);
-    } finally {
-      setIsGeneratingPDF(false);
+    // Use already-loaded state, or fetch now and use the returned data directly
+    // (can't rely on React state after await since state updates are async)
+    let resolvedShortForm = shortFormPaper;
+    let resolvedVolume = volumeContent;
+
+    if (!resolvedVolume && !resolvedShortForm) {
+      const loaded = await loadFinalAnswerContent();
+      if (loaded?.type === 'short_form') resolvedShortForm = loaded.data;
+      if (loaded?.type === 'long_form') resolvedVolume = loaded.data;
     }
+
+    let rawContent = '';
+    let metadata = {};
+    let filename = '';
+
+    if (finalAnswerData?.answer_format === 'short_form' && resolvedShortForm) {
+      rawContent = resolvedShortForm.content || '';
+      metadata = {
+        title: resolvedShortForm.title || 'Final Answer - Short Form',
+        wordCount: resolvedShortForm.word_count,
+        date: new Date().toLocaleDateString(),
+        models: resolvedShortForm.model_usage ? Object.keys(resolvedShortForm.model_usage).join(', ') : null,
+      };
+      filename = sanitizeFilename(`Final_Answer_${resolvedShortForm.title}`);
+    } else if (finalAnswerData?.answer_format === 'long_form' && resolvedVolume) {
+      rawContent = resolvedVolume.content || '';
+      metadata = {
+        title: resolvedVolume.title || finalAnswerData?.volume?.volume_title || 'Final Answer - Volume',
+        wordCount: resolvedVolume.word_count,
+        date: new Date().toLocaleDateString(),
+        models: null,
+      };
+      filename = sanitizeFilename(`Final_Answer_${resolvedVolume.title || 'Volume'}`);
+    } else {
+      alert('Content not available yet. Please wait for the final answer to be generated.');
+      return;
+    }
+
+    await downloadPDFViaBackend(
+      rawContent,
+      metadata,
+      filename,
+      null,
+      () => setIsGeneratingPDF(true),
+      () => setIsGeneratingPDF(false),
+      (error) => {
+        setIsGeneratingPDF(false);
+        console.error('PDF generation error:', error);
+        alert(`PDF generation failed: ${error.message}`);
+      },
+    );
   };
 
   // Load final answer status (metadata only - NOT content)
@@ -174,19 +149,21 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
     }
   }, [api]);
   
-  // Load content on demand (only when needed)
+  // Load content on demand (only when needed). Returns the loaded content for immediate use.
   const loadFinalAnswerContent = useCallback(async () => {
-    if (!api || !finalAnswerData) return;
+    if (!api || !finalAnswerData) return null;
     
     try {
       if (finalAnswerData.answer_format === 'long_form' && finalAnswerData.volume && !volumeContent) {
         console.log('Loading volume content on demand...');
         const volume = await api.getFinalAnswerVolume();
         setVolumeContent(volume);
+        return { type: 'long_form', data: volume };
       } else if (finalAnswerData.answer_format === 'short_form' && finalAnswerData.short_form_paper_id && !shortFormPaper) {
         console.log('Loading short form paper content on demand...');
         const paper = await api.getFinalAnswerPaper();
         setShortFormPaper(paper);
+        return { type: 'short_form', data: paper };
       }
     } catch (error) {
       console.error('Failed to load content:', error);
@@ -422,6 +399,9 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
     return (
       <div className="tier3-section content-section">
         <h4>Final Answer Paper</h4>
+        <div className="paper-library-file-location" style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '0.75em', lineHeight: '1.5' }}>
+          📁 For manual file retrieval, the short-form final answer is saved at: <code>backend/data/auto_sessions/[session_folder]/final_answer/final_short_form_paper.txt</code>. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
+        </div>
         {shortFormPaper ? (
           <div className="paper-content-container" ref={containerRef}>
             <div className="paper-meta">
@@ -454,6 +434,9 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
     return (
       <div className="tier3-section content-section">
         <h4>Volume Content</h4>
+        <div className="paper-library-file-location" style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '0.75em', lineHeight: '1.5' }}>
+          📁 For manual file retrieval, the long-form volume is saved at: <code>backend/data/auto_sessions/[session_folder]/final_answer/final_volume.txt</code>. Individual chapter papers are stored as <code>chapter_[index]_paper.txt</code> in the same directory. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
+        </div>
         {volumeContent && volumeContent.content ? (
           <div className="volume-content-container" ref={containerRef}>
             <div className="volume-meta">
@@ -620,7 +603,7 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
                         disabled={isGeneratingPDF || (!shortFormPaper && !volumeContent)}
                         title="Download as PDF"
                       >
-                        {isGeneratingPDF ? 'Generating PDF...' : 'Download PDF'}
+                        {isGeneratingPDF ? 'Preparing PDF...' : 'Download PDF'}
                       </button>
                       <button
                         className="btn-critique"

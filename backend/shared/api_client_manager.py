@@ -17,10 +17,12 @@ from backend.shared.openrouter_client import (
     OpenRouterClient, 
     CreditExhaustionError,
     OpenRouterPrivacyPolicyError,
-    RateLimitError
+    RateLimitError,
+    FreeModelExhaustedError
 )
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
+from backend.shared.free_model_manager import free_model_manager
 from backend.shared.models import ModelConfig
 
 logger = logging.getLogger(__name__)
@@ -267,7 +269,7 @@ class APIClientManager:
                     tokens_used = None
                     if result.get("choices"):
                         message = result["choices"][0].get("message", {})
-                        response_content = message.get("content", "") or message.get("reasoning", "")
+                        response_content = message.get("content") or message.get("reasoning") or ""
                     if result.get("usage"):
                         tokens_used = result["usage"].get("total_tokens")
                     
@@ -526,6 +528,26 @@ class APIClientManager:
                 openrouter_model = role_config.openrouter_model_id or role_config.model_id
                 openrouter_provider = role_config.openrouter_provider
                 
+                # Account-wide free credit exhaustion pre-check
+                is_free = ":free" in openrouter_model.lower()
+                if is_free and free_model_manager.is_account_exhausted():
+                    if role_config.lm_studio_fallback_id:
+                        logger.warning(
+                            f"Account free credits exhausted. Using LM Studio fallback for role '{role_id}': "
+                            f"{role_config.lm_studio_fallback_id}"
+                        )
+                        model = role_config.lm_studio_fallback_id
+                    else:
+                        await self._broadcast("account_credits_exhausted", {
+                            "message": "OpenRouter account free credits depleted. Add credits at openrouter.ai or configure LM Studio fallback."
+                        })
+                        rate_limited = self._openrouter_client.get_rate_limited_models()
+                        soonest = free_model_manager.get_soonest_retry(rate_limited)
+                        raise FreeModelExhaustedError(
+                            f"Account free credits exhausted and no LM Studio fallback for role '{role_id}'.",
+                            soonest_retry=soonest
+                        )
+                
                 provider_info = f" via {openrouter_provider}" if openrouter_provider else ""
                 
                 start_time = time.time()
@@ -547,7 +569,7 @@ class APIClientManager:
                     tokens_used = None
                     if result.get("choices"):
                         message = result["choices"][0].get("message", {})
-                        response_content = message.get("content", "") or message.get("reasoning", "")
+                        response_content = message.get("content") or message.get("reasoning") or ""
                     if result.get("usage"):
                         tokens_used = result["usage"].get("total_tokens")
                     
@@ -574,10 +596,9 @@ class APIClientManager:
                     return result
                 
                 except RateLimitError as e:
-                    # Rate limit error - try LM Studio fallback if configured (TEMPORARY, not permanent)
+                    # Rate limit error - attempt free model rotation chain before fallback
                     duration_ms = (time.time() - start_time) * 1000
                     
-                    # Log to autonomous API logger if callback set
                     if self._autonomous_logger_callback:
                         full_prompt = messages[-1].get("content", "") if messages else ""
                         await self._autonomous_logger_callback(
@@ -596,35 +617,42 @@ class APIClientManager:
                     
                     logger.warning(f"OpenRouter rate limit for role {role_id}: {e}")
                     
-                    # Broadcast rate limit event to frontend
                     retry_after_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.retry_after))
                     await self._broadcast("openrouter_rate_limit", {
                         "model": openrouter_model,
                         "role_id": role_id,
                         "retry_after": retry_after_iso,
-                        "message": f"OpenRouter free model rate limit hit. Retrying after 1 hour."
+                        "message": f"OpenRouter free model rate limit hit for '{openrouter_model}'."
                     })
                     
-                    # CHECK: Is fallback configured?
-                    if not role_config.lm_studio_fallback_id:
-                        # NO FALLBACK - raise clear error
-                        error_msg = (
-                            f"OpenRouter free model '{openrouter_model}' is rate-limited for role '{role_id}' "
-                            f"and no LM Studio fallback configured. "
-                            f"Please wait for cooldown period or configure an LM Studio fallback model in settings."
-                        )
-                        logger.error(error_msg)
-                        raise RuntimeError(error_msg)
-                    
-                    # Fallback IS configured - use it TEMPORARILY (don't mark as permanent fallback)
-                    fallback_model = role_config.lm_studio_fallback_id
-                    
-                    logger.info(
-                        f"OpenRouter free model rate-limited for role '{role_id}'. "
-                        f"Temporarily using LM Studio fallback: {fallback_model} (will retry OpenRouter after cooldown)"
+                    # --- FREE MODEL ROTATION CHAIN ---
+                    rotated_result = await self._try_free_model_rotation(
+                        task_id=task_id,
+                        role_id=role_id,
+                        original_model=openrouter_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens or role_config.max_output_tokens,
+                        response_format=response_format,
                     )
+                    if rotated_result is not None:
+                        return rotated_result
                     
-                    # Fall through to LM Studio (don't re-raise, don't mark as permanent)
+                    # Rotation chain exhausted — try LM Studio fallback
+                    if not role_config.lm_studio_fallback_id:
+                        rate_limited = self._openrouter_client.get_rate_limited_models() if self._openrouter_client else {}
+                        soonest = free_model_manager.get_soonest_retry(rate_limited)
+                        raise FreeModelExhaustedError(
+                            f"All free model options exhausted for role '{role_id}'. "
+                            f"No LM Studio fallback configured.",
+                            soonest_retry=soonest
+                        )
+                    
+                    fallback_model = role_config.lm_studio_fallback_id
+                    logger.info(
+                        f"Free model rotation exhausted for role '{role_id}'. "
+                        f"Temporarily using LM Studio fallback: {fallback_model}"
+                    )
                     model = fallback_model
                 
                 except OpenRouterPrivacyPolicyError as e:
@@ -809,7 +837,7 @@ class APIClientManager:
             tokens_used = None
             if result.get("choices"):
                 message = result["choices"][0].get("message", {})
-                response_content = message.get("content", "") or message.get("reasoning", "")
+                response_content = message.get("content") or message.get("reasoning") or ""
             if result.get("usage"):
                 tokens_used = result["usage"].get("total_tokens")
             
@@ -856,6 +884,86 @@ class APIClientManager:
             # Re-raise the exception
             raise
     
+    async def _try_free_model_rotation(
+        self,
+        task_id: str,
+        role_id: str,
+        original_model: str,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        response_format: Optional[Dict[str, str]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Attempt free model rotation chain: looping -> auto-selector.
+        Returns API result on success, None if all options exhausted.
+        """
+        if not self._openrouter_client:
+            return None
+
+        rate_limited = self._openrouter_client.get_rate_limited_models()
+
+        # Step 1: Free Model Looping — iterate through available free models
+        if free_model_manager.looping_enabled:
+            tried_models = {original_model}
+            while True:
+                alt_model = free_model_manager.get_alternative_free_model(
+                    original_model, rate_limited, skip_models=tried_models
+                )
+                if not alt_model or alt_model in tried_models:
+                    break
+                tried_models.add(alt_model)
+                logger.info(f"Free model rotation: {original_model} -> {alt_model} for role {role_id}")
+                await self._broadcast("free_model_rotated", {
+                    "role_id": role_id,
+                    "from_model": original_model,
+                    "to_model": alt_model,
+                    "reason": "rate_limit",
+                })
+                try:
+                    result = await self._openrouter_client.generate_completion(
+                        model=alt_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_format=response_format,
+                    )
+                    await self._track_model_usage(alt_model)
+                    if free_model_manager.is_account_exhausted():
+                        free_model_manager.clear_account_exhaustion()
+                    return result
+                except RateLimitError:
+                    rate_limited = self._openrouter_client.get_rate_limited_models()
+                    logger.warning(f"Rotated model {alt_model} also rate-limited, trying next")
+                except CreditExhaustionError as inner_e:
+                    logger.warning(f"Rotated model {alt_model} credit exhaustion: {inner_e}")
+                    break
+
+        # Step 2: Auto-Selector Backup — try openrouter/free
+        if free_model_manager.auto_selector_enabled:
+            auto_model = free_model_manager.AUTO_SELECTOR_MODEL
+            logger.info(f"Trying auto-selector '{auto_model}' for role {role_id}")
+            await self._broadcast("free_model_auto_selector_used", {
+                "role_id": role_id,
+                "original_model": original_model,
+            })
+            try:
+                result = await self._openrouter_client.generate_completion(
+                    model=auto_model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                )
+                await self._track_model_usage(auto_model)
+                if free_model_manager.is_account_exhausted():
+                    free_model_manager.clear_account_exhaustion()
+                return result
+            except (RateLimitError, CreditExhaustionError) as inner_e:
+                logger.warning(f"Auto-selector '{auto_model}' also failed: {inner_e}")
+
+        return None
+
     def get_fallback_state(self, role_id: str) -> str:
         """
         Get current fallback state for a role.

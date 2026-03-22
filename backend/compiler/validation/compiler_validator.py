@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Tuple
 
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission, CompilerValidationResult
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
@@ -488,7 +489,7 @@ class CompilerValidator:
                     return self._fallback_parse(response)
                 
                 message = retry_response["choices"][0]["message"]
-                retry_output = message.get("content", "") or message.get("reasoning", "")
+                retry_output = message.get("content") or message.get("reasoning") or ""
                 
                 try:
                     parsed = parse_json(retry_output)
@@ -962,7 +963,7 @@ class CompilerValidator:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Parse JSON response with retry logic
             validation_data = await self._parse_json_with_retry(
@@ -1004,9 +1005,10 @@ class CompilerValidator:
             
             return result
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Validation failed: {e}")
-            # Notify task completed (failed but still completed)
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             return CompilerValidationResult(
@@ -1658,7 +1660,7 @@ Example (reject - inappropriate for section):
             
             # Extract content from response (handles both 'content' and 'reasoning' fields)
             message = response.get("choices", [{}])[0].get("message", {})
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Parse the extracted string
             data = parse_json(llm_output)
@@ -1685,6 +1687,8 @@ Example (reject - inappropriate for section):
                 logger.info(f"Rewrite decision REJECTED: {reasoning[:200]}...")
                 return False
                 
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Error validating rewrite decision: {e}", exc_info=True)
             return False
@@ -1785,7 +1789,7 @@ Example (reject - inappropriate for section):
             
             # Extract content from response
             message = response.get("choices", [{}])[0].get("message", {})
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             
             # Parse the response
             data = parse_json(llm_output)
@@ -1812,6 +1816,8 @@ Example (reject - inappropriate for section):
                 logger.info(f"Partial revision edit REJECTED: {val_reasoning[:150]}...")
                 return False, val_reasoning
                 
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"Error validating partial revision edit: {e}", exc_info=True)
             return False, f"Validation error: {str(e)}"

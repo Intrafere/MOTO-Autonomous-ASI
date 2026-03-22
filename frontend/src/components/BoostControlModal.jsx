@@ -288,7 +288,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
                 onChange={(e) => setFreeOnly(e.target.checked)}
                 style={{ marginRight: '0.5rem' }}
               />
-              Show free models only
+              Show only free models
             </label>
           </div>
 

@@ -471,8 +471,8 @@ const AutonomousResearchInterface = ({
         )}
       </div>
 
-      {/* Force Tier 3 Button - Always visible when running and not already in Tier 3 */}
-      {isRunning && !status?.is_tier3_active && status?.stats?.total_papers_completed > 0 && (
+      {/* Force Tier 3 Button - Only visible when running, tier3 enabled, and not already in Tier 3 */}
+      {isRunning && config?.tier3_enabled && !status?.is_tier3_active && status?.stats?.total_papers_completed > 0 && (
         <div className="force-tier3-section">
           <button
             className="btn-force-tier3"

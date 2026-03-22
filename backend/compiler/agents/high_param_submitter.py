@@ -249,7 +249,7 @@ class HighParamSubmitter:
         
         # Extract content
         message = response["choices"][0]["message"]
-        llm_output = message.get("content", "") or message.get("reasoning", "")
+        llm_output = message.get("content") or message.get("reasoning") or ""
         logger.info(f"Step 1: LLM completion received - {len(llm_output)} chars")
         
         # Parse JSON
@@ -391,7 +391,7 @@ class HighParamSubmitter:
             
             # Extract content
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             logger.info(f"Step 2: LLM completion received - {len(llm_output)} chars")
             
             # Parse JSON
@@ -588,7 +588,7 @@ class HighParamSubmitter:
             
             # Extract content
             message = response["choices"][0]["message"]
-            llm_output = message.get("content", "") or message.get("reasoning", "")
+            llm_output = message.get("content") or message.get("reasoning") or ""
             logger.info(f"Step 2 (Wolfram): LLM completion received - {len(llm_output)} chars")
             
             # Parse JSON

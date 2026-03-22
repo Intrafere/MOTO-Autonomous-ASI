@@ -11,7 +11,7 @@ alwaysApply: true
 **Required implementation:**
 - `import DOMPurify from 'dompurify';` in LatexRenderer.jsx
 - `DOMPURIFY_CONFIG` constant defined (see below)
-- `renderedHtml` useMemo calls `DOMPurify.sanitize()` AFTER `renderLatexToHtml()`
+- `renderedHtmlSmall` useMemo (single chunk) and per-chunk `renderedHtml` useMemo both call `DOMPurify.sanitize()` AFTER `renderLatexToHtml()`
 - `dangerouslySetInnerHTML` receives ONLY sanitized HTML
 
 ### DOMPurify Configuration (REQUIRED)
@@ -46,19 +46,19 @@ const DOMPURIFY_CONFIG = {
 
 ### Sanitization Point (REQUIRED)
 
-```javascript
-const renderedHtml = useMemo(() => {
-  if (viewMode === 'raw' || !content) return null;
-  const rawHtml = renderLatexToHtml(content);
-  return DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
-}, [content, viewMode]);
-```
+DOMPurify sanitization occurs in two paths:
+- **Small documents** (single chunk): via `renderedHtmlSmall` useMemo in main component
+- **Chunked documents**: via per-chunk `renderedHtml` useMemo in each `RenderedChunk`
+
+Both paths call `DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG)` after `renderLatexToHtml()`.
 
 ---
 
 ## Overview
 
 Dual rendering: **Rendered LaTeX View** (KaTeX math, dark theme on screen, white for PDFs) and **Raw Text View** (plain text, dark theme). All rendering flows through `LatexRenderer.jsx` (`frontend/src/components/LatexRenderer.jsx`). CSS in `LatexRenderer.css`. PDF generation via `downloadHelpers.js`.
+
+**Performance Architecture**: For large documents (>~10K words), content is split into chunks at section boundaries. Each chunk renders independently via `IntersectionObserver`-gated `RenderedChunk` components — only chunks visible in the viewport (plus 600px margin) are LaTeX-rendered. Documents >50K chars auto-default to raw mode with a banner to switch. Content updates in rendered mode are debounced (1.5s) to prevent rapid re-rendering.
 
 ### Props API
 
@@ -89,20 +89,33 @@ Must execute in this exact order in `renderLatexToHtml()`:
 
 **Critical:** `\\` line break conversion MUST be after KaTeX (valid syntax in `aligned`, `matrix`, etc.)
 
+### Chunked Rendering Architecture
+
+**Chunking**: `splitIntoChunks()` splits content at section headers and double-newlines. Target chunk size ~3000 chars. Documents under target stay as single chunk (no overhead).
+
+**Virtualization**: Each chunk is a memoized `RenderedChunk` component. An `IntersectionObserver` (600px root margin) triggers LaTeX rendering only when the chunk scrolls near the viewport. Off-screen chunks show a height-estimated placeholder div.
+
+**Debouncing**: `useDebouncedValue` hook delays rendered-mode processing by 1.5s during rapid content updates (WebSocket + polling). Raw mode is unaffected (instant updates).
+
+**Auto-threshold**: Documents >50K chars (`LARGE_DOC_THRESHOLD`) auto-default to raw mode with a banner offering to switch to rendered view.
+
+**Invariant**: Each chunk independently runs the full `renderLatexToHtml()` → `DOMPurify.sanitize()` pipeline. The pipeline order within each chunk is identical to the single-document path.
+
 ---
 
 ## Download System (`frontend/src/utils/downloadHelpers.js`)
 
-**`downloadPDF()`**: Clone DOM → apply light theme (white bg, black text, SVG to black) → add metadata header → html2pdf.js (A4, scale 2, `backgroundColor: '#ffffff'`) → add page numbers.
+**`downloadPDFViaBackend()`**: Frontend renders content to HTML using `renderLatexToHtml()` + `DOMPurify.sanitize()`, then POSTs the HTML body to `POST /api/download/pdf`. The backend (`backend/api/routes/download.py`) wraps it in a complete HTML document with KaTeX CSS (read from `frontend/node_modules/katex/dist/katex.min.css`) + LatexRenderer.css (both inlined — no CDN dependency), then uses **Playwright (headless Chromium)** to print to PDF via `asyncio.get_running_loop().run_in_executor` (non-blocking). Returns a `Response` with the PDF bytes. Frontend triggers browser download when response arrives. Button shows "Preparing PDF..." while request is in flight — UI stays fully interactive throughout.
 
 **`downloadRawText()`**: Combine outline + content → Blob (UTF-8) → browser download.
 
-**`sanitizeFilename()`**: Remove special chars, underscores for whitespace, truncate to 200 chars.
+**`sanitizeFilename()`**: Remove special chars, underscores for whitespace, truncate to 100 chars.
 
-**Required dependency versions** (security fixes):
-- `html2pdf.js` ^0.14.0 (XSS fix GHSA-w8x4-x68c-m6fc)
-- `jspdf` ^4.1.0 (LFI/Path Traversal CVE-2025-68428 + PDF Injection CVE-2026-24737)
-- `dompurify` ^3.2.4 (mXSS fix)
+**Backend PDF route**: `POST /api/download/pdf` — accepts `{html_body, title, word_count, date, models, outline, filename}`. Builds a standalone HTML document (KaTeX + LatexRenderer CSS both inlined from local filesystem + PDF print overrides that convert dark theme to light). `wait_until="load"` (no external requests). Runs `sync_playwright()` in `asyncio.get_running_loop().run_in_executor`. Returns `Response(content=pdf_bytes, media_type="application/pdf")`.
+
+**Playwright install**: `python -m playwright install chromium` — runs automatically in both launcher scripts after `pip install -r requirements.txt`. One-time ~150MB download of bundled Chromium (no system Chrome/Chromium required). Failure is non-fatal (warning shown, startup continues).
+
+**Required dependency**: `playwright>=1.40.0` in `requirements.txt`.
 
 ---
 
@@ -110,18 +123,20 @@ Must execute in this exact order in `renderLatexToHtml()`:
 
 | Component | Location | PDF | Toggle | Notes |
 |-----------|----------|-----|--------|-------|
-| LivePaper.jsx | compiler/ | ✅ | ✅ | Real-time paper viewing |
+| LivePaper.jsx | compiler/ | ✅ | ✅ | Real-time paper viewing; auto-switches to raw >50K chars |
 | PaperLibrary.jsx | autonomous/ | ✅ | ✅ | Paper library cards |
 | FinalAnswerView.jsx | autonomous/ | ✅ | ✅ | Tier 3 final answer (defaults to raw for performance) |
-| LiveResults.jsx | aggregator/ | ❌ | ✅ | Aggregator submissions |
-| BrainstormList.jsx | autonomous/ | ❌ | ❌ | Simple text display |
+| FinalAnswerLibrary.jsx | autonomous/ | ✅ | ✅ | Final answer library (all sessions) |
+| LivePaperProgress.jsx | autonomous/ | ✅ | ✅ | Live Tier 2 paper in progress |
+| LiveTier3Progress.jsx | autonomous/ | ✅ | ✅ | Live Tier 3 paper in progress |
+| LiveResults.jsx | aggregator/ | ❌ | ✅ | Aggregator submissions (defaults to raw) |
+| BrainstormList.jsx | autonomous/ | ❌ | ✅ | Brainstorm content viewer |
 
 ### PDF Download Usage
 
 ```javascript
-const element = ref.current.querySelector('.latex-rendered-content');
-const metadata = { title, wordCount, date, models };
-await downloadPDF(element, metadata, sanitizeFilename(`${id}_${title}`));
+// Pass raw text content — backend handles rendering and PDF generation
+await downloadPDFViaBackend(rawContent, metadata, sanitizeFilename(title), outline);
 ```
 
 ---
@@ -140,11 +155,15 @@ Ratings: Novelty, Correctness, Impact (1-10 scale). Up to 10 history entries. Re
 
 1. ALL model output MUST be sanitized — no exceptions
 2. DOMPurify MUST block scripts — never relax FORBID_TAGS
-3. Sanitization MUST occur AFTER LaTeX conversion
+3. Sanitization MUST occur AFTER LaTeX conversion (in both single-doc and per-chunk paths)
 4. HTML entities MUST be decoded before LaTeX processing (first step)
 5. TikZ environments MUST be pre-processed — KaTeX cannot render them; remove surrounding math delimiters (all three patterns)
 6. KaTeX maxExpand MUST be 5000
 7. Line break conversion MUST happen AFTER KaTeX — prevents SVG corruption
-8. Rendering pipeline order MUST be preserved
+8. Rendering pipeline order MUST be preserved (same order in each chunk)
 9. Raw text view never processes HTML — plain text only
 10. PDF generation captures sanitized content
+11. Chunks MUST split at safe boundaries (section headers, double-newlines) — never mid-math-environment
+12. IntersectionObserver root margin MUST be ≥600px — prevents visible pop-in
+13. Debounce delay applies ONLY to rendered mode — raw mode updates instantly
+14. Chunk `key` MUST include content hash (`simpleHash`) — prevents React reusing stale DOM on content change

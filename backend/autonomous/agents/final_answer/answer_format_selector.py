@@ -13,6 +13,7 @@ import logging
 from typing import Optional, List, Dict, Any, Callable
 
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
 from backend.shared.models import AnswerFormatSelection, CertaintyAssessment
@@ -193,7 +194,7 @@ class AnswerFormatSelector:
             
             # Extract content
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 return None
             
@@ -211,6 +212,8 @@ class AnswerFormatSelector:
                 reasoning=data.get("reasoning", "")
             )
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"AnswerFormatSelector: Error generating selection: {e}")
             return None
@@ -271,7 +274,7 @@ class AnswerFormatSelector:
             
             # Extract content
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 return False, "No content in validator response"
             
@@ -283,6 +286,8 @@ class AnswerFormatSelector:
             
             return decision == "accept", reasoning
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"AnswerFormatSelector: Error validating selection: {e}")
             return False, str(e)

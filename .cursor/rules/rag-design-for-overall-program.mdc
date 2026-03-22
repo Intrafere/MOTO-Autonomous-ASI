@@ -6,413 +6,153 @@ The RAG system in this program is very advanced, be certain that any changes you
 
 ## Clarifying Direct Injection VS RAG
 
-As specified, things like the JSON request format(s) for output parse, the user prompt, etc are required direct injections and this is non-negotiable. However, all items should be direct injected if able. If an item is direct injected then its content should not also be RAGed into context as well. Below is the preference order of direct injection vs RAG relative to what should be direct injected first and the remainder that does not fit RAGed.
-
 DIRECT INJECTION FIRST, RAG SECOND IF DIRECT INJECTION DOESN'T FIT.
 
-RAG OFF-LOAD PREFERENCE ORDER - What data should be off-loaded to RAG first in order to free up available context to direct-inject the remainder:
+If an item is direct injected, its RAG counterpart must NOT also be included.
 
-RAG Offload Priority Order for the Submitter's Prompt - 1.) Shared Training Database, 2.) Local Respective Submitter Database (the local training that each submitter has), 3.) Local respective submitter database that is a log of their last rejected submissions (only up to the last 5 submission rejections), 4.) User Upload Files (the very last thing that should be RAG off-loaded)
+**RAG Offload Priority — Submitter:** Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files
 
-RAG Offload Priority Order for the Validator's Prompt - 1.) Shared Training Database, 2.) User Upload Files, 3.) The submission being analyzed for validation review (the very last thing that should be RAG off-loaded)
+**RAG Offload Priority — Validator:** Shared Training DB → User Upload Files → Submission under review (last resort)
 
 ## Further RAG Specifications
 
-Implement cyclic variation of RAG chunk sizes for submitters only, rotating through 4 industry-standard intervals on each submission. Validator remains constant at optimal 512 chars for academic research consistency.
+Cyclic variation of RAG chunk sizes for submitters only. Validator constant at 512 chars.
 
-RAG chunk size specfications:
-- **Lower bound**: 256 chars (overlap: 51 chars @ 20%)
-- **Lower-middle**: 512 chars (overlap: 102 chars @ 20%)
-- **Upper-middle**: 768 chars (overlap: 154 chars @ 20%)
-- **Upper bound**: 1024 chars (overlap: 205 chars @ 20%)
-- **Validator constant**: 512 chars (overlap: 102 chars)
+**Chunk sizes:**
+- 256 chars (51 char overlap @ 20%)
+- 512 chars (102 char overlap @ 20%)
+- 768 chars (154 char overlap @ 20%)
+- 1024 chars (205 char overlap @ 20%)
+- **Validator constant**: 512 chars (102 overlap)
 
-For user-uploaded files all 4 RAG configurations should be ran on these files and stored for use as these RAG files would not change throughout the session. However the databases that are updated and changing should have their RAG updated in the specified RAG format the respective submitter needs (depending on which chunk size is required for that given step in the chunk-size cycle). If a file is being direct injected it's RAG counterpart should not be included.
+User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training DB, rejections, outline, paper): single config updated per submitter cycle step.
+
+---
 
 # RAG Architecture & Workflow Guide
 
 ## System Overview
 
-The ASI system uses a production-grade Retrieval-Augmented Generation (RAG) architecture that eliminates truncation-based context loss. The system maintains **evidence-first generation** with full evidence tracking and contradiction detection.
+**Core Principle**: Direct injection first, RAG semantic search only when content doesn't fit.
 
-**Core Principle**: Direct injection first, RAG semantic search only when content doesn't fit available context budget.
+**Embedding**: `text-embedding-nomic-embed-text-v1.5` via LM Studio, or `openai/text-embedding-3-small` via OpenRouter fallback. Routing via `APIClientManager.get_embeddings()`.
 
-**Embedding Model**: text-embedding-nomic-embed-text-v1.5 (Nomic AI) via LM Studio, or `openai/text-embedding-3-small` via OpenRouter fallback.
-
-**Embedding Provider Fallback**: The system routes embedding requests through `APIClientManager.get_embeddings()`:
-1. **LM Studio first** (local, free): Uses Nomic AI embedding model
-2. **OpenRouter fallback**: If LM Studio unavailable, falls back to OpenRouter embeddings
-3. **Error handling**: Clear error message if both providers unavailable
-
-This enables the system to work **without LM Studio** if OpenRouter is configured.
+**Key files:**
+- `aggregator/core/rag_manager.py` — 4-stage pipeline orchestrator
+- `compiler/core/compiler_rag_manager.py` — compiler wrapper
+- `shared/rag_lock.py` — global async lock (prevents Aggregator/Compiler collision)
+- `aggregator/ingestion/` — chunkers, pipeline, normalizer, metadata
+- `shared/config.py` — RAGConfig, SystemConfig
 
 ---
 
-## Architecture Components
+## Architecture: Concurrency
 
-### Core RAG Pipeline
-- **RAGManager** (`core/rag_manager.py`) - Main orchestrator for 4-stage retrieval pipeline
-- **CompilerRAGManager** (`core/compiler/compiler_rag_manager.py`) - Compiler-specific wrapper
-- **RAGOperationLock** (`shared/rag_lock.py`) - Global async lock preventing collision between Aggregator and Compiler RAG operations
-- **Document Ingestion** (`core/ingestion/`) - Chunking, normalization, deduplication, metadata
-- **Coordinator** (`core/ai_cluster/coordinator.py`) - Integrates RAG with submitter/validator workflow
-
-### Concurrency & Collision Prevention
-- **Global RAG Lock** - ChromaDB write operations (re-chunking) and embedding API calls acquire lock to prevent race conditions
-- **Retry Logic for Reads** - Vector search queries automatically retry with exponential backoff (0.5s → 1s → 2s, max 3 attempts) when HNSW index is temporarily unavailable during concurrent writes. This allows read-write concurrency while ensuring transient index errors are recovered gracefully without blocking all reads.
-- **Embedding Rate Limiting** - Semaphore limits concurrent embedding requests to 2 (prevents Nomic API flooding)
-- **Re-Chunking Coordination** - Aggregator (immediate after each acceptance) and Compiler (every 10 acceptances) trigger background tasks that acquire global lock before modifying ChromaDB index
-
-### Observability & Validation
-- **Metrics Collection** (`core/logging/`) - Coverage, answerability, gating, contradictions tracking
-- **Contradiction Checker** (`core/validation/contradiction_checker.py`) - Detects logical contradictions
-- **Drift Detection** (`core/observability/`) - Monitors performance drift, triggers alarms
-
-### Security & Memory
-- **Training Memory** (`core/training/shared_memory.py`) - Shared validated insights + local rejection logs
-- **Memory Limits** - LRU eviction, cache limits, embedding cleanup
+- **Global RAG Lock**: ChromaDB write operations + embedding API calls acquire lock to prevent race conditions
+- **Read retry**: Vector search auto-retries with exponential backoff (0.5s → 1s → 2s, max 3 attempts) on HNSW index errors during concurrent writes
+- **Embedding rate limiting**: Semaphore limits concurrent embedding requests to 2
 
 ---
 
 ## 4-Stage Retrieval Pipeline
 
-Every retrieval request flows through these stages:
+**Stage A — Query Rewriting**: Expands to 3-6 semantic variants; filters queries < 3 words; embeddings cached (500-entry LRU); variants batched into single embedding API call.
 
-### Stage A: Query Rewriting
-- Expands query into 3-6 semantic variants
-- Filters out short/meaningless queries (< 3 words)
-- Cached for performance
-- **Optimization**: Query embeddings are cached (500-entry LRU) to avoid re-embedding identical text
-- **Optimization**: All query variants batched into single embedding API call for speed
+**Stage B — Hybrid Recall**: BM25 (exact terms) + ANN Cosine (semantic); top 120 from each, deduped by chunk_id.
 
-### Stage B: Hybrid Recall (BM25 + Vector Search)
-- **BM25**: Lexical search for exact terms, jargon, acronyms
-- **ANN Cosine**: Semantic search for meaning, synonyms, related concepts
-- Retrieves top 120 results from each, deduplicates by chunk_id
-- Applies security/access control filters
+**Stage C — Reranking + MMR**: Blend vector (60%) + BM25 (40%); MMR λ=0.8 (80% relevance, 20% diversity); removes near-duplicates (similarity > 0.85); hard cap at context budget.
 
-### Stage C: Reranking + MMR Diversification
-- Blends vector (60%) + BM25 (40%) scores
-- Applies Maximal Marginal Relevance (λ=0.8: 80% relevance, 20% diversity)
-- Removes near-duplicates (similarity > 0.85)
-- Hard cap on total context tokens given the user-set limit and the amount reserved for output tokens.
-
-### Stage D: Packing + Compression
-- Assembles evidence with headers and source mappings
-- Packing order: document priority → section order → relevance score
-- Compresses only if exceeds budget (preserves entities, numbers, dates)
-- Creates ContextPack with evidence tracking for provenance
+**Stage D — Packing + Compression**: Assembles evidence with headers; priority: document → section → relevance. Compresses only if over budget (preserves entities, numbers, dates). Returns `ContextPack` with evidence tracking.
 
 ---
 
 ## Multi-Configuration Chunk Storage
 
-### User Files (Permanent Cache)
-- **Files**: User uploads, aggregator results
-- **Storage**: Pre-generates ALL 4 chunk configs (256/512/768/1024 chars with 20% overlap)
-- **Protection**: NEVER evicted from memory
-- **Purpose**: Support submitter chunk size cycling without re-processing
+**User Files (Permanent Cache)**: Pre-generates all 4 configs; NEVER evicted; supports submitter chunk size cycling.
 
-### Dynamic Files (Re-Chunked on Update)
-- **Files**: Shared training database, local rejection logs, outline, current paper
-- **Storage**: Single chunk config (determined by submitter cycle or validator constant)
-- **Eviction**: Subject to LRU eviction when > 10000 documents (max_documents limit)
-- **Re-Chunking**: Automatic when training data updates (triggers callback)
-
-### Searchable Index
-- Rebuilt from multi-config storage when chunk size changes
-- User files: Uses requested chunk_size (or 512 fallback)
-- Dynamic files: Uses whatever config is currently stored
+**Dynamic Files (Re-Chunked on Update)**: Shared training DB, rejection logs, outline, paper. Single config (current submitter cycle or validator constant). LRU eviction when > 10000 documents.
 
 ---
 
 ## Chunk Size Strategy
 
-### Submitter's chunk size specifciations and Cyclic Rotation:
-- **Cyclic Pattern**: 256 → 512 → 768 → 1024 → 256 (cycles on each submission, i.e. the first cycle the submitters will use the 256 chunk size RAG, the next round they will use 512, etc. and this will repeat indefinitely.)
-- **Purpose**: Explore different semantic granularities
-- **Independence**: Each submitter maintains its own cycle state
-- **Benefits**: 256=fine-grained facts, 512=balanced, 768=explanatory, 1024=holistic context
+**Submitter cyclic pattern**: 256 → 512 → 768 → 1024 → 256 (repeats indefinitely; each submitter has independent cycle state).
 
-### Validator chunk size:
-- **Always**: 512 chars, 102 overlap (never cycles)
-- **Purpose**: Consistent validation baseline across all submissions
-- **Rationale**: Industry-standard optimal for academic research
+**Validator**: Always 512 chars (never cycles).
 
-### Re-Chunking Triggers
+**Re-Chunking Triggers:**
 
-**Aggregator** (immediate after each acceptance):
-1. SharedTrainingMemory saves new acceptance to `rag_shared_training.txt`
-2. Calls `rag_rechunk_callback()` immediately
-3. **Acquires global RAG lock**
-4. Coordinator incrementally adds only new submission to RAG at current submitter chunk size
-5. **Releases global RAG lock**
-6. Submitters get fresh context immediately on next retrieval
+*Aggregator* (immediate after each acceptance): Acquires global RAG lock → incrementally adds only new submission → releases lock. New chunks: `rag_shared_training_update_{chunk_size}`. Historical chunks accumulate (not removed). MAX_CHUNKS_PER_SIZE = 10,000.
 
-**Compiler** (periodic - every 10 aggregator acceptances):
-1. Monitors aggregator acceptance count every 30 seconds
-2. When count >= last_check + 10, **acquires global RAG lock**
-3. Removes old aggregator database chunks, re-adds entire updated file with all 4 chunk configs
-4. **Releases global RAG lock**
-5. Compiler retrievals use refreshed database
-
-**Critical**: Global lock prevents Aggregator (immediate, high-frequency) and Compiler (every 10, low-frequency) from simultaneously writing to ChromaDB/Nomic API. Read operations (vector search) use automatic retry logic with exponential backoff to handle transient HNSW index errors during concurrent write operations, allowing better concurrency than a blanket read lock would provide.
-
-### Incremental Re-Chunking Design (Aggregator)
-- Each aggregator acceptance triggers incremental re-chunk (immediate)
-- New chunks added with source name `rag_shared_training_update_{chunk_size}`
-- Historical chunks accumulate intentionally (not removed between updates)
-- MAX_CHUNKS_PER_SIZE (10,000 per size) caps total growth to prevent unbounded memory
-- RAG retrieves most relevant chunks regardless of batch age
-- Design rationale: Simpler than periodic full re-chunk with no risk of data loss during cleanup
+*Compiler* (every 10 aggregator acceptances): Monitors count every 30s → acquires global RAG lock → removes old chunks, re-adds entire file with all 4 configs → releases lock.
 
 ---
 
 ## Context Routing: Direct Injection vs RAG
 
-### Priority Order
+**Always direct injected**: User prompt/goal, JSON output format specs, system prompts.
 
-**ALWAYS Direct Injected** (non-negotiable):
-1. User prompt/goal
-2. JSON output format specifications
-3. System prompts
+**Token budget formula**: `available_input = context_window - output_reserve - buffer(500)`
 
-**RAG Offload Priority** (when context doesn't fit):
+**Context allocation algorithm**:
+1. Calculate mandatory tokens: user_prompt + json_schema + system_prompt + submission (validator) + assembly overhead
+2. `remaining_tokens = available_tokens - mandatory_tokens`
+3. For each content item in priority order: direct inject if `tokens <= remaining_tokens - 5000`, else RAG
+4. `rag_max_tokens = max(0, available_tokens - mandatory_tokens - direct_content_tokens - 200)`
 
-**Submitter**:
-1. Shared training database → RAG first
-2. Local rejection log → RAG
-3. User upload files → RAG LAST
+**Key Invariant**: Context allocator returns content parts only. Prompt builder adds template parts (system prompt, JSON, user prompt). Both must be counted to avoid overflow.
 
-**Validator**:
-1. Shared training database → RAG first
-2. User upload files → RAG
-3. Submission under review → RAG LAST
-
-### Decision Flow
-```
-available_tokens = context_window - output_reserve - buffer(500)
-
-For each content_item in priority_order:
-    If fits: direct inject
-    Else: upload to RAG for semantic search
-```
-
----
-
-## Token Budget Allocation For the Context Window
-
-**Formula**: `available_input = context_window - output_reserve - buffer(500)`
-
-**Overflow Handling**:
-- User prompt ALWAYS direct injected (non-negotiable); if exceeds (context_window - minimum_RAG_allocation): HALT with error
-- Content too large: Offload to RAG by priority
-- Still doesn't fit: Compress (preserves entities, removes redundancy)
-
-### Context Allocation Algorithm
-
-The context allocator must account for prompt template components that are added by the prompt builder to avoid double-counting.
-
-1. **Calculate available input tokens:**
-   ```
-   available_tokens = context_window - output_reserve - buffer(500)
-   ```
-
-2. **Calculate mandatory tokens (template parts added by prompt builder):**
-   ```
-   # These are NOT in the 'direct' context returned, but must be accounted for
-   user_prompt_tokens = count_tokens(user_prompt)
-   json_schema_tokens = count_tokens(json_schema)
-   system_prompt_tokens = count_tokens(system_prompt)
-   submission_tokens = count_tokens(submission_content)  # For validator only
-   
-   # Assembly overhead: actual separators, headers, final instructions
-   # Format varies by role but typically: system + "\n---\n" + schema + "\n---\n" + "USER PROMPT:\n" + user_prompt + "\n---\n" + content + optional_rag + "\n---\n" + final_instruction
-   assembly_overhead = count_tokens(all_separators_and_headers)
-   
-   mandatory_tokens = user_prompt_tokens + json_schema_tokens + system_prompt_tokens + [submission_tokens] + assembly_overhead
-   remaining_tokens = available_tokens - mandatory_tokens
-   ```
-
-3. **Try to direct-inject content by priority:**
-   - For each content item (shared training, local training, rejections, user files):
-     - Direct inject if: `tokens <= remaining_tokens` AND `tokens < remaining_tokens - 5000`
-     - Else: mark for RAG offload
-   - The 5,000-token reserve ensures RAG has meaningful retrieval space
-
-4. **Calculate RAG budget from actual remaining space:**
-   ```
-   direct_content_tokens = count_tokens(all_direct_injected_content)
-   already_allocated = mandatory_tokens + direct_content_tokens
-   rag_max_tokens = max(0, available_tokens - already_allocated - 200)
-   ```
-   - The 200-token buffer accounts for final assembly formatting
-
-**Key Invariant**: The context allocator returns only the content parts (e.g., shared training, user files). The prompt builder adds the template parts (system prompt, JSON schema, user prompt, submission). Both must be counted to avoid overflow.
-
----
-
-## Key Data Structures
-
-### ContextPack
-The main retrieval payload consumed by all submitters and validators:
-- `text` - Assembled context with evidence headers
-- `evidence` - List of source spans for attribution
-- `source_map` - Evidence source mappings for provenance tracking
-- `coverage` - Query-term overlap (0.0-1.0)
-- `answerability` - Cross-encoder confidence (0.0-1.0)
-- `metadata` - Pipeline stats, compression flag, needs_more_context flag
-
-### DocumentChunk
-Individual text chunks with embeddings:
-- Includes: text, source file, position, chunk type, embedding vector, tokens for BM25
-- Types: text, table, code, equation, section
-- Auto-detected chunking strategy (semantic, TOC-aware, table extraction, etc.)
-
----
-
-## Observability
-
-### Metrics Tracked
-- **Coverage**: Query-term overlap with retrieved evidence (threshold: 0.25 for aggregator)
-- **Answerability**: Cross-encoder confidence in retrieved evidence (threshold: 0.15 for aggregator)
-- **Gating Events**: Submissions blocked due to insufficient context quality
-- **Contradiction Checks**: Pre-acceptance validation for logical contradictions
-- **Hard Negatives**: High-confidence rejections collected for weekly reranker retraining
-- **Cache Performance**: Hit ratio, TTL expiration, capacity usage
-
-### Drift Detection
-Monitors 5 metrics with automatic alerting:
-- Acceptance rate drift (> 15% shift = high severity)
-- Coverage drift (> 20% drop from baseline)
-- Answerability drift (> 20% shift from baseline)
-- Latency drift (> 50% increase)
-- Query diversity drift (> 25% shift)
-
-**Actions by Severity**: Critical → immediate review + re-embed; High → retrain reranker; Medium → monitor trend; Low → log
-
-### Debug Mode
-Enable via `RAGConfig.debug_mode = True`:
-- Outputs to `logs/rag_debug.txt`
-- Logs: retrieval stats, chunk details, deduplication, context limiting, errors
-
----
-
-## Contradiction Enforcement
-
-### Contradiction Detection
-- Keyword patterns: "contradicts", "conflicts with", "does not support"
-- Negation detection: "not/no/never" + term from source context
-- Pre-acceptance check, automatic rejection if found
+**Overflow handling**: User prompt always direct injected; if exceeds `context_window - minimum_RAG_allocation`: HALT with error. Content too large: offload to RAG. Still doesn't fit: compress (NEVER truncate).
 
 ---
 
 ## Memory Management
 
-### Document Limits
-- The aggregation database and the paper can build indefinitely without imposed size limits.
-- User files: NEVER evicted (permanent cache)
-- Embedding arrays explicitly deleted before eviction
-
-### Cache Limits
+**Cache limits:**
 - Query rewrite cache: 500 entries, 30-min TTL
-- **Embedding cache: 500 entries, LRU eviction** (caches query embedding vectors to avoid re-embedding identical queries)
+- Embedding cache: 500 entries, LRU eviction
 - BM25 cache: 1000 entries, 1-hour TTL
-- Context pack cache: 300 entries, configurable TTL
-- **Document LRU eviction**: Removes oldest 1 non-permanent document when max_documents (10000) limit is hit; tracks access time per document, updates on retrieval
+- Context pack cache: 300 entries
+- Document LRU: removes oldest non-permanent document when > 10000 docs
 
-### Training Data Limits
-- No shared training database size limit.
-- Local rejections: Max 5 per submitter (rolling window)
-- Observability: 1000 retrieval history, 50 gating events, 100 hard negatives
+**Training data limits**: No shared DB size limit. Local rejections: max 5 per submitter. Observability: 1000 retrieval history, 50 gating events, 100 hard negatives.
 
----
-
-## Critical Invariants
-
-1. **User prompt and JSON context for prompts is NEVER RAG'd** - Always direct injected (all modes: Part 1, Part 2, Part 3)
-2. **Validator always uses 512-char chunks** - Consistency across validations
-3. **User files pre-generate 4 configs** - No re-chunking during session
-4. **Dynamic files re-chunked on update** - Single config, updated with current chunk size
-5. **Submitter cycling is independent** - Each maintains own cycle state
-6. **No truncation fallback** - Fails cleanly, uses RAG retrieval, or compresses (NEVER truncates with "content truncated" messages)
-7. **Evidence tracking mandatory** - All facts map to source spans for provenance
-8. **User files protected from eviction** - Permanent cache
-9. **Contradiction check pre-acceptance** - All submissions checked before validation
-10. **Autonomous mode prompt validation** - All autonomous agents validate assembled prompt size before LLM calls
-11. **Read operations retry on HNSW index errors** - Vector search automatically retries (3 attempts, exponential backoff: 0.5s → 1s → 2s) when ChromaDB HNSW index is temporarily unavailable during concurrent writes, gracefully recovering from transient errors without blocking reads
+**User files**: NEVER evicted (permanent cache). Embedding arrays explicitly deleted before eviction.
 
 ---
 
-## Navigation Guide
+## Observability
 
-### To Modify RAG Behavior
-- **Chunk sizes**: Edit `core/config.py` RAGConfig (submitter_chunk_intervals, validator_chunk_size)
-- **Retrieval tuning**: Edit `core/rag_manager.py` (MMR lambda, reranking blend, BM25 parameters)
-- **Context priority**: Edit `core/ai_cluster/coordinator.py` submission/validation loops
-- **Thresholds**: Edit `core/config.py` RAGConfig (coverage_threshold, answerability_threshold)
+**Gating thresholds**: coverage < 0.25 OR answerability < 0.15 → block submission.
 
-### To Debug Issues
-- Enable debug mode in config → check `logs/rag_debug.txt`
-- Review metrics: `logger.metrics.get_rag_observability_summary()`
-- Check cache stats: `rag_manager.get_cache_stats()`
-- Review failed validations in `data/failed_validations/`
+**Contradiction detection**: Keyword patterns ("contradicts", "conflicts with") + negation detection → pre-acceptance check → automatic rejection if found.
 
-### To Monitor Health
-- **Acceptance rate**: 0.4-0.6 normal, < 0.3 too strict, > 0.9 too lenient
-- **Cache hit ratio**: > 0.7 good, < 0.5 poor
-- **Gating rate**: 5-15% ideal, > 20% retrieval issue
-- **Contradiction failures**: < 5% good, > 10% reranker false positives
-
-### Common Troubleshooting
-- **High gating**: Lower thresholds or improve document quality
-- **High contradictions**: Retrain reranker with hard negatives, increase MMR diversity
-- **Low acceptance**: Decompose by rejection type (gating/contradiction/quality)
-- **High latency**: Reduce query variants, increase cache TTL, optimize index size
-- **Memory growth**: Verify LRU eviction working, reduce training data limits
+**Debug mode**: `RAGConfig.debug_mode = True` → outputs to `logs/rag_debug.txt`.
 
 ---
 
 ## Integration Points
 
-### Aggregator (Submitters & Validator)
-- Submitters cycle through chunk sizes (256→512→768→1024)
-- Validator uses constant 512-char chunks
-- Both log coverage/answerability metrics
-- Gating threshold: coverage < 0.25 OR answerability < 0.15
-- Validator runs contradiction checks
+**Aggregator**: Submitters cycle 256→512→768→1024; validator constant 512. Validator runs contradiction checks.
 
-### Compiler (Outline/Paper Generation)
-- Loads aggregator result as user file (4 configs)
-- Updates outline/paper as dynamic files (512 chars)
-- Tracks last 10 rejections and acceptances (not embedded, appended as text)
-- Three modes: high-context construction, high-context review, high-parameter rigor
+**Compiler**: Aggregator result loaded as user file (4 configs); outline/paper as dynamic files (512 chars); last 10 rejections/acceptances appended as text (not embedded).
 
-### Autonomous Research (Part 3 - Brainstorm & Paper Generation)
-- Topic selector/validator: Direct inject brainstorm metadata, paper titles+abstracts if fit
-- Brainstorm aggregation: Uses Part 1 Aggregator RAG (per-topic database)
-- Completion reviewer: Direct inject brainstorm database if fits, else RAG retrieval
-- Reference selector: RAG retrieval for reference paper content (always)
-- Paper compilation: Uses Part 2 Compiler RAG with brainstorm DB + reference papers
-- Follows same "no truncation" principle - RAG fallback when context doesn't fit
-- Prompt size validation in all agents before LLM calls
+**Autonomous (Part 3)**: Per-topic brainstorm databases; reference paper content always RAG'd; same no-truncation principle; all agents validate prompt size before LLM calls.
 
-### Training Database Updates
-- Shared training: `data/rag_shared_training.txt` (This is the accepted submissions that were validated, it does not included any validator responses - it only includes the accepted submissions.)
-- Local rejections: `data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt` (max 5)
-- Updates trigger automatic re-chunking callbacks
-- Re-chunked with current submitter chunk sizes
+**Training DB files**: `data/rag_shared_training.txt` (accepted submissions only, no validator reasoning); `data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt` (max 5).
 
 ---
 
-## File Locations Reference
+## Critical Invariants
 
-**Core**: `aggregator/core/rag_manager.py`, `compiler/core/compiler_rag_manager.py`  
-**Concurrency**: `shared/rag_lock.py` (global RAG operation lock)  
-**Ingestion**: `aggregator/ingestion/` (chunkers, pipeline, normalizer, metadata)  
-**Validation**: `aggregator/validation/` (contradiction_checker, json_validator)  
-**Config**: `shared/config.py` (RAGConfig, SystemConfig)  
-**Embedding Routing**: `shared/api_client_manager.py` (routes to LM Studio or OpenRouter fallback)  
-**LM Studio**: `shared/lm_studio_client.py` (embedding rate limiting via semaphore)  
-**OpenRouter**: `shared/openrouter_client.py` (embedding fallback when LM Studio unavailable)
-
+1. User prompt and JSON context NEVER RAG'd — always direct injected (Parts 1, 2, 3)
+2. Validator always uses 512-char chunks
+3. User files pre-generate 4 configs — no re-chunking during session
+4. Dynamic files re-chunked on update — single config
+5. Submitter cycling is independent — each maintains own cycle state
+6. No truncation fallback — fails cleanly, uses RAG or compresses
+7. Evidence tracking mandatory — all facts map to source spans
+8. User files protected from eviction — permanent cache
+9. Contradiction check pre-acceptance
+10. Autonomous mode prompt validation before all LLM calls
+11. Read operations retry on HNSW index errors (3 attempts, 0.5s → 1s → 2s backoff)

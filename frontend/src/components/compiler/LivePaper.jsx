@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDF, sanitizeFilename } from '../../utils/downloadHelpers';
+import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 
 function LivePaper() {
@@ -21,25 +21,35 @@ function LivePaper() {
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
 
+  const wsDebounceRef = useRef(null);
+  const loadPaperRef = useRef(null);
+
+  // Always-current ref so the debounced WS handler never holds a stale closure.
+  useEffect(() => { loadPaperRef.current = loadPaper; });
+
+  const debouncedLoadPaper = useCallback(() => {
+    if (wsDebounceRef.current) clearTimeout(wsDebounceRef.current);
+    wsDebounceRef.current = setTimeout(() => loadPaperRef.current?.(), 2000);
+  }, []);
+
   useEffect(() => {
     loadPaper();
     loadStatus();
     loadPreviousVersions();
     
-    // Poll paper and status every 10 seconds
     const interval = setInterval(() => {
       loadPaper();
       loadStatus();
       loadPreviousVersions();
     }, 10000);
 
-    // Listen for paper updates via WebSocket
-    websocket.on('paper_updated', handlePaperUpdate);
+    websocket.on('paper_updated', debouncedLoadPaper);
     websocket.on('body_rewrite_started', handleBodyRewrite);
 
     return () => {
       clearInterval(interval);
-      websocket.off('paper_updated', handlePaperUpdate);
+      if (wsDebounceRef.current) clearTimeout(wsDebounceRef.current);
+      websocket.off('paper_updated', debouncedLoadPaper);
       websocket.off('body_rewrite_started', handleBodyRewrite);
     };
   }, []);
@@ -79,10 +89,6 @@ function LivePaper() {
     } catch (error) {
       console.error('Failed to load status:', error);
     }
-  };
-
-  const handlePaperUpdate = (event) => {
-    loadPaper(); // Refresh paper on update
   };
 
   const handleBodyRewrite = (event) => {
@@ -158,35 +164,32 @@ function LivePaper() {
   };
 
   const handleDownloadPDF = async () => {
-    if (!paper || !paperContainerRef.current) {
+    if (!paper) {
       alert('No paper content available to download');
       return;
     }
 
-    setIsGeneratingPDF(true);
-    try {
-      const element = paperContainerRef.current.querySelector('.latex-rendered-content') || 
-                      paperContainerRef.current.querySelector('.paper-content-renderer');
-      
-      if (!element) {
-        throw new Error('Could not find paper content element');
-      }
+    const filename = sanitizeFilename('compiler_paper');
+    const metadata = {
+      title: 'Compiler Paper',
+      wordCount: wordCount,
+      date: new Date().toLocaleDateString(),
+      models: null,
+    };
 
-      const metadata = {
-        title: 'Compiler Paper',
-        wordCount: wordCount,
-        date: new Date().toLocaleDateString(),
-        models: null // Single paper writer doesn't track this currently
-      };
-      
-      const filename = sanitizeFilename('compiler_paper');
-      await downloadPDF(element, metadata, filename, outline);
-    } catch (error) {
-      console.error('PDF generation error:', error);
-      alert('Failed to generate PDF: ' + error.message);
-    } finally {
-      setIsGeneratingPDF(false);
-    }
+    await downloadPDFViaBackend(
+      paper,
+      metadata,
+      filename,
+      outline,
+      () => setIsGeneratingPDF(true),
+      () => setIsGeneratingPDF(false),
+      (error) => {
+        setIsGeneratingPDF(false);
+        console.error('PDF generation error:', error);
+        alert('PDF generation failed: ' + error.message);
+      },
+    );
   };
 
   const handleDownloadRawText = () => {
@@ -235,7 +238,7 @@ function LivePaper() {
             disabled={!paper || isGeneratingPDF}
             title="Download as PDF"
           >
-            {isGeneratingPDF ? 'Generating...' : 'PDF'}
+            {isGeneratingPDF ? 'Preparing PDF...' : 'PDF'}
           </button>
 
           <button

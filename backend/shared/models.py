@@ -117,6 +117,12 @@ class BoostConfig(BaseModel):
     boost_max_output_tokens: int = 25000
 
 
+class FreeModelSettings(BaseModel):
+    """Settings for free model cooldown handling and rotation."""
+    looping_enabled: bool = True
+    auto_selector_enabled: bool = True
+
+
 class WorkflowTask(BaseModel):
     """Represents a predicted API call in the workflow."""
     task_id: str  # Unique ID like "agg_sub1_001"
@@ -421,6 +427,8 @@ class AutonomousResearchStartRequest(BaseModel):
     critique_submitter_lm_studio_fallback: Optional[str] = None
     critique_submitter_context_window: int = 131072
     critique_submitter_max_tokens: int = 25000
+    # Tier 3 Final Answer settings
+    tier3_enabled: bool = False  # Default OFF — system stops at Tier 2 paper library
 
 
 # ============================================================================

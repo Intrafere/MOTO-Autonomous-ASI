@@ -2038,52 +2038,6 @@ button.danger:hover {
   background: rgba(255, 215, 0, 0.08);
 }
 
-.footer-donate {
-  flex-shrink: 0;
-}
-
-.donate-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  background: linear-gradient(135deg, #ffd700 0%, #ffed4e 50%, #ffd700 100%);
-  background-size: 200% 200%;
-  color: #000;
-  text-decoration: none;
-  padding: 0.6rem 1.25rem;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  font-weight: 700;
-  transition: all 0.3s ease;
-  box-shadow: 
-    0 4px 12px rgba(255, 215, 0, 0.25),
-    inset 0 1px 0 rgba(255, 255, 255, 0.2);
-  animation: donate-shimmer 3s ease-in-out infinite;
-}
-
-@keyframes donate-shimmer {
-  0%, 100% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-}
-
-.donate-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 
-    0 6px 20px rgba(255, 215, 0, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.3);
-  background: linear-gradient(135deg, #ffe44d 0%, #fff176 50%, #ffe44d 100%);
-}
-
-.donate-btn:active {
-  transform: translateY(0);
-  box-shadow: 
-    0 2px 8px rgba(255, 215, 0, 0.3),
-    inset 0 1px 0 rgba(255, 255, 255, 0.2);
-}
 
 @media (max-width: 768px) {
   .app-footer {

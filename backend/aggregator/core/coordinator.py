@@ -17,6 +17,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.rag_lock import rag_operation_lock
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.aggregator.agents.submitter import SubmitterAgent
 from backend.aggregator.agents.validator import ValidatorAgent
 from backend.aggregator.core.queue_manager import queue_manager
@@ -608,6 +609,29 @@ class Coordinator:
             except asyncio.CancelledError:
                 logger.info(f"Validator loop cancelled at iteration {iteration}")
                 break
+            except FreeModelExhaustedError as e:
+                if e.soonest_retry:
+                    wait_secs = max(0, e.soonest_retry - time.time())
+                    wait_mins = round(wait_secs / 60, 1)
+                    logger.warning(
+                        f"SERIAL BOTTLENECK: Validator paused for {wait_mins} minutes "
+                        f"(all free models rate-limited)"
+                    )
+                    if self.broadcast_callback:
+                        await self.broadcast_callback("serial_bottleneck_paused", {
+                            "role_id": "aggregator_validator",
+                            "model": str(e),
+                            "wait_seconds": round(wait_secs),
+                            "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
+                        })
+                    await asyncio.sleep(wait_secs)
+                    if self.broadcast_callback:
+                        await self.broadcast_callback("serial_bottleneck_resumed", {
+                            "role_id": "aggregator_validator",
+                        })
+                else:
+                    logger.error(f"Validator: all free models exhausted, no cooldown info: {e}")
+                    await asyncio.sleep(60)
             except Exception as e:
                 logger.error(f"Validator loop error on iteration {iteration}: {e}", exc_info=True)
                 await asyncio.sleep(2)
@@ -701,6 +725,29 @@ class Coordinator:
             except asyncio.CancelledError:
                 logger.info(f"Single-model workflow cancelled at round {round_number}")
                 break
+            except FreeModelExhaustedError as e:
+                if e.soonest_retry:
+                    wait_secs = max(0, e.soonest_retry - time.time())
+                    wait_mins = round(wait_secs / 60, 1)
+                    logger.warning(
+                        f"SERIAL BOTTLENECK: Single-model workflow paused for {wait_mins} minutes "
+                        f"(all free models rate-limited)"
+                    )
+                    if self.broadcast_callback:
+                        await self.broadcast_callback("serial_bottleneck_paused", {
+                            "role_id": "aggregator_single_model",
+                            "model": str(e),
+                            "wait_seconds": round(wait_secs),
+                            "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
+                        })
+                    await asyncio.sleep(wait_secs)
+                    if self.broadcast_callback:
+                        await self.broadcast_callback("serial_bottleneck_resumed", {
+                            "role_id": "aggregator_single_model",
+                        })
+                else:
+                    logger.error(f"Single-model workflow: all free models exhausted, no cooldown info: {e}")
+                    await asyncio.sleep(60)
             except Exception as e:
                 logger.error(f"Single-model workflow error at round {round_number}: {e}", exc_info=True)
                 await asyncio.sleep(5)

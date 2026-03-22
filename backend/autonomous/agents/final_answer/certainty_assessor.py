@@ -16,6 +16,7 @@ from typing import Optional, List, Dict, Any, Callable
 
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
 from backend.shared.models import CertaintyAssessment, ReferenceExpansionRequest
@@ -209,7 +210,7 @@ class CertaintyAssessor:
             
             # Extract content
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 return []
             
@@ -224,6 +225,8 @@ class CertaintyAssessor:
             logger.info(f"CertaintyAssessor: Requested expansion of {len(expand_papers)} papers")
             return expand_papers
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"CertaintyAssessor: Error requesting expansion: {e}")
             return []
@@ -369,7 +372,7 @@ USER'S RESEARCH QUESTION:
             
             # Extract content
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 return None
             
@@ -382,6 +385,8 @@ USER'S RESEARCH QUESTION:
                 reasoning=data.get("reasoning", "")
             )
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"CertaintyAssessor: Error generating assessment: {e}")
             return None
@@ -440,7 +445,7 @@ USER'S RESEARCH QUESTION:
             
             # Extract content
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "") or message.get("reasoning", "")
+            content = message.get("content") or message.get("reasoning") or ""
             if not content:
                 return False, "No content in validator response"
             
@@ -452,6 +457,8 @@ USER'S RESEARCH QUESTION:
             
             return decision == "accept", reasoning
             
+        except FreeModelExhaustedError:
+            raise
         except Exception as e:
             logger.error(f"CertaintyAssessor: Error validating assessment: {e}")
             return False, str(e)

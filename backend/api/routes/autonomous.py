@@ -86,7 +86,8 @@ async def start_autonomous_research(
             high_param_lm_studio_fallback=request.high_param_lm_studio_fallback,
             critique_submitter_provider=request.critique_submitter_provider,
             critique_submitter_openrouter_provider=request.critique_submitter_openrouter_provider,
-            critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback
+            critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback,
+            tier3_enabled=request.tier3_enabled
         )
         
         # Start in background
@@ -1641,7 +1642,7 @@ async def request_paper_critique(paper_id: str, request: CritiqueRequest = None)
         response_content = ""
         if response.get("choices"):
             message = response["choices"][0].get("message", {})
-            response_content = message.get("content", "") or message.get("reasoning", "")
+            response_content = message.get("content") or message.get("reasoning") or ""
         
         if not response_content:
             raise HTTPException(status_code=500, detail="Empty response from validator model")
@@ -1938,7 +1939,7 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         response_content = ""
         if response.get("choices"):
             message = response["choices"][0].get("message", {})
-            response_content = message.get("content", "") or message.get("reasoning", "")
+            response_content = message.get("content") or message.get("reasoning") or ""
         
         if not response_content:
             raise HTTPException(status_code=500, detail="Empty response from validator model")

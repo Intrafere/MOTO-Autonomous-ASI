@@ -574,7 +574,7 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         response_content = ""
         if response.get("choices"):
             message = response["choices"][0].get("message", {})
-            response_content = message.get("content", "") or message.get("reasoning", "")
+            response_content = message.get("content") or message.get("reasoning") or ""
         
         if not response_content:
             raise HTTPException(status_code=500, detail="Empty response from validator model")
