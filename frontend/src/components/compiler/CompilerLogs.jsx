@@ -8,7 +8,7 @@ function CompilerLogs() {
     rigor: { acceptances: 0, rejections: 0, declines: 0, acceptance_rate: 0 },
     outline: { acceptances: 0, rejections: 0, declines: 0 },
     review: { acceptances: 0, rejections: 0, declines: 0 },
-    miniscule_edit_count: 0,
+    minuscule_edit_count: 0,
     paper_word_count: 0,
     total_submissions: 0
   });
@@ -381,16 +381,16 @@ function CompilerLogs() {
       {/* Recovery Alert */}
       {recoveryStatus && recoveryStatus.in_recovery && (
         <div style={{ 
-          backgroundColor: '#fff3cd', 
-          border: '2px solid #ffc107',
+          backgroundColor: 'rgba(30, 255, 28, 0.1)', 
+          border: '2px solid #1eff1c',
           borderRadius: '8px',
           padding: '1rem',
           margin: '1rem 0'
         }}>
-          <h2 style={{ color: '#856404', margin: '0 0 0.5rem 0' }}>
+          <h2 style={{ color: '#1eff1c', margin: '0 0 0.5rem 0' }}>
             Model Recovery in Progress
           </h2>
-          <div style={{ color: '#856404' }}>
+          <div style={{ color: '#c6ffc5' }}>
             <div><strong>Model:</strong> {recoveryStatus.recovering_model}</div>
             <div><strong>Stage:</strong> {recoveryStatus.recovery_stage}</div>
             <div style={{ marginTop: '0.5rem', fontSize: '0.9rem' }}>
@@ -410,8 +410,8 @@ function CompilerLogs() {
         <>
           <div className="current-mode">
             <h3>Current Mode: <span className="mode-highlight">{status.current_mode}</span></h3>
-            {error && <span className="status-badge status-error">Error</span>}
-            {warning && !error && <span className="status-badge status-warning">Stalled</span>}
+            {error && <span className="compiler-status-badge status-error">Error</span>}
+            {warning && !error && <span className="compiler-status-badge status-warning">Stalled</span>}
           </div>
 
           <div className="metrics-grid">
@@ -448,8 +448,8 @@ function CompilerLogs() {
             </div>
 
             <div className="metric-card">
-              <h3>Miniscule Edits</h3>
-              <div className="metric-value">{metrics.miniscule_edit_count}</div>
+              <h3>Minuscule Edits</h3>
+              <div className="metric-value">{metrics.minuscule_edit_count}</div>
               <div className="metric-label">Convergence indicator</div>
             </div>
 
@@ -461,11 +461,11 @@ function CompilerLogs() {
 
             {/* Critique Phase Stats - Show when in critique mode or has activity */}
             {(status.current_mode === 'critique' || critiqueStats.total > 0) && (
-              <div className="metric-card" style={{ borderColor: '#ffc107', borderWidth: '2px' }}>
+              <div className="metric-card" style={{ borderColor: '#1eff1c', borderWidth: '2px' }}>
                 <h3>Critique Phase (v{critiqueStats.version})</h3>
                 <div className="metric-value">{critiqueStats.accepted} / {critiqueStats.rejected} / {critiqueStats.total}</div>
                 <div className="metric-label">Accept / Reject / Total Attempts</div>
-                <div className="metric-rate" style={{ color: '#ffc107' }}>Target: 5 attempts</div>
+                <div className="metric-rate" style={{ color: '#1eff1c' }}>Target: 5 attempts</div>
               </div>
             )}
           </div>
@@ -501,9 +501,9 @@ function CompilerLogs() {
             <h4>Convergence Indicators</h4>
             <p>The paper is approaching completion when:</p>
             <ul>
-              <li>Construction <strong>declines</strong> increase (guide already covers all topics)</li>
+              <li>Construction <strong>declines</strong> increase (paper already covers all topics)</li>
               <li>Construction rejection rate increases (no more novel content to add)</li>
-              <li>Miniscule edit count increases (only tiny improvements found)</li>
+              <li>Minuscule edit count increases (only tiny improvements found)</li>
               <li>Review <strong>declines</strong> increase (paper is already clean)</li>
               <li>Rigor <strong>declines</strong> increase (rigor already adequate)</li>
             </ul>

@@ -8,15 +8,15 @@
 
 /* Upload Button - Matches button.secondary pattern */
 .text-upload-btn {
-  background: #666;           /* Matches button.secondary from index.css line 345 */
+  background: var(--surface-4, #2a2a36);
   color: white;
-  padding: 0.75rem 1.5rem;    /* Standard button padding from index.css line 324 */
+  padding: 0.75rem 1.5rem;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm, 6px);
   cursor: pointer;
   font-size: 0.95rem;
   font-weight: 600;
-  transition: background 0.2s;
+  transition: all var(--transition-fast, 0.15s);
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
@@ -25,17 +25,17 @@
 }
 
 .text-upload-btn:hover:not(:disabled) {
-  background: #777;           /* Matches button.secondary:hover from index.css line 348 */
+  filter: brightness(1.2);
 }
 
 .text-upload-btn:disabled {
-  background: #555;           /* Matches button:disabled from index.css line 340 */
+  background: var(--surface-3, #22222c);
   cursor: not-allowed;
   opacity: 0.7;
 }
 
 .text-upload-btn:focus {
-  outline: 2px solid #4CAF50;
+  outline: 2px solid var(--accent-green, #4CAF50);
   outline-offset: 2px;
 }
 

@@ -56,7 +56,7 @@ No context carryover between prompts (only system-intended DB/submission transfe
 
 **RAG Offload Priority — Submitter:** Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files
 
-**RAG Offload Priority — Validator:** Shared Training DB → User Upload Files → Submission under review (last resort)
+**RAG Offload Priority — Validator:** Shared Training DB → User Upload Files (submission under review is always direct injected)
 
 ## Role Selection
 
@@ -85,7 +85,9 @@ Every 7th acceptance (`total_acceptances % 7 == 0`, minimum 7 before first revie
 
 **Phase 1**: Validator reviews ALL accepted submissions, identifies AT MOST ONE for removal (redundant, contradicted, superseded, or provides no unique value).
 
-**Phase 2** (only if removal proposed): Validator self-validates its removal proposal. Conservative default: if uncertain, reject removal. If validated: execute removal + trigger RAG rechunk.
+**Phase 2** (only if removal proposed): Validator self-validates its removal proposal. Conservative default: if uncertain, reject removal. If validated: execute removal + full RAG rebuild (all shared-training sources are dropped and re-indexed from the post-removal file so deleted content is no longer retrievable).
+
+**Cleanup toggle**: `enable_cleanup_review` (default True) can be set False at `Coordinator.initialize()` to disable cleanup for short-lived mini-brainstorm phases (topic exploration, title exploration).
 
 **Critical selection rule**: When multiple submissions redundant, remove the WEAKEST (least unique value). Never remove a more complete submission.
 

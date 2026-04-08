@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
 import LatexRenderer from '../LatexRenderer';
+import './ArchiveViewerModal.css';
 
-// Simple inline icon components (no external dependency)
 const IconX = ({ className }) => (
   <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
     <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -30,12 +30,8 @@ const IconChevronRight = ({ className }) => (
   </svg>
 );
 
-/**
- * Modal overlay for viewing archived research lineage (papers + brainstorms).
- * Read-only view that looks similar to live interface but can't be continued.
- */
 export default function ArchiveViewerModal({ answerId, onClose }) {
-  const [activeTab, setActiveTab] = useState('papers'); // 'papers' | 'brainstorms'
+  const [activeTab, setActiveTab] = useState('papers');
   const [papers, setPapers] = useState([]);
   const [brainstorms, setBrainstorms] = useState([]);
   const [selectedPaper, setSelectedPaper] = useState(null);
@@ -49,15 +45,10 @@ export default function ArchiveViewerModal({ answerId, onClose }) {
   const loadArchive = async () => {
     try {
       setLoading(true);
-      
-      // Load papers list
-      const papersRes = await api.get(`/auto-research/final-answer/${answerId}/archive/papers`);
-      setPapers(papersRes.data.papers);
-      
-      // Load brainstorms list
-      const brainstormsRes = await api.get(`/auto-research/final-answer/${answerId}/archive/brainstorms`);
-      setBrainstorms(brainstormsRes.data.brainstorms);
-      
+      const papersRes = await api.get(`/api/auto-research/final-answer/${answerId}/archive/papers`);
+      setPapers(papersRes.papers);
+      const brainstormsRes = await api.get(`/api/auto-research/final-answer/${answerId}/archive/brainstorms`);
+      setBrainstorms(brainstormsRes.brainstorms);
     } catch (error) {
       console.error('Failed to load archive:', error);
     } finally {
@@ -67,8 +58,8 @@ export default function ArchiveViewerModal({ answerId, onClose }) {
 
   const loadPaperDetails = async (paperId) => {
     try {
-      const res = await api.get(`/auto-research/final-answer/${answerId}/archive/papers/${paperId}`);
-      setSelectedPaper(res.data);
+      const res = await api.get(`/api/auto-research/final-answer/${answerId}/archive/papers/${paperId}`);
+      setSelectedPaper(res);
     } catch (error) {
       console.error('Failed to load paper:', error);
     }
@@ -76,66 +67,46 @@ export default function ArchiveViewerModal({ answerId, onClose }) {
 
   const loadBrainstormDetails = async (topicId) => {
     try {
-      const res = await api.get(`/auto-research/final-answer/${answerId}/archive/brainstorms/${topicId}`);
-      setSelectedBrainstorm(res.data);
+      const res = await api.get(`/api/auto-research/final-answer/${answerId}/archive/brainstorms/${topicId}`);
+      setSelectedBrainstorm(res);
     } catch (error) {
       console.error('Failed to load brainstorm:', error);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-gray-900 rounded-lg w-11/12 h-5/6 max-w-6xl flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-700">
-          <h2 className="text-xl font-semibold text-gray-100 flex items-center gap-2">
-            <IconDatabase className="w-5 h-5 text-blue-400" />
+    <div className="archive-overlay">
+      <div className="archive-panel">
+        <div className="archive-header">
+          <h2 className="archive-title">
+            <IconDatabase className="archive-icon-header" />
             Research Archive (Read-Only)
           </h2>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-200"
-          >
-            <IconX className="w-6 h-6" />
+          <button onClick={onClose} className="archive-close-btn">
+            <IconX className="archive-icon-close" />
           </button>
         </div>
 
-        {/* Tabs */}
-        <div className="flex border-b border-gray-700">
+        <div className="archive-tabs">
           <button
-            onClick={() => {
-              setActiveTab('papers');
-              setSelectedPaper(null);
-            }}
-            className={`px-6 py-3 font-medium transition-colors ${
-              activeTab === 'papers'
-                ? 'text-blue-400 border-b-2 border-blue-400'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
+            onClick={() => { setActiveTab('papers'); setSelectedPaper(null); }}
+            className={`archive-tab ${activeTab === 'papers' ? 'archive-tab--active' : ''}`}
           >
-            <IconFileText className="inline w-4 h-4 mr-2" />
+            <IconFileText className="archive-tab-icon" />
             Papers ({papers.length})
           </button>
           <button
-            onClick={() => {
-              setActiveTab('brainstorms');
-              setSelectedBrainstorm(null);
-            }}
-            className={`px-6 py-3 font-medium transition-colors ${
-              activeTab === 'brainstorms'
-                ? 'text-blue-400 border-b-2 border-blue-400'
-                : 'text-gray-400 hover:text-gray-200'
-            }`}
+            onClick={() => { setActiveTab('brainstorms'); setSelectedBrainstorm(null); }}
+            className={`archive-tab ${activeTab === 'brainstorms' ? 'archive-tab--active' : ''}`}
           >
-            <IconDatabase className="inline w-4 h-4 mr-2" />
+            <IconDatabase className="archive-tab-icon" />
             Brainstorms ({brainstorms.length})
           </button>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="archive-content">
           {loading ? (
-            <div className="text-center text-gray-400 py-8">Loading archive...</div>
+            <div className="archive-placeholder">Loading archive...</div>
           ) : (
             <>
               {activeTab === 'papers' && (
@@ -145,7 +116,6 @@ export default function ArchiveViewerModal({ answerId, onClose }) {
                   <PapersListView papers={papers} onSelectPaper={loadPaperDetails} />
                 )
               )}
-              
               {activeTab === 'brainstorms' && (
                 selectedBrainstorm ? (
                   <BrainstormDetailView brainstorm={selectedBrainstorm} onBack={() => setSelectedBrainstorm(null)} />
@@ -161,29 +131,24 @@ export default function ArchiveViewerModal({ answerId, onClose }) {
   );
 }
 
-// Papers list view
 function PapersListView({ papers, onSelectPaper }) {
   if (papers.length === 0) {
-    return <div className="text-gray-400 text-center py-8">No papers in archive</div>;
+    return <div className="archive-placeholder">No papers in archive</div>;
   }
 
   return (
-    <div className="space-y-3">
+    <div className="archive-list">
       {papers.map((paper) => (
-        <div
-          key={paper.paper_id}
-          onClick={() => onSelectPaper(paper.paper_id)}
-          className="bg-gray-800 p-4 rounded-lg cursor-pointer hover:bg-gray-750 transition-colors"
-        >
-          <div className="flex items-start justify-between">
-            <div className="flex-1">
-              <h3 className="text-lg font-semibold text-gray-100 mb-2">{paper.title}</h3>
-              <p className="text-sm text-gray-400 line-clamp-2">{paper.abstract}</p>
-              <div className="mt-2 text-xs text-gray-500">
-                {paper.word_count} words • Paper ID: {paper.paper_id}
+        <div key={paper.paper_id} onClick={() => onSelectPaper(paper.paper_id)} className="archive-card">
+          <div className="archive-card-row">
+            <div className="archive-card-body">
+              <h3 className="archive-card-title">{paper.title}</h3>
+              <p className="archive-card-desc">{paper.abstract}</p>
+              <div className="archive-card-meta">
+                {paper.word_count} words &bull; Paper ID: {paper.paper_id}
               </div>
             </div>
-            <IconChevronRight className="w-5 h-5 text-gray-500 ml-4 flex-shrink-0" />
+            <IconChevronRight className="archive-card-chevron" />
           </div>
         </div>
       ))}
@@ -191,34 +156,24 @@ function PapersListView({ papers, onSelectPaper }) {
   );
 }
 
-// Paper detail view
 function PaperDetailView({ paper, onBack }) {
   return (
     <div>
-      <button
-        onClick={onBack}
-        className="text-blue-400 hover:text-blue-300 mb-4 flex items-center gap-1"
-      >
-        ← Back to Papers
+      <button onClick={onBack} className="archive-back-btn">
+        &larr; Back to Papers
       </button>
-      
-      <div className="bg-gray-800 p-6 rounded-lg">
-        <div className="mb-4 pb-4 border-b border-gray-700">
-          <span className="text-xs text-yellow-500 bg-yellow-500/10 px-2 py-1 rounded">
-            ARCHIVED - READ ONLY
-          </span>
+      <div className="archive-detail">
+        <div className="archive-detail-divider">
+          <span className="archive-badge-readonly">ARCHIVED - READ ONLY</span>
         </div>
-        
-        <h2 className="text-2xl font-bold text-gray-100 mb-4">{paper.metadata.title}</h2>
-        
-        <div className="mb-6">
-          <h3 className="text-sm font-semibold text-gray-400 mb-2">Abstract</h3>
-          <p className="text-gray-300">{paper.abstract}</p>
+        <h2 className="archive-detail-title">{paper.metadata.title}</h2>
+        <div className="archive-section">
+          <h3 className="archive-section-heading">Abstract</h3>
+          <p className="archive-section-text">{paper.abstract}</p>
         </div>
-        
-        <div className="mb-6">
-          <h3 className="text-sm font-semibold text-gray-400 mb-2">Paper Content</h3>
-          <div className="bg-gray-900 rounded max-h-96 overflow-y-auto">
+        <div className="archive-section">
+          <h3 className="archive-section-heading">Paper Content</h3>
+          <div className="archive-content-viewer">
             <LatexRenderer
               content={
                 paper.outline
@@ -236,31 +191,26 @@ function PaperDetailView({ paper, onBack }) {
   );
 }
 
-// Brainstorms list view
 function BrainstormsListView({ brainstorms, onSelectBrainstorm }) {
   if (brainstorms.length === 0) {
-    return <div className="text-gray-400 text-center py-8">No brainstorms in archive</div>;
+    return <div className="archive-placeholder">No brainstorms in archive</div>;
   }
 
   return (
-    <div className="space-y-3">
+    <div className="archive-list">
       {brainstorms.map((brainstorm) => (
-        <div
-          key={brainstorm.topic_id}
-          onClick={() => onSelectBrainstorm(brainstorm.topic_id)}
-          className="bg-gray-800 p-4 rounded-lg cursor-pointer hover:bg-gray-750 transition-colors"
-        >
-          <div className="flex items-start justify-between">
-            <div className="flex-1">
-              <h3 className="text-lg font-semibold text-gray-100 mb-2">{brainstorm.topic_prompt}</h3>
-              <div className="text-sm text-gray-400">
-                {brainstorm.submission_count} submissions • Status: {brainstorm.status}
+        <div key={brainstorm.topic_id} onClick={() => onSelectBrainstorm(brainstorm.topic_id)} className="archive-card">
+          <div className="archive-card-row">
+            <div className="archive-card-body">
+              <h3 className="archive-card-title">{brainstorm.topic_prompt}</h3>
+              <div className="archive-card-desc">
+                {brainstorm.submission_count} submissions &bull; Status: {brainstorm.status}
               </div>
-              <div className="mt-2 text-xs text-gray-500">
+              <div className="archive-card-meta">
                 Topic ID: {brainstorm.topic_id}
               </div>
             </div>
-            <IconChevronRight className="w-5 h-5 text-gray-500 ml-4 flex-shrink-0" />
+            <IconChevronRight className="archive-card-chevron" />
           </div>
         </div>
       ))}
@@ -268,40 +218,27 @@ function BrainstormsListView({ brainstorms, onSelectBrainstorm }) {
   );
 }
 
-// Brainstorm detail view
 function BrainstormDetailView({ brainstorm, onBack }) {
   return (
     <div>
-      <button
-        onClick={onBack}
-        className="text-blue-400 hover:text-blue-300 mb-4 flex items-center gap-1"
-      >
-        ← Back to Brainstorms
+      <button onClick={onBack} className="archive-back-btn">
+        &larr; Back to Brainstorms
       </button>
-      
-      <div className="bg-gray-800 p-6 rounded-lg">
-        <div className="mb-4 pb-4 border-b border-gray-700">
-          <span className="text-xs text-yellow-500 bg-yellow-500/10 px-2 py-1 rounded">
-            ARCHIVED - READ ONLY
-          </span>
+      <div className="archive-detail">
+        <div className="archive-detail-divider">
+          <span className="archive-badge-readonly">ARCHIVED - READ ONLY</span>
         </div>
-        
-        <h2 className="text-2xl font-bold text-gray-100 mb-4">{brainstorm.metadata.topic_prompt}</h2>
-        
-        <div className="mb-6 text-sm text-gray-400">
+        <h2 className="archive-detail-title">{brainstorm.metadata.topic_prompt}</h2>
+        <div className="archive-section archive-section-meta">
           <div>Status: {brainstorm.metadata.status}</div>
           <div>Submissions: {brainstorm.metadata.submission_count}</div>
           <div>Topic ID: {brainstorm.topic_id}</div>
         </div>
-        
         <div>
-          <h3 className="text-sm font-semibold text-gray-400 mb-2">Brainstorm Database</h3>
-          <pre className="text-gray-300 whitespace-pre-wrap font-mono text-sm bg-gray-900 p-4 rounded max-h-96 overflow-y-auto">
-            {brainstorm.content}
-          </pre>
+          <h3 className="archive-section-heading">Brainstorm Database</h3>
+          <pre className="archive-pre-content">{brainstorm.content}</pre>
         </div>
       </div>
     </div>
   );
 }
-

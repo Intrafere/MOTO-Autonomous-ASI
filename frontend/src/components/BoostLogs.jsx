@@ -178,7 +178,7 @@ export default function BoostLogs() {
           logs.map((log, index) => (
             <div 
               key={index} 
-              className={`log-entry ${log.success ? 'success' : 'error'} ${expandedIndex === index ? 'expanded' : ''}`}
+              className={`boost-log-entry ${log.success ? 'success' : 'error'} ${expandedIndex === index ? 'expanded' : ''}`}
             >
               <div 
                 className="log-summary"

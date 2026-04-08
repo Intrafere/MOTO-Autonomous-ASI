@@ -1,7 +1,6 @@
 ---
-alwaysApply: true
+alwaysApply: false
 ---
-
 # LaTeX Renderer System
 
 ## 🔒 CRITICAL SECURITY REQUIREMENTS
@@ -66,7 +65,7 @@ Dual rendering: **Rendered LaTeX View** (KaTeX math, dark theme on screen, white
 <LatexRenderer
   content={string}       // Raw content to render
   className={string}     // Optional CSS class
-  showToggle={boolean}   // Show Rendered/Raw toggle (default: false)
+  showToggle={boolean}   // Show Rendered/Raw toggle (default: true)
   defaultRaw={boolean}   // Start in raw mode (default: false)
   showLatex={boolean}    // External view mode control (optional)
 />
@@ -121,23 +120,40 @@ Must execute in this exact order in `renderLatexToHtml()`:
 
 ## Component Integration
 
-| Component | Location | PDF | Toggle | Notes |
-|-----------|----------|-----|--------|-------|
-| LivePaper.jsx | compiler/ | ✅ | ✅ | Real-time paper viewing; auto-switches to raw >50K chars |
-| PaperLibrary.jsx | autonomous/ | ✅ | ✅ | Paper library cards |
-| FinalAnswerView.jsx | autonomous/ | ✅ | ✅ | Tier 3 final answer (defaults to raw for performance) |
-| FinalAnswerLibrary.jsx | autonomous/ | ✅ | ✅ | Final answer library (all sessions) |
-| LivePaperProgress.jsx | autonomous/ | ✅ | ✅ | Live Tier 2 paper in progress |
-| LiveTier3Progress.jsx | autonomous/ | ✅ | ✅ | Live Tier 3 paper in progress |
-| LiveResults.jsx | aggregator/ | ❌ | ✅ | Aggregator submissions (defaults to raw) |
-| BrainstormList.jsx | autonomous/ | ❌ | ✅ | Brainstorm content viewer |
+| Component | Location | PDF | Toggle | Disclaimer | Notes |
+|-----------|----------|-----|--------|------------|-------|
+| LivePaper.jsx | compiler/ | ✅ | ✅ | paper | Real-time paper viewing; auto-switches to raw >50K chars |
+| PaperLibrary.jsx | autonomous/ | ✅ | ✅ | baked-in | Paper library cards (backend embeds disclaimer at save) |
+| FinalAnswerView.jsx | autonomous/ | ✅ | ✅ | baked-in | Tier 3 final answer (defaults to raw for performance) |
+| FinalAnswerLibrary.jsx | autonomous/ | ✅ | ✅ | paper | Final answer library (all sessions) |
+| LivePaperProgress.jsx | autonomous/ | ✅ | ✅ | paper | Live Tier 2 paper in progress |
+| LiveTier3Progress.jsx | autonomous/ | ✅ | ✅ | paper | Live Tier 3 paper in progress |
+| LiveResults.jsx | aggregator/ | ❌ | ✅ | brainstorm | Aggregator submissions (defaults to raw) |
+| BrainstormList.jsx | autonomous/ | ❌ | ✅ | brainstorm | Brainstorm content viewer |
 
 ### PDF Download Usage
 
 ```javascript
 // Pass raw text content — backend handles rendering and PDF generation
-await downloadPDFViaBackend(rawContent, metadata, sanitizeFilename(title), outline);
+// disclaimerType ('paper'|'brainstorm'|null) auto-prepends disclaimer if content lacks one
+await downloadPDFViaBackend(rawContent, metadata, sanitizeFilename(title), outline, onStart, onComplete, onError, 'paper');
 ```
+
+---
+
+## Disclaimer Injection (`frontend/src/utils/disclaimerHelper.js`)
+
+**Purpose:** Hallucination/AI-generated-content disclaimers are shown on every brainstorm and paper view and included in every download — but NEVER injected into the model's context window.
+
+**Approach:** Frontend-only. `prependDisclaimer(content, type)` prepends a disclaimer block unless one already exists (detects both the backend-embedded `AUTONOMOUS AI SOLUTION` header on completed papers and the frontend `DISCLAIMER` header).
+
+**Two variants:** `PAPER_DISCLAIMER` (for papers) and `BRAINSTORM_DISCLAIMER` (for brainstorm/aggregator databases).
+
+**Completed papers** (`PaperLibrary`, `FinalAnswerView`) already carry a richer backend-embedded disclaimer with model attribution; the `hasDisclaimer()` check prevents double-prepending.
+
+**Download helpers** (`downloadRawText`, `downloadPDFViaBackend`) accept an optional `disclaimerType` param that triggers the same `prependDisclaimer` logic before writing.
+
+**Critical invariant:** Backend brainstorm files and in-progress paper files remain disclaimer-free so models never waste context tokens on disclaimer text.
 
 ---
 
@@ -167,3 +183,4 @@ Ratings: Novelty, Correctness, Impact (1-10 scale). Up to 10 history entries. Re
 12. IntersectionObserver root margin MUST be ≥600px — prevents visible pop-in
 13. Debounce delay applies ONLY to rendered mode — raw mode updates instantly
 14. Chunk `key` MUST include content hash (`simpleHash`) — prevents React reusing stale DOM on content change
+15. Disclaimer MUST appear on all brainstorm/paper display and download paths — injected at frontend layer only, never stored in backend files consumed by models

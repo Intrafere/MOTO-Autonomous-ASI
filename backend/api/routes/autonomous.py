@@ -4,21 +4,378 @@ Includes Tier 1 (Brainstorm), Tier 2 (Paper Writing), and Tier 3 (Final Answer) 
 """
 import asyncio
 import logging
-from typing import Optional
+import os
+from pathlib import Path
+from typing import Optional, Any, Dict
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 
 from backend.shared.models import AutonomousResearchStartRequest, CritiqueRequest
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
-from backend.autonomous.memory.research_metadata import research_metadata
-from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
-from backend.autonomous.memory.paper_library import paper_library
+from backend.autonomous.memory.research_metadata import research_metadata, ResearchMetadata
+from backend.autonomous.memory.brainstorm_memory import brainstorm_memory, BrainstormMemory
+from backend.autonomous.memory.paper_library import paper_library, PaperLibrary
 from backend.autonomous.memory.final_answer_memory import final_answer_memory
 from backend.autonomous.memory.session_manager import session_manager
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
+from backend.aggregator.core.coordinator import coordinator
+from backend.compiler.core.compiler_coordinator import compiler_coordinator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auto-research", tags=["autonomous"])
+
+
+def _get_active_autonomous_session_id() -> str:
+    """Return the active autonomous session identifier, falling back to legacy mode."""
+    return session_manager.session_id if session_manager.is_session_active else "legacy"
+
+
+def _validate_history_session_id(session_id: str) -> None:
+    """Reject malformed history session identifiers before building any filesystem paths."""
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+
+    if session_id == "legacy":
+        return
+
+    if session_id in {".", ".."} or "/" in session_id or "\\" in session_id:
+        raise HTTPException(status_code=400, detail=f"Invalid session ID: {session_id}")
+
+
+def _get_start_conflict() -> Optional[str]:
+    """Return a user-facing conflict message if another workflow is active."""
+    autonomous_state = autonomous_coordinator.get_state()
+    if autonomous_state.is_running:
+        return "Autonomous research is already running"
+
+    if coordinator.is_running:
+        return "Cannot start Autonomous Research while Aggregator is running. Stop Aggregator first."
+
+    if compiler_coordinator.is_running:
+        return "Cannot start Autonomous Research while Compiler is running. Stop Compiler first."
+
+    return None
+
+
+def _resolve_history_session_paths(session_id: str) -> Dict[str, Path]:
+    """Resolve all session-specific paths needed for Stage 2 paper history operations."""
+    from backend.shared.config import system_config
+
+    _validate_history_session_id(session_id)
+
+    if session_id == "legacy":
+        paths = {
+            "papers_dir": Path(system_config.auto_papers_dir),
+            "brainstorms_dir": Path(system_config.auto_brainstorms_dir),
+            "metadata_path": Path(system_config.auto_research_metadata_file),
+            "stats_path": Path(system_config.auto_research_stats_file),
+            "workflow_state_path": Path(system_config.auto_workflow_state_file),
+        }
+    else:
+        sessions_root = Path(system_config.auto_sessions_base_dir).resolve()
+        session_root = (sessions_root / session_id).resolve()
+
+        if session_root.parent != sessions_root:
+            raise HTTPException(status_code=400, detail=f"Invalid session ID: {session_id}")
+
+        if not session_root.exists():
+            raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+        paths = {
+            "papers_dir": session_root / "papers",
+            "brainstorms_dir": session_root / "brainstorms",
+            "metadata_path": session_root / "session_metadata.json",
+            "stats_path": session_root / "session_stats.json",
+            "workflow_state_path": session_root / "workflow_state.json",
+        }
+
+    if not paths["papers_dir"].exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No Stage 2 papers directory found for session: {session_id}"
+        )
+
+    return paths
+
+
+def _build_scoped_paper_library(paths: Dict[str, Path]) -> PaperLibrary:
+    """Create a temporary PaperLibrary rooted at one legacy/session papers directory."""
+    scoped_library = PaperLibrary()
+    scoped_library._base_dir = paths["papers_dir"]
+    scoped_library._archive_dir = paths["papers_dir"] / "archive"
+    return scoped_library
+
+
+def _build_scoped_brainstorm_memory(paths: Dict[str, Path]) -> BrainstormMemory:
+    """Create a temporary BrainstormMemory rooted at one legacy/session brainstorms directory."""
+    scoped_memory = BrainstormMemory()
+    scoped_memory._base_dir = paths["brainstorms_dir"]
+    return scoped_memory
+
+
+async def _ensure_history_paper_is_visible(
+    scoped_paper_library: PaperLibrary,
+    *,
+    session_id: str,
+    paper_id: str,
+) -> Any:
+    """Ensure a history paper matches the completed/non-archived contract of the history UI."""
+    metadata = await scoped_paper_library.get_metadata(paper_id)
+    if not metadata or metadata.status != "complete":
+        raise HTTPException(
+            status_code=404,
+            detail=f"Paper not found in history: session={session_id}, paper={paper_id}"
+        )
+
+    if not await scoped_paper_library.is_paper_complete(paper_id):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Paper is not available in history: session={session_id}, paper={paper_id}"
+        )
+
+    return metadata
+
+
+async def _build_scoped_research_metadata(paths: Dict[str, Path]) -> ResearchMetadata:
+    """Create a temporary ResearchMetadata instance rooted at one legacy/session metadata set."""
+    scoped_metadata = ResearchMetadata()
+    scoped_metadata._metadata_path = paths["metadata_path"]
+    scoped_metadata._stats_path = paths["stats_path"]
+    scoped_metadata._workflow_state_path = paths["workflow_state_path"]
+    await scoped_metadata.initialize()
+    return scoped_metadata
+
+
+def _resolve_validator_config(request: Optional[CritiqueRequest]) -> Dict[str, Any]:
+    """Resolve critique validator settings from the request or the active coordinator."""
+    validator_model = None
+    validator_context_window = None
+    validator_max_tokens = None
+    validator_provider = None
+    validator_openrouter_provider = None
+    custom_prompt = None
+
+    if request:
+        custom_prompt = request.custom_prompt
+        if request.validator_model:
+            validator_model = request.validator_model
+            validator_context_window = request.validator_context_window or 131072
+            validator_max_tokens = request.validator_max_tokens or 25000
+            validator_provider = request.validator_provider or "lm_studio"
+            validator_openrouter_provider = request.validator_openrouter_provider
+
+    if not validator_model:
+        coordinator_config = autonomous_coordinator.get_validator_config()
+        if coordinator_config:
+            validator_model = coordinator_config["validator_model"]
+            validator_context_window = coordinator_config["validator_context_window"]
+            validator_max_tokens = coordinator_config["validator_max_tokens"]
+            validator_provider = coordinator_config["validator_provider"]
+            validator_openrouter_provider = coordinator_config.get("validator_openrouter_provider")
+
+    if not validator_model:
+        raise HTTPException(
+            status_code=400,
+            detail="No validator model configured. Please configure a validator model in Autonomous Research Settings."
+        )
+
+    return {
+        "custom_prompt": custom_prompt,
+        "validator_model": validator_model,
+        "validator_context_window": validator_context_window,
+        "validator_max_tokens": validator_max_tokens,
+        "validator_provider": validator_provider,
+        "validator_openrouter_provider": validator_openrouter_provider,
+    }
+
+
+async def _generate_autonomous_paper_critique(
+    *,
+    paper_id: str,
+    paper_title: str,
+    content: str,
+    base_path: str,
+    request: Optional[CritiqueRequest] = None,
+) -> Dict[str, Any]:
+    """Generate and persist a critique for an autonomous Stage 2 paper."""
+    from backend.shared.critique_memory import save_critique
+    from backend.shared.critique_prompts import (
+        DEFAULT_CRITIQUE_PROMPT,
+        build_critique_prompt,
+        parse_critique_response,
+    )
+    from backend.shared.api_client_manager import api_client_manager
+    from backend.shared.models import ModelConfig, PaperCritique
+    from backend.shared.utils import count_tokens
+    from datetime import datetime
+    import uuid
+
+    config = _resolve_validator_config(request)
+    prompt_to_use = config["custom_prompt"] or DEFAULT_CRITIQUE_PROMPT
+    full_prompt = build_critique_prompt(content, paper_title, prompt_to_use)
+    prompt_tokens = count_tokens(full_prompt)
+
+    output_reserve = config["validator_max_tokens"]
+    safety_margin = int(config["validator_context_window"] * 0.1)
+    available_input = config["validator_context_window"] - output_reserve - safety_margin
+
+    if prompt_tokens > available_input:
+        excess_tokens = prompt_tokens - available_input
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Paper is too long for the validator's context window. "
+                f"The paper requires {prompt_tokens:,} tokens, but the validator can only accept {available_input:,} tokens "
+                f"(context window: {config['validator_context_window']:,}, output reserve: {output_reserve:,}, safety margin: {safety_margin:,}). "
+                f"The paper exceeds the limit by {excess_tokens:,} tokens. "
+                f"A complete and honest review requires direct context injection - please select a validator with a larger context window."
+            )
+        )
+
+    api_client_manager.configure_role(
+        "paper_critic",
+        ModelConfig(
+            provider=config["validator_provider"],
+            model_id=config["validator_model"],
+            openrouter_model_id=config["validator_model"] if config["validator_provider"] == "openrouter" else None,
+            openrouter_provider=config["validator_openrouter_provider"],
+            lm_studio_fallback_id=None,
+            context_window=config["validator_context_window"],
+            max_output_tokens=config["validator_max_tokens"],
+        )
+    )
+
+    logger.info(f"Requesting critique for paper {paper_id} from validator model {config['validator_model']}")
+
+    response = await api_client_manager.generate_completion(
+        task_id=f"paper_critique_{paper_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        role_id="paper_critic",
+        model=config["validator_model"],
+        messages=[{"role": "user", "content": full_prompt}],
+        max_tokens=config["validator_max_tokens"],
+        temperature=0.0,
+    )
+
+    response_content = ""
+    if response.get("choices"):
+        message = response["choices"][0].get("message", {})
+        response_content = message.get("content") or message.get("reasoning") or ""
+
+    if not response_content:
+        raise HTTPException(status_code=500, detail="Empty response from validator model")
+
+    critique_data = parse_critique_response(response_content)
+    critique = PaperCritique(
+        critique_id=str(uuid.uuid4()),
+        model_id=config["validator_model"],
+        provider=config["validator_provider"],
+        host_provider=config["validator_openrouter_provider"],
+        date=datetime.now(),
+        prompt_used=prompt_to_use,
+        novelty_rating=critique_data.get("novelty_rating", 0),
+        novelty_feedback=critique_data.get("novelty_feedback", ""),
+        correctness_rating=critique_data.get("correctness_rating", 0),
+        correctness_feedback=critique_data.get("correctness_feedback", ""),
+        impact_rating=critique_data.get("impact_rating", 0),
+        impact_feedback=critique_data.get("impact_feedback", ""),
+        full_critique=critique_data.get("full_critique", ""),
+    )
+
+    saved_critique = await save_critique("autonomous_paper", critique, paper_id, base_path)
+    return {
+        "success": True,
+        "critique": saved_critique.model_dump(),
+        "paper_id": paper_id,
+        "paper_title": paper_title,
+    }
+
+
+async def _get_autonomous_paper_critiques_response(
+    *,
+    paper_id: str,
+    paper_title: str,
+    base_path: str,
+) -> Dict[str, Any]:
+    """Load critique history for an autonomous Stage 2 paper."""
+    from backend.shared.critique_memory import get_critiques
+
+    critiques = await get_critiques("autonomous_paper", paper_id, base_path)
+    return {
+        "success": True,
+        "paper_id": paper_id,
+        "paper_title": paper_title,
+        "critiques": [critique.model_dump() for critique in critiques],
+        "count": len(critiques),
+    }
+
+
+async def _delete_autonomous_paper_from_scope(
+    *,
+    session_id: str,
+    scoped_paper_library: PaperLibrary,
+    scoped_brainstorm_memory: BrainstormMemory,
+    scoped_research_metadata: ResearchMetadata,
+    paper_id: str,
+) -> Dict[str, Any]:
+    """Delete a Stage 2 paper and clean its related metadata/critique state."""
+    from backend.shared.critique_memory import clear_critiques
+
+    state = autonomous_coordinator.get_state()
+    active_session_id = _get_active_autonomous_session_id()
+    if (
+        state.is_running
+        and state.current_tier == "tier2_paper_writing"
+        and autonomous_coordinator._current_paper_id == paper_id
+        and active_session_id == session_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete active paper while it's being compiled. Stop autonomous research first."
+        )
+
+    metadata = await scoped_paper_library.get_metadata(paper_id)
+    if not metadata:
+        raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
+
+    paper_path = scoped_paper_library.get_paper_path(paper_id)
+    base_path = os.path.dirname(paper_path)
+    source_brainstorms = metadata.source_brainstorm_ids or []
+
+    success = await scoped_paper_library.delete_paper(paper_id)
+    if not success:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete paper files for {paper_id}"
+        )
+
+    await scoped_research_metadata.delete_paper(paper_id)
+
+    for topic_id in source_brainstorms:
+        try:
+            await scoped_brainstorm_memory.remove_paper_reference(topic_id, paper_id)
+        except Exception as e:
+            logger.warning(
+                f"Failed to remove paper {paper_id} from brainstorm metadata {topic_id}: {e}"
+            )
+
+    try:
+        await clear_critiques("autonomous_paper", paper_id, base_path)
+        logger.info(f"Cleared critiques for deleted paper {paper_id}")
+    except Exception as e:
+        logger.warning(f"Failed to clear critiques for paper {paper_id}: {e}")
+
+    logger.info(
+        f"Deleted paper {paper_id} from session {session_id} "
+        f"(from brainstorms: {', '.join(source_brainstorms)})"
+    )
+
+    return {
+        "success": True,
+        "message": f"Paper {paper_id} deleted successfully",
+        "paper_id": paper_id,
+        "session_id": session_id,
+        "source_brainstorms": source_brainstorms,
+    }
 
 
 @router.post("/start")
@@ -29,14 +386,10 @@ async def start_autonomous_research(
     """Start autonomous research mode."""
     try:
         from backend.shared.config import system_config
-        
-        # Check if already running
-        state = autonomous_coordinator.get_state()
-        if state.is_running:
-            raise HTTPException(
-                status_code=400,
-                detail="Autonomous research is already running"
-            )
+
+        conflict = _get_start_conflict()
+        if conflict:
+            raise HTTPException(status_code=400, detail=conflict)
         
         # Validate submitter configs
         num_submitters = len(request.submitter_configs)
@@ -420,6 +773,43 @@ async def get_paper(paper_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/paper-history")
+async def get_paper_history():
+    """Get all completed, non-archived Stage 2 papers from legacy and session history."""
+    try:
+        papers = await paper_library.list_history_papers()
+        return {
+            "success": True,
+            "papers": papers,
+            "total_count": len(papers)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get Stage 2 paper history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/paper-history/{session_id}/{paper_id}")
+async def get_history_paper(session_id: str, paper_id: str):
+    """Get one completed, non-archived Stage 2 paper from legacy/session history."""
+    try:
+        paper = await paper_library.get_history_paper(session_id, paper_id)
+        if not paper:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Paper not found in history: session={session_id}, paper={paper_id}"
+            )
+
+        return {
+            "success": True,
+            **paper
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get history paper {session_id}/{paper_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/current-paper-progress")
 async def get_current_paper_progress():
     """Get current paper being compiled (if any).
@@ -764,9 +1154,9 @@ async def force_tier3(mode: str = "complete_current"):
             # Get current paper info from compiler if available
             try:
                 from backend.compiler.core.compiler_coordinator import compiler_coordinator
-                compiler_state = compiler_coordinator.get_state()
-                context_info["compiler_mode"] = compiler_state.get("current_mode", "unknown")
-            except:
+                compiler_state = await compiler_coordinator.get_status()
+                context_info["compiler_mode"] = compiler_state.current_mode or "unknown"
+            except Exception:
                 pass
         
         # Get count of completed papers
@@ -951,72 +1341,58 @@ async def delete_paper(paper_id: str, confirm: bool = False):
     Query params:
         confirm: Must be True to execute deletion (safety check)
     """
-    import os
-    
     try:
         if not confirm:
             raise HTTPException(
                 status_code=400,
                 detail="Must confirm deletion with confirm=true"
             )
-        
-        # Check if running
-        state = autonomous_coordinator.get_state()
-        if state.is_running and state.current_tier == "tier2_paper_writing":
-            # Check if this is the active paper
-            if autonomous_coordinator._current_paper_id == paper_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot delete active paper while it's being compiled. Stop autonomous research first."
-                )
-        
-        # Get paper metadata
-        metadata = await paper_library.get_metadata(paper_id)
-        if not metadata:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Paper not found: {paper_id}"
-            )
-        
-        # Get session-aware base path for critique storage BEFORE deleting paper
-        paper_path = paper_library.get_paper_path(paper_id)
-        base_path = os.path.dirname(paper_path)
-        
-        # Get source brainstorms
-        source_brainstorms = metadata.source_brainstorm_ids or []
-        
-        # Delete paper files
-        success = await paper_library.delete_paper(paper_id)
-        if not success:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to delete paper files for {paper_id}"
-            )
-        
-        # Remove from central metadata
-        await research_metadata.delete_paper(paper_id)
-        
-        # Clear associated critiques using session-aware path
-        from backend.shared.critique_memory import clear_critiques
-        try:
-            await clear_critiques("autonomous_paper", paper_id, base_path)
-            logger.info(f"Cleared critiques for deleted paper {paper_id}")
-        except Exception as e:
-            logger.warning(f"Failed to clear critiques for paper {paper_id}: {e}")
-        
-        logger.info(f"Deleted paper {paper_id} (from brainstorms: {', '.join(source_brainstorms)})")
-        
-        return {
-            "success": True,
-            "message": f"Paper {paper_id} deleted successfully",
-            "paper_id": paper_id,
-            "source_brainstorms": source_brainstorms
-        }
-        
+
+        return await _delete_autonomous_paper_from_scope(
+            session_id=_get_active_autonomous_session_id(),
+            scoped_paper_library=paper_library,
+            scoped_brainstorm_memory=brainstorm_memory,
+            scoped_research_metadata=research_metadata,
+            paper_id=paper_id,
+        )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to delete paper {paper_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/paper-history/{session_id}/{paper_id}")
+async def delete_history_paper(session_id: str, paper_id: str, confirm: bool = False):
+    """Delete a completed Stage 2 history paper from a specific legacy/session scope."""
+    try:
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Must confirm deletion with confirm=true"
+            )
+
+        paths = _resolve_history_session_paths(session_id)
+        scoped_paper_library = _build_scoped_paper_library(paths)
+        scoped_brainstorm_memory = _build_scoped_brainstorm_memory(paths)
+        scoped_research_metadata = await _build_scoped_research_metadata(paths)
+        await _ensure_history_paper_is_visible(
+            scoped_paper_library,
+            session_id=session_id,
+            paper_id=paper_id,
+        )
+
+        return await _delete_autonomous_paper_from_scope(
+            session_id=session_id,
+            scoped_paper_library=scoped_paper_library,
+            scoped_brainstorm_memory=scoped_brainstorm_memory,
+            scoped_research_metadata=scoped_research_metadata,
+            paper_id=paper_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete history paper {session_id}/{paper_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1377,6 +1753,7 @@ async def get_final_answer_archived_papers(answer_id: str):
         List of paper metadata
     """
     from backend.autonomous.memory.final_answer_memory import FinalAnswerMemory
+    from backend.shared.config import system_config
     from pathlib import Path
     
     try:
@@ -1407,6 +1784,7 @@ async def get_final_answer_archived_paper(answer_id: str, paper_id: str):
         Paper content, abstract, outline, metadata
     """
     from backend.autonomous.memory.final_answer_memory import FinalAnswerMemory
+    from backend.shared.config import system_config
     from pathlib import Path
     
     try:
@@ -1441,6 +1819,7 @@ async def get_final_answer_archived_brainstorms(answer_id: str):
         List of brainstorm metadata
     """
     from backend.autonomous.memory.final_answer_memory import FinalAnswerMemory
+    from backend.shared.config import system_config
     from pathlib import Path
     
     try:
@@ -1471,6 +1850,7 @@ async def get_final_answer_archived_brainstorm(answer_id: str, topic_id: str):
         Brainstorm content and metadata
     """
     from backend.autonomous.memory.final_answer_memory import FinalAnswerMemory
+    from backend.shared.config import system_config
     from pathlib import Path
     
     try:
@@ -1516,180 +1896,25 @@ async def request_paper_critique(paper_id: str, request: CritiqueRequest = None)
     Returns:
         The critique with ratings and feedback
     """
-    from backend.shared.config import system_config
-    from backend.shared.critique_prompts import build_critique_prompt, DEFAULT_CRITIQUE_PROMPT
-    from backend.shared.critique_memory import save_critique, MAX_CRITIQUES_PER_PAPER
-    from backend.shared.models import PaperCritique, CritiqueRequest
-    from backend.shared.api_client_manager import api_client_manager
-    from backend.shared.json_parser import parse_json
-    from backend.shared.utils import count_tokens
-    import os
-    import uuid
-    from datetime import datetime
-    
     try:
-        # Get paper content
         metadata = await paper_library.get_metadata(paper_id)
         if not metadata:
             raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
-        
+
         content = await paper_library.get_paper_content(paper_id)
         if not content:
             raise HTTPException(status_code=404, detail=f"Paper content not found: {paper_id}")
-        
-        # Get session-aware base path for critique storage
-        # Critiques are stored alongside papers in the same directory
+
         paper_path = paper_library.get_paper_path(paper_id)
         base_path = os.path.dirname(paper_path)
-        
-        # Try to get validator config from request body first (allows critiques without starting research)
-        # Then fall back to autonomous coordinator's stored config
-        validator_model = None
-        validator_context_window = None
-        validator_max_tokens = None
-        validator_provider = None
-        validator_openrouter_provider = None
-        custom_prompt = None
-        
-        if request:
-            custom_prompt = request.custom_prompt
-            # Check if request provides validator config
-            if request.validator_model:
-                validator_model = request.validator_model
-                validator_context_window = request.validator_context_window or 131072
-                validator_max_tokens = request.validator_max_tokens or 25000
-                validator_provider = request.validator_provider or "lm_studio"
-                validator_openrouter_provider = request.validator_openrouter_provider
-        
-        # If no validator config from request, try coordinator
-        if not validator_model:
-            coordinator_config = autonomous_coordinator.get_validator_config()
-            if coordinator_config:
-                validator_model = coordinator_config["validator_model"]
-                validator_context_window = coordinator_config["validator_context_window"]
-                validator_max_tokens = coordinator_config["validator_max_tokens"]
-                validator_provider = coordinator_config["validator_provider"]
-                validator_openrouter_provider = coordinator_config.get("validator_openrouter_provider")
-        
-        # If still no config, error
-        if not validator_model:
-            raise HTTPException(
-                status_code=400,
-                detail="No validator model configured. Please configure a validator model in Autonomous Research Settings."
-            )
-        
-        # Build the critique prompt
-        prompt_to_use = custom_prompt if custom_prompt else DEFAULT_CRITIQUE_PROMPT
-        full_prompt = build_critique_prompt(content, metadata.title, prompt_to_use)
-        
-        # Count tokens in the prompt
-        prompt_tokens = count_tokens(full_prompt)
-        
-        # Calculate available input tokens (context window - output reserve - safety margin)
-        output_reserve = validator_max_tokens
-        safety_margin = int(validator_context_window * 0.1)  # 10% safety margin
-        available_input = validator_context_window - output_reserve - safety_margin
-        
-        # Check if paper fits in context window
-        if prompt_tokens > available_input:
-            excess_tokens = prompt_tokens - available_input
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Paper is too long for the validator's context window. "
-                    f"The paper requires {prompt_tokens:,} tokens, but the validator can only accept {available_input:,} tokens "
-                    f"(context window: {validator_context_window:,}, output reserve: {output_reserve:,}, safety margin: {safety_margin:,}). "
-                    f"The paper exceeds the limit by {excess_tokens:,} tokens. "
-                    f"A complete and honest review requires direct context injection - please select a validator with a larger context window."
-                )
-            )
-        
-        # Build messages for API call
-        messages = [
-            {"role": "user", "content": full_prompt}
-        ]
-        
-        # Configure the paper_critic role with the validator settings BEFORE making the API call
-        # This ensures routing goes to the correct provider (OpenRouter vs LM Studio)
-        from backend.shared.models import ModelConfig
-        
-        api_client_manager.configure_role(
-            "paper_critic",
-            ModelConfig(
-                provider=validator_provider,
-                model_id=validator_model,
-                openrouter_model_id=validator_model if validator_provider == "openrouter" else None,
-                openrouter_provider=validator_openrouter_provider,
-                lm_studio_fallback_id=None,  # No fallback for direct critique calls
-                context_window=validator_context_window,
-                max_output_tokens=validator_max_tokens
-            )
+
+        return await _generate_autonomous_paper_critique(
+            paper_id=paper_id,
+            paper_title=metadata.title,
+            content=content,
+            base_path=base_path,
+            request=request,
         )
-        
-        # Make the API call to the validator model
-        logger.info(f"Requesting critique for paper {paper_id} from validator model {validator_model}")
-        
-        response = await api_client_manager.generate_completion(
-            task_id=f"paper_critique_{paper_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            role_id="paper_critic",
-            model=validator_model,
-            messages=messages,
-            max_tokens=validator_max_tokens,
-            temperature=0.0
-        )
-        
-        # Parse the response - extract from OpenAI-compatible response structure
-        response_content = ""
-        if response.get("choices"):
-            message = response["choices"][0].get("message", {})
-            response_content = message.get("content") or message.get("reasoning") or ""
-        
-        if not response_content:
-            raise HTTPException(status_code=500, detail="Empty response from validator model")
-        
-        # Try to parse as JSON
-        try:
-            critique_data = parse_json(response_content)
-        except Exception as e:
-            # If JSON parsing fails, create a structured response from raw text
-            logger.warning(f"Failed to parse critique JSON, using raw response: {e}")
-            critique_data = {
-                "novelty_rating": 0,
-                "novelty_feedback": "Unable to parse structured response",
-                "correctness_rating": 0,
-                "correctness_feedback": "Unable to parse structured response",
-                "impact_rating": 0,
-                "impact_feedback": "Unable to parse structured response",
-                "full_critique": response_content
-            }
-        
-        # Create critique object with correct field names
-        critique = PaperCritique(
-            critique_id=str(uuid.uuid4()),
-            model_id=validator_model,
-            provider=validator_provider,
-            host_provider=validator_openrouter_provider,
-            date=datetime.now(),
-            prompt_used=prompt_to_use,
-            novelty_rating=critique_data.get("novelty_rating", 0),
-            novelty_feedback=critique_data.get("novelty_feedback", ""),
-            correctness_rating=critique_data.get("correctness_rating", 0),
-            correctness_feedback=critique_data.get("correctness_feedback", ""),
-            impact_rating=critique_data.get("impact_rating", 0),
-            impact_feedback=critique_data.get("impact_feedback", ""),
-            full_critique=critique_data.get("full_critique", "")
-        )
-        
-        # Save the critique with session-aware path
-        saved_critique = await save_critique("autonomous_paper", critique, paper_id, base_path)
-        
-        return {
-            "success": True,
-            "critique": saved_critique.model_dump(),
-            "paper_id": paper_id,
-            "paper_title": metadata.title
-        }
-        
     except HTTPException:
         raise
     except Exception as e:
@@ -1708,29 +1933,19 @@ async def get_paper_critiques(paper_id: str):
     Returns:
         List of critiques for the paper
     """
-    from backend.shared.critique_memory import get_critiques
-    import os
-    
     try:
-        # Verify paper exists
         metadata = await paper_library.get_metadata(paper_id)
         if not metadata:
             raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
-        
-        # Get session-aware base path for critique storage
+
         paper_path = paper_library.get_paper_path(paper_id)
         base_path = os.path.dirname(paper_path)
-        
-        critiques = await get_critiques("autonomous_paper", paper_id, base_path)
-        
-        return {
-            "success": True,
-            "paper_id": paper_id,
-            "paper_title": metadata.title,
-            "critiques": [c.model_dump() for c in critiques],
-            "count": len(critiques)
-        }
-        
+
+        return await _get_autonomous_paper_critiques_response(
+            paper_id=paper_id,
+            paper_title=metadata.title,
+            base_path=base_path,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -1785,6 +2000,72 @@ async def delete_paper_critiques(paper_id: str, confirm: bool = False):
 
 
 # ============================================================================
+# STAGE 2 PAPER HISTORY CRITIQUE ENDPOINTS
+# ============================================================================
+
+
+@router.post("/paper-history/{session_id}/{paper_id}/critique")
+async def request_history_paper_critique(
+    session_id: str,
+    paper_id: str,
+    request: CritiqueRequest = None,
+):
+    """Request a validator critique for a Stage 2 history paper from a specific session."""
+    try:
+        paths = _resolve_history_session_paths(session_id)
+        scoped_paper_library = _build_scoped_paper_library(paths)
+        metadata = await _ensure_history_paper_is_visible(
+            scoped_paper_library,
+            session_id=session_id,
+            paper_id=paper_id,
+        )
+
+        content = await scoped_paper_library.get_paper_content(paper_id)
+        if not content:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Paper content not found: session={session_id}, paper={paper_id}"
+            )
+
+        return await _generate_autonomous_paper_critique(
+            paper_id=paper_id,
+            paper_title=metadata.title,
+            content=content,
+            base_path=str(paths["papers_dir"]),
+            request=request,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to request history critique for {session_id}/{paper_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/paper-history/{session_id}/{paper_id}/critiques")
+async def get_history_paper_critiques(session_id: str, paper_id: str):
+    """Get all validator critiques for a Stage 2 history paper from a specific session."""
+    try:
+        paths = _resolve_history_session_paths(session_id)
+        scoped_paper_library = _build_scoped_paper_library(paths)
+        metadata = await _ensure_history_paper_is_visible(
+            scoped_paper_library,
+            session_id=session_id,
+            paper_id=paper_id,
+        )
+
+        return await _get_autonomous_paper_critiques_response(
+            paper_id=paper_id,
+            paper_title=metadata.title,
+            base_path=str(paths["papers_dir"]),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get history critiques for {session_id}/{paper_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # FINAL ANSWER CRITIQUE ENDPOINTS
 # ============================================================================
 
@@ -1812,7 +2093,6 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
     from backend.shared.critique_memory import save_critique
     from backend.shared.models import PaperCritique, CritiqueRequest
     from backend.shared.api_client_manager import api_client_manager
-    from backend.shared.json_parser import parse_json
     from backend.shared.utils import count_tokens
     from pathlib import Path
     import uuid
@@ -1944,20 +2224,9 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         if not response_content:
             raise HTTPException(status_code=500, detail="Empty response from validator model")
         
-        # Try to parse as JSON
-        try:
-            critique_data = parse_json(response_content)
-        except Exception as e:
-            logger.warning(f"Failed to parse critique JSON, using raw response: {e}")
-            critique_data = {
-                "novelty_rating": 0,
-                "novelty_feedback": "Unable to parse structured response",
-                "correctness_rating": 0,
-                "correctness_feedback": "Unable to parse structured response",
-                "impact_rating": 0,
-                "impact_feedback": "Unable to parse structured response",
-                "full_critique": response_content
-            }
+        # Parse with lenient fallback for truncated critique responses
+        from backend.shared.critique_prompts import parse_critique_response
+        critique_data = parse_critique_response(response_content)
         
         # Create critique object with correct field names
         critique = PaperCritique(

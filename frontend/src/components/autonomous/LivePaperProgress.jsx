@@ -5,6 +5,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
 import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import { prependDisclaimer } from '../../utils/disclaimerHelper';
 
 const LivePaperProgress = ({ api, isCompiling }) => {
   const [paperData, setPaperData] = useState(null);
@@ -60,7 +61,7 @@ const LivePaperProgress = ({ api, isCompiling }) => {
   const handleDownloadRaw = () => {
     if (!paperData?.content) return;
     const filename = sanitizeFilename(paperData.title || paperData.paper_id || 'paper');
-    downloadRawText(paperData.content, filename, paperData.outline);
+    downloadRawText(paperData.content, filename, paperData.outline, 'paper');
   };
 
   const handleDownloadPdf = async () => {
@@ -86,6 +87,7 @@ const LivePaperProgress = ({ api, isCompiling }) => {
         console.error('PDF download failed:', error);
         alert('PDF generation failed: ' + error.message);
       },
+      'paper',
     );
   };
 
@@ -179,8 +181,8 @@ const LivePaperProgress = ({ api, isCompiling }) => {
                 <LatexRenderer 
                   content={
                     paperData.outline
-                      ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n${paperData.content}`
-                      : paperData.content
+                      ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n${prependDisclaimer(paperData.content, 'paper')}`
+                      : prependDisclaimer(paperData.content, 'paper')
                   }
                   className="live-paper-latex-renderer"
                   defaultRaw={true}

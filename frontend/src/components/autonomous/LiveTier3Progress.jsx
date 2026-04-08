@@ -11,6 +11,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
 import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import { prependDisclaimer } from '../../utils/disclaimerHelper';
 
 const LiveTier3Progress = ({ api, status }) => {
   const [paperData, setPaperData] = useState(null);
@@ -103,7 +104,7 @@ const LiveTier3Progress = ({ api, status }) => {
   const handleDownloadRaw = () => {
     if (!paperData?.content) return;
     const filename = sanitizeFilename(paperData.title || 'tier3_final_answer');
-    downloadRawText(paperData.content, filename, paperData.outline);
+    downloadRawText(paperData.content, filename, paperData.outline, 'paper');
   };
 
   const handleDownloadPdf = async () => {
@@ -129,6 +130,7 @@ const LiveTier3Progress = ({ api, status }) => {
         console.error('PDF download failed:', error);
         alert('PDF generation failed: ' + error.message);
       },
+      'paper',
     );
   };
 
@@ -190,7 +192,7 @@ const LiveTier3Progress = ({ api, status }) => {
       'format_selecting': { label: 'Selecting Format', color: 'blue' },
       'organizing_volume': { label: 'Organizing Volume', color: 'purple' },
       'writing': { label: 'Writing', color: 'green' },
-      'complete': { label: 'Complete', color: 'gold' }
+      'complete': { label: 'Complete', color: 'green' }
     };
     
     const info = statusMap[tierStatus] || { label: tierStatus || 'Unknown', color: 'gray' };
@@ -327,8 +329,8 @@ const LiveTier3Progress = ({ api, status }) => {
                 <LatexRenderer 
                   content={
                     paperData.outline
-                      ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n${paperData.content}`
-                      : paperData.content
+                      ? `${paperData.outline}\n\n${'='.repeat(80)}\n\n${prependDisclaimer(paperData.content, 'paper')}`
+                      : prependDisclaimer(paperData.content, 'paper')
                   }
                   className="live-tier3-latex-renderer"
                   defaultRaw={true}
@@ -353,7 +355,7 @@ const LiveTier3Progress = ({ api, status }) => {
       <style>{`
         .live-tier3-progress {
           background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-          border: 1px solid #ffd700;
+          border: 1px solid #1eff1c;
           border-radius: 8px;
           margin: 1rem 0;
           overflow: hidden;
@@ -364,14 +366,14 @@ const LiveTier3Progress = ({ api, status }) => {
           justify-content: space-between;
           align-items: center;
           padding: 0.75rem 1rem;
-          background: linear-gradient(90deg, rgba(255, 215, 0, 0.15) 0%, rgba(255, 215, 0, 0.05) 100%);
+          background: linear-gradient(90deg, rgba(30, 255, 28, 0.15) 0%, rgba(30, 255, 28, 0.05) 100%);
           cursor: pointer;
-          border-bottom: 1px solid rgba(255, 215, 0, 0.3);
+          border-bottom: 1px solid rgba(30, 255, 28, 0.3);
         }
 
         .live-tier3-header h3 {
           margin: 0;
-          color: #ffd700;
+          color: #1eff1c;
           font-size: 1rem;
           display: flex;
           align-items: center;
@@ -402,7 +404,7 @@ const LiveTier3Progress = ({ api, status }) => {
         .tier3-status-blue { background: #1e40af; color: #93c5fd; }
         .tier3-status-purple { background: #6b21a8; color: #d8b4fe; }
         .tier3-status-green { background: #166534; color: #86efac; }
-        .tier3-status-gold { background: #854d0e; color: #fcd34d; }
+        .tier3-status-gold { background: #0f5a10; color: #7dff6f; }
 
         .tier3-format-badge {
           padding: 0.25rem 0.5rem;
@@ -419,7 +421,7 @@ const LiveTier3Progress = ({ api, status }) => {
 
         .tier3-chapter-list {
           padding: 0.75rem 1rem;
-          border-bottom: 1px solid rgba(255, 215, 0, 0.2);
+          border-bottom: 1px solid rgba(30, 255, 28, 0.2);
           background: rgba(0, 0, 0, 0.2);
         }
 
@@ -447,8 +449,8 @@ const LiveTier3Progress = ({ api, status }) => {
         }
 
         .chapter-item.chapter-active {
-          background: rgba(255, 215, 0, 0.2);
-          border: 1px solid rgba(255, 215, 0, 0.4);
+          background: rgba(30, 255, 28, 0.2);
+          border: 1px solid rgba(30, 255, 28, 0.4);
         }
 
         .chapter-item.chapter-complete {
@@ -464,7 +466,7 @@ const LiveTier3Progress = ({ api, status }) => {
           background: rgba(255, 255, 255, 0.1);
           border-radius: 50%;
           font-weight: 600;
-          color: #ffd700;
+          color: #1eff1c;
         }
 
         .chapter-type {
@@ -488,12 +490,12 @@ const LiveTier3Progress = ({ api, status }) => {
         }
 
         .chapter-status-complete { color: #86efac; }
-        .chapter-status-writing { color: #fcd34d; ${getBannerShimmerEnabled() ? 'animation: pulse 1s infinite;' : ''} }
+        .chapter-status-writing { color: #7dff6f; ${getBannerShimmerEnabled() ? 'animation: pulse 1s infinite;' : ''} }
         .chapter-status-pending { color: #6b7280; }
 
         .tier3-current-writing {
           padding: 0.5rem 1rem;
-          background: rgba(255, 215, 0, 0.1);
+          background: rgba(30, 255, 28, 0.1);
           display: flex;
           align-items: center;
           gap: 0.5rem;
@@ -501,7 +503,7 @@ const LiveTier3Progress = ({ api, status }) => {
         }
 
         .writing-indicator {
-          color: #fcd34d;
+          color: #7dff6f;
           ${getBannerShimmerEnabled() ? 'animation: pulse 1.5s infinite;' : ''}
         }
 
@@ -557,14 +559,14 @@ const LiveTier3Progress = ({ api, status }) => {
         }
 
         .btn-download-pdf {
-          background: #ffd700;
+          background: #1eff1c;
           border: none;
           color: #1a1a2e;
           font-weight: 600;
         }
 
         .btn-download-pdf:hover:not(:disabled) {
-          background: #ffed4e;
+          background: #7dff6f;
         }
 
         .btn-download-raw:disabled, .btn-download-pdf:disabled {
@@ -580,9 +582,9 @@ const LiveTier3Progress = ({ api, status }) => {
 
         .paper-section h4 {
           margin: 0 0 1rem 0;
-          color: #ffd700;
+          color: #1eff1c;
           font-size: 0.9rem;
-          border-bottom: 1px solid rgba(255, 215, 0, 0.2);
+          border-bottom: 1px solid rgba(30, 255, 28, 0.2);
           padding-bottom: 0.5rem;
         }
 

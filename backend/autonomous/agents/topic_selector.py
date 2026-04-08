@@ -5,6 +5,11 @@ CONTEXT HANDLING:
 - Uses DIRECT INJECTION for all context (metadata summaries are typically small)
 - Validates prompt size before sending to prevent context overflow
 - Truncates paper abstracts if context is too large (safe since abstracts are summaries)
+
+NO RAG BY DESIGN: This agent makes a strategic decision about WHAT to work on next.
+It only needs metadata summaries (topic prompts, statuses, paper titles/abstracts),
+not full brainstorm databases or full paper content. Metadata is small enough to
+direct-inject; abstract truncation is the overflow fallback.
 """
 import asyncio
 import json
@@ -68,7 +73,8 @@ class TopicSelectorAgent:
         self,
         user_research_prompt: str,
         brainstorms_summary: List[Dict[str, Any]],
-        papers_summary: List[Dict[str, Any]]
+        papers_summary: List[Dict[str, Any]],
+        candidate_questions: str = ""
     ) -> Optional[TopicSelectionSubmission]:
         """
         Generate a topic selection submission.
@@ -77,6 +83,7 @@ class TopicSelectorAgent:
             user_research_prompt: The user's high-level research goal
             brainstorms_summary: List of all brainstorms with metadata
             papers_summary: List of all papers with title, abstract, word count
+            candidate_questions: Formatted candidate questions from topic exploration phase
         
         Returns:
             TopicSelectionSubmission or None if generation failed
@@ -90,7 +97,8 @@ class TopicSelectorAgent:
                 user_research_prompt=user_research_prompt,
                 brainstorms_summary=brainstorms_summary,
                 papers_summary=papers_summary,
-                rejection_context=rejection_context
+                rejection_context=rejection_context,
+                candidate_questions=candidate_questions
             )
             
             # Validate prompt size
@@ -115,7 +123,8 @@ class TopicSelectorAgent:
                     user_research_prompt=user_research_prompt,
                     brainstorms_summary=brainstorms_summary,
                     papers_summary=truncated_papers,
-                    rejection_context=rejection_context
+                    rejection_context=rejection_context,
+                    candidate_questions=candidate_questions
                 )
                 
                 prompt_tokens = count_tokens(prompt)

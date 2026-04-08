@@ -10,6 +10,7 @@ import TextFileUploader from '../TextFileUploader';
 
 const AutonomousResearchInterface = ({
   isRunning,
+  anyWorkflowRunning,
   status,
   activity,
   onStart,
@@ -31,6 +32,8 @@ const AutonomousResearchInterface = ({
   const [critiquePhaseActive, setCritiquePhaseActive] = useState(false);
   const [isSkipping, setIsSkipping] = useState(false);
   const [skipQueued, setSkipQueued] = useState(false);  // Skip has been queued pre-emptively
+  const [explorationProgress, setExplorationProgress] = useState(null);  // Topic exploration phase tracking
+  const [titleExplorationProgress, setTitleExplorationProgress] = useState(null);  // Paper title exploration tracking
   const activityEndRef = useRef(null);
 
   // Save research prompt to localStorage
@@ -54,13 +57,28 @@ const AutonomousResearchInterface = ({
       setCritiquePhaseActive(true);
     } else if (lastEvent.event === 'critique_phase_ended') {
       setCritiquePhaseActive(false);
-      // Only reset if critique ended without skip (e.g., rewrite happened)
-      // If skipQueued is true, the skip worked, so keep showing checkmark
     } else if (lastEvent.event === 'critique_phase_skipped') {
       setCritiquePhaseActive(false);
-      // Skip worked! Keep skipQueued=true to show checkmark
     } else if (lastEvent.event === 'paper_writing_started' || lastEvent.event === 'paper_completed') {
       setSkipQueued(false);  // Reset skip state for new paper
+    }
+    
+    // Topic exploration phase tracking
+    if (lastEvent.event === 'topic_exploration_started') {
+      setExplorationProgress({ accepted: lastEvent.data?.resumed_count || 0, target: lastEvent.data?.target || 5 });
+    } else if (lastEvent.event === 'topic_exploration_progress') {
+      setExplorationProgress({ accepted: lastEvent.data?.accepted || 0, target: lastEvent.data?.target || 5 });
+    } else if (lastEvent.event === 'topic_exploration_complete' || lastEvent.event === 'topic_selected') {
+      setExplorationProgress(null);
+    }
+    
+    // Paper title exploration phase tracking
+    if (lastEvent.event === 'paper_title_exploration_started') {
+      setTitleExplorationProgress({ accepted: lastEvent.data?.resumed_count || 0, target: lastEvent.data?.target || 5 });
+    } else if (lastEvent.event === 'paper_title_exploration_progress') {
+      setTitleExplorationProgress({ accepted: lastEvent.data?.accepted || 0, target: lastEvent.data?.target || 5 });
+    } else if (lastEvent.event === 'paper_title_exploration_complete' || lastEvent.event === 'paper_writing_started') {
+      setTitleExplorationProgress(null);
     }
   }, [activity]);
 
@@ -80,6 +98,11 @@ const AutonomousResearchInterface = ({
   };
 
   const handleStart = () => {
+    if (anyWorkflowRunning && !isRunning) {
+      alert('Another workflow is already running. Stop it before starting Autonomous Research.');
+      return;
+    }
+
     if (!researchPrompt.trim()) {
       alert('Please enter a research prompt');
       return;
@@ -186,13 +209,32 @@ const AutonomousResearchInterface = ({
   const getActivityIcon = (event) => {
     switch (event) {
       case 'brainstorm_submission_accepted':
+      case 'submission_accepted':
+      case 'compiler_acceptance':
+      case 'outline_locked':
         return '✓';
       case 'brainstorm_submission_rejected':
+      case 'submission_rejected':
+      case 'compiler_rejection':
         return '✗';
       case 'topic_selected':
         return '»';
       case 'topic_selection_rejected':
         return '⚠';
+      case 'topic_exploration_started':
+        return '◉';
+      case 'topic_exploration_progress':
+        return '◈';
+      case 'topic_exploration_rejected':
+        return '⚠';
+      case 'topic_exploration_complete':
+        return '✓';
+      case 'paper_title_exploration_started':
+        return '◉';
+      case 'paper_title_exploration_progress':
+        return '◈';
+      case 'paper_title_exploration_complete':
+        return '✓';
       case 'completion_review_started':
         return '◎';
       case 'completion_review_result':
@@ -215,6 +257,7 @@ const AutonomousResearchInterface = ({
       case 'critique_phase_ended':
         return '✓';
       case 'critique_phase_skipped':
+      case 'compiler_decline':
         return '↷';
       case 'phase_transition':
         return '□';
@@ -222,6 +265,12 @@ const AutonomousResearchInterface = ({
         return '⊟';
       case 'paper_redundancy_review':
         return '◇';
+      case 'brainstorm_continuation_started':
+        return '◎';
+      case 'brainstorm_continuation_decided':
+        return '⊞';
+      case 'brainstorm_paper_limit_reached':
+        return '⊘';
       // Reference selection events
       case 'reference_selection_started':
         return '▭';
@@ -270,8 +319,12 @@ const AutonomousResearchInterface = ({
     }
     // Success events
     if (event.includes('accepted') || 
+        event === 'compiler_acceptance' ||
+        event === 'outline_locked' ||
         event === 'paper_completed' || 
         event === 'partial_revision_complete' ||
+        event === 'topic_exploration_complete' ||
+        event === 'paper_title_exploration_complete' ||
         event === 'tier3_chapter_complete' ||
         event === 'tier3_short_form_complete' ||
         event === 'tier3_long_form_complete' ||
@@ -279,7 +332,7 @@ const AutonomousResearchInterface = ({
       return 'activity-success';
     }
     // Rejection events
-    if (event.includes('rejected') || event === 'tier3_rejection') {
+    if (event.includes('rejected') || event === 'compiler_rejection' || event === 'tier3_rejection') {
       return 'activity-reject';
     }
     // Info events (reviews, starts, tier3 progress, etc.)
@@ -297,8 +350,11 @@ const AutonomousResearchInterface = ({
         event === 'tier3_volume_organized' ||
         event === 'topic_selected' ||
         event === 'reference_selection_started' ||
+        event === 'compiler_decline' ||
         event === 'critique_phase_ended' ||
-        event === 'critique_phase_skipped') {
+        event === 'critique_phase_skipped' ||
+        event === 'brainstorm_continuation_decided' ||
+        event === 'brainstorm_paper_limit_reached') {
       return 'activity-info';
     }
     return 'activity-neutral';
@@ -314,7 +370,10 @@ const AutonomousResearchInterface = ({
             <button 
               className="btn-start"
               onClick={handleStart}
-              disabled={!config?.submitter_configs?.some(s => s.modelId)}
+              disabled={
+                !config?.submitter_configs?.some(s => s.modelId) ||
+                (anyWorkflowRunning && !isRunning)
+              }
             >
               Start Research
             </button>
@@ -348,7 +407,7 @@ const AutonomousResearchInterface = ({
           id="research-prompt"
           value={researchPrompt}
           onChange={(e) => setResearchPrompt(e.target.value)}
-          placeholder="Enter your high level research goal on any topic that related to S.T.E.M. mathematics, anything event remotely related to mathematics (e.g., 'Explore the connections between modular forms and the Langlands program' or )"
+          placeholder="Enter your high level research goal on any topic that relates to S.T.E.M. mathematics, anything remotely related to mathematics (e.g., 'Advance desalination technology' or 'Solve physics unification')"
           disabled={isRunning}
           rows={3}
         />
@@ -370,6 +429,34 @@ const AutonomousResearchInterface = ({
             {isRunning ? getTierLabel(status?.current_tier, status?.is_tier3_active) : 'Not Running'}
           </span>
         </div>
+
+        {explorationProgress && (
+          <div className="current-brainstorm" style={{ borderLeft: '3px solid #a855f7' }}>
+            <span className="status-label">Topic Exploration:</span>
+            <p className="brainstorm-prompt" style={{ color: '#c4b5fd' }}>
+              Brainstorming candidate directions ({explorationProgress.accepted}/{explorationProgress.target} accepted)
+            </p>
+            <div className="brainstorm-stats">
+              <span className="submission-count accepted">
+                ◈ {explorationProgress.accepted} / {explorationProgress.target} candidates validated
+              </span>
+            </div>
+          </div>
+        )}
+
+        {titleExplorationProgress && (
+          <div className="current-brainstorm" style={{ borderLeft: '3px solid #f59e0b' }}>
+            <span className="status-label">Title Exploration:</span>
+            <p className="brainstorm-prompt" style={{ color: '#7dff6f' }}>
+              Exploring candidate paper titles ({titleExplorationProgress.accepted}/{titleExplorationProgress.target} accepted)
+            </p>
+            <div className="brainstorm-stats">
+              <span className="submission-count accepted">
+                ◈ {titleExplorationProgress.accepted} / {titleExplorationProgress.target} titles validated
+              </span>
+            </div>
+          </div>
+        )}
 
         {status?.current_brainstorm && (
           <div className="current-brainstorm">
@@ -433,7 +520,7 @@ const AutonomousResearchInterface = ({
         {status?.current_tier === 'tier2_paper_writing' && (
           <div className="paper-status-banner" style={{
             backgroundColor: critiquePhaseActive ? '#2a2a2a' : '#1a1a1a',
-            border: critiquePhaseActive ? '2px solid #ffd700' : '2px solid #666',
+            border: critiquePhaseActive ? '2px solid #1eff1c' : '2px solid #666',
             borderRadius: '8px',
             padding: '1rem',
             marginTop: '1rem',
@@ -445,12 +532,12 @@ const AutonomousResearchInterface = ({
               {critiquePhaseActive ? '◎' : '▬'}
             </span>
             <div style={{ flex: 1 }}>
-              <strong style={{ color: critiquePhaseActive ? '#ffd700' : '#ccc', fontSize: '1.1rem' }}>
+              <strong style={{ color: critiquePhaseActive ? '#1eff1c' : '#ccc', fontSize: '1.1rem' }}>
                 {critiquePhaseActive ? 'Critique Phase in Progress' : 'Paper Writing in Progress'}
               </strong>
               {critiquePhaseActive ? (
                 <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.85rem', color: '#888' }}>
-                  Collecting peer review feedback on body section...
+                  Collecting peer review feedback on the body section...
                 </p>
               ) : (
                 <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.85rem', color: '#888' }}>

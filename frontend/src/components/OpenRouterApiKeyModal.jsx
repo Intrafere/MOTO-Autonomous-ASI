@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { openRouterAPI } from '../services/api';
+import './settings-common.css';
 
 /**
  * Modal for configuring the global OpenRouter API key.
- * This key is used for per-role OpenRouter model selection (separate from boost).
+ * This key is used for per-role OpenRouter model selection and can also be reused by boost.
  * 
  * Shows when:
  * 1. User clicks "Use OpenRouter" on any role but no API key is configured
@@ -76,7 +77,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
       
       // Notify parent
       if (onKeySet) {
-        onKeySet(apiKey.trim());
+        await onKeySet(apiKey.trim());
       }
       
       onClose();
@@ -103,38 +104,29 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
 
   const reasonMessages = {
     setup: 'Configure your OpenRouter API key to use OpenRouter models for any role.',
+    startup_setup: 'Save your OpenRouter API key to unlock cloud models. MOTO will apply the recommended default profile immediately, and you can switch to your team profile or another default profile later in Settings.',
     lm_studio_unavailable: 'LM Studio is not available. Configure OpenRouter to continue.',
     no_key: 'An OpenRouter API key is required to use OpenRouter models.',
   };
 
   return (
     <div 
+      className="inline-modal-overlay"
       style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.75)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
         zIndex: 10000,
       }}
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div 
+        className="inline-modal-content"
         style={{
-          backgroundColor: '#1a1a2e',
-          borderRadius: '12px',
-          padding: '2rem',
           width: '500px',
           maxWidth: '90vw',
-          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
-          border: '1px solid #333',
+          backgroundColor: '#1a1a2e',
+          borderRadius: '12px',
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+        <div className="settings-header-row" style={{ marginBottom: '1.5rem' }}>
           <h2 style={{ margin: 0, color: '#fff', fontSize: '1.4rem' }}>
             OpenRouter API Key
           </h2>
@@ -167,18 +159,12 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder="sk-or-v1-..."
+            className="input-dark"
             style={{
-              width: '100%',
-              padding: '0.75rem',
-              backgroundColor: '#0d0d1a',
-              border: '1px solid #333',
-              borderRadius: '6px',
-              color: '#fff',
               fontSize: '0.95rem',
-              boxSizing: 'border-box',
             }}
           />
-          <small style={{ color: '#666', display: 'block', marginTop: '0.5rem' }}>
+          <small className="hint-text hint-text--dim">
             Get your API key at{' '}
             <a 
               href="https://openrouter.ai/keys" 
@@ -193,14 +179,8 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
 
         {/* Error Message */}
         {error && (
-          <div style={{
-            backgroundColor: 'rgba(244, 67, 54, 0.1)',
-            border: '1px solid #f44336',
-            borderRadius: '6px',
-            padding: '0.75rem',
+          <div className="test-result-banner test-result-banner--error" style={{
             marginBottom: '1rem',
-            color: '#f44336',
-            fontSize: '0.9rem',
           }}>
             {error}
           </div>
@@ -208,14 +188,8 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
 
         {/* Test Result */}
         {testResult && testResult.connected && (
-          <div style={{
-            backgroundColor: 'rgba(76, 175, 80, 0.1)',
-            border: '1px solid #4CAF50',
-            borderRadius: '6px',
-            padding: '0.75rem',
+          <div className="test-result-banner test-result-banner--success" style={{
             marginBottom: '1rem',
-            color: '#4CAF50',
-            fontSize: '0.9rem',
           }}>
             Connection successful! {testResult.model_count} models available.
           </div>
@@ -265,15 +239,10 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
         {apiKey && (
           <button
             onClick={handleClearKey}
+            className="btn-ghost"
             style={{
               width: '100%',
               marginTop: '1rem',
-              padding: '0.5rem',
-              backgroundColor: 'transparent',
-              border: '1px solid #444',
-              borderRadius: '6px',
-              color: '#888',
-              cursor: 'pointer',
               fontSize: '0.85rem',
             }}
           >
@@ -291,7 +260,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
           borderRadius: '6px',
         }}>
           This API key is stored locally and sent to the backend for OpenRouter API calls.
-          It's separate from the Boost API key used for boost mode.
+          API Boost can reuse this key automatically, or you can override it inside the boost modal.
         </p>
       </div>
     </div>

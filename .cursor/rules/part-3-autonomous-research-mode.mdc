@@ -2,11 +2,11 @@
 alwaysApply: true
 ---
 
-# Part 3 - Autonomous Research Mode Design Specification
+# Part 3 (Adding an Autonomous-Controlling Tier in Hierarchy Over Part 1 and 2) - Autonomous Research Mode Design Specification
 
 ## Overview
 
-The Autonomous Research Mode is Part 3 of the MOTO Math Variant system. It is a self-directing two-tier research system that autonomously generates brainstorm topics, builds knowledge databases, and produces complete mathematical research papers based on a high-level research topic centered around the user prompt.
+The Autonomous Research Mode is Part 3 of the MOTO Math Variant system. It is a self-directing three-tier research system that autonomously generates brainstorm topics, builds knowledge databases, produces complete mathematical research papers, and can synthesize a final answer based on a high-level research topic centered around the user prompt.
 
 **Example User Prompt**: "Solve the Langlands Bridge problem" or "Advance understanding of the Riemann Hypothesis"
 
@@ -15,9 +15,10 @@ The Autonomous Research Mode is Part 3 of the MOTO Math Variant system. It is a 
 - Part 2 (Compiler) requires user-directed paper compilation prompts
 - Part 3 (Autonomous Research) self-directs topic selection, brainstorming, and paper generation
 
-**Two-Tier Architecture**:
+**Three-Tier Architecture**:
 - **Tier 1**: Brainstorm aggregation databases (mathematical concept exploration)
 - **Tier 2**: Finished mathematical research papers (compiled from brainstorm databases)
+- **Tier 3**: Final answer synthesis (short-form answer or long-form volume from Tier 2 papers)
 
 ## Design Philosophy
 
@@ -29,7 +30,7 @@ The Autonomous Research Mode is Part 3 of the MOTO Math Variant system. It is a 
 
 **Model Weight Exploration**: Completion review uses SPECIAL SELF-VALIDATION MODE because only the same model can assess whether its own weights have been exhausted for a given topic.
 
-**Internal Knowledge Only**: The autonomous system operates solely on the model's pre-trained mathematical knowledge, RAG context from prior work, and user prompt. No external data access.
+**External Verification Allowed**: The autonomous system may use the model's pre-trained mathematical knowledge, RAG context from prior work, user prompt, and external verification/search when the selected model/provider supports it. Internal AI-generated context remains non-authoritative and should be treated skeptically.
 
 ---
 
@@ -64,6 +65,7 @@ The autonomous coordinator USES actual Part 2 compiler infrastructure for paper 
 - Extracts abstract from completed paper for metadata storage
 
 **Critical Implementation Details**:
+- **system_config propagation (REQUIRED)**: Before creating `CompilerCoordinator`, autonomous mode MUST write all compiler context/token settings to `system_config` (e.g., `system_config.compiler_high_context_context_window = self._high_context_context`). Compiler modules read from `system_config` at init — the manual `/api/compiler/start` route does this, but autonomous mode bypasses that route and must do it explicitly. Applies to both `_compile_paper_from_brainstorm()` and `_compile_tier3_paper()`.
 - Constrains section order: Body → Conclusion → Introduction → Abstract
 - Paper is considered complete when abstract is detected in paper content
 - Uses regex patterns to detect and extract abstract section
@@ -75,14 +77,55 @@ The autonomous coordinator USES actual Part 2 compiler infrastructure for paper 
 ## Workflow Overview
 
 **Tier 1 → Tier 2 → Tier 3 Loop:**
-1. **Topic Selection** → Validator → Pre-Brainstorm Reference Selection (if papers exist)
+0. **Topic Exploration** — Mini-aggregation: collect 5 validated candidate brainstorm questions (submit→validate→accumulate loop with rejection feedback). Broadens exploration landscape before committing to a direction.
+1. **Topic Selection** (sees all 5 candidates + existing topics) → Validator → Pre-Brainstorm Reference Selection (if papers exist)
 2. **Brainstorm Aggregation** (1-10 submitters, 1 validator, pruning every 7, with reference papers)
 3. **Completion Review** every 10 acceptances (SPECIAL SELF-VALIDATION) → Continue or Write Paper
-4. If Write Paper: **Additional Reference Selection** → **Paper Title Selection** → **Paper Compilation** (Body→Conclusion→Introduction→Abstract)
+4. If Write Paper: **Additional Reference Selection** → **Paper Title Exploration** (5 candidates) → **Paper Title Selection** → **Paper Compilation** (Body→Conclusion→Introduction→Abstract)
 5. **Paper Complete** → Log to Tier 2, cache brainstorm
 6. **Paper Redundancy Review** every 3 papers
-7. **Tier 3 Final Answer** every 5 papers (Certainty→Format→Short-form or Long-form volume)
-8. Loop back to Topic Selection (or STOP if Tier 3 complete)
+7. **Brainstorm Continuation Decision** (if papers < 3): write another paper or move on. If write another: new title → compilation with prior brainstorm papers as auto-refs → loop to step 5
+8. **Tier 3 Final Answer** every 5 papers (Certainty→Format→Short-form or Long-form volume)
+9. Loop back to Topic Selection (or STOP if Tier 3 complete)
+
+---
+
+## PHASE 0: Topic Exploration (Pre-Selection Candidate Brainstorm)
+
+### Purpose
+Before committing to a brainstorm direction, the system runs a full aggregation using the Part 1 infrastructure that collects 5 validated candidate brainstorm questions. This broadens the exploration landscape using all configured submitters in parallel with batch validation.
+
+### Why This Exists (Top-p Exploration at Strategic Level)
+Without exploration, the topic selector samples from the model's highest-probability region — the most obvious topic. By forcing 5 distinct, validated candidate directions first, the system maps the exploration landscape before committing:
+- Breaks greedy single-sample selection
+- Validator enforces diversity (rejects redundant candidates)
+- Final selector sees the full landscape of options
+- Uses full Part 1 aggregator infrastructure (parallel submitters, batch validation up to 3)
+
+### Architecture
+- **Uses `AggregatorCoordinator`** from Part 1 — same parallel submitters + batch validator as normal brainstorms, but with **cleanup/pruning disabled** (`enable_cleanup_review=False`) since target is only 5 candidates
+- **Prompts** (`backend/autonomous/prompts/topic_exploration_prompts.py`): `build_exploration_user_prompt()` frames the aggregation task for candidate question generation
+- **Temp DB**: `exploration_candidates.txt` in brainstorms directory (cleaned up after phase)
+- **Target**: 5 accepted candidates per exploration cycle
+- **Safety valve**: 15 consecutive rejections → proceed with whatever candidates collected
+
+### Workflow
+1. Aggregator starts with all configured submitters running in parallel
+2. Submitters generate candidate brainstorm questions as standard submissions
+3. Validator batch-validates (up to 3 at a time) checking quality, relevance, and DIVERSITY
+4. Accepted candidates accumulate in temp exploration database
+5. Coordinator monitors aggregator stats, stops at 5 acceptances
+6. Reads exploration DB, formats as candidate list for topic selector
+
+### WebSocket Events
+Standard aggregator events (`submission_accepted`, `submission_rejected`) flow through during exploration.
+Additionally: `topic_exploration_started`, `topic_exploration_progress`, `topic_exploration_complete`
+
+### Crash Recovery
+On resume, exploration restarts fresh (short phase, no state to preserve).
+
+### Every Brainstorm Starts This Way
+Topic exploration runs before EVERY new topic selection cycle — no exceptions.
 
 ---
 
@@ -96,6 +139,7 @@ The autonomous topic submitter decides what to work on next. It can:
 
 ### Topic Submitter Context
 The submitter receives:
+- **5 validated candidate brainstorm questions** from Topic Exploration phase (direct injected)
 - User's high-level research prompt (PRIMARY context, always direct injected)
 - List of all existing brainstorm topics with metadata:
   - Topic ID
@@ -261,16 +305,16 @@ The autonomous brainstorm aggregator inherits batch validation from Part 1 infra
 - **Validator processes up to 3 submissions at once**: Uses batch-specific prompts for 1, 2, or 3 submissions
 - **Independent assessment of each submission's value**: Each submission evaluated against existing database independently
 - **Intra-batch redundancy prevention**: If multiple submissions would be accepted but are redundant with each other, only the strongest is accepted
-- **Queue overflow handling**: If 10+ submissions queued, takes latest 3 and clears rest (older submissions were generated against outdated database state)
+- **Queue overflow handling**: If 10+ submissions queued, submitters are paused by the coordinator until queue drops below threshold
 - **Accelerated brainstorm exploration**: Batch validation increases throughput while maintaining quality through redundancy checks
 
 ### Key Differences from Part 1 Aggregator
 1. **Topic-Specific Database**: Writes to `data/auto_brainstorms/brainstorm_{topic_id}.txt` instead of `rag_shared_training.txt`
 2. **No User-Provided Topic Prompt**: Uses the AI-generated brainstorm topic prompt
 3. **Completion Tracking**: Tracks acceptance count (including removals) for completion review trigger
-4. **Hard Limit**: 80 accepted submissions (FORCE transition to paper writing, no completion review)
+4. **Hard Limit**: 30 accepted submissions (FORCE transition to paper writing, no completion review)
    - Purpose: Prevents runaway brainstorms from accumulating indefinitely
-   - Trigger: After each acceptance, check if count >= 80
+   - Trigger: After each acceptance, check if count >= 30
    - Behavior: Immediately transition to paper writing, skip completion review
    - WebSocket event: `brainstorm_hard_limit_reached`
 5. **Rejection Hard Limit**: 10 consecutive rejections (with minimum 5 acceptances) FORCE transition to paper writing
@@ -300,12 +344,12 @@ The autonomous brainstorm aggregator inherits batch validation from Part 1 infra
 ### Regular Trigger
 Runs every 10 accepted submissions (includes both new acceptances AND pruning removals), AFTER the pruner has had its chance to run.
 
-**Hard Limit Override**: If brainstorm reaches 80 accepted submissions, completion review is SKIPPED and paper writing is forced.
+**Hard Limit Override**: If brainstorm reaches 30 accepted submissions, completion review is SKIPPED and paper writing is forced.
 
 **Example trigger points**: 
 - Acceptances at 10, 20, 30, 40... trigger completion review
 - If prune removal happens at acceptance 9, the next acceptance (10th total) still triggers review
-- At 80 acceptances: Hard limit triggers, completion review skipped, paper writing forced
+- At 30 acceptances: Hard limit triggers, completion review skipped, paper writing forced
 
 ### Manual Paper Writing Trigger (User Override)
 
@@ -348,6 +392,7 @@ Runs every 10 accepted submissions (includes both new acceptances AND pruning re
 - Does NOT require self-validation (user decision is final)
 - Brainstorm is marked complete regardless of acceptance count
 - Subsequent paper compilation proceeds normally with all selected reference papers
+- **Race condition guard**: `_brainstorm_aggregation_loop()` checks `_manual_paper_writing_triggered` before calling `start()` on the aggregator (catches override during async init). The monitoring loop also stops the aggregator before returning on manual override.
 
 ### Purpose
 Assess whether the current brainstorm has been sufficiently explored relative to THIS MODEL'S internal knowledge (weights) and decide whether to continue brainstorming or begin writing a paper.
@@ -424,6 +469,30 @@ Same two-step browsing workflow as pre-brainstorm selection (expand request → 
 
 **Final Reference List**: Already-selected papers + newly-selected papers (max 6 total)
 
+### Paper Title Exploration (Pre-Title Candidate Brainstorm)
+
+**Purpose**: Before committing to a paper title, the system collects 5 validated candidate titles using the Part 1 aggregator infrastructure. The final title selection then chooses from candidates, synthesizes them, or proposes a new title with justification.
+
+**Architecture**: Uses `AggregatorCoordinator` from Part 1 — same parallel submitters + batch validator, but with **cleanup/pruning disabled** (`enable_cleanup_review=False`) since target is only 5 candidates.
+
+**Applies to EVERY paper creation**: Tier 2 papers (1/2/3 from brainstorm), Tier 3 short-form, Tier 3 gap/intro/conclusion chapters.
+
+**Workflow**:
+1. Aggregator starts with all configured submitters running in parallel
+2. Submitters generate candidate paper titles as standard submissions
+3. Validator checks quality, relevance, and DIVERSITY (rejects near-duplicates)
+4. Accepted candidates accumulate in temp title DB
+5. Coordinator stops at 5 acceptances (or 15 consecutive rejections safety valve)
+6. Reads title DB, formats as candidate list for final title selection
+
+**Temp DB**: `title_candidates_{topic_id}.txt` in brainstorms dir (cleaned up after phase)
+
+**WebSocket Events**: `paper_title_exploration_started`, `paper_title_exploration_progress`, `paper_title_exploration_complete`
+
+**Crash Recovery**: On resume, exploration restarts fresh (short phase, no state to preserve).
+
+**Prompts**: `paper_title_exploration_prompts.py` — `build_title_exploration_user_prompt()` frames the aggregation task for candidate title generation with context: user prompt, topic, brainstorm summary, existing papers, reference papers.
+
 ### Paper Title Selection
 
 **Context**:
@@ -432,8 +501,9 @@ Same two-step browsing workflow as pre-brainstorm selection (expand request → 
 - Selected reference papers (if any, RAG)
 - ALL existing paper titles from THIS brainstorm topic (direct injection)
 - ALL existing paper abstracts from THIS brainstorm topic (if any, direct injection)
+- **5 validated candidate titles from Paper Title Exploration phase** (direct injection)
 
-**Purpose**: Choose a title for the paper that will be compiled from this brainstorm.
+**Purpose**: Choose a title for the paper that will be compiled from this brainstorm. The selector sees 5 pre-validated candidate titles and may select one, synthesize, or propose a new title with justification.
 
 JSON schema defined in `json-prompt-design.mdc`. Fields: `paper_title`, `reasoning`.
 
@@ -461,6 +531,18 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `paper_title`, `reasoni
 ## Tier 2 - Paper Compilation
 
 Once paper title is selected and validated, paper compilation begins using the FULL Part 2 compiler workflow.
+
+### Retroactive Brainstorm Correction (Unified Workspace)
+
+During paper compilation, the compiler submitter sees both the paper AND the source brainstorm database simultaneously. On each construction turn, the submitter may optionally propose a brainstorm edit/delete/add alongside its paper operation.
+
+**Key design**: Submitter sees full workspace (paper + brainstorm). Validator sees ONLY the specific operation being validated (paper OR brainstorm, never both). Each operation must be independently justified.
+
+**Operations**: edit (correct entry), delete (remove entry), add (new insight). Each validated independently by the compiler validator with brainstorm-only context.
+
+**Independent acceptance**: Paper and brainstorm results are independent. Paper accepted + brainstorm rejected = valid. RAG refreshed after accepted brainstorm modifications.
+
+**Not available in manual Part 2 mode** — only during autonomous paper compilation where `_current_topic_id` is set.
 
 ### Compilation Workflow
 
@@ -523,11 +605,13 @@ The validator will REJECT any outline missing these required sections or with in
 **Skip Critique Phase (User Override)**:
 - **Purpose**: Allow users to manually skip the critique/rewrite phase and proceed directly to conclusion
 - **API Endpoint**: `POST /api/auto-research/skip-critique`
-- **Availability**: Only during Tier 2 paper writing when actively in critique phase
-- **Behavior**: Immediately ends critique phase, transitions to conclusion phase, broadcasts `critique_phase_skipped` with `reason: "user_override"`
-- **Cannot be undone**: Once executed, critique phase for current paper version is permanently skipped
-- **Frontend**: "Skip Critique & Continue" button appears in paper status banner during critique phase (requires confirmation)
-- **Error Conditions**: 400 if not running, 400 if not in Tier 2 paper writing, 400 if not in critique phase
+- **Availability**: Any time during Tier 2 paper writing
+- **Behavior**:
+  - If already in critique phase: immediately ends critique and transitions to conclusion
+  - If critique phase has not started yet: queues a pre-emptive skip and auto-skips when critique is reached
+- **Cannot be undone**: Once executed or queued, critique for the current paper version is bypassed
+- **Frontend**: The paper status banner supports both immediate skip and pre-emptive queued skip
+- **Error Conditions**: 400 if not running, 400 if not in Tier 2 paper writing
 
 **Outline Updates**: Outline can be updated at any time during the cycle (same as Part 2)
 
@@ -686,9 +770,24 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `should_remove` (bool),
    - Update metadata to mark as "archived"
    - Update statistics
 
-### Return to Topic Selection
+### Return to Topic Selection / Brainstorm Multi-Paper Continuation
 
-After paper completion (and redundancy review if triggered), the workflow checks if **Tier 3 Final Answer** should trigger.
+After paper completion and redundancy review, the system enters a **continuation decision loop** (max 3 papers per brainstorm):
+
+1. If `papers_from_brainstorm < 3`: Run continuation decision (submitter + topic validator)
+   - **write_another_paper**: New title selection + compilation (skip reference re-selection, auto-inject prior brainstorm papers)
+   - **move_on**: Proceed to Tier 3 check, then Topic Selection
+2. If 3 papers reached (hard limit): Skip decision, proceed to Tier 3 check
+
+**Continuation Decision Context**: User prompt + brainstorm topic + brainstorm DB + all prior papers (title/abstract/outline). Does NOT include cross-topic reference papers.
+
+**Prior Brainstorm Papers as References**: For paper 2/3, all prior papers from the same brainstorm are auto-loaded into compiler RAG as `is_user_file=True` (high priority). These are separate from the 6-paper cross-topic reference limit.
+
+**Reference Selection**: Runs ONCE per brainstorm cycle. Papers 2/3 reuse the same cross-topic references.
+
+**WebSocket Events**: `brainstorm_continuation_started`, `brainstorm_continuation_decided`, `brainstorm_paper_limit_reached`
+
+**Crash Recovery**: `brainstorm_paper_count` and `current_brainstorm_paper_ids` persisted in workflow state.
 
 ---
 
@@ -846,11 +945,15 @@ The system implements **two tiers of model tracking**:
 ================================================================================
 AUTONOMOUS AI SOLUTION
 
-Disclaimer: This content is for informational purposes only. This paper was
-autonomously generated with the novelty-seeking MOTO harness without peer review
-or user oversight beyond the original prompt. AI-generated content may contain
-fabricated or unverified claims presented with high confidence. All content
-should be viewed with extreme scrutiny and independently verified before use.
+Disclaimer: This content is provided for informational and experimental purposes
+only. This paper was autonomously generated with the novelty-seeking MOTO
+harness without peer review or user oversight beyond the original prompt. It
+may contain incorrect, incomplete, misleading, or fabricated claims presented
+with high confidence. Use of this content is at your own risk. You are solely
+responsible for reviewing and independently verifying any output before relying
+on it, and the developers, operators, and contributors are not responsible for
+errors, omissions, decisions made from this content, or any resulting loss,
+damage, cost, or liability.
 
 User's Research Prompt: [user's original prompt here]
 
@@ -939,11 +1042,15 @@ Tier 3 tracks all models used during final answer generation for author attribut
 ================================================================================
 AUTONOMOUS AI SOLUTION
 
-Disclaimer: This content is for informational purposes only. This paper was
-autonomously generated with the novelty-seeking MOTO harness without peer review
-or user oversight beyond the original prompt. AI-generated content may contain
-fabricated or unverified claims presented with high confidence. All content
-should be viewed with extreme scrutiny and independently verified before use.
+Disclaimer: This content is provided for informational and experimental purposes
+only. This paper was autonomously generated with the novelty-seeking MOTO
+harness without peer review or user oversight beyond the original prompt. It
+may contain incorrect, incomplete, misleading, or fabricated claims presented
+with high confidence. Use of this content is at your own risk. You are solely
+responsible for reviewing and independently verifying any output before relying
+on it, and the developers, operators, and contributors are not responsible for
+errors, omissions, decisions made from this content, or any resulting loss,
+damage, cost, or liability.
 
 User's Research Prompt: [user's original prompt here]
 
@@ -1053,7 +1160,7 @@ Returns: is_long_form, volume_title, outline_complete, current/total/completed c
 
 #### FinalAnswerView.jsx
 Main component for displaying Tier 3 status and content:
-- Status badge: "FINAL ANSWER IN PROGRESS" (yellow) or "FINAL ANSWER" (green)
+- Status badge: "FINAL ANSWER IN PROGRESS" uses the active Tier 3 accent state; completion uses the green success state
 - Certainty assessment display
 - Format selection display
 - Volume organization with chapter status (long form)
@@ -1273,7 +1380,7 @@ Main interface component:
 Brainstorm management component:
 - List of all brainstorm topics with status indicators
 - Expandable to show brainstorm database content
-- Status badges: In Progress (yellow), Complete (green)
+- Status badges: In Progress uses the active accent state; Complete uses the green success state
 - Submission counts per brainstorm
 - Papers generated from each brainstorm
 - **Delete button**: Removes brainstorm and all associated files
@@ -1367,7 +1474,7 @@ Real-time Tier 3 final answer display component (embedded in AutonomousResearchI
 
 ### FinalAnswerView.jsx
 Tier 3 Final Answer display component (separate tab for completed/overall final answer status):
-- Status badge: "FINAL ANSWER IN PROGRESS" (yellow) or "FINAL ANSWER ✓" (green)
+- Status badge: "FINAL ANSWER IN PROGRESS" uses the active Tier 3 accent state; "FINAL ANSWER ✓" uses the green success state
 - Certainty assessment summary display
 - Format selection indicator (Short Form / Long Form)
 - Volume organization outline with chapter status (for long form):
@@ -1382,7 +1489,7 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 
 **Tab Styling**:
 - Tab appears in "Final Answer" section of navigation
-- Yellow highlight when Tier 3 is active (in progress)
+- Active Tier 3 tab uses the in-progress highlight state with pulse animation
 - Green highlight with checkmark when complete
 
 
@@ -1413,16 +1520,17 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
   - Brainstorm database as primary source
 
 ### Running Modes
-- **Part 1, Part 2, Part 3 can run INDEPENDENTLY** (user chooses which mode)
-- **Part 1 and Part 2 can run SIMULTANEOUSLY** (as originally designed)
-- **Part 3 runs ALONE** (it internally uses Part 1 and Part 2 components but manages them autonomously)
-- User cannot manually start Part 1 or Part 2 while Part 3 is running (Part 3 controls them)
+- **Part 1, Part 2, and Part 3 remain user-selectable modes**
+- **Only ONE workflow mode may be active at a time** — Aggregator, Compiler, and Autonomous Research are now mutually exclusive at runtime
+- **Part 3 internally controls Part 1 and Part 2 components** during autonomous execution
+- Starting any mode while another mode is running must be blocked until the active mode is stopped
 
 ---
 
 ## Prerequisites
 
-- At least one LM Studio model must be available for each role
+- Either an OpenRouter API key or at least one LM Studio model must be available to begin
+- LM Studio is highly recommended even with OpenRouter enabled because local embeddings/RAG are free and faster
 - User must provide high-level research prompt
 - No dependency on prior Part 1 or Part 2 usage
 - Fresh start with empty brainstorm/paper libraries
@@ -1432,8 +1540,8 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 ## Error Handling
 
 ### JSON Parse Failure (Topic Selection)
-- Retry up to 3 times with same context
-- If persistent, log error and retry with refreshed context (include prior failure in context)
+- Retry indefinitely with rejection feedback (same as other agents)
+- Each retry includes prior failure context
 
 ### JSON Parse Failure (Brainstorm Aggregation)
 - Same as Part 1 Aggregator: reject submission, feedback to submitter
@@ -1470,9 +1578,15 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 - High-context submitter max tokens: 25000
 - High-parameter submitter max tokens: 25000
 - Completion review interval: 10 acceptances (includes removals)
-- Topic selection retry limit: 3
 - Max brainstorms in parallel: 1 (sequential brainstorm → paper cycle)
 - Max reference papers for context: 6
+
+### Token Tracking & Research Timer
+- `token_tracker` singleton resets and starts timer on `autonomous_coordinator.start()`, stops on stop/finally
+- Cumulative input/output tokens tracked per model from every successful LLM completion call (6 code paths in `api_client_manager`)
+- `token_usage_updated` WebSocket event broadcast after each tracked call; `GET /api/token-stats` for initial fetch
+- Displayed in WorkflowPanel sidebar (timer, totals, expandable per-model breakdown)
+- Also activated for standalone aggregator/compiler via API route start/stop
 
 ---
 
@@ -1500,11 +1614,23 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 20. **Model tracking is ENABLED during Tier 3** - All API calls tracked for author attribution and model credits
 21. **Same model = single author** - Model used in multiple instances counts as ONE author entry, but all API calls tallied
 22. **Paper redundancy is DISABLED during Tier 3** - `_tier3_active` flag prevents redundancy checks from purging papers being used in the final volume
-23. **Brainstorm hard limit is 80 acceptances** - After 80 acceptances, paper writing is forced (no completion review)
+23. **Brainstorm hard limit is 30 acceptances** - After 30 acceptances, paper writing is forced (no completion review)
 24. **Maximum 1 completed rewrite per paper** - Rewrite counts as "completed" only after first successful body acceptance; prevents infinite loops from failed rewrite attempts
 25. **Partial revision option available** - Allows targeted edits without full body rewrite
 26. **Total rewrite is last resort** - Only for catastrophic issues that can't be fixed with targeted edits
 27. **Rejection hard limit is 10 consecutive rejections (with 5+ acceptances)** - Prevents infinite rejection loops
+28. **Retroactive brainstorm corrections during Tier 2 paper compilation** - Submitter sees unified paper+brainstorm workspace; operations validated independently by validator (paper-only context for paper ops, brainstorm-only context for brainstorm ops); each operation must stand alone without requiring the other for correctness
+29. **Max 3 papers per brainstorm** - hard limit, continuation decision skipped after 3rd paper
+30. **Prior brainstorm papers ALWAYS auto-included** for paper 2/3 as `is_user_file=True` in RAG, separate from 6-paper cross-topic reference limit
+31. **Reference selection runs ONCE per brainstorm cycle** - papers 2/3 reuse same cross-topic references
+32. **Topic validator validates continuation decisions** - not self-validation (strategic decision, not weight assessment)
+33. **Tier 3 checks after brainstorm cycle completes** (move_on or hard limit), not between papers
+34. **No brainstorm re-opening during continuation** - strictly write_another_paper or move_on
+35. **Topic exploration runs before EVERY topic selection** — Uses full Part 1 aggregator with all submitters in parallel and batch validation to collect 5 candidate questions. No exceptions.
+36. **Topic exploration uses standard aggregator (cleanup disabled)** — Same parallel submitters, batch validation (up to 3), queue management as normal brainstorms. Cleanup/pruning is disabled because the phase is capped at 5 candidates and the temp DB is deleted afterwards.
+37. **Paper title exploration runs before EVERY title selection** — Uses full Part 1 aggregator to collect 5 candidate titles before every paper creation (Tier 2 papers 1/2/3, Tier 3 short-form, Tier 3 gap/intro/conclusion chapters). No exceptions.
+38. **Title exploration uses standard aggregator (cleanup disabled)** — Same parallel submitters, batch validation, queue management. Cleanup/pruning is disabled because the phase is capped at 5 candidates and the temp DB is deleted afterwards.
+39. **Final title selection sees candidate titles** — The 6th selection can choose a candidate, synthesize, or propose new. Must justify divergence from all candidates.
 
 ---
 
@@ -1540,7 +1666,7 @@ Each role in autonomous research mode supports OpenRouter model selection with h
 **Fallback Behavior**:
 - If OpenRouter is selected and has a fallback configured: Automatically falls back to LM Studio on credit exhaustion
 - If no LM Studio available: OpenRouter-only operation (system works without LM Studio)
-- Fallback is per-role and permanent for the session (no retries after fallback)
+- Fallback is per-role and resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key
 
 ## Other Notes
 

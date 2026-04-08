@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { openRouterAPI, api, aggregatorAPI } from '../../services/api';
+import { openRouterAPI, api, aggregatorAPI, compilerAPI } from '../../services/api';
+import '../settings-common.css';
 
 const SETTINGS_KEY = 'compiler_settings';
 
@@ -118,7 +119,6 @@ function CompilerSettings() {
           if (settings.critiqueSubmitterMaxOutput) setCritiqueSubmitterMaxOutput(settings.critiqueSubmitterMaxOutput);
           // Wolfram Alpha
           if (settings.wolframEnabled !== undefined) setWolframEnabled(settings.wolframEnabled);
-          // wolframApiKey not loaded from localStorage (sensitive data - must re-enter per session)
           // Free-only toggle
           if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
           if (settings.freeModelLooping !== undefined) setFreeModelLooping(settings.freeModelLooping);
@@ -129,19 +129,24 @@ function CompilerSettings() {
         }
       }
       
-      // Load Wolfram Alpha status from backend
-      const loadWolframStatus = async () => {
-        try {
-          const response = await api.getWolframStatus();
-          if (response.enabled) {
-            setWolframEnabled(true);
+      // Restore Wolfram Alpha key from localStorage
+      const storedWolframKey = localStorage.getItem('wolfram_alpha_api_key');
+      if (storedWolframKey) {
+        setWolframApiKey(storedWolframKey);
+        setWolframEnabled(true);
+      } else {
+        const loadWolframStatus = async () => {
+          try {
+            const response = await api.getWolframStatus();
+            if (response.enabled) {
+              setWolframEnabled(true);
+            }
+          } catch (err) {
+            console.error('Failed to load Wolfram Alpha status:', err);
           }
-        } catch (err) {
-          console.error('Failed to load Wolfram Alpha status:', err);
-        }
-      };
-      
-      loadWolframStatus();
+        };
+        loadWolframStatus();
+      }
       
       setIsLoaded(true);
       setLoadingModels(false);
@@ -238,7 +243,6 @@ function CompilerSettings() {
     // Fetch default prompt from backend
     const fetchDefaultPrompt = async () => {
       try {
-        const { compilerAPI } = await import('../../services/api');
         const response = await compilerAPI.getDefaultCritiquePrompt();
         if (response.data?.prompt) {
           setDefaultCritiquePrompt(response.data.prompt);
@@ -312,8 +316,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       
       if (response.success) {
         setWolframTestResult(`✓ Success! Result: ${response.result}`);
-        // Save the key to backend
         await api.setWolframApiKey(wolframApiKey);
+        localStorage.setItem('wolfram_alpha_api_key', wolframApiKey);
         setWolframEnabled(true);
       } else {
         setWolframTestResult('✗ Failed: ' + response.message);
@@ -329,6 +333,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const handleClearWolframKey = async () => {
     try {
       await api.clearWolframApiKey();
+      localStorage.removeItem('wolfram_alpha_api_key');
       setWolframApiKey('');
       setWolframEnabled(false);
       setWolframTestResult('Key cleared');
@@ -392,26 +397,20 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const providers = model && provider === 'openrouter' ? (modelProviders[model] || []) : [];
 
     return (
-      <div style={{
-        marginBottom: '2rem',
-        padding: '1.5rem',
-        background: provider === 'openrouter' ? '#1a1a2e' : '#1a1a24',
-        border: `2px solid ${provider === 'openrouter' ? '#6c5ce7' : borderColor}`,
-        borderRadius: '8px'
-      }}>
-        <h3 style={{ 
-          margin: '0 0 0.5rem 0', 
-          color: provider === 'openrouter' ? '#a29bfe' : borderColor 
-        }}>
+      <div
+        className={`role-config-card role-config-card--highlight${provider === 'openrouter' ? ' role-config-card--openrouter' : ''}`}
+        style={{ borderColor: provider === 'openrouter' ? undefined : borderColor, padding: '1.5rem' }}
+      >
+        <h3 style={{ margin: '0 0 0.5rem 0', color: provider === 'openrouter' ? '#a29bfe' : borderColor }}>
           {title}
-          {provider === 'openrouter' && <span style={{ fontWeight: 'normal', marginLeft: '0.5rem' }}>[OpenRouter]</span>}
+          {provider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
         </h3>
-        <small style={{ color: '#888', display: 'block', marginBottom: '1rem' }}>{description}</small>
+        <small className="role-description">{description}</small>
 
         {/* Provider Toggle */}
         <div className="form-group">
           <label>Provider</label>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <div className="provider-toggle-group">
             <button
               type="button"
               onClick={() => {
@@ -420,15 +419,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 setOpenrouterProv(null);
                 setFallback(null);
               }}
-              style={{
-                flex: 1,
-                padding: '0.5rem',
-                backgroundColor: provider === 'lm_studio' ? '#4CAF50' : '#333',
-                border: 'none',
-                borderRadius: '4px',
-                color: '#fff',
-                cursor: 'pointer'
-              }}
+              className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
             >
               LM Studio
             </button>
@@ -443,15 +434,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 }
               }}
               disabled={!hasOpenRouterKey}
-              style={{
-                flex: 1,
-                padding: '0.5rem',
-                backgroundColor: provider === 'openrouter' ? '#6c5ce7' : '#333',
-                border: 'none',
-                borderRadius: '4px',
-                color: hasOpenRouterKey ? '#fff' : '#666',
-                cursor: hasOpenRouterKey ? 'pointer' : 'not-allowed'
-              }}
+              className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or' : ''}`}
               title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
             >
               OpenRouter
@@ -508,7 +491,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         {/* LM Studio Fallback (if OpenRouter) */}
         {provider === 'openrouter' && (
           <div className="form-group">
-            <label style={{ color: '#888' }}>LM Studio Fallback (optional)</label>
+            <label className="label--muted">LM Studio Fallback (optional)</label>
             <select
               value={fallback || ''}
               onChange={(e) => setFallback(e.target.value || null)}
@@ -522,8 +505,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </div>
         )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-          <div className="form-group" style={{ margin: 0 }}>
+        <div className="config-grid config-grid--2col">
+          <div className="form-group form-group--compact">
             <label>Context Window (tokens)</label>
             <input
               type="number"
@@ -538,7 +521,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             />
           </div>
 
-          <div className="form-group" style={{ margin: 0 }}>
+          <div className="form-group form-group--compact">
             <label>Max Output Tokens</label>
             <input
               type="number"
@@ -566,28 +549,22 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       <h2>Compiler Settings</h2>
 
       {saveStatus && (
-        <div className="save-status" style={{ color: '#4CAF50', marginBottom: '1rem' }}>
+        <div className="save-message" style={{ marginBottom: '1rem' }}>
           {saveStatus}
         </div>
       )}
 
       {/* OpenRouter Status Banner */}
       {!hasOpenRouterKey && (
-        <div style={{
-          backgroundColor: 'rgba(108, 92, 231, 0.1)',
-          border: '1px solid #6c5ce7',
-          borderRadius: '8px',
-          padding: '1rem',
-          marginBottom: '1.5rem'
-        }}>
-          <p style={{ color: '#a29bfe', margin: 0 }}>
+        <div className="openrouter-banner">
+          <p className="openrouter-banner__text">
             <strong>💡 OpenRouter Available:</strong> Set your OpenRouter API key in the header to enable cloud model selection for any role.
           </p>
         </div>
       )}
 
       <div className="settings-section">
-        <h3 style={{ borderBottom: '1px solid #333', paddingBottom: '0.5rem' }}>Model Configuration</h3>
+        <h3 className="section-heading--bordered">Model Configuration</h3>
         
         <RoleConfig
           title="Validator"
@@ -615,8 +592,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
         <RoleConfig
           title="High-Parameter Model"
-          description="Rigor enhancement mode: adds citations, strengthens methodology, clarifies assumptions."
-          borderColor="#f1c40f"
+          description="Rigor enhancement mode: adds citations, strengthens methodology, and clarifies assumptions."
+          borderColor="#1eff1c"
           provider={highParamProvider} setProvider={setHighParamProvider}
           model={highParamModel} setModel={setHighParamModel}
           openrouterProv={highParamOpenrouterProvider} setOpenrouterProv={setHighParamOpenrouterProvider}
@@ -639,17 +616,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       </div>
 
       {/* Model Refresh Controls */}
-      <div style={{ marginBottom: '2rem', padding: '1rem', background: '#1a1a24', borderRadius: '8px' }}>
+      <div className="settings-panel settings-panel--blue">
         <h3 style={{ marginBottom: '1rem' }}>Model Management</h3>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+        <div className="model-refresh-controls">
           <button 
             onClick={handleUseAggregatorModels}
-            className="secondary"
-            style={{
-              backgroundColor: '#2196F3',
-              border: 'none',
-              color: '#fff'
-            }}
+            className="secondary btn-primary-blue"
           >
             Use Aggregator Models
           </button>
@@ -667,17 +639,16 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <button onClick={() => fetchOpenRouterModels(freeOnly)} className="secondary">
                 Refresh OpenRouter Models
               </button>
-              <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+              <label className="settings-checkbox-label">
                 <input
                   type="checkbox"
                   checked={freeOnly}
                   onChange={(e) => setFreeOnly(e.target.checked)}
-                  style={{ marginRight: '0.5rem' }}
                 />
                 Show only free models
               </label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
-                <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+              <div className="checkbox-group-col">
+                <label className="settings-checkbox-label">
                   <input
                     type="checkbox"
                     checked={freeModelLooping}
@@ -685,15 +656,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                       setFreeModelLooping(e.target.checked);
                       openRouterAPI.setFreeModelSettings(e.target.checked, freeModelAutoSelector).catch(() => {});
                     }}
-                    style={{ marginRight: '0.5rem' }}
                   />
                   Enable Free Model Looping
                   <span
                     title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
-                    style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
+                    className="help-hint"
                   >(?)</span>
                 </label>
-                <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+                <label className="settings-checkbox-label">
                   <input
                     type="checkbox"
                     checked={freeModelAutoSelector}
@@ -701,19 +671,18 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                       setFreeModelAutoSelector(e.target.checked);
                       openRouterAPI.setFreeModelSettings(freeModelLooping, e.target.checked).catch(() => {});
                     }}
-                    style={{ marginRight: '0.5rem' }}
                   />
                   Use OpenRouter Free Models Auto-Selector as Backup
                   <span
                     title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
-                    style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
+                    className="help-hint"
                   >(?)</span>
                 </label>
               </div>
             </>
           )}
         </div>
-        <small style={{ color: '#888', display: 'block', marginTop: '0.75rem' }}>
+        <small className="hint-text" style={{ marginTop: '0.75rem' }}>
           "Use Aggregator Models" copies your aggregator's model selection to all compiler roles.
         </small>
       </div>
@@ -721,32 +690,29 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       {/* Wolfram Alpha Integration */}
       <div className="settings-section">
         <h3>Wolfram Alpha Integration (Optional)</h3>
-        <small style={{ color: '#888', display: 'block', marginBottom: '1rem' }}>
+        <small className="hint-text" style={{ marginBottom: '1rem' }}>
           Enable Wolfram Alpha API for computational verification in rigor mode. 
           Get your API key from <a href="https://products.wolframalpha.com/api" target="_blank" rel="noopener noreferrer">developer.wolframalpha.com</a>
         </small>
         
-        <label style={{ display: 'flex', alignItems: 'center', marginBottom: '1rem' }}>
+        <label className="settings-checkbox-label" style={{ marginBottom: '1rem' }}>
           <input
             type="checkbox"
             checked={wolframEnabled}
             onChange={async (e) => {
               const checked = e.target.checked;
               if (!checked) {
-                // Unchecking - clear key from backend
                 await handleClearWolframKey();
               } else {
-                // Checking - just show UI (key will be saved on Test Connection)
                 setWolframEnabled(true);
               }
             }}
-            style={{ marginRight: '0.75rem' }}
           />
-          <span style={{ fontWeight: '500' }}>Enable Wolfram Alpha Verification in Rigor Mode</span>
+          <span className="label-medium">Enable Wolfram Alpha Verification in Rigor Mode</span>
         </label>
         
         {wolframEnabled && (
-          <div style={{ marginLeft: '1.75rem' }}>
+          <div className="indented-section">
             <div className="form-group">
               <label>Wolfram Alpha API Key:</label>
               <input
@@ -754,28 +720,17 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 value={wolframApiKey}
                 onChange={(e) => setWolframApiKey(e.target.value)}
                 placeholder="Enter your Wolfram Alpha App ID"
-                style={{
-                  padding: '0.5rem',
-                  backgroundColor: '#2a2a2a',
-                  border: '1px solid #444',
-                  borderRadius: '4px',
-                  color: '#fff',
-                  width: '100%',
-                  marginBottom: '0.5rem'
-                }}
+                className="input-dark"
+                style={{ marginBottom: '0.5rem' }}
               />
             </div>
             
-            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+            <div className="provider-toggle-group" style={{ marginTop: '0.75rem' }}>
               <button 
                 onClick={handleTestWolframConnection}
                 disabled={testingWolfram}
+                className="btn-success-sm"
                 style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: '#4CAF50',
-                  border: 'none',
-                  borderRadius: '4px',
-                  color: '#fff',
                   cursor: testingWolfram ? 'wait' : 'pointer',
                   opacity: testingWolfram ? 0.6 : 1
                 }}
@@ -785,33 +740,19 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               
               <button 
                 onClick={handleClearWolframKey}
-                style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: 'transparent',
-                  border: '1px solid #666',
-                  borderRadius: '4px',
-                  color: '#888',
-                  cursor: 'pointer'
-                }}
+                className="btn-ghost"
               >
                 Clear Key
               </button>
             </div>
             
             {wolframTestResult && (
-              <div style={{ 
-                marginTop: '0.75rem', 
-                padding: '0.5rem', 
-                borderRadius: '4px',
-                backgroundColor: wolframTestResult.includes('✓') ? '#1a3a1a' : '#3a1a1a',
-                color: wolframTestResult.includes('✓') ? '#4CAF50' : '#ff6b6b',
-                fontSize: '0.85rem'
-              }}>
+              <div className={`test-result-banner ${wolframTestResult.includes('✓') ? 'test-result-banner--success' : 'test-result-banner--error'}`}>
                 {wolframTestResult}
               </div>
             )}
             
-            <small style={{ color: '#888', display: 'block', marginTop: '1rem' }}>
+            <small className="hint-text" style={{ marginTop: '1rem' }}>
               In rigor mode, the AI can request Wolfram Alpha verification of mathematical claims. 
               This enables computational checking of theorems, solving equations, and verifying properties.
             </small>
@@ -836,41 +777,25 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       </div>
 
       {/* Validator Critique Prompt Editor */}
-      <div style={{ marginBottom: '2rem', padding: '1rem', background: '#1a1a24', borderRadius: '8px' }}>
+      <div className="settings-panel settings-panel--blue">
         <div 
           onClick={() => setCritiquePromptExpanded(!critiquePromptExpanded)}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: 'pointer',
-            padding: '0.5rem 0'
-          }}
+          className="collapsible-trigger"
+          style={{ padding: '0.5rem 0', background: 'transparent', border: 'none' }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <span style={{ fontSize: '1.1rem' }}>📝</span>
             <h3 style={{ margin: 0 }}>Edit Validator Critique Prompt</h3>
             {isUsingCustomCritiquePrompt && (
-              <span style={{
-                backgroundColor: '#9b59b6',
-                color: '#fff',
-                padding: '2px 8px',
-                borderRadius: '12px',
-                fontSize: '0.7rem',
-                fontWeight: 'bold'
-              }}>CUSTOM</span>
+              <span className="tag-badge tag-badge--purple">CUSTOM</span>
             )}
           </div>
-          <span style={{ 
-            transform: critiquePromptExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
-            transition: 'transform 0.2s',
-            fontSize: '1.2rem'
-          }}>▼</span>
+          <span className={`collapse-chevron${critiquePromptExpanded ? ' collapse-chevron--open' : ''}`}>▼</span>
         </div>
 
         {critiquePromptExpanded && (
           <div style={{ marginTop: '1rem' }}>
-            <p style={{ color: '#888', fontSize: '0.85rem', marginBottom: '1rem' }}>
+            <p className="text-muted-sm">
               Customize the prompt sent to your validator when requesting a paper critique. 
               The JSON output schema is automatically appended and cannot be modified.
             </p>
@@ -878,59 +803,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             <textarea
               value={customCritiquePrompt}
               onChange={(e) => setCustomCritiquePrompt(e.target.value)}
-              style={{
-                width: '100%',
-                minHeight: '200px',
-                padding: '0.75rem',
-                backgroundColor: '#2a2a2a',
-                border: '1px solid #444',
-                borderRadius: '4px',
-                color: '#fff',
-                fontFamily: 'monospace',
-                fontSize: '0.85rem',
-                resize: 'vertical',
-                lineHeight: '1.5'
-              }}
+              className="textarea-dark-mono"
               placeholder="Enter your custom critique prompt..."
             />
 
-            <div style={{ 
-              display: 'flex', 
-              justifyContent: 'space-between', 
-              alignItems: 'center',
-              marginTop: '1rem' 
-            }}>
+            <div className="actions-row">
               <button
                 onClick={handleRestoreCritiquePrompt}
-                style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: 'transparent',
-                  border: '1px solid #666',
-                  borderRadius: '4px',
-                  color: '#888',
-                  cursor: 'pointer',
-                  fontSize: '0.85rem'
-                }}
+                className="btn-ghost"
+                style={{ fontSize: '0.85rem' }}
               >
                 Restore to Default
               </button>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                 {critiquePromptSaved && (
-                  <span style={{ color: '#4CAF50', fontSize: '0.85rem' }}>✓ Saved!</span>
+                  <span className="status-success-text">✓ Saved!</span>
                 )}
                 <button
                   onClick={handleSaveCritiquePrompt}
-                  style={{
-                    padding: '0.5rem 1.5rem',
-                    backgroundColor: '#9b59b6',
-                    border: 'none',
-                    borderRadius: '4px',
-                    color: '#fff',
-                    cursor: 'pointer',
-                    fontWeight: '500',
-                    fontSize: '0.85rem'
-                  }}
+                  className="btn-accent-purple"
                 >
                   Save Prompt
                 </button>
@@ -941,9 +833,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       </div>
 
       {/* Configuration Summary */}
-      <div style={{ marginTop: '2rem', padding: '1rem', background: '#1a1a1a', borderRadius: '6px' }}>
+      <div className="settings-panel" style={{ marginTop: '2rem' }}>
         <h3>Current Configuration Summary</h3>
-        <pre style={{ color: '#4CAF50', fontSize: '0.85rem', overflow: 'auto' }}>
+        <pre className="config-summary-pre">
           {JSON.stringify({
             validator: {
               provider: validatorProvider,

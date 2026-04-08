@@ -4,7 +4,7 @@ Handles compiler-specific context routing and document management.
 Default context window: 4096 tokens (user-configurable via settings).
 """
 import logging
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 
 from backend.shared.config import system_config, rag_config
@@ -229,7 +229,8 @@ class CompilerRAGManager:
         self,
         query: str,
         mode: str,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        exclude_sources: Optional[List[str]] = None
     ) -> ContextPack:
         """
         Retrieve context optimized for specific compiler mode.
@@ -238,6 +239,7 @@ class CompilerRAGManager:
             query: Search query
             mode: Compiler mode (construction, outline, review, rigor)
             max_tokens: Override max tokens (defaults to available_tokens)
+            exclude_sources: Source names to skip (already direct-injected in prompt)
         
         Returns:
             ContextPack with retrieved context
@@ -245,6 +247,8 @@ class CompilerRAGManager:
         import time
         
         logger.info(f"Starting RAG retrieval for mode={mode}, query_length={len(query)}")
+        if exclude_sources:
+            logger.info(f"Excluding direct-injected sources: {exclude_sources}")
         start_time = time.time()
         
         try:
@@ -257,7 +261,8 @@ class CompilerRAGManager:
             context_pack = await rag_manager.retrieve(
                 query=query,
                 chunk_size=chunk_size,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                exclude_sources=exclude_sources
             )
             
             elapsed = time.time() - start_time

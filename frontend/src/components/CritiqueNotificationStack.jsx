@@ -18,9 +18,9 @@ const IconStar = ({ className }) => (
  * Get color classes based on average rating
  */
 function getRatingColor(rating) {
-  if (rating >= 8) return { text: 'text-emerald-400', bg: 'bg-emerald-500', gradient: 'from-emerald-600 to-emerald-500' };
-  if (rating >= 6.25) return { text: 'text-blue-400', bg: 'bg-blue-500', gradient: 'from-blue-600 to-blue-500' };
-  return { text: 'text-gray-400', bg: 'bg-gray-500', gradient: 'from-gray-600 to-gray-500' };
+  if (rating >= 8) return { text: '#34d399', bg: '#10b981' };
+  if (rating >= 6.25) return { text: '#60a5fa', bg: '#3b82f6' };
+  return { text: '#9ca3af', bg: '#6b7280' };
 }
 
 /**
@@ -98,14 +98,14 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
       style={{
         width: '280px',
         minHeight: '80px',
-        background: `linear-gradient(135deg, ${isHovered ? 'rgba(88, 28, 135, 0.95)' : 'rgba(26, 26, 46, 0.95)'}, ${isHovered ? 'rgba(30, 58, 138, 0.95)' : 'rgba(17, 24, 39, 0.95)'})`,
+        background: `linear-gradient(135deg, ${isHovered ? 'rgba(20, 83, 45, 0.95)' : 'rgba(26, 26, 46, 0.95)'}, ${isHovered ? 'rgba(15, 60, 15, 0.95)' : 'rgba(17, 24, 39, 0.95)'})`,
         backdropFilter: 'blur(8px)',
         borderRadius: '12px',
         padding: '12px',
         boxShadow: isHovered 
-          ? '0 20px 40px -12px rgba(147, 51, 234, 0.6), 0 0 0 1px rgba(147, 51, 234, 0.5)'
-          : '0 10px 30px -12px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(147, 51, 234, 0.3)',
-        border: `1px solid ${isHovered ? 'rgba(147, 51, 234, 0.6)' : 'rgba(147, 51, 234, 0.4)'}`,
+          ? '0 20px 40px -12px rgba(30, 255, 28, 0.5), 0 0 0 1px rgba(30, 255, 28, 0.5)'
+          : '0 10px 30px -12px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(30, 255, 28, 0.3)',
+        border: `1px solid ${isHovered ? 'rgba(30, 255, 28, 0.6)' : 'rgba(30, 255, 28, 0.4)'}`,
         cursor: 'pointer',
         transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         transform: isExiting 
@@ -122,20 +122,20 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
           <div
             style={{
               padding: '6px',
-              backgroundColor: 'rgba(147, 51, 234, 0.3)',
+              backgroundColor: 'rgba(30, 255, 28, 0.2)',
               borderRadius: '8px',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
             }}
           >
-            <IconStar className={`w-4 h-4 ${colors.text}`} />
+            <IconStar style={{ color: colors.text }} />
           </div>
           <div>
             <div style={{ fontSize: '10px', color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               High Score
             </div>
-            <div className={colors.text} style={{ fontSize: '18px', fontWeight: '700', lineHeight: '1' }}>
+            <div style={{ color: colors.text, fontSize: '18px', fontWeight: '700', lineHeight: '1' }}>
               {notification.average_rating.toFixed(1)}/10
             </div>
           </div>
@@ -165,7 +165,7 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
             e.target.style.color = '#9ca3af';
           }}
         >
-          <IconX className="w-3 h-3" />
+          <IconX />
         </button>
       </div>
 
@@ -191,7 +191,7 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
       <div
         style={{
           fontSize: '10px',
-          color: '#a78bfa',
+          color: '#1eff1c',
           marginTop: '6px',
           opacity: isHovered ? 1 : 0.7,
           transition: 'opacity 0.2s',

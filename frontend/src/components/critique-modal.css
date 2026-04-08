@@ -1,0 +1,496 @@
+/* ============================================
+   PaperCritiqueModal — Extracted from inline styles
+   ============================================ */
+
+/* Overlay */
+.critique-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999999;
+  padding: 20px;
+}
+
+/* Panel */
+.critique-modal-panel {
+  background: var(--surface-2, #1a1a2e);
+  border-radius: var(--radius-lg, 14px);
+  width: 100%;
+  max-width: 1200px;
+  height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(30, 255, 28, 0.25);
+  border: 1px solid rgba(30, 255, 28, 0.35);
+  overflow: hidden;
+}
+
+/* Header */
+.critique-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle, rgba(75, 85, 99, 0.5));
+  background: rgba(30, 255, 28, 0.08);
+}
+
+.critique-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.critique-header-icon {
+  padding: 6px;
+  background: rgba(30, 255, 28, 0.15);
+  border-radius: var(--radius-sm, 6px);
+}
+
+.critique-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #f3f4f6);
+  margin: 0;
+}
+
+.critique-modal-subtitle {
+  font-size: 11px;
+  color: var(--text-secondary, #9ca3af);
+  margin: 0;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.critique-close-btn {
+  color: var(--text-secondary, #9ca3af);
+  padding: 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.critique-close-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary, #f3f4f6);
+}
+
+/* Body */
+.critique-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  min-height: 500px;
+}
+
+/* Loading */
+.critique-loading-wrapper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 150px;
+}
+
+.critique-loading-inner {
+  text-align: center;
+}
+
+.critique-spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid #1eff1c;
+  border-top-color: transparent;
+  border-radius: 50%;
+  margin: 0 auto 10px;
+  animation: critique-spin 1s linear infinite;
+}
+
+.critique-spinner--sm {
+  width: 12px;
+  height: 12px;
+  border: 2px solid white;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: critique-spin 1s linear infinite;
+}
+
+@keyframes critique-spin {
+  to { transform: rotate(360deg); }
+}
+
+.critique-loading-text {
+  color: var(--text-secondary, #9ca3af);
+  font-size: 13px;
+}
+
+/* Error */
+.critique-error-box {
+  background: rgba(127, 29, 29, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--radius-md, 10px);
+  padding: 12px;
+}
+
+.critique-error-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.critique-error-title {
+  color: #f87171;
+  font-weight: 500;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.critique-error-message {
+  font-size: 12px;
+  color: rgba(252, 165, 165, 0.8);
+}
+
+/* Content layout */
+.critique-content-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+/* Identity card */
+.critique-identity-card {
+  background: linear-gradient(to right, rgba(20, 83, 45, 0.2), rgba(30, 58, 138, 0.2));
+  border-radius: var(--radius-md, 10px);
+  padding: 10px 12px;
+  border: 1px solid rgba(30, 255, 28, 0.15);
+}
+
+.critique-identity-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.critique-identity-label {
+  font-size: 10px;
+  color: var(--text-secondary, #9ca3af);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+
+.critique-model-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #f3f4f6);
+}
+
+.critique-host-provider {
+  font-size: 11px;
+  color: #6ee7b7;
+}
+
+.critique-date-area {
+  text-align: right;
+}
+
+.critique-date-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary, #9ca3af);
+  font-size: 11px;
+}
+
+/* Ratings grid */
+.critique-ratings-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+/* Full critique section */
+.critique-full-box {
+  background: rgba(31, 41, 55, 0.4);
+  border-radius: var(--radius-md, 10px);
+  padding: 10px 12px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 200px;
+}
+
+.critique-section-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary, #d1d5db);
+  margin-bottom: 8px;
+}
+
+.critique-full-text {
+  color: var(--text-secondary, #d1d5db);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  font-size: 12px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* History accordion */
+.critique-history-container {
+  border: 1px solid var(--border-subtle, rgba(75, 85, 99, 0.5));
+  border-radius: var(--radius-md, 10px);
+  overflow: hidden;
+}
+
+.critique-history-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(31, 41, 55, 0.25);
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.critique-history-toggle:hover {
+  background: rgba(31, 41, 55, 0.4);
+}
+
+.critique-history-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary, #d1d5db);
+}
+
+.critique-history-chevron {
+  transition: transform 0.2s;
+}
+
+.critique-history-chevron--open {
+  transform: rotate(180deg);
+}
+
+.critique-history-list {
+  border-top: 1px solid var(--border-subtle, rgba(75, 85, 99, 0.5));
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.critique-history-item {
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  border-bottom: 1px solid rgba(75, 85, 99, 0.3);
+}
+
+.critique-history-item:last-child {
+  border-bottom: none;
+}
+
+.critique-history-item:hover {
+  background: rgba(31, 41, 55, 0.3);
+}
+
+.critique-history-item--selected {
+  background: rgba(30, 255, 28, 0.08);
+}
+
+.critique-history-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.critique-history-model {
+  font-size: 11px;
+  color: var(--text-secondary, #d1d5db);
+}
+
+.critique-history-date {
+  font-size: 10px;
+  color: var(--text-muted, #6b7280);
+}
+
+.critique-history-ratings {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 10px;
+}
+
+/* Empty state */
+.critique-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 150px;
+  text-align: center;
+}
+
+.critique-empty-icon {
+  padding: 12px;
+  background: rgba(31, 41, 55, 0.4);
+  border-radius: 50%;
+  margin-bottom: 12px;
+}
+
+.critique-empty-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary, #d1d5db);
+  margin-bottom: 6px;
+}
+
+.critique-empty-desc {
+  font-size: 11px;
+  color: var(--text-muted, #6b7280);
+  max-width: 280px;
+}
+
+/* Footer */
+.critique-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-subtle, rgba(75, 85, 99, 0.5));
+  background: rgba(31, 41, 55, 0.25);
+}
+
+.critique-footer-note {
+  font-size: 10px;
+  color: var(--text-muted, #6b7280);
+}
+
+.critique-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.critique-btn-secondary {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary, #d1d5db);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 6px);
+  transition: all 0.2s;
+}
+
+.critique-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.critique-btn-primary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: #1eff1c;
+  color: #0b2e0b;
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.critique-btn-primary:hover:not(:disabled) {
+  background: #0fcc0d;
+}
+
+.critique-btn-primary:disabled {
+  background: #0d9e0b;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* Compact rating card */
+.critique-compact-card {
+  background: rgba(31, 41, 55, 0.4);
+  border-radius: var(--radius-md, 10px);
+  padding: 8px 10px;
+}
+
+.critique-compact-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.critique-compact-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-secondary, #d1d5db);
+}
+
+.critique-compact-value {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.critique-compact-track {
+  height: 4px;
+  background: rgba(55, 65, 81, 1);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.critique-compact-fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.5s;
+}
+
+.critique-compact-feedback {
+  font-size: 11px;
+  color: var(--text-secondary, #9ca3af);
+  line-height: 1.5;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+/* Rating color classes (text) */
+.critique-color--emerald { color: #34d399; }
+.critique-color--blue    { color: #60a5fa; }
+.critique-color--yellow  { color: #facc15; }
+.critique-color--orange  { color: #fb923c; }
+.critique-color--red     { color: #f87171; }
+
+/* Rating color classes (bar fill) */
+.critique-bg--emerald { background-color: #10b981; }
+.critique-bg--blue    { background-color: #3b82f6; }
+.critique-bg--yellow  { background-color: #eab308; }
+.critique-bg--orange  { background-color: #f97316; }
+.critique-bg--red     { background-color: #ef4444; }
+
+/* Icon sizing utilities */
+.critique-icon--sm     { width: 12px; height: 12px; }
+.critique-icon--lg     { width: 32px; height: 32px; }
+.critique-icon--green { color: #1eff1c; }
+.critique-icon--red    { color: #f87171; }
+.critique-icon--muted  { color: var(--text-muted, #6b7280); }
+.critique-icon--close  { width: 16px; height: 16px; }

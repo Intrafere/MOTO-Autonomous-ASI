@@ -187,7 +187,8 @@ def build_paper_title_prompt(
     brainstorm_summary: str,
     existing_papers_from_brainstorm: List[Dict[str, Any]],
     reference_papers: List[Dict[str, Any]] = None,
-    rejection_feedback: str = ""
+    rejection_feedback: str = "",
+    candidate_titles: str = ""
 ) -> str:
     """
     Build the paper title selection prompt.
@@ -199,6 +200,7 @@ def build_paper_title_prompt(
         existing_papers_from_brainstorm: Papers already created from this brainstorm
         reference_papers: Selected reference papers (if any)
         rejection_feedback: Accumulated rejection reasons from previous attempts (if any)
+        candidate_titles: Pre-validated candidate titles from exploration phase (if any)
     
     Returns:
         Complete prompt string
@@ -232,6 +234,17 @@ def build_paper_title_prompt(
         for p in reference_papers:
             parts.append(f"\n- {p.get('title', 'N/A')}")
         parts.append("\n---\n")
+    
+    # Inject validated candidate titles from exploration phase
+    if candidate_titles:
+        parts.append(
+            "PRE-VALIDATED CANDIDATE TITLES (from exploration phase):\n"
+            "The following candidate titles have been validated by the system. You may:\n"
+            "- Select one of these candidates directly\n"
+            "- Synthesize or improve upon a candidate\n"
+            "- Propose a NEW title if clearly better — but you MUST justify why it is superior\n\n"
+            f"{candidate_titles}\n---\n"
+        )
     
     # Inject rejection feedback so the model learns from previous failed attempts
     if rejection_feedback:

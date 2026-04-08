@@ -156,7 +156,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
         <div className="paper-library-pruned-counter">
           Pruned Papers: {archivedCount}
         </div>
-        <div className="empty-state">
+        <div className="auto-empty-state">
           No papers completed yet. Autonomous research will generate papers from brainstorm databases.
         </div>
       </div>
@@ -269,9 +269,9 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
                     onClick={(e) => handleOpenCritique(e, paper)}
                     title="Ask validator to critique this paper"
                     style={{
-                      background: 'linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%)',
+                      background: 'linear-gradient(135deg, #1eff1c 0%, #0fcc0d 100%)',
                       border: 'none',
-                      color: '#fff',
+                      color: '#0b2e0b',
                       padding: '0.35rem 0.7rem',
                       borderRadius: '4px',
                       cursor: 'pointer',

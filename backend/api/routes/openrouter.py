@@ -7,7 +7,8 @@ This module handles:
 - OpenRouter model listing (using stored API key)
 - Model provider listing
 
-Note: This is separate from boost routes which use a separate API key for boost mode.
+Note: Boost routes can reuse the active global key by default, while still allowing
+an explicit boost-only override key when the user provides one.
 """
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
@@ -73,6 +74,7 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
     
     This key is stored in memory and used by the API client manager for
     roles configured to use OpenRouter. It's separate from the boost API key.
+    Also resets any credit exhaustion flags so roles can retry OpenRouter.
     
     Args:
         request: Request with api_key field
@@ -102,12 +104,19 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
             # Also configure the API client manager
             api_client_manager.set_openrouter_api_key(request.api_key)
             
+            # Reset exhaustion flags so roles can retry OpenRouter
+            free_model_manager.clear_account_exhaustion()
+            reset_roles = await api_client_manager.reset_openrouter_fallbacks()
+            
             logger.info(f"Global OpenRouter API key set successfully. {len(models)} models available.")
+            if reset_roles:
+                logger.info(f"Auto-reset {len(reset_roles)} role(s) back to OpenRouter after key update")
             
             return {
                 "success": True,
                 "message": "OpenRouter API key validated and saved",
-                "model_count": len(models)
+                "model_count": len(models),
+                "roles_reset": list(reset_roles.keys())
             }
         finally:
             await client.close()
@@ -355,3 +364,35 @@ async def test_connection(request: SetApiKeyRequest) -> Dict[str, Any]:
             "message": f"Failed to connect: {str(e)}"
         }
 
+
+@router.post("/api/openrouter/reset-exhaustion")
+async def reset_credit_exhaustion() -> Dict[str, Any]:
+    """
+    Reset all credit exhaustion flags and role fallback states.
+    
+    Call this after adding credits to OpenRouter so roles can retry
+    without restarting the research mode.
+    
+    Resets:
+    - Per-role permanent fallback states (roles that fell back to LM Studio)
+    - Account-wide free model exhaustion flag
+    
+    Returns:
+        Success status and list of roles that were reset
+    """
+    try:
+        free_model_manager.clear_account_exhaustion()
+        reset_roles = await api_client_manager.reset_openrouter_fallbacks()
+        
+        roles_list = list(reset_roles.keys())
+        logger.info(f"Credit exhaustion reset: {len(roles_list)} role(s) restored, account exhaustion flag cleared")
+        
+        return {
+            "success": True,
+            "message": f"Reset {len(roles_list)} role(s) back to OpenRouter" if roles_list else "Exhaustion flags cleared (no roles needed reset)",
+            "roles_reset": roles_list,
+            "account_exhaustion_cleared": True
+        }
+    except Exception as e:
+        logger.error(f"Failed to reset credit exhaustion: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to reset: {str(e)}")

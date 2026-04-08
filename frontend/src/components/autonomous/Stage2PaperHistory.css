@@ -1,0 +1,51 @@
+.stage2-paper-history .paper-grid {
+  margin-top: 0.5rem;
+}
+
+.stage2-paper-history .run-history-group .paper-grid {
+  margin-top: 0;
+}
+
+.stage2-history-card-identifiers {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.stage2-history-session-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(30, 255, 28, 0.12);
+  border: 1px solid rgba(30, 255, 28, 0.2);
+  color: #9eff9e;
+  font-size: 0.7rem;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage2-history-critique-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #fff;
+  vertical-align: middle;
+}
+
+.stage2-history-prompt {
+  margin-top: 0.75rem;
+  color: #ccc;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.stage2-history-prompt strong {
+  color: #1eff1c;
+}

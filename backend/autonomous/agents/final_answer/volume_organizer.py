@@ -8,6 +8,11 @@ Organizes a volume/collection structure when long form answer is selected:
 - Iteratively refines until validator agrees
 
 CRITICAL: Operates ONLY on Tier 2 papers, NOT on Tier 1 brainstorm databases.
+
+NO RAG BY DESIGN: This agent organizes chapter order and identifies structural gaps
+using only paper metadata summaries (titles/abstracts/outlines) and the certainty
+assessment. Full paper content is not needed to plan volume structure — that's a
+high-level organizational decision based on what each paper covers.
 """
 import asyncio
 import json

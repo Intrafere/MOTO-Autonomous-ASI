@@ -2,7 +2,7 @@
 Aggregator API routes.
 """
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from typing import List
+from typing import List, Optional
 import logging
 from pathlib import Path
 import aiofiles
@@ -10,19 +10,41 @@ import aiofiles
 from backend.shared.models import AggregatorStartRequest, SystemStatus, ModelInfo
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.config import system_config, rag_config
+from backend.shared.token_tracker import token_tracker
 from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.event_log import event_log
+from backend.compiler.core.compiler_coordinator import compiler_coordinator
+from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/aggregator", tags=["aggregator"])
 
 
+def _get_start_conflict() -> Optional[str]:
+    """Return a user-facing conflict message if another workflow is active."""
+    if coordinator.is_running:
+        return "Aggregator is already running"
+
+    if compiler_coordinator.is_running:
+        return "Cannot start Aggregator while Compiler is running. Stop Compiler first."
+
+    autonomous_state = autonomous_coordinator.get_state()
+    if autonomous_state.is_running:
+        return "Cannot start Aggregator while Autonomous Research is running. Stop Autonomous Research first."
+
+    return None
+
+
 @router.post("/start")
 async def start_aggregator(request: AggregatorStartRequest):
     """Start the aggregator system."""
     try:
+        conflict = _get_start_conflict()
+        if conflict:
+            raise HTTPException(status_code=400, detail=conflict)
+
         # Validate submitter configs
         num_submitters = len(request.submitter_configs)
         if not (system_config.min_submitters <= num_submitters <= system_config.max_submitters):
@@ -50,10 +72,10 @@ async def start_aggregator(request: AggregatorStartRequest):
         # Log submitter configurations
         for config in request.submitter_configs:
             label = "(Main Submitter)" if config.submitter_id == 1 else ""
-        logger.info(
+            logger.info(
                 f"Submitter {config.submitter_id} {label}: model={config.model_id}, "
                 f"context={config.context_window}, max_tokens={config.max_output_tokens}"
-        )
+            )
         logger.info(
             f"Validator: model={request.validator_model}, "
             f"context={request.validator_context_size}, max_tokens={request.validator_max_output_tokens}"
@@ -74,6 +96,8 @@ async def start_aggregator(request: AggregatorStartRequest):
         )
         
         # Start coordinator
+        token_tracker.reset()
+        token_tracker.start_timer()
         await coordinator.start()
         
         return {
@@ -98,6 +122,7 @@ async def stop_aggregator():
     """Stop the aggregator system."""
     try:
         await coordinator.stop()
+        token_tracker.stop_timer()
         return {"status": "stopped", "message": "Aggregator system stopped"}
     except Exception as e:
         logger.error(f"Failed to stop aggregator: {e}")

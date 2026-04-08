@@ -1121,14 +1121,14 @@ const LatexRenderer = ({
               }}
               title="Show rendered LaTeX"
             >
-              📐 Rendered {isLargeDoc ? '' : '(Experimental)'}
+              Rendered View
             </button>
             <button
               className={`latex-toggle-btn ${viewMode === 'raw' ? 'active' : ''}`}
               onClick={() => setInternalViewMode('raw')}
               title="Show raw text"
             >
-              Raw Text
+              Raw Text View
             </button>
           </div>
           {viewMode === 'rendered' && chunks.length > 1 && (

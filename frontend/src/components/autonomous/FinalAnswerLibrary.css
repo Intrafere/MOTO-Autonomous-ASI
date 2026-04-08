@@ -17,7 +17,7 @@
 }
 
 .library-header h2 {
-  color: #ffd700;
+  color: var(--gold, #1eff1c);
   font-size: 2rem;
   margin-bottom: 10px;
 }
@@ -36,13 +36,13 @@
 }
 
 .stat-badge {
-  background: linear-gradient(135deg, #2a2a2a 0%, #3a3a3a 100%);
+  background: linear-gradient(135deg, var(--surface-3, #22222c) 0%, var(--surface-4, #2a2a36) 100%);
   padding: 8px 16px;
-  border-radius: 6px;
-  color: #ffd700;
+  border-radius: var(--radius-sm, 6px);
+  color: var(--gold, #1eff1c);
   font-weight: 600;
   font-size: 0.9rem;
-  border: 1px solid #444;
+  border: 1px solid var(--border-default, rgba(255,255,255,0.1));
 }
 
 /* ============================================================================
@@ -61,17 +61,18 @@
   flex: 1;
   min-width: 250px;
   padding: 12px 16px;
-  background: #2a2a2a;
-  border: 2px solid #444;
-  border-radius: 8px;
-  color: #fff;
+  background: var(--surface-3, #22222c);
+  border: 1px solid var(--border-default, rgba(255,255,255,0.1));
+  border-radius: var(--radius-md, 10px);
+  color: var(--text-primary, #e4e4ec);
   font-size: 0.95rem;
   transition: border-color 0.3s;
 }
 
 .search-input:focus {
   outline: none;
-  border-color: #ffd700;
+  border-color: var(--gold, #1eff1c);
+  box-shadow: 0 0 0 3px var(--gold-glow, rgba(30, 255, 28, 0.12));
 }
 
 .search-input::placeholder {
@@ -100,10 +101,97 @@
 }
 
 .filter-buttons button.active {
-  background: linear-gradient(135deg, #ffd700 0%, #ffed4e 100%);
-  border-color: #ffd700;
+  background: linear-gradient(135deg, #1eff1c 0%, #7dff6f 100%);
+  border-color: #1eff1c;
   color: #000;
   font-weight: 600;
+}
+
+/* ============================================================================
+   RESEARCH RUN GROUPS
+   ============================================================================ */
+
+.run-history-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.run-history-group {
+  background: linear-gradient(180deg, rgba(30, 255, 28, 0.05) 0%, rgba(34, 34, 44, 0.9) 100%);
+  border: 1px solid rgba(30, 255, 28, 0.14);
+  border-radius: 14px;
+  padding: 18px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+}
+
+.run-history-group-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.run-history-group-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.run-history-group-title {
+  margin: 0 0 8px;
+  color: var(--gold, #1eff1c);
+  font-size: 1.15rem;
+  line-height: 1.35;
+}
+
+.run-history-group-subtitle {
+  margin: 0;
+  color: #b9b9c6;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.run-history-group-subtitle + .run-history-group-subtitle {
+  margin-top: 4px;
+}
+
+.run-history-group-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.run-history-group-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #d7d7df;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.run-history-group-badge--current {
+  background: rgba(30, 255, 28, 0.16);
+  border-color: rgba(30, 255, 28, 0.32);
+  color: #b7ffb6;
+}
+
+.run-history-group-badge--linked {
+  background: rgba(46, 134, 222, 0.18);
+  border-color: rgba(46, 134, 222, 0.34);
+  color: #b9ddff;
+}
+
+.run-history-group-body {
+  display: block;
 }
 
 /* ============================================================================
@@ -117,21 +205,25 @@
 }
 
 .answer-card {
-  background: #2a2a2a;
-  border: 2px solid #444;
-  border-radius: 10px;
+  background: var(--surface-3, #22222c);
+  border: 1px solid var(--border-default, rgba(255,255,255,0.1));
+  border-radius: var(--radius-md, 10px);
   overflow: hidden;
   transition: all 0.3s;
 }
 
 .answer-card:hover {
-  border-color: #ffd700;
-  box-shadow: 0 4px 12px rgba(255, 215, 0, 0.1);
+  border-color: var(--gold-dim, #18cc17);
+  box-shadow: 0 4px 16px rgba(30, 255, 28, 0.08);
 }
 
 .answer-card.expanded {
-  border-color: #ffd700;
-  box-shadow: 0 8px 20px rgba(255, 215, 0, 0.15);
+  border-color: var(--gold-dim, #18cc17);
+  box-shadow: 0 8px 24px rgba(30, 255, 28, 0.12);
+}
+
+.run-history-group .answer-list {
+  gap: 14px;
 }
 
 /* ============================================================================
@@ -156,7 +248,7 @@
 }
 
 .answer-title {
-  color: #ffd700;
+  color: var(--gold, #1eff1c);
   font-size: 1.3rem;
   margin: 0;
   flex: 1;
@@ -165,7 +257,7 @@
 .expand-button {
   background: transparent;
   border: none;
-  color: #ffd700;
+  color: #1eff1c;
   font-size: 1.2rem;
   cursor: pointer;
   padding: 5px 10px;
@@ -216,7 +308,7 @@
 }
 
 .answer-prompt strong {
-  color: #ffd700;
+  color: #1eff1c;
 }
 
 .answer-footer-info {
@@ -291,9 +383,9 @@
    ============================================================================ */
 
 .answer-content {
-  border-top: 2px solid #444;
+  border-top: 1px solid var(--border-default, rgba(255,255,255,0.1));
   padding: 20px;
-  background: #1a1a1a;
+  background: var(--surface-2, #1a1a22);
 }
 
 .content-actions {
@@ -329,7 +421,7 @@
 }
 
 .chapter-list h4 {
-  color: #ffd700;
+  color: #1eff1c;
   margin-bottom: 10px;
 }
 
@@ -373,7 +465,7 @@
    EMPTY STATE
    ============================================================================ */
 
-.empty-state {
+.fal-empty-state {
   text-align: center;
   padding: 60px 20px;
   color: #888;
@@ -385,13 +477,13 @@
   margin-bottom: 20px;
 }
 
-.empty-state h3 {
+.fal-empty-state h3 {
   color: #ccc;
   font-size: 1.5rem;
   margin-bottom: 10px;
 }
 
-.empty-state p {
+.fal-empty-state p {
   font-size: 1rem;
 }
 
@@ -402,7 +494,7 @@
 .loading-spinner {
   text-align: center;
   padding: 40px;
-  color: #ffd700;
+  color: #1eff1c;
   font-size: 1.2rem;
   animation: spin 2s linear infinite;
 }
@@ -461,9 +553,9 @@
 .refresh-button {
   padding: 12px 24px;
   background: linear-gradient(135deg, #2a2a2a 0%, #3a3a3a 100%);
-  border: 2px solid #ffd700;
+  border: 2px solid #1eff1c;
   border-radius: 8px;
-  color: #ffd700;
+  color: #1eff1c;
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
@@ -473,7 +565,7 @@
 .refresh-button:hover {
   background: linear-gradient(135deg, #3a3a3a 0%, #4a4a4a 100%);
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(255, 215, 0, 0.2);
+  box-shadow: 0 4px 12px rgba(30, 255, 28, 0.2);
 }
 
 /* ============================================================================

@@ -5,6 +5,10 @@ CONTEXT HANDLING:
 - Uses same context as topic selector (metadata summaries)
 - Validates prompt size before sending
 - Truncates paper abstracts if context is too large
+
+NO RAG BY DESIGN: Same rationale as topic selector — validates a strategic decision
+using only metadata summaries (topic prompts, statuses, paper titles/abstracts).
+Full content not needed for validating topic selection quality.
 """
 import asyncio
 import json
@@ -65,7 +69,8 @@ class TopicValidatorAgent:
         submission: TopicSelectionSubmission,
         user_research_prompt: str,
         brainstorms_summary: List[Dict[str, Any]],
-        papers_summary: List[Dict[str, Any]]
+        papers_summary: List[Dict[str, Any]],
+        override_prompt: Optional[str] = None
     ) -> TopicValidationResult:
         """
         Validate a topic selection submission.
@@ -75,34 +80,41 @@ class TopicValidatorAgent:
             user_research_prompt: The user's high-level research goal
             brainstorms_summary: List of all brainstorms with metadata
             papers_summary: List of all papers with title, abstract, word count
+            override_prompt: If provided, use this prompt instead of building one
         
         Returns:
             TopicValidationResult with accept/reject decision
         """
         try:
-            # Convert submission to dict for prompt
-            proposed_action = {
-                "action": submission.action,
-                "topic_id": submission.topic_id,
-                "topic_ids": submission.topic_ids,
-                "topic_prompt": submission.topic_prompt,
-                "reasoning": submission.reasoning
-            }
-            
-            # Build prompt
-            prompt = build_topic_validation_prompt(
-                user_research_prompt=user_research_prompt,
-                brainstorms_summary=brainstorms_summary,
-                papers_summary=papers_summary,
-                proposed_action=proposed_action
-            )
+            if override_prompt:
+                prompt = override_prompt
+            else:
+                # Convert submission to dict for prompt
+                proposed_action = {
+                    "action": submission.action,
+                    "topic_id": submission.topic_id,
+                    "topic_ids": submission.topic_ids,
+                    "topic_prompt": submission.topic_prompt,
+                    "reasoning": submission.reasoning
+                }
+                
+                # Build prompt
+                prompt = build_topic_validation_prompt(
+                    user_research_prompt=user_research_prompt,
+                    brainstorms_summary=brainstorms_summary,
+                    papers_summary=papers_summary,
+                    proposed_action=proposed_action
+                )
             
             # Validate prompt size
             prompt_tokens = count_tokens(prompt)
             max_input_tokens = self._calculate_max_input_tokens()
             
             if prompt_tokens > max_input_tokens:
-                # Context too large - truncate paper abstracts to fit
+                if override_prompt:
+                    logger.error(f"TopicValidator: Override prompt ({prompt_tokens} tokens) exceeds limit ({max_input_tokens}). Cannot truncate.")
+                    return self._create_rejection("Override prompt too large for validation")
+                
                 logger.warning(f"TopicValidator: Prompt ({prompt_tokens} tokens) exceeds limit ({max_input_tokens}). "
                              f"Truncating paper abstracts.")
                 

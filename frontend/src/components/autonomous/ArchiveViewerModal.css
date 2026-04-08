@@ -1,0 +1,264 @@
+/* ============================================
+   ArchiveViewerModal — Research lineage viewer
+   ============================================ */
+
+/* Overlay */
+.archive-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+/* Panel */
+.archive-panel {
+  background: #111827;
+  border-radius: 8px;
+  width: 91.666%;
+  height: 83.333%;
+  max-width: 72rem;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header */
+.archive-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  border-bottom: 1px solid #374151;
+}
+
+.archive-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #f3f4f6;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.archive-close-btn {
+  color: #9ca3af;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  transition: color 0.2s;
+}
+
+.archive-close-btn:hover {
+  color: #e5e7eb;
+}
+
+/* Tabs */
+.archive-tabs {
+  display: flex;
+  border-bottom: 1px solid #374151;
+}
+
+.archive-tab {
+  padding: 0.75rem 1.5rem;
+  font-weight: 500;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+  color: #9ca3af;
+}
+
+.archive-tab:hover {
+  color: #e5e7eb;
+}
+
+.archive-tab--active {
+  color: #60a5fa;
+  border-bottom-color: #60a5fa;
+}
+
+.archive-tab-icon {
+  display: inline;
+  width: 16px;
+  height: 16px;
+  margin-right: 0.5rem;
+}
+
+/* Content area */
+.archive-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.archive-placeholder {
+  text-align: center;
+  color: #9ca3af;
+  padding: 2rem 0;
+}
+
+/* List items */
+.archive-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.archive-card {
+  background: #1f2937;
+  padding: 1rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.archive-card:hover {
+  background: #283344;
+}
+
+.archive-card-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.archive-card-body {
+  flex: 1;
+}
+
+.archive-card-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: #f3f4f6;
+  margin-bottom: 0.5rem;
+}
+
+.archive-card-desc {
+  font-size: 0.875rem;
+  color: #9ca3af;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.archive-card-meta {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.archive-card-chevron {
+  width: 20px;
+  height: 20px;
+  color: #6b7280;
+  margin-left: 1rem;
+  flex-shrink: 0;
+}
+
+/* Detail view */
+.archive-back-btn {
+  color: #60a5fa;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  padding: 0;
+  font-size: inherit;
+  transition: color 0.2s;
+}
+
+.archive-back-btn:hover {
+  color: #93c5fd;
+}
+
+.archive-detail {
+  background: #1f2937;
+  padding: 1.5rem;
+  border-radius: 8px;
+}
+
+.archive-detail-divider {
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #374151;
+}
+
+.archive-badge-readonly {
+  font-size: 0.75rem;
+  color: #eab308;
+  background: rgba(234, 179, 8, 0.1);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+}
+
+.archive-detail-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #f3f4f6;
+  margin-bottom: 1rem;
+}
+
+.archive-section {
+  margin-bottom: 1.5rem;
+}
+
+.archive-section-heading {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #9ca3af;
+  margin-bottom: 0.5rem;
+}
+
+.archive-section-text {
+  color: #d1d5db;
+}
+
+.archive-section-meta {
+  font-size: 0.875rem;
+  color: #9ca3af;
+}
+
+.archive-section-meta div {
+  margin-bottom: 0.25rem;
+}
+
+.archive-content-viewer {
+  background: #111827;
+  border-radius: 4px;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.archive-pre-content {
+  color: #d1d5db;
+  white-space: pre-wrap;
+  font-family: monospace;
+  font-size: 0.875rem;
+  background: #111827;
+  padding: 1rem;
+  border-radius: 4px;
+  max-height: 24rem;
+  overflow-y: auto;
+  margin: 0;
+}
+
+/* Icon sizing */
+.archive-icon-header {
+  width: 20px;
+  height: 20px;
+  color: #60a5fa;
+}
+
+.archive-icon-close {
+  width: 24px;
+  height: 24px;
+}

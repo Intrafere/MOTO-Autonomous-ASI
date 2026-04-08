@@ -227,7 +227,8 @@ def build_topic_selection_prompt(
     user_research_prompt: str,
     brainstorms_summary: List[Dict[str, Any]],
     papers_summary: List[Dict[str, Any]],
-    rejection_context: str = ""
+    rejection_context: str = "",
+    candidate_questions: str = ""
 ) -> str:
     """
     Build the complete topic selection prompt with context.
@@ -237,6 +238,7 @@ def build_topic_selection_prompt(
         brainstorms_summary: List of all brainstorms with metadata
         papers_summary: List of all papers with title, abstract, word count
         rejection_context: Formatted previous rejection feedback
+        candidate_questions: Formatted candidate questions from topic exploration phase
     
     Returns:
         Complete prompt string
@@ -249,6 +251,23 @@ def build_topic_selection_prompt(
         f"USER RESEARCH GOAL:\n{user_research_prompt}",
         "\n---\n"
     ]
+    
+    # Add candidate questions from topic exploration (if available)
+    if candidate_questions:
+        parts.append(f"""TOPIC EXPLORATION RESULTS:
+The following candidate brainstorm questions were brainstormed and validated for quality
+and diversity BEFORE this topic selection. Use them to make an informed strategic decision.
+
+You may:
+- Select one of these candidates directly as your topic (action: new_topic, topic_prompt: the candidate question)
+- Combine or synthesize multiple candidates into a stronger question
+- Continue an existing brainstorm if the candidates reveal it is worth continuing
+- Combine existing brainstorms if the candidates reveal connections
+- Propose something entirely new if the candidates missed a critical avenue
+
+{candidate_questions}
+""")
+        parts.append("\n---\n")
     
     # Add brainstorms summary
     if brainstorms_summary:

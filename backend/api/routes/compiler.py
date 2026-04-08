@@ -8,19 +8,41 @@ import aiofiles
 
 from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueRequest
 from backend.shared.config import system_config
+from backend.shared.token_tracker import token_tracker
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import paper_memory
+from backend.aggregator.core.coordinator import coordinator
+from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/compiler", tags=["compiler"])
 
 
+def _get_start_conflict() -> str | None:
+    """Return a user-facing conflict message if another workflow is active."""
+    if compiler_coordinator.is_running:
+        return "Compiler is already running"
+
+    if coordinator.is_running:
+        return "Cannot start Compiler while Aggregator is running. Stop Aggregator first."
+
+    autonomous_state = autonomous_coordinator.get_state()
+    if autonomous_state.is_running:
+        return "Cannot start Compiler while Autonomous Research is running. Stop Autonomous Research first."
+
+    return None
+
+
 @router.post("/start")
 async def start_compiler(request: CompilerStartRequest):
     """Start the compiler system."""
     try:
+        conflict = _get_start_conflict()
+        if conflict:
+            raise HTTPException(status_code=400, detail=conflict)
+
         # Update system config with user-provided context sizes
         system_config.compiler_validator_context_window = request.validator_context_size
         system_config.compiler_high_context_context_window = request.high_context_context_size
@@ -66,6 +88,8 @@ async def start_compiler(request: CompilerStartRequest):
         )
         
         # Start coordinator
+        token_tracker.reset()
+        token_tracker.start_timer()
         await compiler_coordinator.start()
         
         return {"status": "started", "message": "Compiler started successfully"}
@@ -116,6 +140,7 @@ async def stop_compiler():
     """Stop the compiler system."""
     try:
         await compiler_coordinator.stop()
+        token_tracker.stop_timer()
         return {"status": "stopped", "message": "Compiler stopped"}
     except Exception as e:
         logger.error(f"Failed to stop compiler: {e}")
@@ -367,7 +392,7 @@ async def get_metrics():
                 "rejections": status.review_rejections,
                 "declines": status.review_declines
             },
-            "miniscule_edit_count": status.miniscule_edit_count,
+            "minuscule_edit_count": status.minuscule_edit_count,
             "paper_word_count": status.paper_word_count
         }
     except Exception as e:
@@ -416,7 +441,7 @@ async def get_critique_status():
             "in_critique_phase": compiler_coordinator.in_critique_phase,
             "critique_acceptances": compiler_coordinator.critique_acceptances,
             "paper_version": compiler_coordinator.paper_version,
-            "target_critiques": 10
+            "target_critiques": 5
         }
     except Exception as e:
         logger.error(f"Failed to get critique status: {e}")
@@ -461,7 +486,6 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
     from backend.shared.critique_memory import save_critique
     from backend.shared.models import PaperCritique
     from backend.shared.api_client_manager import api_client_manager
-    from backend.shared.json_parser import parse_json
     from backend.shared.utils import count_tokens
     import uuid
     from datetime import datetime
@@ -489,13 +513,13 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         validator_provider = critique_request.validator_provider
         validator_openrouter_provider = critique_request.validator_openrouter_provider
         
-        # If validator config not provided in request, fall back to system config
+        # If validator config not provided in request, fall back to coordinator config
         if not validator_model:
-            validator_model = system_config.compiler_validator_model
+            validator_model = getattr(compiler_coordinator, 'validator_model', None)
             validator_context_window = system_config.compiler_validator_context_window
             validator_max_tokens = system_config.compiler_validator_max_output_tokens
-            validator_provider = getattr(system_config, 'compiler_validator_provider', 'lm_studio')
-            validator_openrouter_provider = getattr(system_config, 'compiler_validator_openrouter_provider', None)
+            validator_provider = getattr(compiler_coordinator, 'validator_provider', 'lm_studio')
+            validator_openrouter_provider = getattr(compiler_coordinator, 'validator_openrouter_provider', None)
         
         if not validator_model:
             raise HTTPException(
@@ -579,21 +603,9 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         if not response_content:
             raise HTTPException(status_code=500, detail="Empty response from validator model")
         
-        # Try to parse as JSON
-        try:
-            critique_data = parse_json(response_content)
-        except Exception as e:
-            # If JSON parsing fails, create a structured response from raw text
-            logger.warning(f"Failed to parse critique JSON, using raw response: {e}")
-            critique_data = {
-                "novelty_rating": 0,
-                "novelty_feedback": "Unable to parse structured response",
-                "correctness_rating": 0,
-                "correctness_feedback": "Unable to parse structured response",
-                "impact_rating": 0,
-                "impact_feedback": "Unable to parse structured response",
-                "full_critique": response_content
-            }
+        # Parse with lenient fallback for truncated critique responses
+        from backend.shared.critique_prompts import parse_critique_response
+        critique_data = parse_critique_response(response_content)
         
         # Create critique object
         critique = PaperCritique(

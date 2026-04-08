@@ -3,7 +3,9 @@ import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
 import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import { prependDisclaimer } from '../../utils/disclaimerHelper';
 import PaperCritiqueModal from '../PaperCritiqueModal';
+import '../settings-common.css';
 
 function LivePaper() {
   const [paper, setPaper] = useState('');
@@ -189,6 +191,7 @@ function LivePaper() {
         console.error('PDF generation error:', error);
         alert('PDF generation failed: ' + error.message);
       },
+      'paper',
     );
   };
 
@@ -199,7 +202,7 @@ function LivePaper() {
     }
     
     const filename = sanitizeFilename('compiler_paper');
-    downloadRawText(paper, filename, outline);
+    downloadRawText(paper, filename, outline, 'paper');
   };
 
   return (
@@ -280,9 +283,9 @@ function LivePaper() {
             disabled={!paper}
             title="Ask validator to critique this paper"
             style={{
-              background: 'linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%)',
+              background: 'linear-gradient(135deg, #1eff1c 0%, #0fcc0d 100%)',
               border: 'none',
-              color: '#fff',
+              color: '#0b2e0b',
               padding: '0.5rem 1rem',
               borderRadius: '4px',
               cursor: 'pointer',
@@ -298,7 +301,7 @@ function LivePaper() {
       <div className="paper-container" ref={paperContainerRef}>
         {paper ? (
           <LatexRenderer 
-            content={paper}
+            content={prependDisclaimer(paper, 'paper')}
             className="paper-content-renderer"
             defaultRaw={!showLatex}
             showToggle={true}
@@ -330,9 +333,9 @@ function LivePaper() {
       {previousVersions.length > 0 && (
         <div className="previous-versions-section">
           <button 
-            className="btn btn-secondary"
+            className="btn btn-secondary mt-1"
             onClick={() => setShowVersions(!showVersions)}
-            style={{ marginTop: '1rem', marginBottom: '0.5rem' }}
+            style={{ marginBottom: '0.5rem' }}
           >
             📜 Previous Versions ({previousVersions.length})
           </button>
@@ -347,7 +350,7 @@ function LivePaper() {
                   marginBottom: '1rem',
                   backgroundColor: '#2a2a2a'
                 }}>
-                  <h3 style={{ color: '#ffd700', marginBottom: '0.5rem' }}>
+                  <h3 style={{ color: '#1eff1c', marginBottom: '0.5rem' }}>
                     Version {v.version}: {v.title}
                   </h3>
                   

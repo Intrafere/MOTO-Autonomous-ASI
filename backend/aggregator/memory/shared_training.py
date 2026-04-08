@@ -94,8 +94,9 @@ class SharedTrainingMemory:
                                 default=0
                             )
                             self.submission_count = max_number
-                            # Set last_ragged to current count so new submissions start from here
-                            self.last_ragged_submission_count = self.submission_count
+                            # Use entry count (not max number) so post-prune gaps
+                            # don't cause the next acceptance to be skipped from RAG
+                            self.last_ragged_submission_count = len(self.insights)
                         else:
                             self.submission_count = 0
                 
@@ -263,7 +264,7 @@ class SharedTrainingMemory:
                     return insight['content']
             return None
     
-    async def remove_submission(self, submission_number: int) -> bool:
+    async def remove_submission(self, submission_number: int, trigger_rechunk: bool = True) -> bool:
         """
         Remove a submission from the shared training database.
         
@@ -272,6 +273,8 @@ class SharedTrainingMemory:
         
         Args:
             submission_number: The submission number to remove
+            trigger_rechunk: Whether to fire the incremental rechunk callback.
+                Set False when the caller will do a full RAG rebuild instead.
             
         Returns:
             True if submission was found and removed, False otherwise
@@ -292,7 +295,7 @@ class SharedTrainingMemory:
                 await self._save()
                 
                 # Trigger re-chunking callback to update RAG
-                if self.rechunk_callback:
+                if trigger_rechunk and self.rechunk_callback:
                     try:
                         logger.info(f"Triggering re-chunking callback after removal of submission #{submission_number}")
                         await self.rechunk_callback()

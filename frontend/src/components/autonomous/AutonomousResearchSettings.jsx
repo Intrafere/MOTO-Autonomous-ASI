@@ -5,9 +5,17 @@
  * Now supports per-role OpenRouter model selection with provider and fallback options.
  */
 import React, { useState, useEffect } from 'react';
-import { openRouterAPI, api } from '../../services/api';
-import { loadModelCache, getModelApiId } from '../../utils/modelCache';
+import { openRouterAPI, api, autonomousAPI } from '../../services/api';
+import {
+  AUTONOMOUS_SETTINGS_STORAGE_KEY,
+  AUTONOMOUS_PROFILES_STORAGE_KEY,
+  RECOMMENDED_PROFILE_KEYS,
+  RECOMMENDED_PROFILES,
+  applyAutonomousProfileSelection,
+  getStoredAutonomousSettings,
+} from '../../utils/autonomousProfiles';
 import './AutonomousResearch.css';
+import '../settings-common.css';
 
 const DEFAULT_SUBMITTER_CONFIG = {
   submitterId: 1,
@@ -17,134 +25,6 @@ const DEFAULT_SUBMITTER_CONFIG = {
   lmStudioFallbackId: null,
   contextWindow: 131072,
   maxOutputTokens: 25000
-};
-
-// Recommended profiles with hard-coded model IDs (NO pattern matching)
-const RECOMMENDED_PROFILES = {
-  'recommended_fastest_cheapest': {
-    name: 'Fastest, cheapest, least knowledge',
-    numSubmitters: 3,
-    submitters: [
-      { 
-        modelId: 'openai/gpt-oss-120b',
-        provider: 'openrouter',
-        openrouterProvider: 'Google',
-        lmStudioFallbackId: null,
-        contextWindow: 131000,
-        maxOutputTokens: 25000
-      },
-      { 
-        modelId: 'openai/gpt-oss-20b',
-        provider: 'openrouter',
-        openrouterProvider: 'Groq',
-        lmStudioFallbackId: null,
-        contextWindow: 131000,
-        maxOutputTokens: 25000
-      },
-      { 
-        modelId: 'openai/gpt-oss-120b',
-        provider: 'openrouter',
-        openrouterProvider: 'Google',
-        lmStudioFallbackId: null,
-        contextWindow: 131000,
-        maxOutputTokens: 25000
-      }
-    ],
-    validator: { 
-      modelId: 'openai/gpt-oss-120b',
-      provider: 'openrouter',
-      openrouterProvider: 'Google',
-      lmStudioFallbackId: null,
-      contextWindow: 131000,
-      maxOutputTokens: 25000
-    },
-    highContext: { 
-      modelId: 'openai/gpt-oss-120b',
-      provider: 'openrouter',
-      openrouterProvider: 'Google',
-      lmStudioFallbackId: null,
-      contextWindow: 131000,
-      maxOutputTokens: 25000
-    },
-    highParam: { 
-      modelId: 'openai/gpt-oss-120b',
-      provider: 'openrouter',
-      openrouterProvider: 'Google',
-      lmStudioFallbackId: null,
-      contextWindow: 131000,
-      maxOutputTokens: 25000
-    },
-    critique: { 
-      modelId: 'openai/gpt-oss-120b',
-      provider: 'openrouter',
-      openrouterProvider: 'Google',
-      lmStudioFallbackId: null,
-      contextWindow: 131000,
-      maxOutputTokens: 25000
-    }
-  },
-  'recommended_fast_affordable_mid': {
-    name: 'Fast, affordable, mid-tier knowledge',
-    numSubmitters: 3,
-    submitters: [
-      {
-        modelId: 'moonshotai/kimi-k2.5',
-        provider: 'openrouter',
-        openrouterProvider: 'SiliconFlow',
-        lmStudioFallbackId: null,
-        contextWindow: 262000,
-        maxOutputTokens: 40000
-      },
-      {
-        modelId: 'openai/gpt-oss-120b',
-        provider: 'openrouter',
-        openrouterProvider: 'Groq',
-        lmStudioFallbackId: null,
-        contextWindow: 131072,
-        maxOutputTokens: 25000
-      },
-      {
-        modelId: 'deepseek/deepseek-v3.2',
-        provider: 'openrouter',
-        openrouterProvider: 'AtlasCloud',
-        lmStudioFallbackId: null,
-        contextWindow: 163800,
-        maxOutputTokens: 30000
-      }
-    ],
-    validator: {
-      modelId: 'x-ai/grok-4.1-fast',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 2000000,
-      maxOutputTokens: 30000
-    },
-    highContext: {
-      modelId: 'moonshotai/kimi-k2.5',
-      provider: 'openrouter',
-      openrouterProvider: 'SiliconFlow',
-      lmStudioFallbackId: null,
-      contextWindow: 262000,
-      maxOutputTokens: 40000
-    },
-    highParam: {
-      modelId: 'google/gemini-3.1-pro-preview',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500
-    },
-    critique: {
-      modelId: 'google/gemini-3.1-pro-preview',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500
-    }
-  }
 };
 
 // ModelSelector component - extracted outside to prevent recreation on every render
@@ -157,38 +37,21 @@ const ModelSelector = ({ provider, modelId, openrouterProv, fallback, onProvider
       {/* Provider Toggle */}
       <div className="settings-row">
         <label>Provider</label>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div className="provider-toggle-group">
           <button
             type="button"
+            className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
             onClick={() => onProviderChange('lm_studio')}
             disabled={isRunning}
-            style={{
-              flex: 1,
-              padding: '0.5rem',
-              backgroundColor: provider === 'lm_studio' ? '#4CAF50' : '#333',
-              border: 'none',
-              borderRadius: '4px',
-              color: '#fff',
-              cursor: isRunning ? 'not-allowed' : 'pointer',
-              opacity: isRunning ? 0.6 : 1
-            }}
           >
             LM Studio
           </button>
           <button
             type="button"
+            className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
             onClick={() => hasOpenRouterKey && onProviderChange('openrouter')}
             disabled={isRunning || !hasOpenRouterKey}
-            style={{
-              flex: 1,
-              padding: '0.5rem',
-              backgroundColor: provider === 'openrouter' ? '#FF6700' : '#333',
-              border: 'none',
-              borderRadius: '4px',
-              color: hasOpenRouterKey ? '#fff' : '#666',
-              cursor: (isRunning || !hasOpenRouterKey) ? 'not-allowed' : 'pointer',
-              opacity: (isRunning || !hasOpenRouterKey) ? 0.6 : 1
-            }}
+            style={!hasOpenRouterKey ? { color: '#666' } : undefined}
             title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
           >
             OpenRouter
@@ -241,7 +104,7 @@ const ModelSelector = ({ provider, modelId, openrouterProv, fallback, onProvider
       {/* LM Studio Fallback (if OpenRouter) */}
       {provider === 'openrouter' && (
         <div className="settings-row">
-          <label style={{ color: '#888' }}>LM Studio Fallback (optional)</label>
+          <label className="label--muted">LM Studio Fallback (optional)</label>
           <select
             value={fallback || ''}
             onChange={(e) => onFallbackChange(e.target.value || null)}
@@ -269,12 +132,12 @@ const RoleConfig = ({ title, hint, rolePrefix, borderColor = '#333', localConfig
   const maxTokens = localConfig[`${rolePrefix}_max_tokens`] || 25000;
 
   return (
-    <div className="submitter-config-section" style={{
-      borderColor: provider === 'openrouter' ? '#FF6700' : borderColor
+    <div className={`submitter-config-section${provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`} style={{
+      borderColor: provider === 'openrouter' ? undefined : borderColor
     }}>
-      <h5 style={{ color: provider === 'openrouter' ? '#FF6700' : borderColor }}>
+      <h5 className={provider === 'openrouter' ? 'card-title--orange' : ''} style={provider !== 'openrouter' ? { color: borderColor } : undefined}>
         {title}
-        {provider === 'openrouter' && <span style={{ fontWeight: 'normal', marginLeft: '0.5rem' }}>[OpenRouter]</span>}
+        {provider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
       </h5>
       {hint && <p className="settings-hint">{hint}</p>}
 
@@ -353,10 +216,18 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
   const [testingWolfram, setTestingWolfram] = useState(false);
   
   // Critique prompt editor state
+  const [advancedSettingsExpanded, setAdvancedSettingsExpanded] = useState(false);
   const [critiquePromptExpanded, setCritiquePromptExpanded] = useState(false);
   const [customCritiquePrompt, setCustomCritiquePrompt] = useState('');
   const [critiquePromptSaved, setCritiquePromptSaved] = useState(false);
   const [defaultCritiquePrompt, setDefaultCritiquePrompt] = useState('');
+
+  const handleCollapsibleKeyDown = (event, toggleFn) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      toggleFn();
+    }
+  };
 
   // Parse submitter configs from config
   const parseSubmitterConfigs = (cfg) => {
@@ -461,7 +332,7 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
   useEffect(() => {
     const init = async () => {
       // Load user profiles from localStorage
-      const savedProfiles = localStorage.getItem('autonomous_research_profiles');
+      const savedProfiles = localStorage.getItem(AUTONOMOUS_PROFILES_STORAGE_KEY);
       if (savedProfiles) {
         try {
           let profiles = JSON.parse(savedProfiles);
@@ -473,7 +344,7 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
           setUserProfiles(normalized);
           // Save normalized profiles back to localStorage if any changes were made
           if (JSON.stringify(normalized) !== JSON.stringify(profiles)) {
-            localStorage.setItem('autonomous_research_profiles', JSON.stringify(normalized));
+            localStorage.setItem(AUTONOMOUS_PROFILES_STORAGE_KEY, JSON.stringify(normalized));
             console.log('[Profile Normalization] Profiles updated and saved to localStorage');
           }
         } catch (err) {
@@ -481,25 +352,18 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
         }
       }
 
-      // Load settings from localStorage
-      const savedSettings = localStorage.getItem('autonomous_research_settings');
-      if (savedSettings) {
-        try {
-          const settings = JSON.parse(savedSettings);
-          if (settings.numSubmitters) setNumSubmitters(settings.numSubmitters);
-          if (settings.submitterConfigs) setSubmitterConfigs(settings.submitterConfigs);
-          if (settings.localConfig) {
-            setLocalConfig(prev => ({ ...prev, ...settings.localConfig }));
-          }
-          if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
-          if (settings.freeModelLooping !== undefined) setFreeModelLooping(settings.freeModelLooping);
-          if (settings.freeModelAutoSelector !== undefined) setFreeModelAutoSelector(settings.freeModelAutoSelector);
-          if (settings.tier3Enabled !== undefined) setTier3Enabled(settings.tier3Enabled);
-          if (settings.modelProviders) setModelProviders(settings.modelProviders);
-        } catch (err) {
-          console.error('Failed to load autonomous research settings:', err);
-        }
+      const settings = getStoredAutonomousSettings();
+      if (settings.numSubmitters) setNumSubmitters(settings.numSubmitters);
+      if (settings.submitterConfigs) setSubmitterConfigs(settings.submitterConfigs);
+      if (settings.localConfig) {
+        setLocalConfig(prev => ({ ...prev, ...settings.localConfig }));
       }
+      setSelectedProfile(settings.selectedProfile || '');
+      if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
+      if (settings.freeModelLooping !== undefined) setFreeModelLooping(settings.freeModelLooping);
+      if (settings.freeModelAutoSelector !== undefined) setFreeModelAutoSelector(settings.freeModelAutoSelector);
+      if (settings.tier3Enabled !== undefined) setTier3Enabled(settings.tier3Enabled);
+      if (settings.modelProviders) setModelProviders(settings.modelProviders);
       
       try {
         const status = await openRouterAPI.getApiKeyStatus();
@@ -511,14 +375,20 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
         console.error('Failed to check OpenRouter key:', err);
       }
       
-      // Load Wolfram Alpha status from backend
-      try {
-        const wolframStatus = await api.getWolframStatus();
-        if (wolframStatus.enabled) {
-          setWolframEnabled(true);
+      // Restore Wolfram Alpha key from localStorage
+      const storedWolframKey = localStorage.getItem('wolfram_alpha_api_key');
+      if (storedWolframKey) {
+        setWolframApiKey(storedWolframKey);
+        setWolframEnabled(true);
+      } else {
+        try {
+          const wolframStatus = await api.getWolframStatus();
+          if (wolframStatus.enabled) {
+            setWolframEnabled(true);
+          }
+        } catch (err) {
+          console.error('Failed to load Wolfram Alpha status:', err);
         }
-      } catch (err) {
-        console.error('Failed to load Wolfram Alpha status:', err);
       }
 
       // Try to fetch fresh LM Studio models
@@ -578,10 +448,11 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
       freeModelLooping,
       freeModelAutoSelector,
       tier3Enabled,
-      modelProviders
+      modelProviders,
+      selectedProfile,
     };
-    localStorage.setItem('autonomous_research_settings', JSON.stringify(settings));
-  }, [isLoadedFromStorage, numSubmitters, submitterConfigs, localConfig, freeOnly, freeModelLooping, freeModelAutoSelector, tier3Enabled, modelProviders]);
+    localStorage.setItem(AUTONOMOUS_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  }, [isLoadedFromStorage, numSubmitters, submitterConfigs, localConfig, freeOnly, freeModelLooping, freeModelAutoSelector, tier3Enabled, modelProviders, selectedProfile]);
 
   // Update LM Studio models when prop changes
   useEffect(() => {
@@ -639,7 +510,6 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
     // Fetch default prompt from backend
     const fetchDefaultPrompt = async () => {
       try {
-        const { autonomousAPI } = await import('../../services/api');
         const response = await autonomousAPI.getDefaultCritiquePrompt();
         if (response.prompt) {
           setDefaultCritiquePrompt(response.prompt);
@@ -680,6 +550,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     }
   };
 
+  const markProfileAsCustom = () => {
+    if (selectedProfile) {
+      setSelectedProfile('');
+    }
+  };
+
   const handleChange = (field, value) => {
     const numericFields = [
       'validator_context_window', 'high_context_context_window', 
@@ -696,6 +572,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     }
     
     const newConfig = { ...localConfig, [field]: newValue };
+    markProfileAsCustom();
     setLocalConfig(newConfig);
     
     // CRITICAL FIX: Don't propagate numeric field changes to parent on every keystroke
@@ -720,6 +597,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       const finalValue = isNaN(parsed) ? (isContextField ? 131072 : 25000) : parsed;
       
       const newConfig = { ...localConfig, [field]: finalValue };
+      markProfileAsCustom();
       setLocalConfig(newConfig);
       onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
     }
@@ -732,6 +610,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       // Keep existing model, openrouter_provider, and lm_studio_fallback - don't reset them
     };
     const newConfig = { ...localConfig, ...updates };
+    markProfileAsCustom();
     setLocalConfig(newConfig);
     onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
   };
@@ -747,6 +626,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   // Handle number of submitters change
   const handleNumSubmittersChange = (newCount) => {
     const count = Math.max(1, Math.min(10, parseInt(newCount, 10) || 1));
+    markProfileAsCustom();
     setNumSubmitters(count);
     
     // Expand or contract submitter configs
@@ -767,6 +647,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   // Handler for when user finishes editing number of submitters
   const handleNumSubmittersBlur = (value) => {
     const count = Math.max(1, Math.min(10, parseInt(value, 10) || 1));
+    markProfileAsCustom();
     setNumSubmitters(count);
     
     const newConfigs = [...submitterConfigs];
@@ -815,6 +696,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       fetchProvidersForModel(newValue);
     }
     
+    markProfileAsCustom();
     setSubmitterConfigs(newConfigs);
     
     // CRITICAL FIX: Don't propagate numeric field changes on every keystroke
@@ -837,6 +719,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         [field]: finalValue
       };
       
+      markProfileAsCustom();
       setSubmitterConfigs(newConfigs);
       onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
     }
@@ -855,6 +738,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         contextWindow: main.contextWindow,
         maxOutputTokens: main.maxOutputTokens
       }));
+      markProfileAsCustom();
       setSubmitterConfigs(newConfigs);
       onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
     }
@@ -885,8 +769,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       
       if (response.success) {
         setWolframTestResult(`✓ Success! Result: ${response.result}`);
-        // Save the key to backend
         await api.setWolframApiKey(wolframApiKey);
+        localStorage.setItem('wolfram_alpha_api_key', wolframApiKey);
         setWolframEnabled(true);
       } else {
         setWolframTestResult('✗ Failed: ' + response.message);
@@ -902,6 +786,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const handleClearWolframKey = async () => {
     try {
       await api.clearWolframApiKey();
+      localStorage.removeItem('wolfram_alpha_api_key');
       setWolframApiKey('');
       setWolframEnabled(false);
       setWolframTestResult('Key cleared');
@@ -921,120 +806,25 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
   // Apply a profile (recommended or user-saved)
   const applyProfile = async (profileKey) => {
-    const isRecommended = profileKey.startsWith('recommended_');
-    const profile = isRecommended
-      ? RECOMMENDED_PROFILES[profileKey]
-      : userProfiles[profileKey];
-    
-    if (!profile) {
-      console.error(`Profile not found: ${profileKey}`);
-      return;
+    try {
+      const { profile, settings, config: nextConfig } = await applyAutonomousProfileSelection(profileKey, userProfiles);
+      const isRecommended = profileKey.startsWith('recommended_');
+
+      console.log(`Applying profile: ${profile.name} (${isRecommended ? 'recommended' : 'user'})`);
+
+      setNumSubmitters(settings.numSubmitters);
+      setSubmitterConfigs(settings.submitterConfigs);
+      setLocalConfig(settings.localConfig);
+      setFreeOnly(settings.freeOnly);
+      setFreeModelLooping(settings.freeModelLooping);
+      setFreeModelAutoSelector(settings.freeModelAutoSelector);
+      setTier3Enabled(settings.tier3Enabled);
+      setModelProviders(settings.modelProviders || {});
+      setSelectedProfile(settings.selectedProfile);
+      onConfigChange(nextConfig);
+    } catch (err) {
+      console.error(err.message || 'Failed to apply profile:', err);
     }
-
-    console.log(`Applying profile: ${profile.name} (${isRecommended ? 'recommended' : 'user'})`);
-
-    // Load model cache to convert display names to API IDs
-    const modelCache = await loadModelCache();
-    
-    // Helper to convert display name to API ID
-    const convertToApiId = (displayNameOrId) => {
-      if (!displayNameOrId) return '';
-      const apiId = getModelApiId(displayNameOrId);
-      if (apiId !== displayNameOrId) {
-        console.log(`  Converted "${displayNameOrId}" -> "${apiId}"`);
-      }
-      return apiId;
-    };
-
-    // Apply submitter configs using hard-coded modelId values (NO pattern matching)
-    const newSubmitterConfigs = [];
-    for (let i = 0; i < profile.numSubmitters; i++) {
-      const submitterProfile = profile.submitters[i];
-      
-      let modelId, provider, openrouterProv, fallback;
-      
-      if (isRecommended) {
-        // Recommended profiles: convert display name to API ID
-        modelId = convertToApiId(submitterProfile.modelId || '');
-        provider = submitterProfile.provider || 'openrouter';
-        openrouterProv = submitterProfile.openrouterProvider || null;
-        fallback = null; // No fallback for recommended
-      } else {
-        // User profile: use stored settings directly (already in API format)
-        modelId = submitterProfile.modelId || '';
-        provider = submitterProfile.provider || 'openrouter';
-        openrouterProv = submitterProfile.openrouterProvider || null;
-        fallback = submitterProfile.lmStudioFallbackId || null;
-      }
-      
-      newSubmitterConfigs.push({
-        submitterId: i + 1,
-        provider,
-        modelId,
-        openrouterProvider: openrouterProv,
-        lmStudioFallbackId: fallback,
-        contextWindow: submitterProfile.contextWindow,
-        maxOutputTokens: submitterProfile.maxOutputTokens
-      });
-    }
-
-    // Helper to get model ID (convert display name to API ID for recommended profiles)
-    const getModelId = (roleProfile) => {
-      if (isRecommended) {
-        return convertToApiId(roleProfile.modelId || '');
-      }
-      return roleProfile.modelId || '';
-    };
-
-    // Helper to get OpenRouter provider
-    const getOpenrouterProvider = (roleProfile) => {
-      if (isRecommended) {
-        return roleProfile.openrouterProvider || null;
-      }
-      return roleProfile.openrouterProvider || null;
-    };
-
-    // Apply validator, high-context, high-param, and critique configs
-    const validatorModelId = getModelId(profile.validator);
-    const highContextModelId = getModelId(profile.highContext);
-    const highParamModelId = getModelId(profile.highParam);
-    const critiqueModelId = getModelId(profile.critique);
-
-    // Update all state
-    setNumSubmitters(profile.numSubmitters);
-    setSubmitterConfigs(newSubmitterConfigs);
-    
-    const newConfig = {
-      ...localConfig,
-      validator_provider: isRecommended ? 'openrouter' : (profile.validator.provider || 'openrouter'),
-      validator_model: validatorModelId,
-      validator_openrouter_provider: getOpenrouterProvider(profile.validator),
-      validator_lm_studio_fallback: isRecommended ? null : (profile.validator.lmStudioFallbackId || null),
-      validator_context_window: profile.validator.contextWindow,
-      validator_max_tokens: profile.validator.maxOutputTokens,
-      high_context_provider: isRecommended ? 'openrouter' : (profile.highContext.provider || 'openrouter'),
-      high_context_model: highContextModelId,
-      high_context_openrouter_provider: getOpenrouterProvider(profile.highContext),
-      high_context_lm_studio_fallback: isRecommended ? null : (profile.highContext.lmStudioFallbackId || null),
-      high_context_context_window: profile.highContext.contextWindow,
-      high_context_max_tokens: profile.highContext.maxOutputTokens,
-      high_param_provider: isRecommended ? 'openrouter' : (profile.highParam.provider || 'openrouter'),
-      high_param_model: highParamModelId,
-      high_param_openrouter_provider: getOpenrouterProvider(profile.highParam),
-      high_param_lm_studio_fallback: isRecommended ? null : (profile.highParam.lmStudioFallbackId || null),
-      high_param_context_window: profile.highParam.contextWindow,
-      high_param_max_tokens: profile.highParam.maxOutputTokens,
-      critique_submitter_provider: isRecommended ? 'openrouter' : (profile.critique.provider || 'openrouter'),
-      critique_submitter_model: critiqueModelId,
-      critique_submitter_openrouter_provider: getOpenrouterProvider(profile.critique),
-      critique_submitter_lm_studio_fallback: isRecommended ? null : (profile.critique.lmStudioFallbackId || null),
-      critique_submitter_context_window: profile.critique.contextWindow,
-      critique_submitter_max_tokens: profile.critique.maxOutputTokens
-    };
-    
-    setLocalConfig(newConfig);
-    onConfigChange({ ...newConfig, submitter_configs: newSubmitterConfigs });
-    setSelectedProfile(profileKey);
   };
 
   // Save current settings as a new profile
@@ -1092,7 +882,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
     const updatedProfiles = { ...userProfiles, [profileKey]: newProfile };
     setUserProfiles(updatedProfiles);
-    localStorage.setItem('autonomous_research_profiles', JSON.stringify(updatedProfiles));
+    localStorage.setItem(AUTONOMOUS_PROFILES_STORAGE_KEY, JSON.stringify(updatedProfiles));
     setSelectedProfile(profileKey);
     setShowSaveDialog(false);
     setNewProfileName('');
@@ -1119,7 +909,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const updatedProfiles = { ...userProfiles };
     delete updatedProfiles[profileKey];
     setUserProfiles(updatedProfiles);
-    localStorage.setItem('autonomous_research_profiles', JSON.stringify(updatedProfiles));
+    localStorage.setItem(AUTONOMOUS_PROFILES_STORAGE_KEY, JSON.stringify(updatedProfiles));
     
     if (selectedProfile === profileKey) {
       setSelectedProfile('');
@@ -1131,200 +921,86 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       {/* Left Sidebar - Known Compatible Models */}
       <div className="settings-left-sidebar">
         <div className="known-models-sidebar">
-          <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <span>📦 Tested Compatible Models</span>
-            <div style={{ position: 'relative', display: 'inline-block' }}>
+          <h3 className="flex-row-center">
+            <span>Highlighted Models</span>
+            <div className="tooltip-anchor">
               <button
-                style={{
-                  backgroundColor: 'transparent',
-                  border: '2px solid #FF6700',
-                  color: '#FF6700',
-                  padding: '0',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.7rem',
-                  fontWeight: 'bold',
-                  width: '16px',
-                  height: '16px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  boxShadow: '0 0 8px rgba(255, 103, 0, 0.3)',
-                  transition: 'all 0.2s ease'
-                }}
+                className="info-tooltip-btn info-tooltip-btn--orange"
                 onMouseEnter={() => setShowTestedModelsTooltip(true)}
                 onMouseLeave={() => setShowTestedModelsTooltip(false)}
               >
                 ?
               </button>
               {showTestedModelsTooltip && (
-                <div style={{
-                  position: 'absolute',
-                  backgroundColor: '#1a1a1a',
-                  border: '2px solid #FF6700',
-                  borderRadius: '6px',
-                  padding: '12px 16px',
-                  fontSize: '0.85rem',
-                  color: '#FF6700',
-                  fontWeight: '500',
-                  maxWidth: '280px',
-                  width: '260px',
-                  zIndex: 1000,
-                  boxShadow: '0 8px 24px rgba(255, 103, 0, 0.4)',
-                  textShadow: '0 1px 2px rgba(0, 0, 0, 0.5)',
-                  pointerEvents: 'none',
-                  top: 'calc(100% + 8px)',
-                  left: '50%',
-                  transform: 'translateX(-50%)'
-                }}>
-                  These models and/or hosts are not affiliated with the MOTO program, or Intrafere LLC. This chart contains compatible models to help guide users through developer-tested configurations. Any statements about pricing, cost, models, roles, rankings, effects, or otherwise are speculative and based on individual developer testing experience. Intrafere LLC (Intrafere Research Group), and the MOTO developement team make no guarantees or warranties about the accuracy or truth of this chart. MOTO is a harness that works with the majority of models, including many more models that are not listed here.
+                /* sidebar-escape: fixed positioning so the tooltip breaks out of the
+                   322px sidebar and renders freely. See settings-common.css for coords. */
+                <div className="tooltip-popup tooltip-popup--sidebar-escape">
+                  The models and hosts listed here are not affiliated with MOTO or Intrafere LLC. This chart reflects developer-tested configurations intended to help guide model selection. All statements regarding pricing, performance, roles, rankings, or capabilities are speculative and based on individual testing experience. Intrafere LLC and the MOTO development team make no guarantees about the accuracy of this chart. MOTO is compatible with the majority of models, including many not listed here.
                 </div>
               )}
             </div>
           </h3>
-          <p style={{ fontSize: '.70rem', color: '#888', marginTop: '0.5rem', marginBottom: '1rem', lineHeight: '1.4', marginLeft: '20px' }}>
-            Note: Computer science and/or non-general purpose models may have trouble performing as validators, critique submitters, or in the tier 2 compilation stage. These models generally perform fine for brainstorming. Most text based models over 20 billion parameters are compatible with MOSO, including ones not shown.
+          <p className="hint-text hint-text--dim" style={{ marginLeft: '20px', marginBottom: '0.45rem' }}>
+            Note: Most models over 20 billion parameters are compatible with MOTO.
           </p>
           <div className="models-list">
-            {/* King of the Hill - Gold */}
-            <div className="model-item" style={{ 
-              backgroundColor: 'linear-gradient(135deg, rgba(212, 175, 55, 0.35) 0%, rgba(212, 175, 55, 0.15) 100%)',
-              borderLeft: '5px solid #d4af37',
-              borderRadius: '6px',
-              boxShadow: '0 0 15px rgba(212, 175, 55, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.15)',
-              paddingLeft: '12px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <div className="model-item-name">GPT OSS 120B</div>
-                <div style={{
-                  background: 'linear-gradient(135deg, #e8c547 0%, #d4af37 50%, #c9a227 100%)',
-                  color: '#000',
-                  padding: '2px 8px',
-                  borderRadius: '12px',
-                  fontSize: '0.7rem',
-                  fontWeight: 'bold',
-                  boxShadow: '0 2px 8px rgba(212, 175, 55, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3)',
-                  textShadow: '0 1px 1px rgba(0, 0, 0, 0.1)'
-                }}>👑 KING OF THE HILL</div>
-                <div style={{ position: 'relative', display: 'inline-block', zIndex: 100 }}>
-                  <button
-                    style={{
-                      backgroundColor: 'transparent',
-                      border: '2px solid #d4af37',
-                      color: '#d4af37',
-                      padding: '2px 6px',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontSize: '0.8rem',
-                      fontWeight: 'bold',
-                      width: '20px',
-                      height: '20px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      boxShadow: '0 0 8px rgba(212, 175, 55, 0.3)',
-                      transition: 'all 0.2s ease'
-                    }}
-                    onMouseEnter={() => setShowKothTooltip(true)}
-                    onMouseLeave={() => setShowKothTooltip(false)}
-                  >
-                    ?
-                  </button>
-                  {showKothTooltip && (
-                    <div style={{
-                      position: 'fixed',
-                      backgroundColor: '#1a1a1a',
-                      border: '2px solid #FF6700',
-                      borderRadius: '6px',
-                      padding: '12px 16px',
-                      fontSize: '0.85rem',
-                      color: '#FF6700',
-                      fontWeight: '500',
-                      maxWidth: '300px',
-                      width: '280px',
-                      zIndex: 2147483647,
-                      boxShadow: '0 8px 24px rgba(255, 103, 0, 0.4)',
-                      textShadow: '0 1px 2px rgba(0, 0, 0, 0.5)',
-                      pointerEvents: 'none',
-                      top: '50px',
-                      right: '20px'
-                    }}>
-                      This model was chosen by the Intrafere developers as the CURRENT best overall performer in the MOTO harness, optimized for cost, speed, and knowledge.
-                    </div>
-                  )}
+            {/* Podium - Top 3 */}
+            <div className="models-podium">
+              <div className="models-podium-label">Leaderboard</div>
+              <div className="model-item model-item--ranked model-item--gold">
+                <div className="flex-row-center">
+                  <div className="model-item-name">Kimi K2.5</div>
+                  <div className="ranking-badge ranking-badge--gold">👑 KING OF THE HILL</div>
+                  <div className="tooltip-anchor" style={{ zIndex: 100 }}>
+                    <button
+                      className="info-tooltip-btn info-tooltip-btn--gold"
+                      onMouseEnter={() => setShowKothTooltip(true)}
+                      onMouseLeave={() => setShowKothTooltip(false)}
+                    >
+                      ?
+                    </button>
+                    {showKothTooltip && (
+                      <div className="tooltip-popup tooltip-popup--fixed" style={{ top: '50px', right: '20px' }}>
+                        This model was chosen by the Intrafere developers as the best overall performer in the MOTO harness, optimized for cost, speed, and knowledge.
+                      </div>
+                    )}
+                  </div>
                 </div>
+                <div className="model-item-badge">Highly knowledgeable and balanced cost</div>
               </div>
-              <div className="model-item-badge">Balanced knowledge and speed</div>
-              <div className="model-item-note">(outputs may corrupt over time depending on host)</div>
-            </div>
 
-            {/* Runner Up - Silver */}
-            <div className="model-item" style={{ 
-              backgroundColor: 'linear-gradient(135deg, rgba(192, 192, 192, 0.35) 0%, rgba(192, 192, 192, 0.15) 100%)',
-              borderLeft: '5px solid #c0c0c0',
-              borderRadius: '6px',
-              boxShadow: '0 0 15px rgba(192, 192, 192, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.15)',
-              paddingLeft: '12px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <div className="model-item-name">Grok 4.1 Fast</div>
-                <div style={{
-                  background: 'linear-gradient(135deg, #e8e8e8 0%, #c0c0c0 50%, #a9a9a9 100%)',
-                  color: '#000',
-                  padding: '2px 8px',
-                  borderRadius: '12px',
-                  fontSize: '0.7rem',
-                  fontWeight: 'bold',
-                  boxShadow: '0 2px 8px rgba(192, 192, 192, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3)',
-                  textShadow: '0 1px 1px rgba(0, 0, 0, 0.1)'
-                }}>🥈 SILVER</div>
+              <div className="model-item model-item--ranked model-item--silver">
+                <div className="flex-row-center">
+                  <div className="model-item-name">Grok 4.1 Fast</div>
+                  <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
+                </div>
+                <div className="model-item-badge">Fast validator</div>
               </div>
-              <div className="model-item-badge">Fast validator</div>
-            </div>
 
-            {/* Bronze - DeepSeek V3.2 */}
-            <div className="model-item" style={{ 
-              backgroundColor: 'linear-gradient(135deg, rgba(205, 127, 50, 0.35) 0%, rgba(205, 127, 50, 0.15) 100%)',
-              borderLeft: '5px solid #cd7f32',
-              borderRadius: '6px',
-              boxShadow: '0 0 15px rgba(205, 127, 50, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.15)',
-              paddingLeft: '12px'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <div className="model-item-name">DeepSeek V3.2</div>
-                <div style={{
-                  background: 'linear-gradient(135deg, #d9a574 0%, #cd7f32 50%, #b86f28 100%)',
-                  color: '#fff',
-                  padding: '2px 8px',
-                  borderRadius: '12px',
-                  fontSize: '0.7rem',
-                  fontWeight: 'bold',
-                  boxShadow: '0 2px 8px rgba(205, 127, 50, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2)',
-                  textShadow: '0 1px 2px rgba(0, 0, 0, 0.3)'
-                }}>🥉 BRONZE</div>
+              <div className="model-item model-item--ranked model-item--bronze">
+                <div className="flex-row-center">
+                  <div className="model-item-name">GPT OSS 120B</div>
+                  <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
+                </div>
+                <div className="model-item-badge">Balanced knowledge and speed at low cost</div>
+                <div className="model-item-note">(outputs may corrupt over time depending on host)</div>
               </div>
-              <div className="model-item-badge">Highly knowledgeable</div>
             </div>
 
             {/* Alphabetical list (rest of models) */}
             
             <div className="model-item">
-              <div className="model-item-name">Amazon Nova</div>
+              <div className="model-item-name">Amazon Nova Pro/Premier</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Claude Opus</div>
+              <div className="model-item-name">Claude Opus/Sonnet</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Claude Sonnet</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">DeepSeek Speciale</div>
+              <div className="model-item-name">DeepSeek</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
@@ -1334,18 +1010,23 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Gemini Flash Light</div>
-              <div className="model-item-badge">Fast validator</div>
-            </div>
-            
-            <div className="model-item">
               <div className="model-item-name">Gemini Pro</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
+              <div className="model-item-name">Google's Gemma</div>
+              <div className="model-item-badge">Balanced knowledge and speed</div>
+            </div>
+            
+            <div className="model-item">
               <div className="model-item-name">GLM</div>
               <div className="model-item-badge">Highly knowledgeable</div>
+            </div>
+            
+            <div className="model-item">
+              <div className="model-item-name">GLM Turbo</div>
+              <div className="model-item-badge">Fast validator</div>
             </div>
             
             <div className="model-item">
@@ -1365,13 +1046,18 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Kimi K</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item">
               <div className="model-item-name">ChatGPT</div>
               <div className="model-item-badge">Highly knowledgeable</div>
+            </div>
+
+            <div className="model-item">
+              <div className="model-item-name">Inception's Mercury</div>
+              <div className="model-item-badge">Rapid knowledge</div>
+            </div>
+
+            <div className="model-item">
+              <div className="model-item-name">Nemotron Super</div>
+              <div className="model-item-badge">Balanced knowledge and speed</div>
             </div>
 
             <div className="model-item">
@@ -1380,13 +1066,18 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             </div>
             
             <div className="model-item">
-              <div className="model-item-name">Perplexity: Sonar</div>
-              <div className="model-item-badge">Internet search capability</div>
+              <div className="model-item-name">Perplexity's Sonar</div>
+              <div className="model-item-badge">Native internet search capability</div>
             </div>
             
             <div className="model-item">
               <div className="model-item-name">Microsoft's Phi</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
+            </div>
+
+            <div className="model-item">
+              <div className="model-item-name">MiniMax</div>
+              <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
             <div className="model-item">
@@ -1417,23 +1108,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             value={selectedProfile}
             onChange={(e) => {
               const value = e.target.value;
-              if (value) {
-                if (!hasOpenRouterKey) {
-                  alert('OpenRouter API key required to use profiles. Please set your API key first.');
-                  return;
-                }
-                if (openRouterModels.length === 0) {
-                  alert('Please wait for OpenRouter models to load, or click "Refresh OpenRouter Models" button below.');
-                  return;
-                }
-                applyProfile(value);
+              if (!value) {
+                setSelectedProfile('');
+                return;
               }
+
+              if (!hasOpenRouterKey) {
+                alert('OpenRouter API key required to use profiles. Please set your API key first.');
+                return;
+              }
+              if (openRouterModels.length === 0) {
+                alert('Please wait for OpenRouter models to load, or click "Refresh OpenRouter Models" button below.');
+                return;
+              }
+              applyProfile(value);
             }}
             disabled={isRunning}
           >
             <option value="">-- Custom Settings --</option>
             <optgroup label="Recommended Profiles">
-              {['recommended_fastest_cheapest', 'recommended_fast_affordable_mid']
+              {RECOMMENDED_PROFILE_KEYS
                 .filter(key => RECOMMENDED_PROFILES[key])
                 .map(key => (
                   <option key={key} value={key}>
@@ -1455,10 +1149,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </select>
           
           <button
-            className="secondary"
+            className="secondary ml-05"
             onClick={() => setShowSaveDialog(true)}
             disabled={isRunning}
-            style={{ marginLeft: '0.5rem' }}
             title="Save current settings as a profile"
           >
             Save as Profile
@@ -1480,27 +1173,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
       {/* Save Profile Dialog */}
       {showSaveDialog && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.7)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9999
-        }}>
-          <div style={{
-            backgroundColor: '#1e1e1e',
-            padding: '2rem',
-            borderRadius: '8px',
-            border: '1px solid #333',
-            minWidth: '400px'
-          }}>
+        <div className="inline-modal-overlay">
+          <div className="inline-modal-content">
             <h3 style={{ marginTop: 0 }}>Save Profile</h3>
-            <p style={{ color: '#888' }}>
+            <p className="label--muted">
               Enter a name for this profile. Current settings will be saved.
             </p>
             <input
@@ -1508,15 +1184,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               value={newProfileName}
               onChange={(e) => setNewProfileName(e.target.value)}
               placeholder="Profile name..."
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                marginBottom: '1rem',
-                backgroundColor: '#2a2a2a',
-                border: '1px solid #444',
-                borderRadius: '4px',
-                color: '#fff'
-              }}
+              className="input-dark"
               onKeyPress={(e) => {
                 if (e.key === 'Enter') {
                   saveCurrentAsProfile();
@@ -1535,15 +1203,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 Cancel
               </button>
               <button
+                className="btn-success-sm"
                 onClick={saveCurrentAsProfile}
-                style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: '#4CAF50',
-                  border: 'none',
-                  borderRadius: '4px',
-                  color: '#fff',
-                  cursor: 'pointer'
-                }}
               >
                 Save Profile
               </button>
@@ -1554,21 +1215,15 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
       {/* OpenRouter Status Banner */}
       {!hasOpenRouterKey && (
-        <div style={{
-          backgroundColor: 'rgba(255, 103, 0, 0.1)',
-          border: '1px solid #FF6700',
-          borderRadius: '8px',
-          padding: '1rem',
-          marginBottom: '1.5rem'
-        }}>
-          <p style={{ color: '#FF6700', margin: 0 }}>
+        <div className="openrouter-banner openrouter-banner--orange">
+          <p className="openrouter-banner__text">
             <strong>💡 OpenRouter Available:</strong> Set your OpenRouter API key in the header to enable cloud model selection for any role.
           </p>
         </div>
       )}
 
       {/* Show only free models + model refresh controls — grouped at top */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+      <div className="model-refresh-controls">
         <button 
           className="secondary"
           onClick={async () => {
@@ -1599,7 +1254,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             >
               🔗 OpenRouter Model List
             </button>
-            <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem', cursor: isRunning ? 'not-allowed' : 'pointer' }}>
+            <label
+              className="settings-checkbox-label model-refresh-controls__toggle"
+              style={{ cursor: isRunning ? 'not-allowed' : 'pointer' }}
+            >
               <input
                 type="checkbox"
                 checked={freeOnly}
@@ -1607,7 +1265,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 disabled={isRunning}
                 style={{ marginRight: '0.5rem' }}
               />
-              Show only free models
+              Free models only
             </label>
           </>
         )}
@@ -1650,14 +1308,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         {submitterConfigs.slice(0, numSubmitters).map((cfg, idx) => (
           <div 
             key={idx} 
-            className="submitter-config-section"
-            style={{
-              borderColor: cfg.provider === 'openrouter' ? '#FF6700' : (idx === 0 ? '#4CAF50' : '#333')
-            }}
+            className={`submitter-config-section${cfg.provider === 'openrouter' ? ' role-config-card--openrouter-orange' : (idx === 0 ? ' role-config-card--main' : '')}`}
           >
-            <h5 style={{ color: cfg.provider === 'openrouter' ? '#FF6700' : (idx === 0 ? '#4CAF50' : '#fff') }}>
+            <h5 className={cfg.provider === 'openrouter' ? 'card-title--orange' : (idx === 0 ? 'card-title--green' : '')}>
               {idx === 0 ? 'Submitter 1 (Main Submitter)' : `Submitter ${idx + 1}`}
-              {cfg.provider === 'openrouter' && <span style={{ fontWeight: 'normal', marginLeft: '0.5rem' }}>[OpenRouter]</span>}
+              {cfg.provider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
             </h5>
             
             <ModelSelector
@@ -1711,7 +1366,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       <div className="settings-group">
         <h4>Validator (Single Instance)</h4>
         <p className="settings-info">
-          Single validator maintains coherent Markov chain evolution for database alignment. This models speed will be your biggest bottleneck for the system, however their knowledge is also very important. Choose this model wisely, about half of all API calls will be to this model. A single validator as the markov chain bottleneck for the solution progression is important to mitigate the "alignment problem" with AI and user prompts. This is the model that will reject wrong answers, off-track answers, etc. at all stages of solution creation.
+          This single validator model is the gatekeeper of what gets accepted. This model's speed will be your biggest bottleneck for the system, however its knowledge capability is also very important. Choose this model wisely, about half of all API calls will be to this model so it will also greatly control system cost. This is the model that will reject wrong answers, off-track answers, etc. at all stages of solution creation and all solutions run through a single instance to ensure user alignment (markov-chain style bottleneck).
         </p>
 
         <RoleConfig
@@ -1759,7 +1414,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           title="High-Parameter Submitter"
           hint="Handles mathematical rigor enhancement."
           rolePrefix="high_param"
-          borderColor="#f1c40f"
+          borderColor="#1eff1c"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
@@ -1790,305 +1445,302 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         />
       </div>
 
-      {/* Wolfram Alpha Integration */}
       <div className="settings-group">
-        <h3>Wolfram Alpha Integration (Optional)</h3>
-        <small style={{ color: '#888', display: 'block', marginBottom: '1rem' }}>
-          Enable Wolfram Alpha API for computational verification in rigor mode. Shared with manual compiler mode.
-          Get your API key from <a href="https://products.wolframalpha.com/api" target="_blank" rel="noopener noreferrer">developer.wolframalpha.com</a>
-        </small>
-        
-        <label style={{ display: 'flex', alignItems: 'center', marginBottom: '1rem' }}>
-          <input
-            type="checkbox"
-            checked={wolframEnabled}
-            onChange={async (e) => {
-              const checked = e.target.checked;
-              if (!checked) {
-                // Unchecking - clear key from backend
-                await handleClearWolframKey();
-              } else {
-                // Checking - just show UI (key will be saved on Test Connection)
-                setWolframEnabled(true);
-              }
-            }}
-            style={{ marginRight: '0.75rem' }}
-          />
-          <span style={{ fontWeight: '500' }}>Enable Wolfram Alpha Verification in Rigor Mode</span>
-        </label>
-        
-        {wolframEnabled && (
-          <div style={{ marginLeft: '1.75rem', marginTop: '1rem' }}>
-            <div className="form-group">
-              <label>Wolfram Alpha API Key:</label>
-              <input
-                type="password"
-                value={wolframApiKey}
-                onChange={(e) => setWolframApiKey(e.target.value)}
-                placeholder="Enter your Wolfram Alpha App ID"
-                style={{
-                  padding: '0.6rem',
-                  backgroundColor: '#1e1e1e',
-                  border: '1px solid #444',
-                  borderRadius: '4px',
-                  color: '#fff',
-                  width: '100%',
-                  marginBottom: '0.75rem'
-                }}
-              />
-            </div>
-            
-            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-              <button 
-                onClick={handleTestWolframConnection}
-                disabled={testingWolfram}
-                style={{
-                  padding: '0.6rem 1.25rem',
-                  backgroundColor: '#4CAF50',
-                  border: 'none',
-                  borderRadius: '4px',
-                  color: '#fff',
-                  cursor: testingWolfram ? 'wait' : 'pointer',
-                  opacity: testingWolfram ? 0.6 : 1,
-                  fontWeight: '500'
-                }}
-              >
-                {testingWolfram ? 'Testing...' : 'Test Connection'}
-              </button>
-              
-              <button 
-                onClick={handleClearWolframKey}
-                style={{
-                  padding: '0.6rem 1.25rem',
-                  backgroundColor: 'transparent',
-                  border: '1px solid #666',
-                  borderRadius: '4px',
-                  color: '#888',
-                  cursor: 'pointer'
-                }}
-              >
-                Clear Key
-              </button>
-            </div>
-            
-            {wolframTestResult && (
-              <div style={{ 
-                marginTop: '1rem', 
-                padding: '0.75rem', 
-                borderRadius: '4px',
-                backgroundColor: wolframTestResult.includes('✓') ? '#1a3a1a' : '#3a1a1a',
-                color: wolframTestResult.includes('✓') ? '#4CAF50' : '#ff6b6b',
-                fontSize: '0.9rem'
-              }}>
-                {wolframTestResult}
-              </div>
-            )}
-            
-            <small style={{ color: '#888', display: 'block', marginTop: '1rem', lineHeight: '1.5' }}>
-              In rigor mode, the AI can request Wolfram Alpha verification of mathematical claims. 
-              This enables computational checking of theorems, solving equations, and verifying properties.
-              This setting is shared with the manual compiler mode.
-            </small>
-          </div>
-        )}
-      </div>
-
-      {/* Tier 3 Final Answer Toggle */}
-      <div className="settings-group" style={{ borderLeft: '4px solid #ff6b6b', paddingLeft: '12px' }}>
-        <h4>Stage 3: Final Answer Generation</h4>
-        <p className="settings-info">
-          Feature in construction. Enabling this is optional and not recommended. Stage 3 is a highly experimental mode. Most users should not enable this feature — it is expensive and wasteful at this current stage of development. When enabled, the system will automatically synthesize all completed Stage 2 papers into a final answer that is often book-length or greater. This feature is highly hallucinatory — Stage 2 papers are the recommended final output. Disabled by default; final paper quality is currently much lower than Stage 2 papers. Once optimized and better-functioning, this mode will be advertised more.
-        </p>
-        <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.95rem', cursor: isRunning ? 'not-allowed' : 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={tier3Enabled}
-            onChange={(e) => setTier3Enabled(e.target.checked)}
-            disabled={isRunning}
-            style={{ marginRight: '0.5rem' }}
-          />
-          Enable Stage 3 Final Answer Generation (Very Experimental)
-        </label>
-      </div>
-
-      {/* Validator Critique Prompt Editor */}
-      <div className="settings-group">
-        <div 
-          className="collapsible-header"
-          onClick={() => setCritiquePromptExpanded(!critiquePromptExpanded)}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: 'pointer',
-            padding: '0.75rem',
-            backgroundColor: '#1e1e1e',
-            borderRadius: '6px',
-            border: '1px solid #333',
-            marginBottom: critiquePromptExpanded ? '1rem' : 0,
-            width: '100%',
-            maxWidth: '100%',
-            boxSizing: 'border-box'
-          }}
+        <div
+          className="collapsible-trigger settings-trigger--multiline"
+          onClick={() => setAdvancedSettingsExpanded(prev => !prev)}
+          onKeyDown={(event) => handleCollapsibleKeyDown(event, () => setAdvancedSettingsExpanded(prev => !prev))}
+          role="button"
+          tabIndex={0}
+          aria-expanded={advancedSettingsExpanded}
+          aria-controls="advanced-settings-panel"
+          style={{ marginBottom: advancedSettingsExpanded ? '1rem' : 0 }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <h4 style={{ margin: 0 }}>[OPTIONAL] Edit Validator Critique Prompt (for the user feedback mode on individual papers - this is not for the critique submitter used for the internal research workflow)</h4>
-            {isUsingCustomCritiquePrompt && (
-              <span style={{
-                backgroundColor: '#9b59b6',
-                color: '#fff',
-                padding: '2px 8px',
-                borderRadius: '12px',
-                fontSize: '0.7rem',
-                fontWeight: 'bold'
-              }}>CUSTOM</span>
-            )}
+          <div className="settings-heading-stack">
+            <h4 className="form-group--compact">Advanced Settings</h4>
+            <p className="settings-subsection-description">
+              Optional integrations, Stage 3 controls, prompt customization, interface polish, and OpenRouter fallback behavior.
+            </p>
           </div>
-          <span style={{ 
-            transform: critiquePromptExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
-            transition: 'transform 0.2s',
-            fontSize: '1.2rem'
-          }}>▼</span>
+          <span className={`collapse-chevron${advancedSettingsExpanded ? ' collapse-chevron--open' : ''}`}>▼</span>
         </div>
 
-        {critiquePromptExpanded && (
-          <div style={{
-            padding: '1rem',
-            backgroundColor: '#1a1a1a',
-            borderRadius: '6px',
-            border: '1px solid #333'
-          }}>
-            <p style={{ color: '#888', fontSize: '0.85rem', marginBottom: '1rem' }}>
-              Customize the prompt sent to your validator when requesting a paper critique. 
-              The JSON output schema is automatically appended and cannot be modified.
-            </p>
-
-            <textarea
-              value={customCritiquePrompt}
-              onChange={(e) => setCustomCritiquePrompt(e.target.value)}
-              style={{
-                width: '100%',
-                minHeight: '200px',
-                padding: '0.75rem',
-                backgroundColor: '#2a2a2a',
-                border: '1px solid #444',
-                borderRadius: '4px',
-                color: '#fff',
-                fontFamily: 'monospace',
-                fontSize: '0.85rem',
-                resize: 'vertical',
-                lineHeight: '1.5'
-              }}
-              placeholder="Enter your custom critique prompt..."
-            />
-
-            <div style={{ 
-              display: 'flex', 
-              justifyContent: 'space-between', 
-              alignItems: 'center',
-              marginTop: '1rem' 
-            }}>
-              <button
-                onClick={handleRestoreCritiquePrompt}
-                style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: 'transparent',
-                  border: '1px solid #666',
-                  borderRadius: '4px',
-                  color: '#888',
-                  cursor: 'pointer',
-                  fontSize: '0.85rem'
-                }}
-              >
-                Restore to Default
-              </button>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                {critiquePromptSaved && (
-                  <span style={{ color: '#4CAF50', fontSize: '0.85rem' }}>✓ Saved!</span>
-                )}
-                <button
-                  onClick={handleSaveCritiquePrompt}
-                  style={{
-                    padding: '0.5rem 1.5rem',
-                    backgroundColor: '#9b59b6',
-                    border: 'none',
-                    borderRadius: '4px',
-                    color: '#fff',
-                    cursor: 'pointer',
-                    fontWeight: '500',
-                    fontSize: '0.85rem'
-                  }}
-                >
-                  Save Prompt
-                </button>
+        {advancedSettingsExpanded && (
+          <div className="collapsible-body settings-advanced-content" id="advanced-settings-panel">
+            {isRunning && (
+              <div className="settings-notice">
+                Settings cannot be changed while autonomous research is running.
               </div>
+            )}
+
+            {/* Wolfram Alpha Integration */}
+            <div className="settings-subsection">
+              <div className="settings-subsection-header">
+                <h5 className="settings-subsection-title">Integrations</h5>
+                <p className="settings-subsection-description">
+                  Optional external verification tools used by rigor mode.
+                </p>
+              </div>
+
+              <h4 className="form-group--compact">Wolfram Alpha Integration (Optional)</h4>
+              <small className="hint-text">
+                Enable Wolfram Alpha API for computational verification in rigor mode. Shared with manual compiler mode.
+                Get your API key from <a href="https://products.wolframalpha.com/api" target="_blank" rel="noopener noreferrer">developer.wolframalpha.com</a>
+              </small>
+
+              <label className="settings-checkbox-label settings-checkbox-label--stacked">
+                <input
+                  type="checkbox"
+                  checked={wolframEnabled}
+                  onChange={async (e) => {
+                    const checked = e.target.checked;
+                    if (!checked) {
+                      await handleClearWolframKey();
+                    } else {
+                      setWolframEnabled(true);
+                    }
+                  }}
+                />
+                <span className="settings-option-copy">
+                  <span className="settings-option-title">Enable Wolfram Alpha Verification in Rigor Mode</span>
+                  <span className="settings-option-description">
+                    Lets rigor mode request computational verification for equations, properties, and theorem checks.
+                  </span>
+                </span>
+              </label>
+
+              {wolframEnabled && (
+                <div className="indented-section">
+                  <div className="form-group">
+                    <label>Wolfram Alpha API Key:</label>
+                    <input
+                      type="password"
+                      value={wolframApiKey}
+                      onChange={(e) => setWolframApiKey(e.target.value)}
+                      placeholder="Enter your Wolfram Alpha App ID"
+                      className="input-dark"
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+                    <button
+                      className="btn-success-sm"
+                      onClick={handleTestWolframConnection}
+                      disabled={testingWolfram}
+                      style={testingWolfram ? { cursor: 'wait', opacity: 0.6 } : undefined}
+                    >
+                      {testingWolfram ? 'Testing...' : 'Test Connection'}
+                    </button>
+
+                    <button
+                      className="btn-ghost"
+                      onClick={handleClearWolframKey}
+                    >
+                      Clear Key
+                    </button>
+                  </div>
+
+                  {wolframTestResult && (
+                    <div className={`test-result-banner ${wolframTestResult.includes('✓') ? 'test-result-banner--success' : 'test-result-banner--error'}`}>
+                      {wolframTestResult}
+                    </div>
+                  )}
+
+                  <small className="hint-text">
+                    In rigor mode, the AI can request Wolfram Alpha verification of mathematical claims.
+                    This enables computational checking of theorems, solving equations, and verifying properties.
+                    This setting is shared with the manual compiler mode.
+                  </small>
+                </div>
+              )}
             </div>
+
+            {/* Tier 3 Final Answer Toggle */}
+            <div className="settings-subsection settings-subsection--accent-danger">
+              <div className="settings-subsection-header">
+                <h5 className="settings-subsection-title">Experimental / Ending Options</h5>
+              </div>
+              <h4 className="form-group--compact">Stage 3: Final Answer Generation</h4>
+              <p className="settings-info">
+                Feature in construction. Enabling this is optional and not recommended. Stage 3 is a highly experimental mode. Most users should not enable this feature — it is expensive and wasteful at this current stage of development. When enabled, the system will automatically synthesize all completed Stage 2 papers into a final answer that is often book-length or greater. This feature is highly hallucinatory — Stage 2 papers are the recommended final output. Disabled by default; final paper quality is currently much lower than Stage 2 papers. Once optimized and better-functioning, this mode will be advertised more.
+              </p>
+              <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ cursor: isRunning ? 'not-allowed' : 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={tier3Enabled}
+                  onChange={(e) => setTier3Enabled(e.target.checked)}
+                  disabled={isRunning}
+                />
+                <span className="settings-option-copy">
+                  <span className="settings-option-title">Enable Stage 3 Final Answer Generation (Very Experimental)</span>
+                  <span className="settings-option-description">
+                    Allows the system to synthesize completed Stage 2 papers into a final answer after enough papers accumulate.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {/* Validator Critique Prompt Editor */}
+            <div className="settings-subsection">
+              <div className="settings-subsection-header">
+                <h5 className="settings-subsection-title">Prompt Customization</h5>
+                <p className="settings-subsection-description">
+                  Optional tweaks for the user-facing paper critique prompt only.
+                </p>
+              </div>
+
+              <div
+                className="collapsible-trigger settings-trigger--multiline"
+                onClick={() => setCritiquePromptExpanded(prev => !prev)}
+                onKeyDown={(event) => handleCollapsibleKeyDown(event, () => setCritiquePromptExpanded(prev => !prev))}
+                role="button"
+                tabIndex={0}
+                aria-expanded={critiquePromptExpanded}
+                aria-controls="critique-prompt-panel"
+                style={{ marginBottom: critiquePromptExpanded ? '1rem' : 0 }}
+              >
+                <div className="settings-trigger-copy">
+                  <div className="settings-trigger-title-row">
+                    <h4 className="form-group--compact settings-trigger-title">Edit Validator Critique Prompt</h4>
+                    {isUsingCustomCritiquePrompt && (
+                      <span className="tag-badge tag-badge--purple">CUSTOM</span>
+                    )}
+                  </div>
+                  <p className="settings-subsection-description">
+                    Optional prompt customization for the user-facing paper critique mode only. This does not affect the internal critique submitter used during autonomous research.
+                  </p>
+                </div>
+                <span className={`collapse-chevron${critiquePromptExpanded ? ' collapse-chevron--open' : ''}`}>▼</span>
+              </div>
+
+              {critiquePromptExpanded && (
+                <div className="collapsible-body" id="critique-prompt-panel">
+                  <p className="hint-text">
+                    Customize the prompt sent to your validator when requesting a paper critique.
+                    The JSON output schema is automatically appended and cannot be modified.
+                  </p>
+
+                  <textarea
+                    value={customCritiquePrompt}
+                    onChange={(e) => setCustomCritiquePrompt(e.target.value)}
+                    className="textarea-dark-mono"
+                    placeholder="Enter your custom critique prompt..."
+                  />
+
+                  <div className="actions-row">
+                    <button
+                      className="btn-ghost"
+                      onClick={handleRestoreCritiquePrompt}
+                    >
+                      Restore to Default
+                    </button>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                      {critiquePromptSaved && (
+                        <span className="status-success-text">✓ Saved!</span>
+                      )}
+                      <button
+                        className="btn-accent-purple"
+                        onClick={handleSaveCritiquePrompt}
+                      >
+                        Save Prompt
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="settings-subsection">
+              <div className="settings-subsection-header">
+                <h5 className="settings-subsection-title">Interface</h5>
+                <p className="settings-subsection-description">
+                  Display-only controls for the autonomous research UI.
+                </p>
+              </div>
+
+              <label className="settings-checkbox-label settings-checkbox-label--stacked">
+                <input
+                  type="checkbox"
+                  checked={(() => {
+                    const saved = localStorage.getItem('banner_shimmer_enabled');
+                    return saved !== null ? JSON.parse(saved) : true;
+                  })()}
+                  onChange={(e) => {
+                    localStorage.setItem('banner_shimmer_enabled', JSON.stringify(e.target.checked));
+                    window.location.reload();
+                  }}
+                />
+                <span className="settings-option-copy">
+                  <span className="settings-option-title">Enable banner shimmer</span>
+                  <span className="settings-option-description">
+                    Keeps the animated banner shimmer on. Disable this when recording video to reduce motion and visual noise.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {/* Free model looping/auto-selector options */}
+            {hasOpenRouterKey && (
+              <div className="settings-subsection">
+                <div className="settings-subsection-header">
+                  <h5 className="settings-subsection-title">OpenRouter Fallback</h5>
+                  <p className="settings-subsection-description">
+                    Fallback behavior for OpenRouter free-model rate limits.
+                  </p>
+                </div>
+
+                <div className="checkbox-group-col">
+                  <label className="settings-checkbox-label settings-checkbox-label--stacked">
+                    <input
+                      type="checkbox"
+                      checked={freeModelLooping}
+                      onChange={(e) => {
+                        setFreeModelLooping(e.target.checked);
+                        openRouterAPI.setFreeModelSettings(e.target.checked, freeModelAutoSelector).catch(() => {});
+                      }}
+                    />
+                    <span className="settings-option-copy">
+                      <span className="settings-option-title">
+                        Enable Free Model Looping
+                        <span
+                          title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
+                          className="help-hint"
+                        >(?)</span>
+                      </span>
+                      <span className="settings-option-description">
+                        Automatically rotate to the next selected free model when one hits a rate limit.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="settings-checkbox-label settings-checkbox-label--stacked">
+                    <input
+                      type="checkbox"
+                      checked={freeModelAutoSelector}
+                      onChange={(e) => {
+                        setFreeModelAutoSelector(e.target.checked);
+                        openRouterAPI.setFreeModelSettings(freeModelLooping, e.target.checked).catch(() => {});
+                      }}
+                    />
+                    <span className="settings-option-copy">
+                      <span className="settings-option-title">
+                        Use OpenRouter Free Models Auto-Selector as Backup
+                        <span
+                          title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
+                          className="help-hint"
+                        >(?)</span>
+                      </span>
+                      <span className="settings-option-description">
+                        Falls back to OpenRouter&apos;s free router when every selected free model is temporarily exhausted.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
-
-      <div style={{ marginTop: '1rem' }}>
-        <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
-          <input
-            type="checkbox"
-            checked={(() => {
-              const saved = localStorage.getItem('banner_shimmer_enabled');
-              return saved !== null ? JSON.parse(saved) : true;
-            })()}
-            onChange={(e) => {
-              localStorage.setItem('banner_shimmer_enabled', JSON.stringify(e.target.checked));
-              window.location.reload(); // Reload to apply change
-            }}
-            style={{ marginRight: '0.5rem' }}
-          />
-          Enable banner shimmer (disable for video recording)
-        </label>
-      </div>
-
-      {isRunning && (
-        <div className="settings-notice">
-          Settings cannot be changed while autonomous research is running.
-        </div>
-      )}
-
-      {/* Free model looping/auto-selector options */}
-      {hasOpenRouterKey && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
-          <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
-            <input
-              type="checkbox"
-              checked={freeModelLooping}
-              onChange={(e) => {
-                setFreeModelLooping(e.target.checked);
-                openRouterAPI.setFreeModelSettings(e.target.checked, freeModelAutoSelector).catch(() => {});
-              }}
-              style={{ marginRight: '0.5rem' }}
-            />
-            Enable Free Model Looping
-            <span
-              title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
-              style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
-            >(?)</span>
-          </label>
-          <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
-            <input
-              type="checkbox"
-              checked={freeModelAutoSelector}
-              onChange={(e) => {
-                setFreeModelAutoSelector(e.target.checked);
-                openRouterAPI.setFreeModelSettings(freeModelLooping, e.target.checked).catch(() => {});
-              }}
-              style={{ marginRight: '0.5rem' }}
-            />
-            Use OpenRouter Free Models Auto-Selector as Backup
-            <span
-              title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
-              style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
-            >(?)</span>
-          </label>
-        </div>
-      )}
     </div>
     </div>
   );

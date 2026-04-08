@@ -168,6 +168,22 @@ class BrainstormMemory:
             await self._save_metadata(metadata)
         
         return metadata
+
+    async def remove_paper_reference(self, topic_id: str, paper_id: str) -> Optional[BrainstormMetadata]:
+        """Remove a paper reference from the brainstorm metadata if it exists."""
+        metadata = await self.get_metadata(topic_id)
+        if metadata is None:
+            return None
+
+        if paper_id in metadata.papers_generated:
+            metadata.papers_generated = [
+                existing_paper_id
+                for existing_paper_id in metadata.papers_generated
+                if existing_paper_id != paper_id
+            ]
+            await self._save_metadata(metadata)
+
+        return metadata
     
     async def get_all_brainstorms(self) -> List[BrainstormMetadata]:
         """Get metadata for all brainstorm topics."""
@@ -278,6 +294,156 @@ class BrainstormMemory:
                     })
         
         return submissions
+    
+    # ========================================================================
+    # RETROACTIVE CORRECTION OPERATIONS (used during paper compilation)
+    # ========================================================================
+    
+    async def edit_submission(self, topic_id: str, submission_number: int, new_content: str) -> bool:
+        """
+        Edit an existing submission's content in the brainstorm database.
+        Preserves submission number and updates timestamp.
+        """
+        async with self._lock:
+            db_path = self._get_database_path(topic_id)
+            if not db_path.exists():
+                logger.error(f"Brainstorm database not found for edit: {topic_id}")
+                return False
+            
+            try:
+                submissions = await self._parse_submissions_unlocked(db_path)
+                found = False
+                for sub in submissions:
+                    if sub['number'] == submission_number:
+                        sub['content'] = new_content
+                        sub['timestamp'] = datetime.now().isoformat()
+                        found = True
+                        break
+                
+                if not found:
+                    logger.warning(f"Submission #{submission_number} not found in brainstorm {topic_id}")
+                    return False
+                
+                await self._write_submissions_unlocked(db_path, submissions)
+                logger.info(f"Retroactive edit: submission #{submission_number} in brainstorm {topic_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to edit submission #{submission_number} in {topic_id}: {e}")
+                return False
+    
+    async def remove_submission(self, topic_id: str, submission_number: int) -> bool:
+        """
+        Remove a submission from the brainstorm database.
+        Does not renumber remaining submissions.
+        """
+        async with self._lock:
+            db_path = self._get_database_path(topic_id)
+            if not db_path.exists():
+                logger.error(f"Brainstorm database not found for removal: {topic_id}")
+                return False
+            
+            try:
+                submissions = await self._parse_submissions_unlocked(db_path)
+                original_count = len(submissions)
+                submissions = [s for s in submissions if s['number'] != submission_number]
+                
+                if len(submissions) == original_count:
+                    logger.warning(f"Submission #{submission_number} not found in brainstorm {topic_id}")
+                    return False
+                
+                await self._write_submissions_unlocked(db_path, submissions)
+                
+                metadata = await self.get_metadata(topic_id)
+                if metadata:
+                    metadata.submission_count = len(submissions)
+                    metadata.last_activity = datetime.now()
+                    await self._save_metadata(metadata)
+                
+                logger.info(f"Retroactive removal: submission #{submission_number} from brainstorm {topic_id}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to remove submission #{submission_number} from {topic_id}: {e}")
+                return False
+    
+    async def add_submission_retroactive(self, topic_id: str, content: str) -> Optional[int]:
+        """
+        Add a new submission discovered during paper compilation.
+        Returns the new submission number, or None on failure.
+        """
+        async with self._lock:
+            db_path = self._get_database_path(topic_id)
+            if not db_path.exists():
+                logger.error(f"Brainstorm database not found for retroactive add: {topic_id}")
+                return None
+            
+            try:
+                submissions = await self._parse_submissions_unlocked(db_path)
+                max_number = max((s['number'] for s in submissions), default=0)
+                new_number = max_number + 1
+                
+                submissions.append({
+                    'number': new_number,
+                    'timestamp': datetime.now().isoformat(),
+                    'content': content
+                })
+                
+                await self._write_submissions_unlocked(db_path, submissions)
+                
+                metadata = await self.get_metadata(topic_id)
+                if metadata:
+                    metadata.submission_count = len(submissions)
+                    metadata.last_activity = datetime.now()
+                    await self._save_metadata(metadata)
+                
+                logger.info(f"Retroactive add: submission #{new_number} to brainstorm {topic_id}")
+                return new_number
+            except Exception as e:
+                logger.error(f"Failed to retroactively add submission to {topic_id}: {e}")
+                return None
+    
+    async def _parse_submissions_unlocked(self, db_path: Path) -> List[Dict[str, Any]]:
+        """Parse submissions from a brainstorm database file. Caller must hold lock."""
+        import re
+        async with aiofiles.open(db_path, 'r', encoding='utf-8') as f:
+            content = await f.read()
+        
+        if not content.strip():
+            return []
+        
+        submissions = []
+        parts = content.split("=" * 80)
+        
+        for i, part in enumerate(parts):
+            if "SUBMISSION #" in part:
+                lines = part.strip().split("\n")
+                header = lines[0] if lines else ""
+                match = re.search(r'SUBMISSION #(\d+) \| Accepted: (.+)', header)
+                if match:
+                    sub_num = int(match.group(1))
+                    timestamp = match.group(2).strip()
+                    content_text = ""
+                    if i + 1 < len(parts):
+                        content_text = parts[i + 1].strip()
+                    submissions.append({
+                        'number': sub_num,
+                        'timestamp': timestamp,
+                        'content': content_text
+                    })
+        
+        return submissions
+    
+    async def _write_submissions_unlocked(self, db_path: Path, submissions: List[Dict[str, Any]]) -> None:
+        """Write submissions back to a brainstorm database file. Caller must hold lock."""
+        formatted_sections = []
+        separator = '=' * 80
+        
+        for sub in submissions:
+            section = f"{separator}\nSUBMISSION #{sub['number']} | Accepted: {sub['timestamp']}\n{separator}\n\n{sub['content']}\n"
+            formatted_sections.append(section)
+        
+        full_content = '\n\n'.join(formatted_sections)
+        async with aiofiles.open(db_path, 'w', encoding='utf-8') as f:
+            await f.write(full_content)
     
     # ========================================================================
     # REJECTION LOG OPERATIONS

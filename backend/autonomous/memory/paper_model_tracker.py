@@ -177,11 +177,14 @@ class PaperModelTracker:
             "=" * 80,
             "AUTONOMOUS AI SOLUTION",
             "",
-            "Disclaimer: This content is for informational purposes only. This paper was "
-            "autonomously generated with the novelty-seeking MOTO harness without peer review or user "
-            "oversight beyond the original prompt. AI-generated content may contain "
-            "fabricated or unverified claims presented with high confidence. All content "
-            "should be viewed with extreme scrutiny and independently verified before use.",
+            "Disclaimer: This content is provided for informational and experimental purposes only. "
+            "This paper was autonomously generated with the novelty-seeking MOTO harness without "
+            "peer review or user oversight beyond the original prompt. It may contain incorrect, "
+            "incomplete, misleading, or fabricated claims presented with high confidence. Use of "
+            "this content is at your own risk. You are solely responsible for reviewing and "
+            "independently verifying any output before relying on it, and the developers, "
+            "operators, and contributors are not responsible for errors, omissions, decisions made "
+            "from this content, or any resulting loss, damage, cost, or liability.",
             "",
             f"User's Research Prompt: {display_prompt}",
             "",

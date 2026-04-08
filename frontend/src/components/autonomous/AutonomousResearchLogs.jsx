@@ -7,6 +7,16 @@ import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react'
 import { autonomousAPI } from '../../services/api';
 import './AutonomousResearch.css';
 
+const EMPTY_API_STATS = Object.freeze({
+  total_calls: 0,
+  successful_calls: 0,
+  failed_calls: 0,
+  success_rate: 0,
+  by_phase: {},
+  by_model: {},
+  by_provider: {},
+});
+
 const AutonomousResearchLogs = ({ stats, events }) => {
   const eventsEndRef = useRef(null);
   const [expandedSubmitters, setExpandedSubmitters] = useState({});
@@ -33,21 +43,32 @@ const AutonomousResearchLogs = ({ stats, events }) => {
     }
     
     // Create new abort controller for this request
-    abortControllerRef.current = new AbortController();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     
     try {
-      const response = await autonomousAPI.getApiLogs(100);
+      const response = await autonomousAPI.getApiLogs(100, { signal: controller.signal });
+      if (abortControllerRef.current !== controller) {
+        return;
+      }
+
       if (response.success) {
         setApiLogs(response.logs || []);
-        setApiStats(response.stats || null);
+        setApiStats(response.stats || EMPTY_API_STATS);
       }
     } catch (error) {
+      if (abortControllerRef.current !== controller) {
+        return;
+      }
+
       // Don't log abort errors as they're expected on cleanup
       if (error.name !== 'AbortError') {
         console.error('Failed to fetch autonomous API logs:', error);
       }
     } finally {
-      setApiLogsLoading(false);
+      if (abortControllerRef.current === controller) {
+        setApiLogsLoading(false);
+      }
     }
   }, []);
 
@@ -66,6 +87,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       // Cancel any pending requests on unmount
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
     };
   }, [fetchApiLogs, apiAutoRefresh]);
@@ -77,10 +99,16 @@ const AutonomousResearchLogs = ({ stats, events }) => {
     }
 
     try {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+
       await autonomousAPI.clearApiLogs();
       setApiLogs([]);
-      setApiStats(null);
+      setApiStats(EMPTY_API_STATS);
       setExpandedApiLogIdx(null);
+      setApiLogsLoading(false);
     } catch (error) {
       console.error('Failed to clear API logs:', error);
     }
@@ -191,6 +219,24 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         return 'Autonomous research started';
       case 'auto_research_stopped':
         return `Research stopped. Total: ${data.final_stats?.total_papers_completed || 0} papers`;
+      // Topic exploration events (pre-brainstorm)
+      case 'topic_exploration_started':
+        return `Topic exploration started (target: ${data.target || 5} candidates${data.resumed_count ? `, resumed: ${data.resumed_count}` : ''})`;
+      case 'topic_exploration_progress': {
+        const question = data.latest_question ? data.latest_question.substring(0, 80) + '...' : '';
+        return `Exploration candidate ${data.accepted}/${data.target} accepted${question ? `: ${question}` : ''}`;
+      }
+      case 'topic_exploration_rejected':
+        return `Exploration candidate rejected (${data.accepted_so_far || 0}/${data.target || 5} accepted)`;
+      case 'topic_exploration_complete':
+        return `Topic exploration complete: ${data.accepted_count} candidates (${data.total_attempts} attempts)`;
+      // Paper title exploration events
+      case 'paper_title_exploration_started':
+        return `Title exploration started (target: ${data.target || 5} candidate titles)`;
+      case 'paper_title_exploration_progress':
+        return `Title candidate ${data.accepted}/${data.target} accepted`;
+      case 'paper_title_exploration_complete':
+        return `Title exploration complete: ${data.accepted_count} candidates (${data.total_attempts} attempts)`;
       case 'topic_selected':
         return `Topic selected: ${data.action} - ${data.topic_prompt || data.topic_id}`;
       case 'topic_selection_rejected':
@@ -225,13 +271,13 @@ const AutonomousResearchLogs = ({ stats, events }) => {
 
   const getEventClass = (event) => {
     const eventName = event.event || '';
-    if (eventName.includes('completed') || eventName.includes('accepted') || eventName === 'submission_accepted') {
+    if (eventName.includes('completed') || eventName.includes('accepted') || eventName === 'submission_accepted' || eventName === 'topic_exploration_complete' || eventName === 'paper_title_exploration_complete') {
       return 'log-success';
     }
-    if (eventName.includes('rejected') || eventName === 'submission_rejected') {
+    if (eventName.includes('rejected') || eventName === 'submission_rejected' || eventName === 'topic_exploration_rejected') {
       return 'log-reject';
     }
-    if (eventName.includes('started') || eventName.includes('review')) {
+    if (eventName.includes('started') || eventName.includes('review') || eventName.includes('progress')) {
       return 'log-info';
     }
     return '';
@@ -305,7 +351,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       <h4 style={{ marginTop: '20px' }}>Per-Submitter Statistics</h4>
       <div className="submitter-stats-container">
         {Object.keys(submitterStats).length === 0 ? (
-          <div className="empty-state">
+          <div className="auto-empty-state">
             No submission data yet.
           </div>
         ) : (
@@ -552,14 +598,14 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       <h4 style={{ marginTop: '20px' }}>Event Log</h4>
       <div className="logs-events">
         {(!events || events.length === 0) ? (
-          <div className="empty-state">
+          <div className="auto-empty-state">
             No events recorded yet.
           </div>
         ) : (
           events.map((event, index) => (
             <div 
               key={index} 
-              className={`log-entry ${getEventClass(event)}`}
+              className={`auto-log-entry ${getEventClass(event)}`}
             >
               <span className="log-time">
                 {new Date(event.timestamp).toLocaleTimeString()}

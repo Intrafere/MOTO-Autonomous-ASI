@@ -1,5 +1,10 @@
 """
 Paper Title Selector Agent - Selects titles for papers.
+
+NO RAG BY DESIGN: This agent selects a title based on brainstorm SUMMARY (not full DB),
+existing paper titles/abstracts from this brainstorm, and reference paper metadata.
+All inputs are compact summaries that fit in direct injection. The full brainstorm
+content is not needed — a summary is sufficient to choose an appropriate title.
 """
 import asyncio
 import json
@@ -58,6 +63,7 @@ class PaperTitleSelectorAgent:
         brainstorm_summary: str,
         existing_papers_from_brainstorm: List[Dict[str, Any]],
         reference_papers: List[Dict[str, Any]] = None,
+        candidate_titles: str = "",
         stop_event: Optional[asyncio.Event] = None
     ) -> Optional[str]:
         """
@@ -67,6 +73,7 @@ class PaperTitleSelectorAgent:
         so the model can correct its mistakes.
 
         Args:
+            candidate_titles: Pre-validated candidate titles from exploration phase.
             stop_event: If provided, the loop exits when the event is set (user stop).
 
         Returns:
@@ -100,7 +107,8 @@ class PaperTitleSelectorAgent:
                 brainstorm_summary,
                 existing_papers_from_brainstorm,
                 reference_papers,
-                rejection_feedback=rejection_feedback
+                rejection_feedback=rejection_feedback,
+                candidate_titles=candidate_titles
             )
 
             if selection is None:
@@ -137,7 +145,8 @@ class PaperTitleSelectorAgent:
         brainstorm_summary: str,
         existing_papers_from_brainstorm: List[Dict[str, Any]],
         reference_papers: List[Dict[str, Any]] = None,
-        rejection_feedback: str = ""
+        rejection_feedback: str = "",
+        candidate_titles: str = ""
     ) -> Optional[PaperTitleSelection]:
         """Generate a paper title selection."""
         try:
@@ -150,7 +159,8 @@ class PaperTitleSelectorAgent:
                 brainstorm_summary=brainstorm_summary,
                 existing_papers_from_brainstorm=existing_papers_from_brainstorm,
                 reference_papers=reference_papers,
-                rejection_feedback=rejection_feedback
+                rejection_feedback=rejection_feedback,
+                candidate_titles=candidate_titles
             )
 
             # If prompt is too large, shed oldest rejection entries one at a time until it fits
@@ -165,7 +175,8 @@ class PaperTitleSelectorAgent:
                         brainstorm_summary=brainstorm_summary,
                         existing_papers_from_brainstorm=existing_papers_from_brainstorm,
                         reference_papers=reference_papers,
-                        rejection_feedback=trimmed_feedback
+                        rejection_feedback=trimmed_feedback,
+                        candidate_titles=candidate_titles
                     )
                 if count_tokens(prompt) > max_input_tokens:
                     logger.warning(
@@ -178,8 +189,46 @@ class PaperTitleSelectorAgent:
                         brainstorm_summary=brainstorm_summary,
                         existing_papers_from_brainstorm=existing_papers_from_brainstorm,
                         reference_papers=reference_papers,
-                        rejection_feedback=""
+                        rejection_feedback="",
+                        candidate_titles=candidate_titles
                     )
+
+            # Progressive truncation if still too large after shedding rejection feedback
+            if count_tokens(prompt) > max_input_tokens:
+                logger.warning("PaperTitleSelector: Truncating existing paper outlines/abstracts to fit")
+                truncated_existing = []
+                for p in existing_papers_from_brainstorm:
+                    tp = p.copy()
+                    if tp.get("outline"):
+                        tp["outline"] = ""
+                    if tp.get("abstract") and len(tp["abstract"]) > 200:
+                        tp["abstract"] = tp["abstract"][:200] + "..."
+                    truncated_existing.append(tp)
+                prompt = build_paper_title_prompt(
+                    user_research_prompt=user_research_prompt,
+                    topic_prompt=topic_prompt,
+                    brainstorm_summary=brainstorm_summary,
+                    existing_papers_from_brainstorm=truncated_existing,
+                    reference_papers=reference_papers,
+                    rejection_feedback="",
+                    candidate_titles=candidate_titles
+                )
+            
+            if count_tokens(prompt) > max_input_tokens:
+                logger.warning("PaperTitleSelector: Truncating brainstorm summary to fit")
+                prompt = build_paper_title_prompt(
+                    user_research_prompt=user_research_prompt,
+                    topic_prompt=topic_prompt,
+                    brainstorm_summary=brainstorm_summary[:2000] + "\n... [truncated for context fit]",
+                    existing_papers_from_brainstorm=truncated_existing,
+                    reference_papers=reference_papers,
+                    rejection_feedback="",
+                    candidate_titles=candidate_titles
+                )
+            
+            if count_tokens(prompt) > max_input_tokens:
+                logger.error("PaperTitleSelector: Cannot fit prompt even after all truncation")
+                return None
 
             # Generate task ID for tracking
             task_id = self.get_current_task_id()

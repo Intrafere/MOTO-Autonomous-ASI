@@ -5,6 +5,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
+import { prependDisclaimer } from '../../utils/disclaimerHelper';
 
 export default function LiveResults() {
   const [results, setResults] = useState('');
@@ -74,7 +75,7 @@ export default function LiveResults() {
       return;
     }
     
-    const blob = new Blob([results], { type: 'text/plain' });
+    const blob = new Blob([prependDisclaimer(results, 'brainstorm')], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -118,7 +119,7 @@ export default function LiveResults() {
 
       <div className="results-container" ref={resultsRef}>
         <LatexRenderer
-          content={results}
+          content={prependDisclaimer(results, 'brainstorm')}
           className="results-latex-renderer"
           showToggle={false}
           showLatex={showLatex}

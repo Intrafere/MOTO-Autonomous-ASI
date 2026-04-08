@@ -77,6 +77,10 @@ async def lifespan(app: FastAPI):
     from backend.shared.boost_manager import boost_manager
     boost_manager.set_broadcast_callback(websocket.broadcast_event)
     
+    # Set API client manager broadcaster (token tracking, rate limits, fallbacks)
+    from backend.shared.api_client_manager import api_client_manager
+    api_client_manager.set_broadcast_callback(websocket.broadcast_event)
+    
     logger.info("ASI Aggregator System ready")
     
     yield
@@ -94,7 +98,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ASI Aggregator System",
     description="AI-powered aggregator with RAG and multi-agent validation",
-    version="1.0.4",
+    version="1.0.5",
     lifespan=lifespan
 )
 
@@ -117,7 +121,7 @@ async def root():
     """Root endpoint."""
     return {
         "name": "ASI Aggregator System",
-        "version": "1.0.4",
+        "version": "1.0.5",
         "status": "running"
     }
 

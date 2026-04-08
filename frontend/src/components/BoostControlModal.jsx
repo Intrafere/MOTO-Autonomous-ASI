@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { api, boostAPI } from '../services/api';
+import { boostAPI, openRouterAPI } from '../services/api';
 import './BoostControlModal.css';
 
 export default function BoostControlModal({ isOpen, onClose }) {
@@ -17,49 +17,21 @@ export default function BoostControlModal({ isOpen, onClose }) {
   const [success, setSuccess] = useState('');
   const [boostStatus, setBoostStatus] = useState(null);
   const [freeOnly, setFreeOnly] = useState(false);
+  const [hasGlobalKey, setHasGlobalKey] = useState(false);
 
-  // Load saved API key from localStorage
-  useEffect(() => {
-    const savedKey = localStorage.getItem('openrouter_api_key');
-    if (savedKey) {
-      setApiKey(savedKey);
-    }
-  }, []);
+  const hasAvailableKey = Boolean(apiKey.trim() || hasGlobalKey);
 
-  // Fetch boost status
-  useEffect(() => {
-    if (isOpen) {
-      fetchBoostStatus();
-    }
-  }, [isOpen]);
-
-  const fetchBoostStatus = async () => {
-    try {
-      const response = await boostAPI.getStatus();
-      if (response.status) {
-        setBoostStatus(response.status);
-        if (response.status.enabled) {
-          setBoostModel(response.status.model_id);
-          setSelectedProvider(response.status.provider || '');
-          setContextWindow(response.status.context_window);
-          setMaxOutputTokens(response.status.max_output_tokens);
-        }
-      }
-    } catch (error) {
-      console.error('Failed to fetch boost status:', error);
-    }
-  };
-
-  // Fetch providers when model is selected
-  const fetchProviders = async (modelId) => {
-    if (!apiKey || !modelId) {
+  const fetchProviders = async (modelId, keyOverride = undefined) => {
+    if (!modelId) {
       setProviders([]);
       return;
     }
 
+    const effectiveKey = keyOverride === undefined ? apiKey.trim() : keyOverride;
+
     setLoadingProviders(true);
     try {
-      const response = await boostAPI.getModelProviders(apiKey, modelId);
+      const response = await boostAPI.getModelProviders(effectiveKey || null, modelId);
       if (response.providers) {
         setProviders(response.providers);
       } else {
@@ -70,6 +42,30 @@ export default function BoostControlModal({ isOpen, onClose }) {
       setProviders([]);
     } finally {
       setLoadingProviders(false);
+    }
+  };
+
+  const fetchBoostStatus = async (keyOverride = undefined) => {
+    const effectiveKey = keyOverride === undefined ? apiKey.trim() : keyOverride;
+
+    try {
+      const response = await boostAPI.getStatus();
+      if (response.status) {
+        setBoostStatus(response.status);
+        if (response.status.enabled) {
+          setBoostModel(response.status.model_id);
+          setSelectedProvider(response.status.provider || '');
+          setContextWindow(response.status.context_window);
+          setMaxOutputTokens(response.status.max_output_tokens);
+          if (response.status.model_id) {
+            await fetchProviders(response.status.model_id, effectiveKey);
+          }
+        } else {
+          setProviders([]);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch boost status:', error);
     }
   };
 
@@ -84,53 +80,96 @@ export default function BoostControlModal({ isOpen, onClose }) {
     }
   };
 
-  const fetchModels = async (freeFilter = freeOnly) => {
-    if (!apiKey) {
-      setError('Please enter an API key first');
-      return;
-    }
+  const fetchModels = async (
+    freeFilter = freeOnly,
+    { silent = false, keyOverride = undefined } = {}
+  ) => {
+    const effectiveKey = keyOverride === undefined ? apiKey.trim() : keyOverride;
 
     setLoading(true);
-    setError('');
+    if (!silent) {
+      setError('');
+      setSuccess('');
+    }
 
     try {
-      const response = await boostAPI.getOpenRouterModels(apiKey);
+      const response = await boostAPI.getOpenRouterModels(effectiveKey || null);
       if (response.models) {
-        // Filter for free models only if enabled
-        const filtered = freeFilter 
+        const filtered = freeFilter
           ? response.models.filter(model => model.pricing && model.pricing.prompt === '0' && model.pricing.completion === '0')
           : response.models;
         setModels(filtered);
-        setSuccess(`Models loaded successfully (${filtered.length} ${freeFilter ? 'free ' : ''}models)`);
+        if (!silent) {
+          setSuccess(`Models loaded successfully (${filtered.length} ${freeFilter ? 'free ' : ''}models)`);
+        }
       }
     } catch (error) {
-      setError(error.message || 'Failed to fetch models');
+      if (!silent) {
+        setError(error.message || 'Failed to fetch models');
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const initializeModal = async () => {
+      const savedKey = (localStorage.getItem('openrouter_api_key') || '').trim();
+      setApiKey(savedKey);
+      setError('');
+      setSuccess('');
+
+      let useGlobalKey = false;
+      try {
+        const keyStatus = await openRouterAPI.getApiKeyStatus();
+        useGlobalKey = Boolean(keyStatus.has_key);
+        setHasGlobalKey(useGlobalKey);
+      } catch (error) {
+        console.error('Failed to check OpenRouter key status for boost modal:', error);
+        setHasGlobalKey(false);
+      }
+
+      const preferredKey = useGlobalKey ? null : savedKey;
+      await fetchBoostStatus(preferredKey);
+
+      if (useGlobalKey || savedKey) {
+        await fetchModels(freeOnly, { silent: true, keyOverride: preferredKey });
+      } else {
+        setModels([]);
+      }
+    };
+
+    initializeModal();
+  }, [isOpen]);
+
   // Refetch models when free-only toggle changes
   useEffect(() => {
-    if (apiKey && models.length > 0) {
-      fetchModels(freeOnly);
+    if (isOpen && hasAvailableKey && models.length > 0) {
+      fetchModels(freeOnly, { silent: true });
     }
   }, [freeOnly]);
 
   const testConnection = async () => {
-    if (!apiKey) {
-      setError('Please enter an API key');
+    if (!hasAvailableKey) {
+      setError('Please enter an API key or use an active OpenRouter key');
       return;
     }
+
+    const effectiveKey = apiKey.trim() || null;
+    const usingGlobalKey = !apiKey.trim() && hasGlobalKey;
 
     setTesting(true);
     setError('');
     setSuccess('');
 
     try {
-      const response = await boostAPI.getOpenRouterModels(apiKey);
+      const response = await boostAPI.getOpenRouterModels(effectiveKey);
       if (response.models && response.models.length > 0) {
-        setSuccess(`✓ Connected successfully! Found ${response.models.length} models.`);
+        setSuccess(`✓ Connected successfully${usingGlobalKey ? ' using the active OpenRouter key' : ''}! Found ${response.models.length} models.`);
         setModels(response.models);
       } else {
         setError('Connected but no models found');
@@ -143,10 +182,12 @@ export default function BoostControlModal({ isOpen, onClose }) {
   };
 
   const enableBoost = async () => {
-    if (!apiKey || !boostModel) {
-      setError('Please enter API key and select a model');
+    if (!boostModel) {
+      setError('Please select a model');
       return;
     }
+
+    const trimmedApiKey = apiKey.trim();
 
     setLoading(true);
     setError('');
@@ -155,7 +196,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
     try {
       const config = {
         enabled: true,
-        openrouter_api_key: apiKey,
+        openrouter_api_key: trimmedApiKey,
         boost_model_id: boostModel,
         boost_provider: selectedProvider || null,
         boost_context_window: contextWindow,
@@ -171,8 +212,9 @@ export default function BoostControlModal({ isOpen, onClose }) {
         response = await boostAPI.updateModel(config);
         
         if (response.success) {
-          // Save API key to localStorage
-          localStorage.setItem('openrouter_api_key', apiKey);
+          if (trimmedApiKey) {
+            localStorage.setItem('openrouter_api_key', trimmedApiKey);
+          }
           
           setSuccess(`✓ Boost model updated! State preserved: ${response.preserved_state.boost_next_count} next calls`);
           await fetchBoostStatus();
@@ -185,8 +227,9 @@ export default function BoostControlModal({ isOpen, onClose }) {
         response = await boostAPI.enable(config);
         
         if (response.success) {
-          // Save API key to localStorage
-          localStorage.setItem('openrouter_api_key', apiKey);
+          if (trimmedApiKey) {
+            localStorage.setItem('openrouter_api_key', trimmedApiKey);
+          }
           
           setSuccess('✓ Boost enabled successfully!');
           await fetchBoostStatus();
@@ -254,7 +297,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
             </div>
           )}
 
-          <div className="form-group">
+          <div className="boost-form-group">
             <label>OpenRouter API Key</label>
             <input
               type="password"
@@ -263,20 +306,20 @@ export default function BoostControlModal({ isOpen, onClose }) {
               placeholder="sk-or-..."
               disabled={loading}
             />
-            <small>Your API key is stored locally and never sent to our servers</small>
+            <small>Leave this blank to reuse the active OpenRouter key, or paste a different key just for boost.</small>
           </div>
 
-          <div className="button-group">
+          <div className="boost-button-group">
             <button 
               onClick={testConnection} 
-              disabled={testing || !apiKey}
+              disabled={testing || !hasAvailableKey}
               className="secondary"
             >
               {testing ? 'Testing...' : 'Test Connection'}
             </button>
             <button 
               onClick={() => fetchModels(freeOnly)} 
-              disabled={loading || !apiKey}
+              disabled={loading || !hasAvailableKey}
               className="secondary"
             >
               {loading ? 'Loading...' : 'Load Models'}
@@ -292,7 +335,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
             </label>
           </div>
 
-          <div className="form-group">
+          <div className="boost-form-group">
             <label>Boost Model</label>
             <select
               value={boostModel}
@@ -307,12 +350,12 @@ export default function BoostControlModal({ isOpen, onClose }) {
               ))}
             </select>
             {models.length === 0 && (
-              <small>Click "Load Models" to fetch available models</small>
+              <small>Models load automatically when an OpenRouter key is active. Use "Load Models" to refresh.</small>
             )}
           </div>
 
           {boostModel && (
-            <div className="form-group">
+            <div className="boost-form-group">
               <label>Provider</label>
               <select
                 value={selectedProvider}
@@ -339,7 +382,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
           )}
 
           <div className="form-row">
-            <div className="form-group">
+            <div className="boost-form-group">
               <label>Context Window</label>
               <input
                 type="number"
@@ -352,7 +395,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
               />
             </div>
 
-            <div className="form-group">
+            <div className="boost-form-group">
               <label>Max Output Tokens</label>
               <input
                 type="number"
@@ -384,7 +427,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
               <li>Click tasks in the MOTO Workflow panel to toggle boost</li>
               <li>Boosted tasks use your OpenRouter model instead of LM Studio</li>
               <li>If credits run out, system falls back to LM Studio automatically</li>
-              <li>You can continuously select which tasks use the boost</li>
+              <li>You can toggle which tasks use the boost at any time</li>
             </ul>
           </div>
         </div>
@@ -394,7 +437,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
             <>
               <button 
                 onClick={enableBoost} 
-                disabled={loading || !apiKey || !boostModel}
+                disabled={loading || !boostModel}
                 className="primary"
                 title="Update boost model (preserves boost_next_count and categories)"
               >
@@ -411,7 +454,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
           ) : (
             <button 
               onClick={enableBoost} 
-              disabled={loading || !apiKey || !boostModel}
+              disabled={loading || !boostModel}
               className="primary"
             >
               {loading ? 'Enabling...' : 'Enable Boost'}
