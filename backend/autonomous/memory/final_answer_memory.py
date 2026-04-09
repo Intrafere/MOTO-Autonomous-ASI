@@ -14,6 +14,10 @@ from datetime import datetime
 import aiofiles
 
 from backend.shared.config import system_config
+from backend.shared.path_safety import (
+    resolve_path_within_root,
+    validate_single_path_component,
+)
 from backend.shared.models import (
     FinalAnswerState,
     CertaintyAssessment,
@@ -53,6 +57,35 @@ class FinalAnswerMemory:
         # In-memory state
         self._state: Optional[FinalAnswerState] = None
         self._session_manager = None
+
+    @classmethod
+    def build_scoped_memory(cls, base_dir: Path) -> "FinalAnswerMemory":
+        """Create a temporary instance rooted at one validated final-answer directory."""
+        memory = cls()
+        memory._base_dir = base_dir
+        memory._state_path = base_dir / "final_answer_state.json"
+        memory._volume_path = base_dir / "volume_organization.json"
+        memory._rejections_path = base_dir / "tier3_rejections.txt"
+        memory._final_volume_path = base_dir / "final_volume.txt"
+        return memory
+
+    @staticmethod
+    def resolve_answer_base_dir(answer_id: str) -> Optional[Path]:
+        """Resolve a legacy or session-based final-answer directory safely."""
+        if answer_id == "legacy":
+            base_dir = Path(system_config.data_dir) / "auto_final_answer"
+        else:
+            try:
+                session_dir = resolve_path_within_root(
+                    Path(system_config.auto_sessions_base_dir),
+                    validate_single_path_component(answer_id, "final answer ID"),
+                )
+            except ValueError:
+                return None
+
+            base_dir = session_dir / "final_answer"
+
+        return base_dir if base_dir.exists() else None
     
     def set_session_manager(self, session_manager) -> None:
         """Set session manager for session-based path resolution."""
@@ -1441,13 +1474,8 @@ class FinalAnswerMemory:
             - content: Full text of volume/paper
             - chapters: List of chapter details (long form only)
         """
-        # Determine location
-        if answer_id == "legacy":
-            base_dir = Path(system_config.data_dir) / "auto_final_answer"
-        else:
-            base_dir = Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer"
-        
-        if not base_dir.exists():
+        base_dir = self.resolve_answer_base_dir(answer_id)
+        if not base_dir:
             return None
         
         state_path = base_dir / "final_answer_state.json"

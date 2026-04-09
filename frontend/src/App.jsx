@@ -357,17 +357,7 @@ function App() {
       console.error('Failed to check OpenRouter key status:', err);
     }
 
-    let finalHasOpenRouterKey = Boolean(keyStatus.has_key);
-    const storedKey = localStorage.getItem('openrouter_api_key');
-    if (storedKey && !finalHasOpenRouterKey) {
-      try {
-        await openRouterAPI.setApiKey(storedKey);
-        finalHasOpenRouterKey = true;
-      } catch (err) {
-        console.error('Failed to restore OpenRouter key:', err);
-        localStorage.removeItem('openrouter_api_key');
-      }
-    }
+    const finalHasOpenRouterKey = Boolean(keyStatus.has_key);
     setHasOpenRouterKey(finalHasOpenRouterKey);
 
     let availableModels = [];
@@ -401,42 +391,12 @@ function App() {
     syncProviderAvailability();
   }, [syncProviderAvailability]);
 
-  useEffect(() => {
-    const restoreWolframKey = async () => {
-      const storedWolframKey = localStorage.getItem('wolfram_alpha_api_key');
-      if (!storedWolframKey) {
-        return;
-      }
-
-      try {
-        await api.setWolframApiKey(storedWolframKey);
-      } catch (err) {
-        console.error('Failed to restore Wolfram Alpha key:', err);
-        localStorage.removeItem('wolfram_alpha_api_key');
-      }
-    };
-
-    restoreWolframKey();
-  }, []);
-
   // Periodically re-check OpenRouter key status to keep indicator in sync
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const keyStatus = await openRouterAPI.getApiKeyStatus();
         setHasOpenRouterKey(keyStatus.has_key);
-
-        if (!keyStatus.has_key) {
-          const storedKey = localStorage.getItem('openrouter_api_key');
-          if (storedKey) {
-            try {
-              await openRouterAPI.setApiKey(storedKey);
-              setHasOpenRouterKey(true);
-            } catch {
-              // Silent retry next interval
-            }
-          }
-        }
       } catch {
         // Backend unreachable, skip this cycle
       }

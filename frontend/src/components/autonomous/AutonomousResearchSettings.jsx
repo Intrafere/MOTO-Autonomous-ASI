@@ -212,6 +212,7 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
   // Wolfram Alpha settings (shared with compiler)
   const [wolframEnabled, setWolframEnabled] = useState(false);
   const [wolframApiKey, setWolframApiKey] = useState('');
+  const [hasStoredWolframKey, setHasStoredWolframKey] = useState(false);
   const [wolframTestResult, setWolframTestResult] = useState('');
   const [testingWolfram, setTestingWolfram] = useState(false);
   
@@ -375,20 +376,14 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
         console.error('Failed to check OpenRouter key:', err);
       }
       
-      // Restore Wolfram Alpha key from localStorage
-      const storedWolframKey = localStorage.getItem('wolfram_alpha_api_key');
-      if (storedWolframKey) {
-        setWolframApiKey(storedWolframKey);
-        setWolframEnabled(true);
-      } else {
-        try {
-          const wolframStatus = await api.getWolframStatus();
-          if (wolframStatus.enabled) {
-            setWolframEnabled(true);
-          }
-        } catch (err) {
-          console.error('Failed to load Wolfram Alpha status:', err);
+      try {
+        const wolframStatus = await api.getWolframStatus();
+        setHasStoredWolframKey(Boolean(wolframStatus.has_key));
+        if (wolframStatus.enabled) {
+          setWolframEnabled(true);
         }
+      } catch (err) {
+        console.error('Failed to load Wolfram Alpha status:', err);
       }
 
       // Try to fetch fresh LM Studio models
@@ -770,7 +765,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       if (response.success) {
         setWolframTestResult(`✓ Success! Result: ${response.result}`);
         await api.setWolframApiKey(wolframApiKey);
-        localStorage.setItem('wolfram_alpha_api_key', wolframApiKey);
+        setHasStoredWolframKey(true);
         setWolframEnabled(true);
       } else {
         setWolframTestResult('✗ Failed: ' + response.message);
@@ -786,9 +781,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const handleClearWolframKey = async () => {
     try {
       await api.clearWolframApiKey();
-      localStorage.removeItem('wolfram_alpha_api_key');
       setWolframApiKey('');
       setWolframEnabled(false);
+      setHasStoredWolframKey(false);
       setWolframTestResult('Key cleared');
       setTimeout(() => setWolframTestResult(''), 3000);
     } catch (err) {
@@ -1517,9 +1512,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                       type="password"
                       value={wolframApiKey}
                       onChange={(e) => setWolframApiKey(e.target.value)}
-                      placeholder="Enter your Wolfram Alpha App ID"
+                      placeholder={hasStoredWolframKey && !wolframApiKey ? "Stored securely on backend. Enter a new App ID to replace it." : "Enter your Wolfram Alpha App ID"}
                       className="input-dark"
                     />
+                    {hasStoredWolframKey && !wolframApiKey && (
+                      <small className="hint-text">
+                        A Wolfram Alpha key is already stored securely on the backend for this machine.
+                      </small>
+                    )}
                   </div>
 
                   <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>

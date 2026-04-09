@@ -17,6 +17,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [error, setError] = useState('');
+  const [hasStoredKey, setHasStoredKey] = useState(false);
 
   // Reset state when modal opens
   useEffect(() => {
@@ -24,16 +25,30 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
       setApiKey('');
       setTestResult(null);
       setError('');
-    }
-  }, [isOpen]);
+      let isCancelled = false;
 
-  // Load existing key from localStorage on mount
-  useEffect(() => {
-    const storedKey = localStorage.getItem('openrouter_api_key');
-    if (storedKey) {
-      setApiKey(storedKey);
+      const loadKeyStatus = async () => {
+        try {
+          const status = await openRouterAPI.getApiKeyStatus();
+          if (!isCancelled) {
+            setHasStoredKey(Boolean(status.has_key));
+          }
+        } catch {
+          if (!isCancelled) {
+            setHasStoredKey(false);
+          }
+        }
+      };
+
+      loadKeyStatus();
+
+      return () => {
+        isCancelled = true;
+      };
     }
-  }, []);
+    setHasStoredKey(false);
+    return undefined;
+  }, [isOpen]);
 
   const handleTestConnection = async () => {
     if (!apiKey.trim()) {
@@ -71,9 +86,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
     try {
       // Save to backend
       await openRouterAPI.setApiKey(apiKey.trim());
-      
-      // Also save to localStorage for persistence
-      localStorage.setItem('openrouter_api_key', apiKey.trim());
+      setHasStoredKey(true);
       
       // Notify parent
       if (onKeySet) {
@@ -91,10 +104,10 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
   const handleClearKey = async () => {
     try {
       await openRouterAPI.clearApiKey();
-      localStorage.removeItem('openrouter_api_key');
       setApiKey('');
       setTestResult(null);
       setError('');
+      setHasStoredKey(false);
     } catch (err) {
       setError(err.message || 'Failed to clear API key');
     }
@@ -195,6 +208,15 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
           </div>
         )}
 
+        {hasStoredKey && !apiKey.trim() && (
+          <div className="test-result-banner test-result-banner--success" style={{
+            marginBottom: '1rem',
+          }}>
+            An OpenRouter API key is already stored securely on the backend for this machine.
+            Enter a new key below to replace it.
+          </div>
+        )}
+
         {/* Action Buttons */}
         <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
           <button
@@ -236,7 +258,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
         </div>
 
         {/* Clear Key Button */}
-        {apiKey && (
+        {(apiKey || hasStoredKey) && (
           <button
             onClick={handleClearKey}
             className="btn-ghost"
@@ -259,7 +281,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
           backgroundColor: '#0d0d1a',
           borderRadius: '6px',
         }}>
-          This API key is stored locally and sent to the backend for OpenRouter API calls.
+          This API key is stored securely through the backend keyring integration and sent to the backend for OpenRouter API calls.
           API Boost can reuse this key automatically, or you can override it inside the boost modal.
         </p>
       </div>

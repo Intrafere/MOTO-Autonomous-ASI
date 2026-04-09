@@ -12,6 +12,11 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import aiofiles
 
+from backend.shared.path_safety import (
+    resolve_path_within_root,
+    validate_single_path_component,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -170,7 +175,12 @@ class SessionManager:
         """
         async with self._lock:
             self._base_dir = Path(base_dir)
-            self._session_path = self._base_dir / session_id
+            try:
+                safe_session_id = validate_single_path_component(session_id, "session ID")
+                self._session_path = resolve_path_within_root(self._base_dir, safe_session_id)
+            except ValueError as e:
+                logger.error(f"Invalid session ID: {session_id} ({e})")
+                return None
             
             if not self._session_path.exists():
                 logger.error(f"Session not found: {session_id}")

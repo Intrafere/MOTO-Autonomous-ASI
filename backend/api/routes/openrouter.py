@@ -22,6 +22,11 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import OpenRouterClient
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.free_model_manager import free_model_manager
+from backend.shared.secret_store import (
+    SecretStoreError,
+    clear_openrouter_api_key,
+    store_openrouter_api_key,
+)
 from backend.shared.models import FreeModelSettings
 
 router = APIRouter()
@@ -83,11 +88,12 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
         Success status and validation result
     """
     try:
-        if not request.api_key:
+        api_key = request.api_key.strip()
+        if not api_key:
             raise HTTPException(status_code=400, detail="API key is required")
         
         # Validate API key by testing connection
-        client = OpenRouterClient(request.api_key)
+        client = OpenRouterClient(api_key)
         try:
             models = await client.list_models()
             
@@ -98,11 +104,14 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
                 )
             
             # Store the API key globally
-            rag_config.openrouter_api_key = request.api_key
+            rag_config.openrouter_api_key = api_key
             rag_config.openrouter_enabled = True
             
             # Also configure the API client manager
-            api_client_manager.set_openrouter_api_key(request.api_key)
+            api_client_manager.set_openrouter_api_key(api_key)
+
+            # Persist to secure OS-backed storage so the key survives restarts.
+            store_openrouter_api_key(api_key)
             
             # Reset exhaustion flags so roles can retry OpenRouter
             free_model_manager.clear_account_exhaustion()
@@ -121,6 +130,9 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
         finally:
             await client.close()
             
+    except SecretStoreError as e:
+        logger.error(f"Failed to persist OpenRouter API key securely: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -143,6 +155,7 @@ async def clear_api_key() -> Dict[str, Any]:
         rag_config.openrouter_api_key = None
         rag_config.openrouter_enabled = False
         api_client_manager.set_openrouter_api_key(None)
+        clear_openrouter_api_key()
         
         logger.info("Global OpenRouter API key cleared")
         
@@ -150,6 +163,9 @@ async def clear_api_key() -> Dict[str, Any]:
             "success": True,
             "message": "OpenRouter API key cleared"
         }
+    except SecretStoreError as e:
+        logger.error(f"Failed to clear OpenRouter API key from secure storage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to clear OpenRouter API key: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to clear API key: {str(e)}")

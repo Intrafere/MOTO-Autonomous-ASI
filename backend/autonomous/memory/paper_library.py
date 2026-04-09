@@ -14,6 +14,10 @@ import aiofiles
 
 from backend.shared.config import system_config
 from backend.shared.models import PaperMetadata
+from backend.shared.path_safety import (
+    resolve_path_within_root,
+    validate_single_path_component,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,12 +119,15 @@ class PaperLibrary:
             papers_dir = Path(system_config.auto_papers_dir)
             return papers_dir if papers_dir.exists() else None
 
-        if not session_id or session_id in {".", ".."} or "/" in session_id or "\\" in session_id:
+        try:
+            safe_session_id = validate_single_path_component(session_id, "session ID")
+        except ValueError:
             return None
 
-        sessions_root = Path(system_config.auto_sessions_base_dir).resolve()
-        session_dir = (sessions_root / session_id).resolve()
-        if session_dir.parent != sessions_root:
+        try:
+            sessions_root = Path(system_config.auto_sessions_base_dir)
+            session_dir = resolve_path_within_root(sessions_root, safe_session_id)
+        except ValueError:
             return None
 
         papers_dir = session_dir / "papers"
@@ -132,7 +139,11 @@ class PaperLibrary:
             metadata_path = Path(system_config.auto_research_metadata_file)
             default_prompt = "Legacy research session"
         else:
-            metadata_path = Path(system_config.auto_sessions_base_dir) / session_id / "session_metadata.json"
+            papers_dir = self.get_history_papers_dir(session_id)
+            if not papers_dir:
+                return "Unknown research question"
+
+            metadata_path = papers_dir.parent / "session_metadata.json"
             default_prompt = "Unknown research question"
 
         if not metadata_path.exists():
@@ -177,7 +188,7 @@ class PaperLibrary:
             latest_critique = await get_latest_critique(
                 paper_type="autonomous_paper",
                 paper_id=metadata.paper_id,
-                base_path=str(papers_dir)
+                base_dir=papers_dir
             )
 
             history_papers.append({
@@ -243,7 +254,7 @@ class PaperLibrary:
         latest_critique = await get_latest_critique(
             paper_type="autonomous_paper",
             paper_id=paper_id,
-            base_path=str(papers_dir)
+            base_dir=papers_dir
         )
 
         return {

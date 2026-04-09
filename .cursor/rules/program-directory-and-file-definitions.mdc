@@ -28,7 +28,9 @@ project-root/
 │   │   ├── utils.py                     # Common utilities
 │   │   ├── json_parser.py               # JSON parsing with sanitization for LLM quirks
 │   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
-│   │   └── critique_prompts.py          # Default critique prompt and builder function for validator critiques 
+│   │   ├── critique_prompts.py          # Default critique prompt and builder function for validator critiques
+│   │   ├── secret_store.py              # Secure API key persistence via OS keyring (OpenRouter, Wolfram Alpha)
+│   │   └── path_safety.py               # Safe path resolution helpers (realpath/normpath containment checks)
 │   ├── aggregator/                      # AGGREGATOR 
 │   │   ├── __init__.py
 │   │   ├── core/

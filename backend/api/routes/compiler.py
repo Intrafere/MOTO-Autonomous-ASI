@@ -737,6 +737,7 @@ async def set_wolfram_api_key(request: dict):
     Returns:
         Success status and validation result
     """
+    from backend.shared.secret_store import SecretStoreError, store_wolfram_api_key
     from backend.shared.wolfram_alpha_client import initialize_wolfram_client, get_wolfram_client
     
     try:
@@ -761,6 +762,9 @@ async def set_wolfram_api_key(request: dict):
         # Store in system config
         system_config.wolfram_alpha_api_key = api_key
         system_config.wolfram_alpha_enabled = True
+
+        # Persist to secure backend storage so the key survives restarts.
+        store_wolfram_api_key(api_key)
         
         logger.info("Wolfram Alpha API key set and validated")
         
@@ -770,6 +774,9 @@ async def set_wolfram_api_key(request: dict):
             "test_result": test_result
         }
         
+    except SecretStoreError as e:
+        logger.error(f"Failed to persist Wolfram Alpha API key securely: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -785,6 +792,7 @@ async def clear_wolfram_api_key():
     Returns:
         Success status
     """
+    from backend.shared.secret_store import SecretStoreError, clear_wolfram_api_key as clear_persisted_wolfram_api_key
     from backend.shared.wolfram_alpha_client import clear_wolfram_client
     
     try:
@@ -794,6 +802,7 @@ async def clear_wolfram_api_key():
         # Clear from config
         system_config.wolfram_alpha_api_key = None
         system_config.wolfram_alpha_enabled = False
+        clear_persisted_wolfram_api_key()
         
         logger.info("Wolfram Alpha API key cleared")
         
@@ -802,6 +811,9 @@ async def clear_wolfram_api_key():
             "message": "Wolfram Alpha API key cleared"
         }
         
+    except SecretStoreError as e:
+        logger.error(f"Failed to clear Wolfram Alpha API key from secure storage: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to clear Wolfram Alpha API key: {e}")
         raise HTTPException(status_code=500, detail=str(e))

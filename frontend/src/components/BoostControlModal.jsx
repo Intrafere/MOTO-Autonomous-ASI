@@ -118,8 +118,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
     }
 
     const initializeModal = async () => {
-      const savedKey = (localStorage.getItem('openrouter_api_key') || '').trim();
-      setApiKey(savedKey);
+      setApiKey('');
       setError('');
       setSuccess('');
 
@@ -133,10 +132,10 @@ export default function BoostControlModal({ isOpen, onClose }) {
         setHasGlobalKey(false);
       }
 
-      const preferredKey = useGlobalKey ? null : savedKey;
+      const preferredKey = null;
       await fetchBoostStatus(preferredKey);
 
-      if (useGlobalKey || savedKey) {
+      if (useGlobalKey) {
         await fetchModels(freeOnly, { silent: true, keyOverride: preferredKey });
       } else {
         setModels([]);
@@ -212,10 +211,6 @@ export default function BoostControlModal({ isOpen, onClose }) {
         response = await boostAPI.updateModel(config);
         
         if (response.success) {
-          if (trimmedApiKey) {
-            localStorage.setItem('openrouter_api_key', trimmedApiKey);
-          }
-          
           setSuccess(`✓ Boost model updated! State preserved: ${response.preserved_state.boost_next_count} next calls`);
           await fetchBoostStatus();
           
@@ -227,10 +222,6 @@ export default function BoostControlModal({ isOpen, onClose }) {
         response = await boostAPI.enable(config);
         
         if (response.success) {
-          if (trimmedApiKey) {
-            localStorage.setItem('openrouter_api_key', trimmedApiKey);
-          }
-          
           setSuccess('✓ Boost enabled successfully!');
           await fetchBoostStatus();
           

@@ -53,6 +53,7 @@ function CompilerSettings() {
   // Wolfram Alpha settings
   const [wolframEnabled, setWolframEnabled] = useState(false);
   const [wolframApiKey, setWolframApiKey] = useState('');
+  const [hasStoredWolframKey, setHasStoredWolframKey] = useState(false);
   const [wolframTestResult, setWolframTestResult] = useState('');
   const [testingWolfram, setTestingWolfram] = useState(false);
 
@@ -129,24 +130,18 @@ function CompilerSettings() {
         }
       }
       
-      // Restore Wolfram Alpha key from localStorage
-      const storedWolframKey = localStorage.getItem('wolfram_alpha_api_key');
-      if (storedWolframKey) {
-        setWolframApiKey(storedWolframKey);
-        setWolframEnabled(true);
-      } else {
-        const loadWolframStatus = async () => {
-          try {
-            const response = await api.getWolframStatus();
-            if (response.enabled) {
-              setWolframEnabled(true);
-            }
-          } catch (err) {
-            console.error('Failed to load Wolfram Alpha status:', err);
+      const loadWolframStatus = async () => {
+        try {
+          const response = await api.getWolframStatus();
+          setHasStoredWolframKey(Boolean(response.has_key));
+          if (response.enabled) {
+            setWolframEnabled(true);
           }
-        };
-        loadWolframStatus();
-      }
+        } catch (err) {
+          console.error('Failed to load Wolfram Alpha status:', err);
+        }
+      };
+      loadWolframStatus();
       
       setIsLoaded(true);
       setLoadingModels(false);
@@ -317,7 +312,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       if (response.success) {
         setWolframTestResult(`✓ Success! Result: ${response.result}`);
         await api.setWolframApiKey(wolframApiKey);
-        localStorage.setItem('wolfram_alpha_api_key', wolframApiKey);
+        setHasStoredWolframKey(true);
         setWolframEnabled(true);
       } else {
         setWolframTestResult('✗ Failed: ' + response.message);
@@ -333,9 +328,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const handleClearWolframKey = async () => {
     try {
       await api.clearWolframApiKey();
-      localStorage.removeItem('wolfram_alpha_api_key');
       setWolframApiKey('');
       setWolframEnabled(false);
+      setHasStoredWolframKey(false);
       setWolframTestResult('Key cleared');
       setTimeout(() => setWolframTestResult(''), 3000);
     } catch (err) {
@@ -719,10 +714,15 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 type="password"
                 value={wolframApiKey}
                 onChange={(e) => setWolframApiKey(e.target.value)}
-                placeholder="Enter your Wolfram Alpha App ID"
+                placeholder={hasStoredWolframKey && !wolframApiKey ? "Stored securely on backend. Enter a new App ID to replace it." : "Enter your Wolfram Alpha App ID"}
                 className="input-dark"
                 style={{ marginBottom: '0.5rem' }}
               />
+              {hasStoredWolframKey && !wolframApiKey && (
+                <small className="hint-text">
+                  A Wolfram Alpha key is already stored securely on the backend for this machine.
+                </small>
+              )}
             </div>
             
             <div className="provider-toggle-group" style={{ marginTop: '0.75rem' }}>

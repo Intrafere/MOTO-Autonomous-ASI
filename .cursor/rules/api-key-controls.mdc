@@ -192,6 +192,8 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ## Configuration Persistence
 
-**localStorage:** `openrouter_api_key`, `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`)
+**Secure backend storage (OS keyring):** OpenRouter global API key and Wolfram Alpha API key persist via `backend/shared/secret_store.py` using the OS keychain/keyring. Restored into backend memory on startup in `backend/api/main.py`.
+
+**localStorage:** `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`)
 
 **Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs, free model manager state. Boost logs persist to file (`boost_api_log.txt`).

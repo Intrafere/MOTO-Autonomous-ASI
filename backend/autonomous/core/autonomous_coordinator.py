@@ -3935,12 +3935,12 @@ class AutonomousCoordinator:
             
             paper_path = paper_library.get_paper_path(paper_id)  # Synchronous, returns str
             if paper_path:
-                base_path = Path(paper_path).parent
+                paper_dir = Path(paper_path).parent
                 await save_critique(
                     paper_type="autonomous_paper",
                     critique=critique,
                     paper_id=paper_id,
-                    base_path=str(base_path)
+                    base_dir=paper_dir
                 )
                 logger.info(
                     f"Auto-critique saved for paper {paper_id}: "

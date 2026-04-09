@@ -4,17 +4,20 @@ Includes Tier 1 (Brainstorm), Tier 2 (Paper Writing), and Tier 3 (Final Answer) 
 """
 import asyncio
 import logging
-import os
 from pathlib import Path
 from typing import Optional, Any, Dict
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 
 from backend.shared.models import AutonomousResearchStartRequest, CritiqueRequest
+from backend.shared.path_safety import (
+    resolve_path_within_root,
+    validate_single_path_component,
+)
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
 from backend.autonomous.memory.research_metadata import research_metadata, ResearchMetadata
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory, BrainstormMemory
 from backend.autonomous.memory.paper_library import paper_library, PaperLibrary
-from backend.autonomous.memory.final_answer_memory import final_answer_memory
+from backend.autonomous.memory.final_answer_memory import final_answer_memory, FinalAnswerMemory
 from backend.autonomous.memory.session_manager import session_manager
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
 from backend.aggregator.core.coordinator import coordinator
@@ -38,7 +41,9 @@ def _validate_history_session_id(session_id: str) -> None:
     if session_id == "legacy":
         return
 
-    if session_id in {".", ".."} or "/" in session_id or "\\" in session_id:
+    try:
+        validate_single_path_component(session_id, "session ID")
+    except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid session ID: {session_id}")
 
 
@@ -72,10 +77,12 @@ def _resolve_history_session_paths(session_id: str) -> Dict[str, Path]:
             "workflow_state_path": Path(system_config.auto_workflow_state_file),
         }
     else:
-        sessions_root = Path(system_config.auto_sessions_base_dir).resolve()
-        session_root = (sessions_root / session_id).resolve()
-
-        if session_root.parent != sessions_root:
+        try:
+            session_root = resolve_path_within_root(
+                Path(system_config.auto_sessions_base_dir),
+                validate_single_path_component(session_id, "session ID"),
+            )
+        except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid session ID: {session_id}")
 
         if not session_root.exists():
@@ -96,6 +103,34 @@ def _resolve_history_session_paths(session_id: str) -> Dict[str, Path]:
         )
 
     return paths
+
+
+def _resolve_final_answer_dir(answer_id: str) -> Path:
+    """Resolve a legacy or session-based final answer directory safely."""
+    from backend.shared.config import system_config
+
+    if answer_id == "legacy":
+        base_dir = Path(system_config.data_dir) / "auto_final_answer"
+    else:
+        try:
+            session_dir = resolve_path_within_root(
+                Path(system_config.auto_sessions_base_dir),
+                validate_single_path_component(answer_id, "final answer ID"),
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid final answer ID: {answer_id}")
+
+        base_dir = session_dir / "final_answer"
+
+    if not base_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Final answer not found: {answer_id}")
+
+    return base_dir
+
+
+def _build_scoped_final_answer_memory(answer_id: str) -> FinalAnswerMemory:
+    """Create a temporary FinalAnswerMemory rooted at one validated answer directory."""
+    return FinalAnswerMemory.build_scoped_memory(_resolve_final_answer_dir(answer_id))
 
 
 def _build_scoped_paper_library(paths: Dict[str, Path]) -> PaperLibrary:
@@ -194,7 +229,7 @@ async def _generate_autonomous_paper_critique(
     paper_id: str,
     paper_title: str,
     content: str,
-    base_path: str,
+    base_dir: Path,
     request: Optional[CritiqueRequest] = None,
 ) -> Dict[str, Any]:
     """Generate and persist a critique for an autonomous Stage 2 paper."""
@@ -281,7 +316,7 @@ async def _generate_autonomous_paper_critique(
         full_critique=critique_data.get("full_critique", ""),
     )
 
-    saved_critique = await save_critique("autonomous_paper", critique, paper_id, base_path)
+    saved_critique = await save_critique("autonomous_paper", critique, paper_id, base_dir)
     return {
         "success": True,
         "critique": saved_critique.model_dump(),
@@ -294,12 +329,12 @@ async def _get_autonomous_paper_critiques_response(
     *,
     paper_id: str,
     paper_title: str,
-    base_path: str,
+    base_dir: Path,
 ) -> Dict[str, Any]:
     """Load critique history for an autonomous Stage 2 paper."""
     from backend.shared.critique_memory import get_critiques
 
-    critiques = await get_critiques("autonomous_paper", paper_id, base_path)
+    critiques = await get_critiques("autonomous_paper", paper_id, base_dir)
     return {
         "success": True,
         "paper_id": paper_id,
@@ -338,7 +373,7 @@ async def _delete_autonomous_paper_from_scope(
         raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
 
     paper_path = scoped_paper_library.get_paper_path(paper_id)
-    base_path = os.path.dirname(paper_path)
+    base_dir = Path(paper_path).parent
     source_brainstorms = metadata.source_brainstorm_ids or []
 
     success = await scoped_paper_library.delete_paper(paper_id)
@@ -359,7 +394,7 @@ async def _delete_autonomous_paper_from_scope(
             )
 
     try:
-        await clear_critiques("autonomous_paper", paper_id, base_path)
+        await clear_critiques("autonomous_paper", paper_id, base_dir)
         logger.info(f"Cleared critiques for deleted paper {paper_id}")
     except Exception as e:
         logger.warning(f"Failed to clear critiques for paper {paper_id}: {e}")
@@ -662,14 +697,14 @@ async def get_all_papers():
         for p in papers:
             # Get latest critique for this paper
             paper_path = paper_library.get_paper_path(p.paper_id)
-            base_path = None
+            base_dir = None
             if paper_path:
-                base_path = str(Path(paper_path).parent)
+                base_dir = Path(paper_path).parent
             
             latest_critique = await get_latest_critique(
                 paper_type="autonomous_paper",
                 paper_id=p.paper_id,
-                base_path=base_path
+                base_dir=base_dir
             )
             
             # Calculate average rating if critique exists
@@ -1752,18 +1787,8 @@ async def get_final_answer_archived_papers(answer_id: str):
     Returns:
         List of paper metadata
     """
-    from backend.autonomous.memory.final_answer_memory import FinalAnswerMemory
-    from backend.shared.config import system_config
-    from pathlib import Path
-    
     try:
-        # Create temporary memory instance with correct path
-        memory = FinalAnswerMemory()
-        if answer_id == "legacy":
-            memory._base_dir = Path(system_config.data_dir) / "auto_final_answer"
-        else:
-            memory._base_dir = Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer"
-        
+        memory = _build_scoped_final_answer_memory(answer_id)
         papers = await memory.get_archived_papers_list()
         return {"papers": papers}
     except Exception as e:
@@ -1783,18 +1808,8 @@ async def get_final_answer_archived_paper(answer_id: str, paper_id: str):
     Returns:
         Paper content, abstract, outline, metadata
     """
-    from backend.autonomous.memory.final_answer_memory import FinalAnswerMemory
-    from backend.shared.config import system_config
-    from pathlib import Path
-    
     try:
-        # Create temporary memory instance with correct path
-        memory = FinalAnswerMemory()
-        if answer_id == "legacy":
-            memory._base_dir = Path(system_config.data_dir) / "auto_final_answer"
-        else:
-            memory._base_dir = Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer"
-        
+        memory = _build_scoped_final_answer_memory(answer_id)
         paper = await memory.get_archived_paper(paper_id)
         if paper is None:
             raise HTTPException(status_code=404, detail=f"Archived paper {paper_id} not found")
@@ -1818,18 +1833,8 @@ async def get_final_answer_archived_brainstorms(answer_id: str):
     Returns:
         List of brainstorm metadata
     """
-    from backend.autonomous.memory.final_answer_memory import FinalAnswerMemory
-    from backend.shared.config import system_config
-    from pathlib import Path
-    
     try:
-        # Create temporary memory instance with correct path
-        memory = FinalAnswerMemory()
-        if answer_id == "legacy":
-            memory._base_dir = Path(system_config.data_dir) / "auto_final_answer"
-        else:
-            memory._base_dir = Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer"
-        
+        memory = _build_scoped_final_answer_memory(answer_id)
         brainstorms = await memory.get_archived_brainstorms_list()
         return {"brainstorms": brainstorms}
     except Exception as e:
@@ -1849,18 +1854,8 @@ async def get_final_answer_archived_brainstorm(answer_id: str, topic_id: str):
     Returns:
         Brainstorm content and metadata
     """
-    from backend.autonomous.memory.final_answer_memory import FinalAnswerMemory
-    from backend.shared.config import system_config
-    from pathlib import Path
-    
     try:
-        # Create temporary memory instance with correct path
-        memory = FinalAnswerMemory()
-        if answer_id == "legacy":
-            memory._base_dir = Path(system_config.data_dir) / "auto_final_answer"
-        else:
-            memory._base_dir = Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer"
-        
+        memory = _build_scoped_final_answer_memory(answer_id)
         brainstorm = await memory.get_archived_brainstorm(topic_id)
         if brainstorm is None:
             raise HTTPException(status_code=404, detail=f"Archived brainstorm {topic_id} not found")
@@ -1906,13 +1901,13 @@ async def request_paper_critique(paper_id: str, request: CritiqueRequest = None)
             raise HTTPException(status_code=404, detail=f"Paper content not found: {paper_id}")
 
         paper_path = paper_library.get_paper_path(paper_id)
-        base_path = os.path.dirname(paper_path)
+        base_dir = Path(paper_path).parent
 
         return await _generate_autonomous_paper_critique(
             paper_id=paper_id,
             paper_title=metadata.title,
             content=content,
-            base_path=base_path,
+            base_dir=base_dir,
             request=request,
         )
     except HTTPException:
@@ -1939,12 +1934,12 @@ async def get_paper_critiques(paper_id: str):
             raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
 
         paper_path = paper_library.get_paper_path(paper_id)
-        base_path = os.path.dirname(paper_path)
+        base_dir = Path(paper_path).parent
 
         return await _get_autonomous_paper_critiques_response(
             paper_id=paper_id,
             paper_title=metadata.title,
-            base_path=base_path,
+            base_dir=base_dir,
         )
     except HTTPException:
         raise
@@ -1980,11 +1975,9 @@ async def delete_paper_critiques(paper_id: str, confirm: bool = False):
         if not metadata:
             raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
         
-        # Get session-aware base path for critique storage
-        paper_path = paper_library.get_paper_path(paper_id)
-        base_path = os.path.dirname(paper_path)
+        base_dir = Path(paper_library.get_paper_path(paper_id)).parent
         
-        await clear_critiques("autonomous_paper", paper_id, base_path)
+        await clear_critiques("autonomous_paper", paper_id, base_dir)
         
         return {
             "success": True,
@@ -2031,7 +2024,7 @@ async def request_history_paper_critique(
             paper_id=paper_id,
             paper_title=metadata.title,
             content=content,
-            base_path=str(paths["papers_dir"]),
+            base_dir=paths["papers_dir"],
             request=request,
         )
     except HTTPException:
@@ -2056,7 +2049,7 @@ async def get_history_paper_critiques(session_id: str, paper_id: str):
         return await _get_autonomous_paper_critiques_response(
             paper_id=paper_id,
             paper_title=metadata.title,
-            base_path=str(paths["papers_dir"]),
+            base_dir=paths["papers_dir"],
         )
     except HTTPException:
         raise
@@ -2088,13 +2081,11 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
     Returns:
         The critique with ratings and feedback
     """
-    from backend.shared.config import system_config
     from backend.shared.critique_prompts import build_critique_prompt, DEFAULT_CRITIQUE_PROMPT
     from backend.shared.critique_memory import save_critique
     from backend.shared.models import PaperCritique, CritiqueRequest
     from backend.shared.api_client_manager import api_client_manager
     from backend.shared.utils import count_tokens
-    from pathlib import Path
     import uuid
     from datetime import datetime
     
@@ -2112,12 +2103,7 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         if not content:
             raise HTTPException(status_code=404, detail=f"Final answer content not found: {answer_id}")
         
-        # Determine session-aware base path for critique storage
-        # Final answers can be in legacy or session-based locations
-        if answer_id == "legacy":
-            base_path = str(Path(system_config.data_dir) / "auto_final_answer")
-        else:
-            base_path = str(Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer")
+        base_dir = _resolve_final_answer_dir(answer_id)
         
         # Try to get validator config from request body first (allows critiques without starting research)
         # Then fall back to autonomous coordinator's stored config
@@ -2246,7 +2232,7 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         )
         
         # Save the critique with session-aware path
-        saved_critique = await save_critique("final_answer", critique, answer_id, base_path)
+        saved_critique = await save_critique("final_answer", critique, answer_id, base_dir)
         
         return {
             "success": True,
@@ -2274,8 +2260,6 @@ async def get_final_answer_critiques(answer_id: str):
         List of critiques for the final answer
     """
     from backend.shared.critique_memory import get_critiques
-    from backend.shared.config import system_config
-    from pathlib import Path
     
     try:
         # Verify final answer exists
@@ -2285,14 +2269,10 @@ async def get_final_answer_critiques(answer_id: str):
         if not final_answer:
             raise HTTPException(status_code=404, detail=f"Final answer not found: {answer_id}")
         
-        # Determine session-aware base path for critique storage
-        if answer_id == "legacy":
-            base_path = str(Path(system_config.data_dir) / "auto_final_answer")
-        else:
-            base_path = str(Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer")
+        base_dir = _resolve_final_answer_dir(answer_id)
         
         title = final_answer.get("title", "Final Answer")
-        critiques = await get_critiques("final_answer", answer_id, base_path)
+        critiques = await get_critiques("final_answer", answer_id, base_dir)
         
         return {
             "success": True,
@@ -2322,8 +2302,6 @@ async def delete_final_answer_critiques(answer_id: str, confirm: bool = False):
         Success status
     """
     from backend.shared.critique_memory import clear_critiques
-    from backend.shared.config import system_config
-    from pathlib import Path
     
     try:
         if not confirm:
@@ -2339,13 +2317,9 @@ async def delete_final_answer_critiques(answer_id: str, confirm: bool = False):
         if not final_answer:
             raise HTTPException(status_code=404, detail=f"Final answer not found: {answer_id}")
         
-        # Determine session-aware base path for critique storage
-        if answer_id == "legacy":
-            base_path = str(Path(system_config.data_dir) / "auto_final_answer")
-        else:
-            base_path = str(Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer")
+        base_dir = _resolve_final_answer_dir(answer_id)
         
-        await clear_critiques("final_answer", answer_id, base_path)
+        await clear_critiques("final_answer", answer_id, base_dir)
         
         return {
             "success": True,
