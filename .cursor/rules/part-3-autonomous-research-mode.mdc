@@ -1326,10 +1326,10 @@ backend/data/auto_sessions/{session_id}/final_answer/    # Session final answers
 4. Memory modules handle path resolution automatically
 
 **Critique Storage Integration:**
-- Critiques are stored in `.critiques/` subdirectory within each paper's directory
-- `critique_memory.py` accepts `base_path` parameter for session-awareness
-- When paper is deleted, critiques are automatically cleaned up from correct location
-- Path is derived from `paper_library.get_paper_path(paper_id)` which returns session-aware paths
+- Critiques are stored as JSON files inside the resolved legacy/session `papers/` or `final_answer/` directory
+- `critique_memory.py` accepts `base_dir` for session-aware storage and revalidates it against trusted roots before file access
+- When a paper or final answer is deleted, critiques are automatically cleaned up from the matching resolved storage location
+- Callers derive the directory from session-aware memory/path helpers before invoking critique storage
 
 **Important for New Features:**
 - Always use memory module methods (e.g., `paper_library.get_paper_path()`) to get paths
