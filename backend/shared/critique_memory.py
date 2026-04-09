@@ -36,10 +36,7 @@ import uuid
 
 from backend.shared.config import system_config
 from backend.shared.models import PaperCritique
-from backend.shared.path_safety import (
-    resolve_path_within_root,
-    validate_single_path_component,
-)
+from backend.shared.path_safety import validate_single_path_component
 
 logger = logging.getLogger(__name__)
 
@@ -53,69 +50,6 @@ PaperType = Literal["autonomous_paper", "final_answer", "compiler_paper"]
 def _get_legacy_data_dir() -> Path:
     """Return the shared legacy data directory for critique storage."""
     return Path(__file__).resolve().parents[1] / "data"
-
-
-def _get_legacy_critiques_dir(paper_type: PaperType) -> Path:
-    """Return the trusted legacy directory for a critique storage type."""
-    data_dir = _get_legacy_data_dir()
-
-    if paper_type == "autonomous_paper":
-        return resolve_path_within_root(data_dir, "auto_papers")
-
-    if paper_type == "final_answer":
-        return resolve_path_within_root(data_dir, "auto_final_answer")
-
-    if paper_type == "compiler_paper":
-        return data_dir
-
-    raise ValueError(f"Unknown paper_type: {paper_type}")
-
-
-def _resolve_session_critiques_dir(base_dir: Path, paper_type: PaperType) -> Path:
-    """
-    Rebuild a session-aware critique directory from validated components.
-
-    This prevents callers from passing arbitrary absolute paths into critique
-    file operations. Only `<session_id>/papers` and `<session_id>/final_answer`
-    directories under the trusted sessions root are allowed.
-    """
-    sessions_root = Path(system_config.auto_sessions_base_dir)
-    candidate_dir = Path(base_dir)
-    expected_leaf = "papers" if paper_type == "autonomous_paper" else "final_answer"
-
-    try:
-        relative_dir = candidate_dir.resolve(strict=False).relative_to(
-            sessions_root.resolve(strict=False)
-        )
-    except ValueError as exc:
-        raise ValueError(f"Untrusted critique storage directory: {base_dir}") from exc
-
-    if len(relative_dir.parts) != 2 or relative_dir.parts[1] != expected_leaf:
-        raise ValueError(f"Untrusted critique storage directory: {base_dir}")
-
-    safe_session_id = validate_single_path_component(relative_dir.parts[0], "session ID")
-    return resolve_path_within_root(sessions_root, safe_session_id, expected_leaf)
-
-
-def _resolve_trusted_critiques_dir(
-    paper_type: PaperType,
-    base_dir: Optional[Path] = None,
-) -> Path:
-    """
-    Resolve critique storage to a trusted legacy or session-scoped directory.
-    """
-    if paper_type == "compiler_paper":
-        return _get_legacy_critiques_dir(paper_type)
-
-    legacy_dir = _get_legacy_critiques_dir(paper_type)
-    if base_dir is None:
-        return legacy_dir
-
-    candidate_dir = Path(base_dir)
-    if candidate_dir.resolve(strict=False) == legacy_dir.resolve(strict=False):
-        return legacy_dir
-
-    return _resolve_session_critiques_dir(candidate_dir, paper_type)
 
 
 def _get_critiques_file_path(
@@ -138,25 +72,37 @@ def _get_critiques_file_path(
     if paper_id:
         safe_paper_id = validate_single_path_component(paper_id, "paper ID")
 
+    if base_dir is not None:
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        if paper_type == "autonomous_paper":
+            if not safe_paper_id:
+                raise ValueError("paper_id is required for autonomous_paper type")
+            return base_dir / f"paper_{safe_paper_id}_critiques.json"
+
+        if paper_type == "final_answer":
+            return base_dir / "final_answer_critiques.json"
+
+        if paper_type != "compiler_paper":
+            raise ValueError(f"Unknown paper_type: {paper_type}")
+
+    data_dir = _get_legacy_data_dir()
+
     if paper_type == "autonomous_paper":
         if not safe_paper_id:
             raise ValueError("paper_id is required for autonomous_paper type")
-        critiques_dir = _resolve_trusted_critiques_dir(paper_type, base_dir)
-        critiques_dir.mkdir(parents=True, exist_ok=True)
-        return resolve_path_within_root(
-            critiques_dir,
-            f"paper_{safe_paper_id}_critiques.json",
-        )
+        papers_dir = data_dir / "auto_papers"
+        papers_dir.mkdir(parents=True, exist_ok=True)
+        return papers_dir / f"paper_{safe_paper_id}_critiques.json"
 
     if paper_type == "final_answer":
-        critiques_dir = _resolve_trusted_critiques_dir(paper_type, base_dir)
-        critiques_dir.mkdir(parents=True, exist_ok=True)
-        return resolve_path_within_root(critiques_dir, "final_answer_critiques.json")
+        final_answer_dir = data_dir / "auto_final_answer"
+        final_answer_dir.mkdir(parents=True, exist_ok=True)
+        return final_answer_dir / "final_answer_critiques.json"
 
     if paper_type == "compiler_paper":
-        critiques_dir = _resolve_trusted_critiques_dir(paper_type, base_dir)
-        critiques_dir.mkdir(parents=True, exist_ok=True)
-        return resolve_path_within_root(critiques_dir, "compiler_paper_critiques.json")
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "compiler_paper_critiques.json"
 
     raise ValueError(f"Unknown paper_type: {paper_type}")
 
