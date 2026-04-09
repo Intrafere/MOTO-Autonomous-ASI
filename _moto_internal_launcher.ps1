@@ -28,7 +28,7 @@ try {
     }
 
     # Check for Python
-    Write-Host "[1/6] Checking Python installation..." -ForegroundColor Yellow
+    Write-Host "[1/8] Checking Python installation..." -ForegroundColor Yellow
     if (-not (Test-Command python)) {
         Write-Host ""
         Write-Host "============================================================" -ForegroundColor Red
@@ -46,7 +46,7 @@ try {
     Write-Host ""
 
     # Check for Node.js
-    Write-Host "[2/6] Checking Node.js installation..." -ForegroundColor Yellow
+    Write-Host "[2/8] Checking Node.js installation..." -ForegroundColor Yellow
     if (-not (Test-Command node)) {
         Write-Host ""
         Write-Host "============================================================" -ForegroundColor Red
@@ -63,8 +63,8 @@ try {
     Write-Host "npm: $npmVersion" -ForegroundColor Green
     Write-Host ""
 
-    # Create necessary directories
-    Write-Host "[3/6] Creating necessary directories..." -ForegroundColor Yellow
+    # Create necessary directories & clean ChromaDB
+    Write-Host "[3/8] Creating necessary directories..." -ForegroundColor Yellow
     $directories = @(
         "backend\data",
         "backend\data\user_uploads",
@@ -77,35 +77,38 @@ try {
         }
     }
     Write-Host "Directories ready!" -ForegroundColor Green
-    Write-Host ""
-
-    # Check/Install Python dependencies
-    Write-Host "[4/6] Checking Python dependencies..." -ForegroundColor Yellow
-    $pipList = pip list 2>&1
-    if ($pipList -notmatch "fastapi") {
-        Write-Host "Installing Python dependencies..." -ForegroundColor Yellow
-        Write-Host "This may take a few minutes..." -ForegroundColor Yellow
-        Write-Host ""
-        pip install -r requirements.txt
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host ""
-            Write-Host "============================================================" -ForegroundColor Red
-            Write-Host "ERROR: Failed to install Python dependencies" -ForegroundColor Red
-            Write-Host "============================================================" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "Please check:" -ForegroundColor Yellow
-            Write-Host "- Internet connection is working" -ForegroundColor Yellow
-            Write-Host "- You have permission to install packages" -ForegroundColor Yellow
-            Exit-WithPause -ExitCode 1
-        }
-        Write-Host "Python dependencies installed successfully" -ForegroundColor Green
-    } else {
-        Write-Host "Python dependencies already installed" -ForegroundColor Green
+    
+    # Clean ChromaDB on startup to prevent corruption issues
+    $chromaPath = "backend\data\chroma_db"
+    if (Test-Path $chromaPath) {
+        Write-Host "Cleaning ChromaDB database..." -ForegroundColor Yellow
+        Remove-Item -Path $chromaPath -Recurse -Force
+        Write-Host "ChromaDB cleaned!" -ForegroundColor Green
     }
     Write-Host ""
 
+    # Install/Update Python dependencies
+    Write-Host "[4/8] Installing Python dependencies..." -ForegroundColor Yellow
+    Write-Host "Upgrading pip and checking packages..." -ForegroundColor Yellow
+    Write-Host ""
+    python -m pip install --upgrade pip 2>&1 | Out-Null
+    pip install --upgrade -r requirements.txt
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "============================================================" -ForegroundColor Red
+        Write-Host "ERROR: Failed to install Python dependencies" -ForegroundColor Red
+        Write-Host "============================================================" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Please check:" -ForegroundColor Yellow
+        Write-Host "- Internet connection is working" -ForegroundColor Yellow
+        Write-Host "- You have permission to install packages" -ForegroundColor Yellow
+        Exit-WithPause -ExitCode 1
+    }
+    Write-Host "Python dependencies up to date" -ForegroundColor Green
+    Write-Host ""
+
     # Install Playwright Chromium browser (one-time ~150MB download for PDF generation)
-    Write-Host "[4b/6] Installing Playwright Chromium browser for PDF generation..." -ForegroundColor Yellow
+    Write-Host "[4b/8] Installing Playwright Chromium browser for PDF generation..." -ForegroundColor Yellow
     Write-Host "This is a one-time download (~150MB) and may take a few minutes..." -ForegroundColor Yellow
     Write-Host ""
     python -m playwright install chromium 2>&1
@@ -121,7 +124,7 @@ try {
     Write-Host ""
 
     # Check/Install Node.js dependencies
-    Write-Host "[5/6] Checking Node.js dependencies..." -ForegroundColor Yellow
+    Write-Host "[5/8] Checking Node.js dependencies..." -ForegroundColor Yellow
     if (-not (Test-Path "frontend")) {
         Write-Host ""
         Write-Host "============================================================" -ForegroundColor Red
@@ -160,7 +163,7 @@ try {
     Write-Host ""
 
     # Check for LM Studio (optional - OpenRouter is an alternative)
-    Write-Host "[6/6] Checking LM Studio..." -ForegroundColor Yellow
+    Write-Host "[6/8] Checking LM Studio..." -ForegroundColor Yellow
     Write-Host ""
     
     # Check if LM Studio is responding
@@ -194,7 +197,7 @@ try {
     Write-Host ""
 
     # Clean up any existing processes on ports 8000 and 5173
-    Write-Host "[7/7] Cleaning up existing processes on ports 8000 and 5173..." -ForegroundColor Yellow
+    Write-Host "[7/8] Cleaning up existing processes on ports 8000 and 5173..." -ForegroundColor Yellow
     Write-Host ""
     
     # Kill processes on port 8000
@@ -247,6 +250,8 @@ try {
     Write-Host ""
 
     # Start the system
+    Write-Host "[8/8] Starting services..." -ForegroundColor Yellow
+    Write-Host ""
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host "  All checks passed! Starting system..." -ForegroundColor Cyan
     Write-Host "================================================================" -ForegroundColor Cyan

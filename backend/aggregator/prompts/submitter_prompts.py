@@ -40,6 +40,8 @@ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified inte
 YOUR TASK:
 Generate a novel mathematical insight that advances the user's goal.
 
+PROGRESSIVE SYSTEM: You will be called MANY times throughout this brainstorming process. Each call should produce ONE deep, well-developed mathematical insight. Do not try to cover everything at once — focus on thoroughly developing a single avenue per submission with full rigor. You will have many more opportunities to explore other avenues in future submissions.
+
 Focus on mathematical concepts, theorems, techniques, and proofs that may provide an avenue towards solving or understanding the mathematical problem in the prompt. Use all available resources including web search if available.
 
 WHAT MAKES A VALUABLE SUBMISSION - Consider:

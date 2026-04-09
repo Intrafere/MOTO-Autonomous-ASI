@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from typing import Dict, Any, Optional
 import logging
 
+from backend.shared.config import rag_config
 from backend.shared.models import BoostConfig
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
@@ -27,33 +28,49 @@ class BoostNextCountRequest(BaseModel):
     count: int
 
 
+def _resolve_boost_api_key(api_key: Optional[str]) -> str:
+    """Use the explicit boost key when provided, otherwise fall back to the active global key."""
+    explicit_key = (api_key or "").strip()
+    if explicit_key:
+        return explicit_key
+
+    global_key = (rag_config.openrouter_api_key or "").strip()
+    if global_key:
+        return global_key
+
+    raise HTTPException(
+        status_code=400,
+        detail="No OpenRouter API key available. Use the active global key or provide one in the boost modal."
+    )
+
+
 @router.post("/api/boost/enable")
 async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
     """
     Enable API boost with OpenRouter.
     
     Args:
-        config: Boost configuration with API key and model
+        config: Boost configuration with optional explicit API key and model
         
     Returns:
         Status and boost configuration
     """
     try:
-        # Validate API key by testing connection
-        if not config.openrouter_api_key:
-            raise HTTPException(status_code=400, detail="OpenRouter API key is required")
+        effective_api_key = _resolve_boost_api_key(config.openrouter_api_key)
         
-        # Test connection
-        client = OpenRouterClient(config.openrouter_api_key)
-        models = await client.list_models()
-        
-        if not models:
-            raise HTTPException(
-                status_code=400,
-                detail="Failed to connect to OpenRouter. Please check your API key."
-            )
-        
-        await client.close()
+        client = OpenRouterClient(effective_api_key)
+        try:
+            models = await client.list_models()
+            
+            if not models:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Failed to connect to OpenRouter. Please check your API key."
+                )
+        finally:
+            await client.close()
+
+        config.openrouter_api_key = effective_api_key
         
         # Enable boost
         await boost_manager.set_boost_config(config)
@@ -89,7 +106,7 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
     - boosted_task_ids
     
     Args:
-        config: New boost configuration with API key and model
+        config: New boost configuration with optional explicit API key and model
         
     Returns:
         Status and updated configuration
@@ -102,21 +119,21 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
                 detail="Boost must be enabled first. Use /api/boost/enable to enable boost."
             )
         
-        # Validate API key by testing connection
-        if not config.openrouter_api_key:
-            raise HTTPException(status_code=400, detail="OpenRouter API key is required")
+        effective_api_key = _resolve_boost_api_key(config.openrouter_api_key)
         
-        # Test connection with new model
-        client = OpenRouterClient(config.openrouter_api_key)
-        models = await client.list_models()
-        
-        if not models:
-            raise HTTPException(
-                status_code=400,
-                detail="Failed to connect to OpenRouter. Please check your API key."
-            )
-        
-        await client.close()
+        client = OpenRouterClient(effective_api_key)
+        try:
+            models = await client.list_models()
+            
+            if not models:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Failed to connect to OpenRouter. Please check your API key."
+                )
+        finally:
+            await client.close()
+
+        config.openrouter_api_key = effective_api_key
         
         # Store current boost state before update
         old_boost_next_count = boost_manager.boost_next_count
@@ -227,26 +244,26 @@ async def get_openrouter_models(authorization: Optional[str] = Header(None)) -> 
     Fetch available OpenRouter models.
     
     Args:
-        authorization: OpenRouter API key via Authorization header (Bearer token)
+        authorization: Optional OpenRouter API key via Authorization header (Bearer token)
         
     Returns:
         List of available models
     """
     try:
-        # Extract API key from Authorization header
         api_key = authorization.replace("Bearer ", "") if authorization and authorization.startswith("Bearer ") else authorization
-        
-        if not api_key:
-            raise HTTPException(status_code=400, detail="API key is required in Authorization header")
-        
-        client = OpenRouterClient(api_key)
-        models = await client.list_models()
-        await client.close()
+
+        client = OpenRouterClient(_resolve_boost_api_key(api_key))
+        try:
+            models = await client.list_models()
+        finally:
+            await client.close()
         
         return {
             "success": True,
             "models": models
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to fetch OpenRouter models: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch models: {str(e)}")
@@ -259,23 +276,22 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
     
     Args:
         model_id: The model ID to get providers for (query parameter)
-        authorization: OpenRouter API key via Authorization header (Bearer token)
+        authorization: Optional OpenRouter API key via Authorization header (Bearer token)
         
     Returns:
         List of available providers for the model
     """
     try:
-        # Extract API key from Authorization header
         api_key = authorization.replace("Bearer ", "") if authorization and authorization.startswith("Bearer ") else authorization
         
-        if not api_key:
-            raise HTTPException(status_code=400, detail="API key is required in Authorization header")
         if not model_id:
             raise HTTPException(status_code=400, detail="Model ID is required")
         
-        client = OpenRouterClient(api_key)
-        providers = await client.get_model_providers(model_id)
-        await client.close()
+        client = OpenRouterClient(_resolve_boost_api_key(api_key))
+        try:
+            providers = await client.get_model_providers(model_id)
+        finally:
+            await client.close()
         
         return {
             "success": True,

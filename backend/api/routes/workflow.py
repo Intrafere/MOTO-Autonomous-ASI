@@ -101,3 +101,10 @@ async def get_workflow_history(limit: int = 50) -> Dict[str, Any]:
         logger.error(f"Failed to get workflow history: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
 
+
+@router.get("/api/token-stats")
+async def get_token_stats() -> Dict[str, Any]:
+    """Return cumulative token usage stats and elapsed research time."""
+    from backend.shared.token_tracker import token_tracker
+    return {"success": True, **token_tracker.get_stats()}
+

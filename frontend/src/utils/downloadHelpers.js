@@ -8,15 +8,19 @@
  */
 import { renderLatexToHtml, DOMPURIFY_CONFIG } from '../components/LatexRenderer';
 import DOMPurify from 'dompurify';
+import { prependDisclaimer } from './disclaimerHelper';
 
 /**
  * Download raw text content as a .txt file.
  * @param {string} content - The text content
  * @param {string} filename - The filename (without extension)
  * @param {string|null} outline - Optional outline to prepend
+ * @param {'paper'|'brainstorm'|null} disclaimerType - Prepend disclaimer if set
  */
-export const downloadRawText = (content, filename, outline = null) => {
+export const downloadRawText = (content, filename, outline = null, disclaimerType = null) => {
   let fullContent = '';
+
+  const body = disclaimerType ? prependDisclaimer(content, disclaimerType) : content;
 
   if (outline) {
     fullContent += 'OUTLINE\n';
@@ -25,7 +29,7 @@ export const downloadRawText = (content, filename, outline = null) => {
     fullContent += '='.repeat(80) + '\n\n';
   }
 
-  fullContent += content;
+  fullContent += body;
 
   const blob = new Blob([fullContent], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
@@ -52,6 +56,7 @@ export const downloadRawText = (content, filename, outline = null) => {
  * @param {Function|null} onStart    - Called immediately when request starts
  * @param {Function|null} onComplete - Called when PDF download begins
  * @param {Function|null} onError    - Called with Error on failure
+ * @param {'paper'|'brainstorm'|null} disclaimerType - Prepend disclaimer if set
  */
 export const downloadPDFViaBackend = async (
   rawContent,
@@ -61,12 +66,15 @@ export const downloadPDFViaBackend = async (
   onStart = null,
   onComplete = null,
   onError = null,
+  disclaimerType = null,
 ) => {
   onStart?.();
 
   try {
+    const body = disclaimerType ? prependDisclaimer(rawContent, disclaimerType) : rawContent;
+
     // Render LaTeX → HTML using the same pipeline as the screen renderer
-    const rawHtml = renderLatexToHtml(rawContent);
+    const rawHtml = renderLatexToHtml(body);
     const sanitizedHtml = DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
 
     const response = await fetch('/api/download/pdf', {

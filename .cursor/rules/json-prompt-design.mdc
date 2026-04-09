@@ -1,5 +1,5 @@
 ---
-alwaysApply: true
+alwaysApply: false
 ---
 # Enhance AI Role Prompts with Complete Context Assembly
 
@@ -217,12 +217,14 @@ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified inte
 - `backend/compiler/prompts/outline_prompts.py`
 - `backend/compiler/prompts/review_prompts.py`
 - `backend/compiler/prompts/rigor_prompts.py`
+- `backend/compiler/prompts/critique_prompts.py`
 - `backend/compiler/validation/compiler_validator.py`
 - `backend/autonomous/prompts/topic_prompts.py`
 - `backend/autonomous/prompts/completion_prompts.py`
 - `backend/autonomous/prompts/paper_reference_prompts.py`
 - `backend/autonomous/prompts/paper_title_prompts.py`
 - `backend/autonomous/prompts/paper_redundancy_prompts.py`
+- `backend/autonomous/prompts/paper_continuation_prompts.py`
 - `backend/autonomous/prompts/final_answer_prompts.py`
 
 **Note:** The prompt structure examples in the sections below show the core task-specific content. The INTERNAL CONTENT WARNING block is ALWAYS inserted between the role description and the "YOUR TASK:" section in the actual code.
@@ -1347,6 +1349,28 @@ The coordinator tracks the current phase via `autonomous_section_phase`:
 **Autonomous Mode Phase Synchronization:**
 When the compiler runs in autonomous mode (Part 3), the autonomous coordinator polls `autonomous_section_phase` every 3 seconds and syncs it to the workflow state (`paper_phase` field). This ensures accurate crash recovery and prevents the bug where workflow state showed "outline" even though the compiler had progressed through body/conclusion/introduction phases.
 
+### Retroactive Brainstorm Operation (Optional, Autonomous Mode Only)
+
+During autonomous paper compilation, the construction JSON includes an optional `brainstorm_operation` field:
+
+```json
+{
+  ... (standard construction fields) ...,
+  "brainstorm_operation": {
+    "action": "edit | delete | add",
+    "submission_number": 5,
+    "new_content": "corrected or new content (empty for delete)",
+    "reasoning": "Independent justification"
+  }
+}
+```
+
+**Validation**: Brainstorm operations are validated by the compiler validator with brainstorm-only context. The validator never sees the paper operation when validating a brainstorm operation.
+
+**Independent Validity Principle**: Each operation must be justified on its own merits. Paper content must not depend on a brainstorm correction. Brainstorm corrections must not depend on paper content.
+
+**Models**: `BrainstormRetroactiveOperation` in `models.py`. Parsed in `high_context_submitter.py`. Handled in `compiler_coordinator._handle_brainstorm_retroactive_operation()`. Validated in `compiler_validator.validate_brainstorm_operation()`.
+
 ---
 
 ## 5. COMPILER-Submitter OUTLINE CREATION (PHASE 1: ITERATIVE REFINEMENT)
@@ -2064,7 +2088,7 @@ The rigor submitter uses a **2-step planning-then-execution process**:
 - Submitters provide exact text (`old_string`) to identify edit locations
 - The `old_string` is pre-validated to exist verbatim (exactly) in the document
 - The `old_string` is pre-validated to be unique (appear only once)
-- If exact match fails, system tries in order: Unicode normalization → whitespace normalization → backslash normalization (collapses `\\\\cmd` → `\\cmd`, handles over-escaping) → consecutive fuzzy matching (conservative last resort)
+- If exact match fails, system tries in order: Unicode normalization → whitespace normalization (multi-spaces) → all-whitespace normalization (collapses newlines/spaces/tabs to single space) → backslash normalization (collapses `\\\\cmd` → `\\cmd`, handles over-escaping) → consecutive fuzzy matching (conservative last resort)
 - If match fails or is ambiguous after all attempts, pre-validation rejects immediately with clear feedback (before LLM validation)
 - LLM validation then focuses on placement context and semantic appropriateness
 - Industry-standard approach used by Cursor, Claude Code, and similar tools
@@ -2094,7 +2118,7 @@ All compiler modes (construction, review, rigor, outline_update) use this schema
 
 
 ### Validation Rules
-- **REJECT** if `old_string` is not found after trying: exact match → Unicode normalization → whitespace normalization → backslash normalization → consecutive fuzzy matching
+- **REJECT** if `old_string` is not found after trying: exact match → Unicode normalization → whitespace normalization → all-whitespace normalization → backslash normalization → consecutive fuzzy matching
 - **REJECT** if `old_string` matches multiple locations (not unique)
 - **REJECT** if `operation` doesn't match the intent (e.g., using "replace" for new content)
 - Validator confirms content flows naturally at the edit location
@@ -2196,6 +2220,18 @@ LaTeX notation IS ALLOWED and EXPECTED - you must escape it properly in JSON:
 **File:** `backend/autonomous/prompts/`
 
 Part 3 introduces autonomous topic selection, brainstorm-to-paper workflows, and paper library management. All JSON schemas follow the same escape rules as Part 1 and Part 2.
+
+---
+
+### 0. TOPIC EXPLORATION (Pre-Selection Candidate Brainstorm)
+
+**File:** `backend/autonomous/prompts/topic_exploration_prompts.py`
+
+**Purpose:** Before topic selection, collect 5 validated candidate brainstorm questions using the full Part 1 aggregator infrastructure (parallel submitters, batch validation up to 3). Uses `build_exploration_user_prompt()` to frame the standard aggregator as a candidate question generator.
+
+**Architecture:** Reuses `AggregatorCoordinator` — no custom JSON schemas. Standard aggregator submitter/validator prompts handle generation and validation. The exploration user prompt provides the framing context (research goal, existing brainstorms/papers, diversity requirement).
+
+**Standard Aggregator JSON Schemas Apply** (from Part 1 submitter/validator prompts).
 
 ---
 
@@ -2499,6 +2535,32 @@ No Removal:
 
 ### PART 3 PROMPT ASSEMBLY PATTERNS
 
+### 9. BRAINSTORM CONTINUATION DECISION
+
+**File:** `backend/autonomous/prompts/paper_continuation_prompts.py`
+
+**Function:** `get_continuation_decision_json_schema()`
+
+```
+REQUIRED JSON FORMAT:
+{
+  "decision": "write_another_paper | move_on",
+  "reasoning": "string - Detailed explanation of assessment"
+}
+
+FIELD REQUIREMENTS:
+- decision: MUST be either "write_another_paper" or "move_on"
+- reasoning: ALWAYS required
+```
+
+**Context**: User prompt + brainstorm topic + brainstorm DB + prior papers from this brainstorm (title/abstract/outline) + paper count ("N of 3 maximum"). Does NOT include cross-topic reference papers.
+
+**Validation**: Topic validator validates with `build_continuation_validation_prompt()` via `override_prompt` parameter.
+
+---
+
+### PART 3 PROMPT ASSEMBLY PATTERNS (continued)
+
 All Part 3 prompts follow similar assembly patterns to Part 1 and Part 2:
 
 ```python
@@ -2517,7 +2579,12 @@ All Part 3 prompts follow similar assembly patterns to Part 1 and Part 2:
 
 **Context Variations by Role:**
 
+**Topic Exploration (uses Part 1 Aggregator):**
+- Aggregator user prompt = `build_exploration_user_prompt()` containing research goal, existing brainstorms, completed papers, diversity framing
+- Standard aggregator submitter/validator prompts + context handling (shared training DB, rejection logs, RAG cycling)
+
 **Topic Selection Submitter:**
+- **5 validated candidate brainstorm questions** from topic exploration (direct injection)
 - All brainstorm topics with metadata
 - All completed papers with title + abstract + word count
 - Topic selection rejection history (last 5)

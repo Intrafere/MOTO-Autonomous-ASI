@@ -91,16 +91,20 @@ class RAGManager:
             for chunk_size, chunks in chunks_by_size.items():
                 await self._add_chunks(chunks, chunk_size)
             
-            # Track document
+            # Track document (only increment count for genuinely new sources)
             source_name = Path(file_path).name
-            self.document_count += 1
-            self.document_access_order[source_name] = time.time()  # LRU tracking
+            if source_name not in self.document_access_order:
+                self.document_count += 1
+            self.document_access_order[source_name] = time.time()
             if is_user_file:
                 self.permanent_documents.add(source_name)
             
             # Check if need to evict
             if self.document_count > rag_config.max_documents:
                 await self._evict_lru_document()
+            
+            # Enforce per-size chunk cap
+            await self._enforce_chunk_cap()
             
             logger.info(f"Added document: {file_path}")
             
@@ -137,15 +141,19 @@ class RAGManager:
             for chunk_size, chunks in chunks_by_size.items():
                 await self._add_chunks(chunks, chunk_size)
             
-            # Track document
-            self.document_count += 1
-            self.document_access_order[source_name] = time.time()  # LRU tracking
+            # Track document (only increment count for genuinely new sources)
+            if source_name not in self.document_access_order:
+                self.document_count += 1
+            self.document_access_order[source_name] = time.time()
             if is_permanent:
                 self.permanent_documents.add(source_name)
             
             # Check if need to evict
             if self.document_count > rag_config.max_documents:
                 await self._evict_lru_document()
+            
+            # Enforce per-size chunk cap
+            await self._enforce_chunk_cap()
             
             logger.info(f"Added text: {source_name}")
             
@@ -157,7 +165,8 @@ class RAGManager:
         self,
         query: str,
         chunk_size: int = 512,
-        max_tokens: int = None
+        max_tokens: int = None,
+        exclude_sources: Optional[List[str]] = None
     ) -> ContextPack:
         """
         4-stage retrieval pipeline.
@@ -166,6 +175,7 @@ class RAGManager:
             query: Search query
             chunk_size: Chunk size to retrieve from
             max_tokens: Maximum tokens in result
+            exclude_sources: Source names to skip during packing (already direct-injected)
         
         Returns:
             ContextPack with retrieved context
@@ -189,7 +199,9 @@ class RAGManager:
         
         # Stage D: Packing + Compression
         logger.debug(f"RAG Stage 4/4: Packing and compression (max_tokens={max_tokens})")
-        context_pack = await self._pack_and_compress(ranked_chunks, query, max_tokens)
+        if exclude_sources:
+            logger.info(f"RAG Stage 4/4: Excluding sources already direct-injected: {exclude_sources}")
+        context_pack = await self._pack_and_compress(ranked_chunks, query, max_tokens, exclude_sources)
         logger.debug(f"RAG Stage 4/4 complete: Packed {len(context_pack.evidence)} evidence items, coverage={context_pack.coverage:.2f}")
         
         return context_pack
@@ -309,11 +321,9 @@ class RAGManager:
         if not chunks:
             return []
         
+        query_embeddings = await api_client_manager.get_embeddings(queries)
         all_results = []
-        for query in queries:
-            # Get query embedding
-            query_embedding = await api_client_manager.get_embeddings([query])
-            
+        for query_embedding in query_embeddings:
             # Search with retry logic for transient HNSW errors during concurrent writes
             max_retries = 3
             retry_delay = 0.5  # Start with 500ms delay
@@ -322,7 +332,7 @@ class RAGManager:
             for attempt in range(max_retries):
                 try:
                     results = collection.query(
-                        query_embeddings=query_embedding,
+                        query_embeddings=[query_embedding],
                         n_results=min(rag_config.hybrid_recall_top_k, len(chunks))
                     )
                     break  # Success - exit retry loop
@@ -480,13 +490,16 @@ class RAGManager:
         self,
         chunks: List[DocumentChunk],
         query: str,
-        max_tokens: int
+        max_tokens: int,
+        exclude_sources: Optional[List[str]] = None
     ) -> ContextPack:
         """
         Stage D: Pack chunks into ContextPack with strict token limit enforcement.
         
         CRITICAL: This function MUST NOT exceed max_tokens. We pack chunks incrementally
         until we hit the limit, then stop. Compression is NOT used because it's unreliable.
+        
+        Chunks from exclude_sources are skipped (already direct-injected in the prompt).
         """
         if not chunks:
             return ContextPack(
@@ -498,38 +511,52 @@ class RAGManager:
                 needs_more_context=True
             )
         
+        exclude_set = set(exclude_sources) if exclude_sources else set()
+        skipped_count = 0
+        
         # Assemble evidence INCREMENTALLY until we hit max_tokens
         evidence = []
         source_map = {}
         assembled_text = []
         current_tokens = 0
+        evidence_idx = 0
         
-        for idx, chunk in enumerate(chunks, start=1):
+        for chunk in chunks:
+            # Skip chunks from excluded sources (already direct-injected)
+            if chunk.source_file in exclude_set:
+                skipped_count += 1
+                continue
+            
+            evidence_idx += 1
+            
             # Format this chunk's evidence entry
-            chunk_entry = f"[Evidence {idx} from {chunk.source_file}]\n{chunk.text}\n"
+            chunk_entry = f"[Evidence {evidence_idx} from {chunk.source_file}]\n{chunk.text}\n"
             chunk_tokens = count_tokens(chunk_entry)
             
             # Check if adding this chunk would exceed limit
             if current_tokens + chunk_tokens > max_tokens:
                 # Stop here - we've hit the limit
-                logger.debug(f"RAG packing stopped at {idx-1}/{len(chunks)} chunks ({current_tokens} tokens, limit={max_tokens})")
+                logger.debug(f"RAG packing stopped at {evidence_idx-1} packed chunks ({current_tokens} tokens, limit={max_tokens})")
                 break
             
             # Add this chunk
             evidence_entry = {
-                "id": idx,
+                "id": evidence_idx,
                 "source": chunk.source_file,
                 "text": chunk.text,
                 "position": chunk.position
             }
             evidence.append(evidence_entry)
-            source_map[f"E{idx}"] = chunk.source_file
+            source_map[f"E{evidence_idx}"] = chunk.source_file
             assembled_text.append(chunk_entry)
             current_tokens += chunk_tokens
             
             # Update LRU access time for this document
             if chunk.source_file in self.document_access_order:
                 self.document_access_order[chunk.source_file] = time.time()
+        
+        if skipped_count > 0:
+            logger.info(f"RAG packing: Skipped {skipped_count} chunks from excluded sources (already direct-injected)")
         
         full_text = "\n".join(assembled_text)
         token_count = current_tokens  # We already counted during packing
@@ -556,6 +583,38 @@ class RAGManager:
             needs_more_context=coverage < rag_config.coverage_threshold
         )
     
+    async def _enforce_chunk_cap(self) -> None:
+        """Trim oldest non-permanent chunks when any size bucket exceeds max_chunks_per_size."""
+        cap = rag_config.max_chunks_per_size
+        for chunk_size in rag_config.submitter_chunk_intervals:
+            chunks = self.chunks_by_size[chunk_size]
+            if len(chunks) <= cap:
+                continue
+
+            overflow = len(chunks) - cap
+            evict_ids = []
+            keep = []
+            removed = 0
+
+            for chunk in chunks:
+                if removed < overflow and not chunk.is_permanent:
+                    evict_ids.append(chunk.chunk_id)
+                    chunk.embedding = None
+                    removed += 1
+                else:
+                    keep.append(chunk)
+
+            if evict_ids:
+                collection = self.collections[chunk_size]
+                try:
+                    collection.delete(ids=evict_ids)
+                except Exception as e:
+                    logger.error(f"ChromaDB delete during chunk cap enforcement (size={chunk_size}): {e}")
+
+                self.chunks_by_size[chunk_size] = keep
+                self.bm25_index[chunk_size] = None
+                logger.info(f"Chunk cap enforced for size={chunk_size}: removed {len(evict_ids)} oldest non-permanent chunks ({len(keep)} remaining)")
+
     async def _evict_lru_document(self) -> None:
         """Evict least recently used document (except permanent ones)."""
         # Find oldest non-permanent document
@@ -585,6 +644,8 @@ class RAGManager:
     
     async def remove_document(self, source_name: str) -> None:
         """Remove a document from all collections."""
+        was_tracked = source_name in self.document_access_order
+        
         for chunk_size in rag_config.submitter_chunk_intervals:
             # Remove from memory
             self.chunks_by_size[chunk_size] = [
@@ -602,7 +663,8 @@ class RAGManager:
             # Invalidate BM25
             self.bm25_index[chunk_size] = None
         
-        self.document_count -= 1
+        if was_tracked:
+            self.document_count = max(0, self.document_count - 1)
         
         # Clean up LRU tracking
         if source_name in self.document_access_order:
@@ -664,6 +726,7 @@ class RAGManager:
             # Reset counters
             self.document_count = 0
             self.permanent_documents.clear()
+            self.document_access_order.clear()
             
             if collection_errors:
                 logger.warning(f"RAG cleared with {len(collection_errors)} non-critical warnings: {'; '.join(collection_errors)}")

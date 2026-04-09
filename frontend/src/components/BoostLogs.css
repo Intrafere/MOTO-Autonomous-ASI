@@ -13,7 +13,7 @@
 
 .boost-logs-header h2 {
   margin: 0;
-  color: #ffd700;
+  color: var(--gold, #1eff1c);
   font-size: 1.5rem;
 }
 
@@ -80,26 +80,26 @@
 }
 
 .stat-card {
-  background: #2a2a2a;
-  border: 1px solid #444;
-  border-radius: 8px;
+  background: var(--surface-3, #22222c);
+  border: 1px solid var(--border-default, rgba(255,255,255,0.1));
+  border-radius: var(--radius-md, 10px);
   padding: 1rem;
   text-align: center;
 }
 
 .stat-card.success {
-  border-color: #4CAF50;
+  border-color: rgba(76, 175, 80, 0.35);
 }
 
 .stat-card.error {
-  border-color: #dc3545;
+  border-color: rgba(220, 53, 69, 0.35);
 }
 
 .stat-value {
   display: block;
   font-size: 1.75rem;
   font-weight: 700;
-  color: #ffd700;
+  color: var(--gold, #1eff1c);
   margin-bottom: 0.25rem;
 }
 
@@ -142,8 +142,8 @@
 
 /* Logs List */
 .boost-logs-list {
-  border: 1px solid #333;
-  border-radius: 8px;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.07));
+  border-radius: var(--radius-md, 10px);
   overflow: hidden;
 }
 
@@ -163,20 +163,20 @@
   font-style: italic;
 }
 
-.log-entry {
-  border-bottom: 1px solid #333;
-  background: #1a1a1a;
+.boost-log-entry {
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.07));
+  background: var(--surface-2, #1a1a22);
 }
 
-.log-entry:last-child {
+.boost-log-entry:last-child {
   border-bottom: none;
 }
 
-.log-entry.success {
-  border-left: 3px solid #4CAF50;
+.boost-log-entry.success {
+  border-left: 3px solid var(--accent-green, #4CAF50);
 }
 
-.log-entry.error {
+.boost-log-entry.error {
   border-left: 3px solid #dc3545;
 }
 
@@ -191,7 +191,7 @@
 }
 
 .log-summary:hover {
-  background: #242424;
+  background: var(--surface-3, #22222c);
 }
 
 .log-status {
@@ -204,11 +204,11 @@
   font-weight: 700;
 }
 
-.log-entry.success .log-status {
+.boost-log-entry.success .log-status {
   color: #4CAF50;
 }
 
-.log-entry.error .log-status {
+.boost-log-entry.error .log-status {
   color: #dc3545;
 }
 
@@ -233,10 +233,10 @@
 }
 
 .log-mode-badge {
-  background: #ffd700;
+  background: var(--gold, #1eff1c);
   color: #000;
   padding: 0.15rem 0.4rem;
-  border-radius: 3px;
+  border-radius: var(--radius-sm, 6px);
   font-size: 0.7rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -270,8 +270,8 @@
 /* Log Details (Expanded) */
 .log-details {
   padding: 1rem;
-  background: #0f0f0f;
-  border-top: 1px solid #333;
+  background: var(--surface-0, #0b0b0f);
+  border-top: 1px solid var(--border-subtle, rgba(255,255,255,0.07));
 }
 
 .log-detail-section {

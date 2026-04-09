@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import './critique-modal.css';
 
 // Simple inline icon components
 const IconX = ({ className }) => (
@@ -39,54 +40,20 @@ const IconAlertCircle = ({ className }) => (
   </svg>
 );
 
-/**
- * Get color class based on rating value (1-10)
- */
 function getRatingColor(rating) {
-  if (rating >= 8) return 'text-emerald-400';
-  if (rating >= 6) return 'text-blue-400';
-  if (rating >= 4) return 'text-yellow-400';
-  if (rating >= 2) return 'text-orange-400';
-  return 'text-red-400';
+  if (rating >= 8) return 'critique-color--emerald';
+  if (rating >= 6) return 'critique-color--blue';
+  if (rating >= 4) return 'critique-color--yellow';
+  if (rating >= 2) return 'critique-color--orange';
+  return 'critique-color--red';
 }
 
 function getRatingBgColor(rating) {
-  if (rating >= 8) return 'bg-emerald-500';
-  if (rating >= 6) return 'bg-blue-500';
-  if (rating >= 4) return 'bg-yellow-500';
-  if (rating >= 2) return 'bg-orange-500';
-  return 'bg-red-500';
-}
-
-/**
- * Rating display component with progress bar
- */
-function RatingDisplay({ label, rating, feedback }) {
-  const percentage = (rating / 10) * 100;
-  
-  return (
-    <div className="bg-gray-800/50 rounded-lg p-4">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-medium text-gray-300">{label}</span>
-        <span className={`text-2xl font-bold ${getRatingColor(rating)}`}>
-          {rating > 0 ? rating : '—'}/10
-        </span>
-      </div>
-      
-      {/* Progress bar */}
-      <div className="h-2 bg-gray-700 rounded-full mb-3 overflow-hidden">
-        <div 
-          className={`h-full rounded-full transition-all duration-500 ${getRatingBgColor(rating)}`}
-          style={{ width: `${percentage}%` }}
-        />
-      </div>
-      
-      {/* Feedback text */}
-      {feedback && (
-        <p className="text-sm text-gray-400 leading-relaxed">{feedback}</p>
-      )}
-    </div>
-  );
+  if (rating >= 8) return 'critique-bg--emerald';
+  if (rating >= 6) return 'critique-bg--blue';
+  if (rating >= 4) return 'critique-bg--yellow';
+  if (rating >= 2) return 'critique-bg--orange';
+  return 'critique-bg--red';
 }
 
 /**
@@ -201,20 +168,6 @@ export default function PaperCritiqueModal({
   const modalContent = (
     <div 
       className="critique-modal-overlay"
-      style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.7)',
-        backdropFilter: 'blur(4px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 999999, // Very high z-index to ensure visibility
-        padding: '20px',
-      }}
       onClick={(e) => {
         // Close when clicking the backdrop
         if (e.target === e.currentTarget) {
@@ -223,144 +176,64 @@ export default function PaperCritiqueModal({
       }}
     >
       <div 
-        className="critique-modal-content"
-        style={{
-          backgroundColor: '#1a1a2e',
-          borderRadius: '12px',
-          width: '100%',
-          maxWidth: '1200px',
-          height: '85vh',
-          display: 'flex',
-          flexDirection: 'column',
-          boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(147, 51, 234, 0.3)',
-          border: '1px solid rgba(147, 51, 234, 0.4)',
-          overflow: 'hidden',
-        }}
+        className="critique-modal-panel"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header - Compact */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '12px 16px',
-          borderBottom: '1px solid rgba(75, 85, 99, 0.5)',
-          backgroundColor: 'rgba(147, 51, 234, 0.1)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div style={{
-              padding: '6px',
-              backgroundColor: 'rgba(147, 51, 234, 0.2)',
-              borderRadius: '8px',
-            }}>
-              <IconStar className="w-4 h-4 text-purple-400" />
+        <div className="critique-modal-header">
+          <div className="critique-header-left">
+            <div className="critique-header-icon">
+              <IconStar className="critique-icon--green" />
             </div>
             <div>
-              <h2 style={{ 
-                fontSize: '14px', 
-                fontWeight: '600', 
-                color: '#f3f4f6',
-                margin: 0,
-              }}>Validator Critique</h2>
-              <p style={{ 
-                fontSize: '11px', 
-                color: '#9ca3af',
-                margin: 0,
-                maxWidth: '300px',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }} title={paperTitle}>
+              <h2 className="critique-modal-title">Validator Critique</h2>
+              <p className="critique-modal-subtitle" title={paperTitle}>
                 {paperTitle || 'Paper'}
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            style={{
-              color: '#9ca3af',
-              padding: '6px',
-              backgroundColor: 'transparent',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              transition: 'all 0.2s',
-            }}
-            onMouseEnter={(e) => {
-              e.target.style.backgroundColor = 'rgba(75, 85, 99, 0.5)';
-              e.target.style.color = '#f3f4f6';
-            }}
-            onMouseLeave={(e) => {
-              e.target.style.backgroundColor = 'transparent';
-              e.target.style.color = '#9ca3af';
-            }}
+            className="critique-close-btn"
           >
-            <IconX className="w-4 h-4" />
+            <IconX className="critique-icon--close" />
           </button>
         </div>
 
         {/* Content - Scrollable */}
-        <div style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '16px',
-          minHeight: '500px',
-        }}>
+        <div className="critique-modal-body">
           {loading ? (
-            <div style={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              justifyContent: 'center',
-              height: '150px',
-            }}>
-              <div style={{ textAlign: 'center' }}>
-                <div style={{
-                  width: '28px',
-                  height: '28px',
-                  border: '2px solid #a855f7',
-                  borderTopColor: 'transparent',
-                  borderRadius: '50%',
-                  margin: '0 auto 10px',
-                  animation: 'spin 1s linear infinite',
-                }}></div>
-                <p style={{ color: '#9ca3af', fontSize: '13px' }}>Loading critiques...</p>
+            <div className="critique-loading-wrapper">
+              <div className="critique-loading-inner">
+                <div className="critique-spinner"></div>
+                <p className="critique-loading-text">Loading critiques...</p>
               </div>
             </div>
           ) : error ? (
-            <div style={{
-              backgroundColor: 'rgba(127, 29, 29, 0.2)',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              borderRadius: '8px',
-              padding: '12px',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
-                <IconAlertCircle className="w-4 h-4 text-red-400" style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div className="critique-error-box">
+              <div className="critique-error-row">
+                <IconAlertCircle className="critique-icon--red" style={{ flexShrink: 0, marginTop: '2px' }} />
                 <div>
-                  <h4 style={{ color: '#f87171', fontWeight: '500', marginBottom: '4px', fontSize: '13px' }}>Error</h4>
-                  <p style={{ fontSize: '12px', color: 'rgba(252, 165, 165, 0.8)' }}>{error}</p>
+                  <h4 className="critique-error-title">Error</h4>
+                  <p className="critique-error-message">{error}</p>
                 </div>
               </div>
             </div>
           ) : selectedCritique ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', height: '100%' }}>
+            <div className="critique-content-layout">
               {/* Critic Identity - Compact */}
-              <div style={{
-                background: 'linear-gradient(to right, rgba(88, 28, 135, 0.3), rgba(30, 58, 138, 0.3))',
-                borderRadius: '8px',
-                padding: '10px 12px',
-                border: '1px solid rgba(147, 51, 234, 0.2)',
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div className="critique-identity-card">
+                <div className="critique-identity-row">
                   <div>
-                    <p style={{ fontSize: '10px', color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '2px' }}>Critique by</p>
-                    <p style={{ fontSize: '14px', fontWeight: '600', color: '#f3f4f6' }}>{selectedCritique.model_id}</p>
+                    <p className="critique-identity-label">Critique by</p>
+                    <p className="critique-model-name">{selectedCritique.model_id}</p>
                     {selectedCritique.host_provider && (
-                      <p style={{ fontSize: '11px', color: '#c4b5fd' }}>via {selectedCritique.host_provider}</p>
+                      <p className="critique-host-provider">via {selectedCritique.host_provider}</p>
                     )}
                   </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#9ca3af', fontSize: '11px' }}>
-                      <IconClock className="w-3 h-3" />
+                  <div className="critique-date-area">
+                    <div className="critique-date-row">
+                      <IconClock className="critique-icon--sm" />
                       {formatDate(selectedCritique.date)}
                     </div>
                   </div>
@@ -368,7 +241,7 @@ export default function PaperCritiqueModal({
               </div>
 
               {/* Ratings - Compact Grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+              <div className="critique-ratings-grid">
                 <CompactRating label="Novelty" rating={selectedCritique.novelty_rating} feedback={selectedCritique.novelty_feedback} />
                 <CompactRating label="Correctness" rating={selectedCritique.correctness_rating} feedback={selectedCritique.correctness_feedback} />
                 <CompactRating label="Impact" rating={selectedCritique.impact_rating} feedback={selectedCritique.impact_feedback} />
@@ -376,24 +249,9 @@ export default function PaperCritiqueModal({
 
               {/* Full Critique - Expanded to fill space */}
               {selectedCritique.full_critique && (
-                <div style={{
-                  backgroundColor: 'rgba(31, 41, 55, 0.5)',
-                  borderRadius: '8px',
-                  padding: '10px 12px',
-                  flex: 1,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  minHeight: '200px',
-                }}>
-                  <h3 style={{ fontSize: '11px', fontWeight: '500', color: '#d1d5db', marginBottom: '8px' }}>Full Critique</h3>
-                  <p style={{ 
-                    color: '#d1d5db', 
-                    lineHeight: '1.5', 
-                    whiteSpace: 'pre-wrap',
-                    fontSize: '12px',
-                    flex: 1,
-                    overflowY: 'auto',
-                  }}>
+                <div className="critique-full-box">
+                  <h3 className="critique-section-label">Full Critique</h3>
+                  <p className="critique-full-text">
                     {selectedCritique.full_critique}
                   </p>
                 </div>
@@ -401,45 +259,21 @@ export default function PaperCritiqueModal({
 
               {/* History - Compact */}
               {critiques.length > 1 && (
-                <div style={{
-                  border: '1px solid rgba(75, 85, 99, 0.5)',
-                  borderRadius: '8px',
-                  overflow: 'hidden',
-                }}>
+                <div className="critique-history-container">
                   <button
                     onClick={() => setHistoryOpen(!historyOpen)}
-                    style={{
-                      width: '100%',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '8px 12px',
-                      backgroundColor: 'rgba(31, 41, 55, 0.3)',
-                      border: 'none',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s',
-                    }}
-                    onMouseEnter={(e) => e.target.style.backgroundColor = 'rgba(31, 41, 55, 0.5)'}
-                    onMouseLeave={(e) => e.target.style.backgroundColor = 'rgba(31, 41, 55, 0.3)'}
+                    className="critique-history-toggle"
                   >
-                    <span style={{ fontSize: '12px', fontWeight: '500', color: '#d1d5db' }}>
+                    <span className="critique-history-label">
                       History ({critiques.length})
                     </span>
                     <IconChevronDown 
-                      className="w-3 h-3 text-gray-400"
-                      style={{ 
-                        transition: 'transform 0.2s',
-                        transform: historyOpen ? 'rotate(180deg)' : 'rotate(0deg)',
-                      }}
+                      className={`critique-icon--sm critique-icon--muted critique-history-chevron ${historyOpen ? 'critique-history-chevron--open' : ''}`}
                     />
                   </button>
                   
                   {historyOpen && (
-                    <div style={{ 
-                      borderTop: '1px solid rgba(75, 85, 99, 0.5)',
-                      maxHeight: '120px',
-                      overflowY: 'auto',
-                    }}>
+                    <div className="critique-history-list">
                       {critiques.map((critique, idx) => (
                         <button
                           key={critique.critique_id || idx}
@@ -447,32 +281,13 @@ export default function PaperCritiqueModal({
                             setSelectedCritique(critique);
                             setHistoryOpen(false);
                           }}
-                          style={{
-                            width: '100%',
-                            textAlign: 'left',
-                            padding: '8px 12px',
-                            backgroundColor: selectedCritique?.critique_id === critique.critique_id ? 'rgba(88, 28, 135, 0.2)' : 'transparent',
-                            border: 'none',
-                            borderBottom: idx < critiques.length - 1 ? '1px solid rgba(75, 85, 99, 0.3)' : 'none',
-                            cursor: 'pointer',
-                            transition: 'background-color 0.2s',
-                          }}
-                          onMouseEnter={(e) => {
-                            if (selectedCritique?.critique_id !== critique.critique_id) {
-                              e.target.style.backgroundColor = 'rgba(31, 41, 55, 0.5)';
-                            }
-                          }}
-                          onMouseLeave={(e) => {
-                            if (selectedCritique?.critique_id !== critique.critique_id) {
-                              e.target.style.backgroundColor = 'transparent';
-                            }
-                          }}
+                          className={`critique-history-item ${selectedCritique?.critique_id === critique.critique_id ? 'critique-history-item--selected' : ''}`}
                         >
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                            <span style={{ fontSize: '11px', color: '#d1d5db' }}>{critique.model_id}</span>
-                            <span style={{ fontSize: '10px', color: '#6b7280' }}>{formatDate(critique.date)}</span>
+                          <div className="critique-history-item-row">
+                            <span className="critique-history-model">{critique.model_id}</span>
+                            <span className="critique-history-date">{formatDate(critique.date)}</span>
                           </div>
-                          <div style={{ display: 'flex', gap: '8px', marginTop: '2px', fontSize: '10px' }}>
+                          <div className="critique-history-ratings">
                             <span className={getRatingColor(critique.novelty_rating)}>N: {critique.novelty_rating}</span>
                             <span className={getRatingColor(critique.correctness_rating)}>C: {critique.correctness_rating}</span>
                             <span className={getRatingColor(critique.impact_rating)}>I: {critique.impact_rating}</span>
@@ -485,24 +300,12 @@ export default function PaperCritiqueModal({
               )}
             </div>
           ) : (
-            <div style={{ 
-              display: 'flex', 
-              flexDirection: 'column', 
-              alignItems: 'center', 
-              justifyContent: 'center',
-              height: '150px',
-              textAlign: 'center',
-            }}>
-              <div style={{
-                padding: '12px',
-                backgroundColor: 'rgba(31, 41, 55, 0.5)',
-                borderRadius: '50%',
-                marginBottom: '12px',
-              }}>
-                <IconStar className="w-8 h-8 text-gray-600" />
+            <div className="critique-empty-state">
+              <div className="critique-empty-icon">
+                <IconStar className="critique-icon--lg critique-icon--muted" />
               </div>
-              <h3 style={{ fontSize: '14px', fontWeight: '500', color: '#d1d5db', marginBottom: '6px' }}>No Critique Yet</h3>
-              <p style={{ fontSize: '11px', color: '#6b7280', maxWidth: '280px' }}>
+              <h3 className="critique-empty-title">No Critique Yet</h3>
+              <p className="critique-empty-desc">
                 Click "Generate Critique" to have your validator model provide an honest assessment of this paper.
               </p>
             </div>
@@ -510,80 +313,30 @@ export default function PaperCritiqueModal({
         </div>
 
         {/* Footer - Compact */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '10px 16px',
-          borderTop: '1px solid rgba(75, 85, 99, 0.5)',
-          backgroundColor: 'rgba(31, 41, 55, 0.3)',
-        }}>
-          <p style={{ fontSize: '10px', color: '#6b7280' }}>
+        <div className="critique-modal-footer">
+          <p className="critique-footer-note">
             {critiques.length > 0 && 'Up to 10 critiques saved'}
           </p>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div className="critique-footer-actions">
             <button
               onClick={onClose}
-              style={{
-                padding: '6px 12px',
-                fontSize: '12px',
-                color: '#d1d5db',
-                backgroundColor: 'transparent',
-                border: 'none',
-                cursor: 'pointer',
-                borderRadius: '6px',
-                transition: 'all 0.2s',
-              }}
-              onMouseEnter={(e) => {
-                e.target.style.backgroundColor = 'rgba(75, 85, 99, 0.3)';
-                e.target.style.color = '#f3f4f6';
-              }}
-              onMouseLeave={(e) => {
-                e.target.style.backgroundColor = 'transparent';
-                e.target.style.color = '#d1d5db';
-              }}
+              className="critique-btn-secondary"
             >
               Close
             </button>
             <button
               onClick={handleGenerateCritique}
               disabled={generating}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '6px 12px',
-                backgroundColor: generating ? '#6b21a8' : '#9333ea',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                fontSize: '12px',
-                fontWeight: '500',
-                cursor: generating ? 'not-allowed' : 'pointer',
-                transition: 'background-color 0.2s',
-              }}
-              onMouseEnter={(e) => {
-                if (!generating) e.target.style.backgroundColor = '#a855f7';
-              }}
-              onMouseLeave={(e) => {
-                if (!generating) e.target.style.backgroundColor = '#9333ea';
-              }}
+              className="critique-btn-primary"
             >
               {generating ? (
                 <>
-                  <div style={{
-                    width: '12px',
-                    height: '12px',
-                    border: '2px solid white',
-                    borderTopColor: 'transparent',
-                    borderRadius: '50%',
-                    animation: 'spin 1s linear infinite',
-                  }}></div>
+                  <div className="critique-spinner--sm"></div>
                   Generating...
                 </>
               ) : (
                 <>
-                  <IconRefresh className="w-3 h-3" />
+                  <IconRefresh className="critique-icon--sm" />
                   {selectedCritique ? 'Regenerate' : 'Generate Critique'}
                 </>
               )}
@@ -591,14 +344,6 @@ export default function PaperCritiqueModal({
           </div>
         </div>
       </div>
-      
-      {/* Keyframes for spinner animation */}
-      <style>{`
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
     </div>
   );
 
@@ -613,46 +358,25 @@ function CompactRating({ label, rating, feedback }) {
   const percentage = (rating / 10) * 100;
   
   return (
-    <div style={{
-      backgroundColor: 'rgba(31, 41, 55, 0.5)',
-      borderRadius: '8px',
-      padding: '8px 10px',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-        <span style={{ fontSize: '10px', fontWeight: '500', color: '#d1d5db' }}>{label}</span>
-        <span className={getRatingColor(rating)} style={{ fontSize: '14px', fontWeight: '700' }}>
+    <div className="critique-compact-card">
+      <div className="critique-compact-header">
+        <span className="critique-compact-label">{label}</span>
+        <span className={`${getRatingColor(rating)} critique-compact-value`}>
           {rating > 0 ? rating : '—'}
         </span>
       </div>
       
       {/* Progress bar */}
-      <div style={{
-        height: '4px',
-        backgroundColor: 'rgba(55, 65, 81, 1)',
-        borderRadius: '9999px',
-        overflow: 'hidden',
-        marginBottom: feedback ? '6px' : '0',
-      }}>
+      <div className="critique-compact-track" style={{ marginBottom: feedback ? '6px' : '0' }}>
         <div 
-          className={getRatingBgColor(rating)}
-          style={{ 
-            height: '100%', 
-            width: `${percentage}%`,
-            borderRadius: '9999px',
-            transition: 'width 0.5s',
-          }}
+          className={`${getRatingBgColor(rating)} critique-compact-fill`}
+          style={{ width: `${percentage}%` }}
         />
       </div>
       
       {/* Feedback text - full display */}
       {feedback && (
-        <p style={{ 
-          fontSize: '11px', 
-          color: '#9ca3af', 
-          lineHeight: '1.5',
-          maxHeight: '250px',
-          overflowY: 'auto',
-        }}>{feedback}</p>
+        <p className="critique-compact-feedback">{feedback}</p>
       )}
     </div>
   );

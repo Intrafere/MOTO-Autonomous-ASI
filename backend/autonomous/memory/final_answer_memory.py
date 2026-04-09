@@ -14,6 +14,10 @@ from datetime import datetime
 import aiofiles
 
 from backend.shared.config import system_config
+from backend.shared.path_safety import (
+    resolve_path_within_root,
+    validate_single_path_component,
+)
 from backend.shared.models import (
     FinalAnswerState,
     CertaintyAssessment,
@@ -53,6 +57,35 @@ class FinalAnswerMemory:
         # In-memory state
         self._state: Optional[FinalAnswerState] = None
         self._session_manager = None
+
+    @classmethod
+    def build_scoped_memory(cls, base_dir: Path) -> "FinalAnswerMemory":
+        """Create a temporary instance rooted at one validated final-answer directory."""
+        memory = cls()
+        memory._base_dir = base_dir
+        memory._state_path = base_dir / "final_answer_state.json"
+        memory._volume_path = base_dir / "volume_organization.json"
+        memory._rejections_path = base_dir / "tier3_rejections.txt"
+        memory._final_volume_path = base_dir / "final_volume.txt"
+        return memory
+
+    @staticmethod
+    def resolve_answer_base_dir(answer_id: str) -> Optional[Path]:
+        """Resolve a legacy or session-based final-answer directory safely."""
+        if answer_id == "legacy":
+            base_dir = Path(system_config.data_dir) / "auto_final_answer"
+        else:
+            try:
+                session_dir = resolve_path_within_root(
+                    Path(system_config.auto_sessions_base_dir),
+                    validate_single_path_component(answer_id, "final answer ID"),
+                )
+            except ValueError:
+                return None
+
+            base_dir = session_dir / "final_answer"
+
+        return base_dir if base_dir.exists() else None
     
     def set_session_manager(self, session_manager) -> None:
         """Set session manager for session-based path resolution."""
@@ -550,7 +583,7 @@ class FinalAnswerMemory:
             "=" * 80,
             "AUTONOMOUS AI SOLUTION",
             "",
-            "Disclaimer: This content is for informational purposes only. This paper was autonomously generated with the novelty-seeking MOTO harness without peer review or user oversight beyond the original prompt. AI-generated content may contain fabricated or unverified claims presented with high confidence. All content should be viewed with extreme scrutiny and independently verified before use.",
+            "Disclaimer: This content is provided for informational and experimental purposes only. This paper was autonomously generated with the novelty-seeking MOTO harness without peer review or user oversight beyond the original prompt. It may contain incorrect, incomplete, misleading, or fabricated claims presented with high confidence. Use of this content is at your own risk. You are solely responsible for reviewing and independently verifying any output before relying on it, and the developers, operators, and contributors are not responsible for errors, omissions, decisions made from this content, or any resulting loss, damage, cost, or liability.",
             "",
             f"User's Research Prompt: {display_prompt}",
             "",
@@ -1441,13 +1474,8 @@ class FinalAnswerMemory:
             - content: Full text of volume/paper
             - chapters: List of chapter details (long form only)
         """
-        # Determine location
-        if answer_id == "legacy":
-            base_dir = Path(system_config.data_dir) / "auto_final_answer"
-        else:
-            base_dir = Path(system_config.data_dir) / "auto_sessions" / answer_id / "final_answer"
-        
-        if not base_dir.exists():
+        base_dir = self.resolve_answer_base_dir(answer_id)
+        if not base_dir:
             return None
         
         state_path = base_dir / "final_answer_state.json"

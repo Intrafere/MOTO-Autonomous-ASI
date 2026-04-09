@@ -89,6 +89,8 @@ YOUR TASK:
 3. Write the NEXT body section that follows the outline
 4. Set section_complete=true ONLY when ALL body sections from the outline are written
 
+PROGRESSIVE SYSTEM: You will be called repeatedly — once per body section. Focus on writing ONE complete, rigorous section per turn rather than rushing through multiple sections. Write what you can do thoroughly and correctly this turn; you will be called again for the next section.
+
 WHAT COUNTS AS BODY SECTIONS:
 - Definitions and Preliminaries
 - Main Results / Theorems
@@ -856,6 +858,36 @@ Example (Phase complete - no construction needed):
   "new_string": "",
   "reasoning": "The abstract is complete. The paper is finished."
 }
+
+OPTIONAL - RETROACTIVE BRAINSTORM OPERATION (Autonomous Mode Only):
+
+During paper writing, you see the FULL brainstorm database alongside the paper. If you identify
+an error, redundancy, or missing insight in the brainstorm, you may OPTIONALLY include a
+brainstorm_operation field. This is validated INDEPENDENTLY from your paper operation.
+
+CRITICAL INDEPENDENT VALIDITY PRINCIPLE:
+- Your paper edit must be correct even if the brainstorm operation is rejected
+- Your brainstorm operation must be justified even if the paper edit is rejected
+- NEVER write paper content that depends on a simultaneous brainstorm correction for correctness
+- NEVER propose a brainstorm correction that is only justified by what you're writing in the paper
+
+Add this OPTIONAL field to your JSON response:
+{
+  ... (all standard fields above) ...,
+  "brainstorm_operation": {
+    "action": "edit | delete | add",
+    "submission_number": 5,
+    "new_content": "corrected or new content (empty for delete)",
+    "reasoning": "Independent justification - must stand alone without referencing paper edit"
+  }
+}
+
+brainstorm_operation actions:
+- "edit": Correct submission #N with new_content (submission_number required)
+- "delete": Remove submission #N from brainstorm (submission_number required, new_content empty)
+- "add": Add a new insight to the brainstorm (submission_number not needed)
+
+If no brainstorm correction is needed (most turns), simply omit the brainstorm_operation field.
 """
 
 
@@ -872,7 +904,8 @@ async def build_construction_prompt(
     section_phase: Optional[str] = None,
     rejection_feedback: Optional[str] = None,
     critique_feedback: Optional[str] = None,
-    pre_critique_paper: Optional[str] = None
+    pre_critique_paper: Optional[str] = None,
+    brainstorm_content: Optional[str] = None
 ) -> str:
     """
     Build complete prompt for construction mode.
@@ -887,6 +920,7 @@ async def build_construction_prompt(
         rejection_feedback: Feedback from a previous rejection to guide the model
         critique_feedback: Accepted critique feedback from peer review (for rewrites)
         pre_critique_paper: Paper state before critique phase (for rewrites - shows what failed)
+        brainstorm_content: Full brainstorm database with submission numbers (for retroactive corrections, autonomous mode)
     
     Returns:
         Complete prompt string
@@ -985,6 +1019,11 @@ each of these critique points while preserving the mathematical content that was
         parts.append("TASK: Write the NEXT logical portion following the section order (body → conclusion → intro → abstract).")
     
     parts.append("\n---\n")
+    
+    if brainstorm_content:
+        parts.append(f"BRAINSTORM DATABASE (editable - you may propose corrections via brainstorm_operation):\n{brainstorm_content}")
+        parts.append("\n---\n")
+    
     parts.append(f"AGGREGATOR DATABASE EVIDENCE:\n{rag_evidence}")
     parts.append("\n---\n")
     parts.append("Now generate your submission as JSON (remember to set section_complete appropriately):")
@@ -1001,7 +1040,8 @@ async def build_phase_construction_prompt(
     is_first_in_phase: bool = False,
     rejection_feedback: Optional[str] = None,
     critique_feedback: Optional[str] = None,
-    pre_critique_paper: Optional[str] = None
+    pre_critique_paper: Optional[str] = None,
+    brainstorm_content: Optional[str] = None
 ) -> str:
     """
     Build prompt for a specific construction phase.
@@ -1018,6 +1058,7 @@ async def build_phase_construction_prompt(
         rejection_feedback: Feedback from a previous rejection to guide the model
         critique_feedback: Accepted critique feedback from peer review (for rewrites)
         pre_critique_paper: Paper state before critique phase (for rewrites)
+        brainstorm_content: Full brainstorm database with submission numbers (autonomous mode)
     
     Returns:
         Complete prompt string
@@ -1031,7 +1072,8 @@ async def build_phase_construction_prompt(
         section_phase=phase,
         rejection_feedback=rejection_feedback,
         critique_feedback=critique_feedback,
-        pre_critique_paper=pre_critique_paper
+        pre_critique_paper=pre_critique_paper,
+        brainstorm_content=brainstorm_content
     )
 
 
@@ -1047,7 +1089,8 @@ async def build_body_construction_prompt(
     is_first_portion: bool = False,
     rejection_feedback: Optional[str] = None,
     critique_feedback: Optional[str] = None,
-    pre_critique_paper: Optional[str] = None
+    pre_critique_paper: Optional[str] = None,
+    brainstorm_content: Optional[str] = None
 ) -> str:
     """
     Build prompt for BODY section construction phase.
@@ -1061,6 +1104,7 @@ async def build_body_construction_prompt(
         rejection_feedback: Feedback from a previous rejection to guide the model
         critique_feedback: Accepted critique feedback from peer review (for rewrites only)
         pre_critique_paper: Paper state before critique phase (for rewrites - shows what failed)
+        brainstorm_content: Full brainstorm database with submission numbers (autonomous mode)
     """
     return await build_phase_construction_prompt(
         user_prompt=user_prompt,
@@ -1071,7 +1115,8 @@ async def build_body_construction_prompt(
         is_first_in_phase=is_first_portion,
         rejection_feedback=rejection_feedback,
         critique_feedback=critique_feedback,
-        pre_critique_paper=pre_critique_paper
+        pre_critique_paper=pre_critique_paper,
+        brainstorm_content=brainstorm_content
     )
 
 
@@ -1080,7 +1125,8 @@ async def build_conclusion_construction_prompt(
     current_outline: str,
     current_paper: str,
     rag_evidence: str,
-    rejection_feedback: Optional[str] = None
+    rejection_feedback: Optional[str] = None,
+    brainstorm_content: Optional[str] = None
 ) -> str:
     """Build prompt for CONCLUSION section construction phase."""
     return await build_phase_construction_prompt(
@@ -1090,7 +1136,8 @@ async def build_conclusion_construction_prompt(
         rag_evidence=rag_evidence,
         phase="conclusion",
         is_first_in_phase=True,
-        rejection_feedback=rejection_feedback
+        rejection_feedback=rejection_feedback,
+        brainstorm_content=brainstorm_content
     )
 
 
@@ -1099,7 +1146,8 @@ async def build_introduction_construction_prompt(
     current_outline: str,
     current_paper: str,
     rag_evidence: str,
-    rejection_feedback: Optional[str] = None
+    rejection_feedback: Optional[str] = None,
+    brainstorm_content: Optional[str] = None
 ) -> str:
     """Build prompt for INTRODUCTION section construction phase."""
     return await build_phase_construction_prompt(
@@ -1109,7 +1157,8 @@ async def build_introduction_construction_prompt(
         rag_evidence=rag_evidence,
         phase="introduction",
         is_first_in_phase=True,
-        rejection_feedback=rejection_feedback
+        rejection_feedback=rejection_feedback,
+        brainstorm_content=brainstorm_content
     )
 
 
@@ -1118,7 +1167,8 @@ async def build_abstract_construction_prompt(
     current_outline: str,
     current_paper: str,
     rag_evidence: str,
-    rejection_feedback: Optional[str] = None
+    rejection_feedback: Optional[str] = None,
+    brainstorm_content: Optional[str] = None
 ) -> str:
     """Build prompt for ABSTRACT section construction phase."""
     return await build_phase_construction_prompt(
@@ -1128,5 +1178,6 @@ async def build_abstract_construction_prompt(
         rag_evidence=rag_evidence,
         phase="abstract",
         is_first_in_phase=True,
-        rejection_feedback=rejection_feedback
+        rejection_feedback=rejection_feedback,
+        brainstorm_content=brainstorm_content
     )

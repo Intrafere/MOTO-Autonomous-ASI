@@ -4,6 +4,7 @@ Implements priority-based offloading to RAG when content exceeds context window.
 """
 from typing import Dict, List, Optional
 import logging
+from pathlib import Path
 
 from backend.shared.config import rag_config
 from backend.shared.models import ContextPack
@@ -45,6 +46,32 @@ class ContextAllocator:
         if validator_max_output is not None:
             self.validator_max_output_tokens = validator_max_output
         logger.info(f"Context windows updated - Submitter: {submitter_context}, Validator: {validator_context}")
+
+    def _get_shared_training_rag_sources(self) -> List[str]:
+        """
+        Get RAG source names that map to shared-training content.
+
+        Used to exclude shared-training chunks from RAG when the same
+        shared-training content is already direct-injected into the prompt.
+        """
+        sources: List[str] = []
+
+        # Current shared-training file source (manual mode: rag_shared_training.txt,
+        # autonomous mode: brainstorm_<topic_id>.txt)
+        try:
+            from backend.aggregator.memory.shared_training import shared_training_memory
+            current_source = Path(shared_training_memory.file_path).name
+            if current_source:
+                sources.append(current_source)
+        except Exception as e:
+            logger.debug(f"Could not resolve shared-training source name for exclusion: {e}")
+
+        # Incremental re-RAG sources used by aggregator background updates
+        for chunk_size in rag_config.submitter_chunk_intervals:
+            sources.append(f"rag_shared_training_update_{chunk_size}")
+
+        # De-dup while preserving insertion order
+        return list(dict.fromkeys(sources))
     
     async def allocate_submitter_context(
         self,
@@ -184,6 +211,15 @@ class ContextAllocator:
         # Perform RAG retrieval ONLY if content was offloaded
         rag_context = None
         if any([needs_shared_training_rag, needs_local_training_rag, needs_rejection_log_rag, needs_user_files_rag]):
+            # Build exclusion list: sources that were direct-injected should not appear in RAG
+            exclude_sources = []
+            if not needs_shared_training_rag and shared_training_content:
+                exclude_sources.extend(self._get_shared_training_rag_sources())
+            if not needs_user_files_rag and user_files_content:
+                exclude_sources.extend(user_files_content.keys())
+            if exclude_sources:
+                exclude_sources = list(dict.fromkeys(exclude_sources))
+            
             # FIXED: Calculate RAG budget from REMAINING space after direct injection
             # This ensures we maximize context usage without exceeding limits
             direct_content_temp = "\n\n".join(direct_parts)
@@ -216,7 +252,8 @@ class ContextAllocator:
             rag_context = await rag_manager.retrieve(
                 query=user_prompt,
                 chunk_size=chunk_size,  # Cycles: 256→512→768→1024
-                max_tokens=rag_max_tokens
+                max_tokens=rag_max_tokens,
+                exclude_sources=exclude_sources if exclude_sources else None
             )
             
             if rag_context and rag_context.text:
@@ -343,6 +380,15 @@ class ContextAllocator:
         # Perform RAG retrieval ONLY if content was offloaded
         rag_context = None
         if needs_shared_training_rag or needs_user_files_rag:
+            # Build exclusion list: sources that were direct-injected should not appear in RAG
+            exclude_sources = []
+            if not needs_shared_training_rag and shared_training_content:
+                exclude_sources.extend(self._get_shared_training_rag_sources())
+            if not needs_user_files_rag and user_files_content:
+                exclude_sources.extend(user_files_content.keys())
+            if exclude_sources:
+                exclude_sources = list(dict.fromkeys(exclude_sources))
+            
             # FIXED: Calculate RAG budget from REMAINING space after direct injection
             # This ensures we maximize context usage without exceeding limits
             direct_content_temp = "\n\n".join(direct_parts)
@@ -375,7 +421,8 @@ class ContextAllocator:
             rag_context = await rag_manager.retrieve(
                 query=user_prompt,
                 chunk_size=chunk_size,  # Always 512 for validator
-                max_tokens=rag_max_tokens
+                max_tokens=rag_max_tokens,
+                exclude_sources=exclude_sources if exclude_sources else None
             )
             
             if rag_context and rag_context.text:
@@ -503,6 +550,15 @@ class ContextAllocator:
         # Perform RAG retrieval if content was offloaded
         rag_context = None
         if needs_submissions_rag or needs_user_files_rag:
+            # Build exclusion list: sources that were direct-injected should not appear in RAG
+            exclude_sources = []
+            if not needs_submissions_rag and all_submissions_formatted:
+                exclude_sources.extend(self._get_shared_training_rag_sources())
+            if not needs_user_files_rag and user_files_content:
+                exclude_sources.extend(user_files_content.keys())
+            if exclude_sources:
+                exclude_sources = list(dict.fromkeys(exclude_sources))
+            
             # Calculate RAG budget from remaining space
             direct_content_temp = "\n\n".join(direct_parts)
             direct_content_tokens = count_tokens(direct_content_temp)
@@ -520,12 +576,11 @@ class ContextAllocator:
                 f"direct_content={direct_content_tokens}"
             )
             
-            # Use the user prompt as query for RAG - this will retrieve relevant submissions
-            # For cleanup, we want to find similar/redundant content
             rag_context = await rag_manager.retrieve(
                 query=user_prompt,
                 chunk_size=512,  # Use validator's standard chunk size
-                max_tokens=rag_max_tokens
+                max_tokens=rag_max_tokens,
+                exclude_sources=exclude_sources if exclude_sources else None
             )
             
             if rag_context and rag_context.text:

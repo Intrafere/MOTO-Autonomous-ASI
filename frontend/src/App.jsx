@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AggregatorInterface from './components/aggregator/AggregatorInterface';
 import AggregatorSettings from './components/aggregator/AggregatorSettings';
 import AggregatorLogs from './components/aggregator/AggregatorLogs';
@@ -11,6 +11,7 @@ import {
   AutonomousResearchInterface,
   BrainstormList,
   PaperLibrary,
+  Stage2PaperHistory,
   AutonomousResearchSettings,
   AutonomousResearchLogs,
   FinalAnswerView,
@@ -19,23 +20,79 @@ import {
 import WorkflowPanel from './components/WorkflowPanel';
 import BoostControlModal from './components/BoostControlModal';
 import BoostLogs from './components/BoostLogs';
+import StartupProviderSetupModal from './components/StartupProviderSetupModal';
 import OpenRouterApiKeyModal from './components/OpenRouterApiKeyModal';
 import OpenRouterPrivacyWarningModal from './components/OpenRouterPrivacyWarningModal';
 import CritiqueNotificationStack from './components/CritiqueNotificationStack';
+import CreditExhaustionNotificationStack from './components/CreditExhaustionNotificationStack';
+import HungConnectionNotificationStack from './components/HungConnectionNotificationStack';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import { websocket } from './services/websocket';
 import { api, autonomousAPI, openRouterAPI } from './services/api';
+import {
+  LM_STUDIO_STARTUP_CHOICE,
+  RECOMMENDED_PROFILE_KEY,
+  STARTUP_PROVIDER_CHOICE_STORAGE_KEY,
+  applyAutonomousProfileSelection,
+  applyLmStudioStartupDefaults,
+  getStoredAutonomousSettings,
+  settingsToAutonomousConfig,
+  persistAutonomousSettings,
+} from './utils/autonomousProfiles';
+
+const APP_MODE_STORAGE_KEY = 'appMode';
+const AUTONOMOUS_TAB_STORAGE_KEY = 'autonomousActiveTab';
+const MANUAL_TAB_STORAGE_KEY = 'manualActiveTab';
+const LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY = 'singlePaperWriterExpanded';
+const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'];
+
+function normalizeLoadedLmStudioModelId(modelId = '') {
+  return String(modelId).replace(/:\d+$/, '');
+}
+
+function isLikelyEmbeddingModel(modelId = '') {
+  const normalizedModelId = normalizeLoadedLmStudioModelId(modelId).toLowerCase();
+  return EMBEDDING_MODEL_HINTS.some((hint) => normalizedModelId.includes(hint));
+}
+
+function getUsableLoadedLmStudioChatModelId(loadedModels = []) {
+  for (const loadedModelId of loadedModels) {
+    const normalizedModelId = normalizeLoadedLmStudioModelId(loadedModelId);
+    if (!normalizedModelId || isLikelyEmbeddingModel(normalizedModelId)) {
+      continue;
+    }
+    return normalizedModelId;
+  }
+
+  return '';
+}
 
 function App() {
-  const [activeTab, setActiveTab] = useState('auto-interface');
-  
-  // Single Paper Writer expandable section state
-  const [showSinglePaperWriter, setShowSinglePaperWriter] = useState(() => {
-    const saved = localStorage.getItem('singlePaperWriterExpanded');
-    return saved ? JSON.parse(saved) : false;
-  });
+  const [appMode, setAppMode] = useState(() => {
+    const savedMode = localStorage.getItem(APP_MODE_STORAGE_KEY);
+    if (savedMode === 'autonomous' || savedMode === 'manual') {
+      return savedMode;
+    }
 
-  const [singlePaperWriterActiveTab, setSinglePaperWriterActiveTab] = useState('aggregator-interface');
+    const legacyExpanded = localStorage.getItem(LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY);
+    if (!legacyExpanded) {
+      return 'autonomous';
+    }
+
+    try {
+      return JSON.parse(legacyExpanded) ? 'manual' : 'autonomous';
+    } catch {
+      return 'autonomous';
+    }
+  });
+  const [autonomousActiveTab, setAutonomousActiveTab] = useState(
+    () => localStorage.getItem(AUTONOMOUS_TAB_STORAGE_KEY) || 'auto-interface'
+  );
+  const [manualActiveTab, setManualActiveTab] = useState(
+    () => localStorage.getItem(MANUAL_TAB_STORAGE_KEY) || 'aggregator-interface'
+  );
+  const [utilityActiveTab, setUtilityActiveTab] = useState(null);
+  const activeTab = utilityActiveTab || (appMode === 'manual' ? manualActiveTab : autonomousActiveTab);
   
   // Models list (fetched from API)
   const [models, setModels] = useState([]);
@@ -49,6 +106,15 @@ function App() {
   
   // LM Studio availability state (for determining default provider)
   const [lmStudioAvailable, setLmStudioAvailable] = useState(true);
+  const [lmStudioStatus, setLmStudioStatus] = useState({
+    available: true,
+    has_models: false,
+    model_count: 0,
+    models: [],
+    error: null,
+    usable_chat_model_id: '',
+    has_usable_chat_model: false,
+  });
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   
   // Track if any workflow is running (for WorkflowPanel visibility)
@@ -59,6 +125,22 @@ function App() {
     const savedState = localStorage.getItem('workflow_panel_collapsed');
     return savedState === 'true';
   });
+
+  useEffect(() => {
+    localStorage.setItem(APP_MODE_STORAGE_KEY, appMode);
+    localStorage.setItem(
+      LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY,
+      JSON.stringify(appMode === 'manual')
+    );
+  }, [appMode]);
+
+  useEffect(() => {
+    localStorage.setItem(AUTONOMOUS_TAB_STORAGE_KEY, autonomousActiveTab);
+  }, [autonomousActiveTab]);
+
+  useEffect(() => {
+    localStorage.setItem(MANUAL_TAB_STORAGE_KEY, manualActiveTab);
+  }, [manualActiveTab]);
   
   // Initialize config from localStorage or use defaults
   // CRITICAL: Read from 'aggregator_settings' (used by AggregatorSettings component)
@@ -157,6 +239,9 @@ function App() {
   
   // Disclaimer modal state (shows on every app load)
   const [showDisclaimer, setShowDisclaimer] = useState(true);
+  const [showStartupSetupModal, setShowStartupSetupModal] = useState(false);
+  const [startupSetupMessage, setStartupSetupMessage] = useState('');
+  const [checkingLmStudioStartupChoice, setCheckingLmStudioStartupChoice] = useState(false);
   
   // OpenRouter privacy warning modal state
   const [showPrivacyWarning, setShowPrivacyWarning] = useState(false);
@@ -170,96 +255,40 @@ function App() {
   const [selectedCritiquePaper, setSelectedCritiquePaper] = useState(null);
   const [showCritiqueModal, setShowCritiqueModal] = useState(false);
 
+  // Credit exhaustion notification state (persistent until dismissed)
+  const [creditExhaustionNotifications, setCreditExhaustionNotifications] = useState([]);
+
+  // Hung connection notification state (persistent until dismissed)
+  const [hungConnectionNotifications, setHungConnectionNotifications] = useState([]);
+
+  // Live refs used by websocket listeners (which are registered once)
+  const autonomousRunningRef = useRef(autonomousRunning);
+  const autonomousTierRef = useRef(autonomousStatus?.current_tier || null);
+  const openRouterKeyJustSavedRef = useRef(false);
+
+  useEffect(() => {
+    autonomousRunningRef.current = autonomousRunning;
+  }, [autonomousRunning]);
+
+  useEffect(() => {
+    autonomousTierRef.current = autonomousStatus?.current_tier || null;
+  }, [autonomousStatus]);
+
   // Autonomous config with localStorage persistence
   // CRITICAL: Read from 'autonomous_research_settings' (used by AutonomousResearchSettings component)
   const [autonomousConfig, setAutonomousConfig] = useState(() => {
-    // Try to load from the settings component key first
-    const settingsConfig = localStorage.getItem('autonomous_research_settings');
-    if (settingsConfig) {
-      try {
-        const settings = JSON.parse(settingsConfig);
-        const localConfig = settings.localConfig || {};
-        return {
-          submitter_configs: settings.submitterConfigs || [
-            { submitterId: 1, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-            { submitterId: 2, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-            { submitterId: 3, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 }
-          ],
-          validator_provider: localConfig.validator_provider,
-          validator_model: localConfig.validator_model,
-          validator_openrouter_provider: localConfig.validator_openrouter_provider,
-          validator_lm_studio_fallback: localConfig.validator_lm_studio_fallback,
-          validator_context_window: localConfig.validator_context_window,
-          validator_max_tokens: localConfig.validator_max_tokens,
-          high_context_provider: localConfig.high_context_provider,
-          high_context_model: localConfig.high_context_model,
-          high_context_openrouter_provider: localConfig.high_context_openrouter_provider,
-          high_context_lm_studio_fallback: localConfig.high_context_lm_studio_fallback,
-          high_context_context_window: localConfig.high_context_context_window,
-          high_context_max_tokens: localConfig.high_context_max_tokens,
-          high_param_provider: localConfig.high_param_provider,
-          high_param_model: localConfig.high_param_model,
-          high_param_openrouter_provider: localConfig.high_param_openrouter_provider,
-          high_param_lm_studio_fallback: localConfig.high_param_lm_studio_fallback,
-          high_param_context_window: localConfig.high_param_context_window,
-          high_param_max_tokens: localConfig.high_param_max_tokens,
-          critique_submitter_provider: localConfig.critique_submitter_provider,
-          critique_submitter_model: localConfig.critique_submitter_model,
-          critique_submitter_openrouter_provider: localConfig.critique_submitter_openrouter_provider,
-          critique_submitter_lm_studio_fallback: localConfig.critique_submitter_lm_studio_fallback,
-          critique_submitter_context_window: localConfig.critique_submitter_context_window,
-          critique_submitter_max_tokens: localConfig.critique_submitter_max_tokens,
-          tier3_enabled: settings.tier3Enabled ?? false
-        };
-      } catch (e) {
-        console.error('Failed to parse autonomous_research_settings:', e);
-      }
-    }
-    
-    // Final fallback - use ACTUAL working defaults (OpenRouter API IDs)
-    return {
-      submitter_configs: [
-        { submitterId: 1, provider: 'openrouter', modelId: 'openai/gpt-oss-120b', openrouterProvider: 'Google', lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-        { submitterId: 2, provider: 'openrouter', modelId: 'openai/gpt-oss-20b', openrouterProvider: 'Groq', lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-        { submitterId: 3, provider: 'openrouter', modelId: 'openai/gpt-oss-120b', openrouterProvider: 'Google', lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 }
-      ],
-      validator_provider: 'openrouter',
-      validator_model: 'openai/gpt-oss-120b',
-      validator_openrouter_provider: 'Google',
-      validator_lm_studio_fallback: null,
-      validator_context_window: 131072,
-      validator_max_tokens: 25000,
-      high_context_provider: 'openrouter',
-      high_context_model: 'openai/gpt-oss-120b',
-      high_context_openrouter_provider: 'Google',
-      high_context_lm_studio_fallback: null,
-      high_context_context_window: 131072,
-      high_context_max_tokens: 25000,
-      high_param_provider: 'openrouter',
-      high_param_model: 'openai/gpt-oss-120b',
-      high_param_openrouter_provider: 'Google',
-      high_param_lm_studio_fallback: null,
-      high_param_context_window: 131072,
-      high_param_max_tokens: 25000,
-      critique_submitter_provider: 'openrouter',
-      critique_submitter_model: 'openai/gpt-oss-120b',
-      critique_submitter_openrouter_provider: 'Google',
-      critique_submitter_lm_studio_fallback: null,
-      critique_submitter_context_window: 131072,
-      critique_submitter_max_tokens: 25000,
-      tier3_enabled: false
-    };
+    return settingsToAutonomousConfig(getStoredAutonomousSettings());
   });
 
   // Save autonomous config to localStorage
-  // CRITICAL: Save to BOTH keys to maintain backward compatibility
   useEffect(() => {
-    localStorage.setItem('autonomousConfig', JSON.stringify(autonomousConfig));
-    // Also save to autonomous_research_settings in the format expected by AutonomousResearchSettings
-    const settingsToSave = {
-      numSubmitters: autonomousConfig.submitter_configs?.length || 3,
-      submitterConfigs: autonomousConfig.submitter_configs || [],
+    const existingSettings = getStoredAutonomousSettings();
+    persistAutonomousSettings({
+      ...existingSettings,
+      numSubmitters: autonomousConfig.submitter_configs?.length || existingSettings.numSubmitters || 3,
+      submitterConfigs: autonomousConfig.submitter_configs || existingSettings.submitterConfigs,
       localConfig: {
+        ...existingSettings.localConfig,
         validator_provider: autonomousConfig.validator_provider,
         validator_model: autonomousConfig.validator_model,
         validator_openrouter_provider: autonomousConfig.validator_openrouter_provider,
@@ -283,67 +312,97 @@ function App() {
         critique_submitter_openrouter_provider: autonomousConfig.critique_submitter_openrouter_provider,
         critique_submitter_lm_studio_fallback: autonomousConfig.critique_submitter_lm_studio_fallback,
         critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
-        critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens
+        critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
       },
-      freeOnly: false, // Default value
-      tier3Enabled: autonomousConfig.tier3_enabled ?? false
-    };
-    localStorage.setItem('autonomous_research_settings', JSON.stringify(settingsToSave));
+      tier3Enabled: autonomousConfig.tier3_enabled ?? existingSettings.tier3Enabled ?? false,
+    });
   }, [autonomousConfig]);
 
-  // Check LM Studio availability and fetch models on mount
-  useEffect(() => {
-    const checkAvailability = async () => {
+  const syncProviderAvailability = useCallback(async () => {
+    let lmResult = {
+      available: false,
+      has_models: false,
+      model_count: 0,
+      models: [],
+      error: null,
+    };
+
+    try {
+      lmResult = await openRouterAPI.checkLMStudioAvailability();
+    } catch (err) {
+      console.error('Failed to check LM Studio availability:', err);
+      lmResult = {
+        available: false,
+        has_models: false,
+        model_count: 0,
+        models: [],
+        error: err.message || 'Failed to check LM Studio availability.',
+      };
+    }
+
+    const usableLmStudioChatModelId = getUsableLoadedLmStudioChatModelId(lmResult.models || []);
+    const hasUsableLmStudioChatModel = Boolean(usableLmStudioChatModelId);
+    const lmAvailable = Boolean(lmResult.available && lmResult.has_models);
+    setLmStudioStatus({
+      ...lmResult,
+      usable_chat_model_id: usableLmStudioChatModelId,
+      has_usable_chat_model: hasUsableLmStudioChatModel,
+    });
+    setLmStudioAvailable(lmAvailable);
+
+    let keyStatus = { has_key: false };
+    try {
+      keyStatus = await openRouterAPI.getApiKeyStatus();
+    } catch (err) {
+      console.error('Failed to check OpenRouter key status:', err);
+    }
+
+    const finalHasOpenRouterKey = Boolean(keyStatus.has_key);
+    setHasOpenRouterKey(finalHasOpenRouterKey);
+
+    let availableModels = [];
+    if (lmAvailable) {
       try {
-        // Check LM Studio availability
-        const lmResult = await openRouterAPI.checkLMStudioAvailability();
-        const lmAvailable = lmResult.available && lmResult.has_models;
-        setLmStudioAvailable(lmAvailable);
-        
-        // Check if OpenRouter API key is configured
+        const data = await api.getModels();
+        availableModels = data.models || data || [];
+        setModels(availableModels);
+      } catch (err) {
+        console.error('Failed to fetch LM Studio models:', err);
+        setModels([]);
+      }
+    } else {
+      setModels([]);
+    }
+
+    return {
+      lmAvailable,
+      hasOpenRouterKey: finalHasOpenRouterKey,
+      hasUsableLmStudioChatModel,
+      lmStudioStatus: {
+        ...lmResult,
+        usable_chat_model_id: usableLmStudioChatModelId,
+        has_usable_chat_model: hasUsableLmStudioChatModel,
+      },
+      defaultLmStudioModelId: usableLmStudioChatModelId,
+    };
+  }, []);
+
+  useEffect(() => {
+    syncProviderAvailability();
+  }, [syncProviderAvailability]);
+
+  // Periodically re-check OpenRouter key status to keep indicator in sync
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
         const keyStatus = await openRouterAPI.getApiKeyStatus();
         setHasOpenRouterKey(keyStatus.has_key);
-        
-        // Also check localStorage for saved key and sync with backend
-        const storedKey = localStorage.getItem('openrouter_api_key');
-        if (storedKey && !keyStatus.has_key) {
-          // Restore key to backend from localStorage
-          try {
-            await openRouterAPI.setApiKey(storedKey);
-            setHasOpenRouterKey(true);
-          } catch (err) {
-            console.error('Failed to restore OpenRouter key:', err);
-            localStorage.removeItem('openrouter_api_key');
-          }
-        }
-        
-        // If LM Studio not available and no OpenRouter key, prompt for key
-        if (!lmAvailable && !keyStatus.has_key && !storedKey) {
-          console.log('LM Studio not available, prompting for OpenRouter API key...');
-          setOpenRouterKeyReason('lm_studio_unavailable');
-          setShowOpenRouterKeyModal(true);
-        }
-        
-        // Fetch LM Studio models if available
-        if (lmAvailable) {
-          api.getModels().then(data => {
-            setModels(data.models || data);
-          }).catch(err => {
-            console.error('Failed to fetch LM Studio models:', err);
-          });
-        }
-      } catch (err) {
-        console.error('Failed to check availability:', err);
-        // Fallback to fetching models directly
-        api.getModels().then(data => {
-          setModels(data.models || data);
-        }).catch(modelErr => {
-          console.error('Failed to fetch models:', modelErr);
-        });
+      } catch {
+        // Backend unreachable, skip this cycle
       }
-    };
-    
-    checkAvailability();
+    }, 30000);
+
+    return () => clearInterval(interval);
   }, []);
 
   // Check autonomous research status on mount (handles page refresh while running)
@@ -399,6 +458,86 @@ function App() {
     const addActivity = (event) => {
       setAutonomousActivity(prev => [...prev, event].slice(-MAX_ACTIVITY_EVENTS));
     };
+    const isAutonomousTier2Active = () =>
+      autonomousRunningRef.current && autonomousTierRef.current === 'tier2_paper_writing';
+    const formatCompilerMode = (mode) => {
+      switch (mode) {
+        case 'outline_create':
+          return 'Outline creation';
+        case 'construction':
+          return 'Construction';
+        case 'outline_update':
+          return 'Outline update';
+        case 'review':
+          return 'Review';
+        case 'rigor':
+          return 'Rigor';
+        default:
+          return mode || 'Compiler';
+      }
+    };
+    const formatReason = (reasoning, maxLen = 140) => {
+      if (!reasoning) return '';
+      const cleaned = String(reasoning).replace(/\s+/g, ' ').trim();
+      if (!cleaned) return '';
+      return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen)}...` : cleaned;
+    };
+    
+    // Topic exploration events (pre-brainstorm candidate collection)
+    unsubscribers.push(websocket.on('topic_exploration_started', (data) => {
+      addActivity({
+        event: 'topic_exploration_started',
+        timestamp: new Date().toISOString(),
+        message: `Topic exploration started (target: ${data.target || 5} candidates${data.resumed_count ? `, resuming with ${data.resumed_count}` : ''})`,
+        data
+      });
+    }));
+    
+    unsubscribers.push(websocket.on('topic_exploration_progress', (data) => {
+      addActivity({
+        event: 'topic_exploration_progress',
+        timestamp: new Date().toISOString(),
+        message: `Exploration candidate ${data.accepted}/${data.target} accepted: ${data.latest_question ? data.latest_question.substring(0, 100) + '...' : ''}`,
+        data
+      });
+    }));
+    
+    unsubscribers.push(websocket.on('topic_exploration_complete', (data) => {
+      addActivity({
+        event: 'topic_exploration_complete',
+        timestamp: new Date().toISOString(),
+        message: `Topic exploration complete: ${data.accepted_count} candidates collected from ${data.total_attempts} attempts`,
+        data
+      });
+    }));
+    
+    // Paper title exploration events (pre-title-selection candidate collection)
+    unsubscribers.push(websocket.on('paper_title_exploration_started', (data) => {
+      addActivity({
+        event: 'paper_title_exploration_started',
+        timestamp: new Date().toISOString(),
+        message: `Title exploration started (target: ${data.target || 5} candidate titles)`,
+        data
+      });
+    }));
+    
+    unsubscribers.push(websocket.on('paper_title_exploration_progress', (data) => {
+      addActivity({
+        event: 'paper_title_exploration_progress',
+        timestamp: new Date().toISOString(),
+        message: `Title candidate ${data.accepted}/${data.target} accepted`,
+        data
+      });
+    }));
+    
+    unsubscribers.push(websocket.on('paper_title_exploration_complete', (data) => {
+      addActivity({
+        event: 'paper_title_exploration_complete',
+        timestamp: new Date().toISOString(),
+        message: `Title exploration complete: ${data.accepted_count} candidates collected from ${data.total_attempts} attempts`,
+        data
+      });
+    }));
     
     // Topic selection events
     unsubscribers.push(websocket.on('topic_selected', (data) => {
@@ -470,10 +609,59 @@ function App() {
     
     // Paper events
     unsubscribers.push(websocket.on('paper_writing_started', (data) => {
+      autonomousTierRef.current = 'tier2_paper_writing';
       addActivity({
         event: 'paper_writing_started',
         timestamp: new Date().toISOString(),
         message: `Paper writing started: ${data.title}`,
+        data
+      });
+    }));
+
+    // Compiler writing activity events (Tier 2 paper writing internals)
+    unsubscribers.push(websocket.on('compiler_acceptance', (data) => {
+      if (!isAutonomousTier2Active()) return;
+      const modeLabel = formatCompilerMode(data.mode);
+      const iterationSuffix = data.iteration ? ` (iteration ${data.iteration})` : '';
+      addActivity({
+        event: 'compiler_acceptance',
+        timestamp: new Date().toISOString(),
+        message: `${modeLabel}: ✓ ACCEPTED${iterationSuffix}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('compiler_rejection', (data) => {
+      if (!isAutonomousTier2Active()) return;
+      const modeLabel = formatCompilerMode(data.mode);
+      const iterationSuffix = data.iteration ? ` (iteration ${data.iteration})` : '';
+      const reason = formatReason(data.reasoning);
+      addActivity({
+        event: 'compiler_rejection',
+        timestamp: new Date().toISOString(),
+        message: `${modeLabel}: ✗ REJECTED${iterationSuffix}${reason ? ` - ${reason}` : ''}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('compiler_decline', (data) => {
+      if (!isAutonomousTier2Active()) return;
+      const modeLabel = formatCompilerMode(data.mode);
+      const reason = formatReason(data.reasoning, 100);
+      addActivity({
+        event: 'compiler_decline',
+        timestamp: new Date().toISOString(),
+        message: `${modeLabel}: ↷ DECLINED${reason ? ` - ${reason}` : ''}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('outline_locked', (data) => {
+      if (!isAutonomousTier2Active()) return;
+      addActivity({
+        event: 'outline_locked',
+        timestamp: new Date().toISOString(),
+        message: `Outline locked after ${data.total_iterations || data.iteration || '?'} iteration(s)`,
         data
       });
     }));
@@ -578,6 +766,9 @@ function App() {
       // Handle resume after crash/restart - sync running state
       console.log('Autonomous research resumed:', data);
       setAutonomousRunning(true);
+      if (data?.tier) {
+        autonomousTierRef.current = data.tier;
+      }
       addActivity({
         event: 'auto_research_resumed',
         timestamp: new Date().toISOString(),
@@ -592,10 +783,13 @@ function App() {
     
     unsubscribers.push(websocket.on('auto_research_stopped', () => {
       setAutonomousRunning(false);
+      autonomousTierRef.current = null;
+      setHungConnectionNotifications([]);
     }));
     
     // Tier 3 events
     unsubscribers.push(websocket.on('tier3_started', (data) => {
+      autonomousTierRef.current = 'tier3_final_answer';
       addActivity({
         event: 'tier3_started',
         timestamp: new Date().toISOString(),
@@ -701,6 +895,7 @@ function App() {
     
     // Paper writing resumed (after crash recovery)
     unsubscribers.push(websocket.on('paper_writing_resumed', (data) => {
+      autonomousTierRef.current = 'tier2_paper_writing';
       addActivity({
         event: 'paper_writing_resumed',
         timestamp: new Date().toISOString(),
@@ -846,6 +1041,111 @@ function App() {
         timestamp: new Date().toISOString(),
         message: `❌ Account free credits depleted: ${data.message}`,
         ...data
+      });
+      setCreditExhaustionNotifications(prev => {
+        const roleId = data.role_id || 'Account';
+        if (prev.some(n => n.role_id === roleId && n.reason === 'account_credits_exhausted')) return prev;
+        return [...prev, {
+          id: `account_exhausted_${Date.now()}`,
+          role_id: roleId,
+          reason: 'account_credits_exhausted',
+          message: data.message || 'Account free credits depleted.',
+          timestamp: new Date().toISOString()
+        }];
+      });
+    }));
+
+    // OpenRouter fallback event (credit exhaustion triggered fallback to LM Studio)
+    unsubscribers.push(websocket.on('openrouter_fallback', (data) => {
+      console.warn('OpenRouter fallback triggered:', data);
+      addActivity({
+        event: 'openrouter_fallback',
+        timestamp: new Date().toISOString(),
+        message: `⚠️ OpenRouter credits exhausted for ${data.role_id} — fell back to ${data.fallback_model || 'LM Studio'}`,
+        ...data
+      });
+      setCreditExhaustionNotifications(prev => {
+        const reason = data.reason || 'credit_exhaustion';
+        if (prev.some(n => n.role_id === data.role_id && n.reason === reason)) return prev;
+        return [...prev, {
+          id: `fallback_${data.role_id}_${Date.now()}`,
+          role_id: data.role_id,
+          reason,
+          message: data.message,
+          fallback_model: data.fallback_model,
+          timestamp: new Date().toISOString()
+        }];
+      });
+    }));
+
+    // OpenRouter fallback failed (no fallback configured — role stopped)
+    unsubscribers.push(websocket.on('openrouter_fallback_failed', (data) => {
+      console.error('OpenRouter fallback failed:', data);
+      addActivity({
+        event: 'openrouter_fallback_failed',
+        timestamp: new Date().toISOString(),
+        message: `🛑 OpenRouter credits exhausted for ${data.role_id} — NO FALLBACK configured!`,
+        ...data
+      });
+      setCreditExhaustionNotifications(prev => {
+        if (prev.some(n => n.role_id === data.role_id && n.reason === 'no_fallback_configured')) return prev;
+        return [...prev, {
+          id: `fallback_failed_${data.role_id}_${Date.now()}`,
+          role_id: data.role_id,
+          reason: 'no_fallback_configured',
+          message: data.message,
+          timestamp: new Date().toISOString()
+        }];
+      });
+    }));
+
+    // Boost credits exhausted
+    unsubscribers.push(websocket.on('boost_credits_exhausted', (data) => {
+      console.warn('Boost credits exhausted:', data);
+      addActivity({
+        event: 'boost_credits_exhausted',
+        timestamp: new Date().toISOString(),
+        message: `⚠️ Boost credits exhausted for task ${data.task_id}`,
+        ...data
+      });
+      setCreditExhaustionNotifications(prev => {
+        if (prev.some(n => n.reason === 'boost_credits_exhausted')) return prev;
+        return [...prev, {
+          id: `boost_exhausted_${Date.now()}`,
+          role_id: `Boost (${data.task_id || 'unknown'})`,
+          reason: 'boost_credits_exhausted',
+          message: data.message || 'Boost API credits exhausted. Falling back to primary model.',
+          timestamp: new Date().toISOString()
+        }];
+      });
+    }));
+
+    unsubscribers.push(websocket.on('openrouter_fallbacks_reset', (data) => {
+      console.info('OpenRouter fallbacks reset:', data);
+      addActivity({
+        event: 'openrouter_fallbacks_reset',
+        timestamp: new Date().toISOString(),
+        message: `OpenRouter reset: ${data.message}`,
+        ...data
+      });
+      setCreditExhaustionNotifications([]);
+      setHungConnectionNotifications([]);
+    }));
+
+    unsubscribers.push(websocket.on('hung_connection_alert', (data) => {
+      console.warn('Hung connection alert:', data);
+      addLog({
+        type: 'warning',
+        message: `⏳ Possible hung connection: ${data.model} via ${data.provider} (${data.elapsed_minutes}+ min)`,
+        ...data
+      });
+      setHungConnectionNotifications(prev => {
+        if (prev.some(n => n.role_id === data.role_id)) return prev;
+        return [...prev, {
+          id: `hung_${data.role_id}_${Date.now()}`,
+          ...data,
+          timestamp: Date.now()
+        }];
       });
     }));
 
@@ -1001,7 +1301,7 @@ function App() {
       setAutonomousRunning(true);
       setAutonomousActivity([]);
     } catch (error) {
-      alert(`Failed to start autonomous research: ${error.message}`);
+      alert(`Failed to start autonomous research: ${error.details || error.message}`);
     }
   };
 
@@ -1061,7 +1361,7 @@ function App() {
   // Determine Final Answer tab label based on Tier 3 status
   const getFinalAnswerLabel = () => {
     if (autonomousStatus?.is_tier3_active) {
-      return 'Stage 3:FINAL ANSWER IN PROGRESS';
+      return 'Autonomous Stage 3: FINAL ANSWER IN PROGRESS';
     }
     if (autonomousStatus?.tier3_status === 'complete') {
       return 'Stage 3: FINAL ANSWER COMPLETE ✓';
@@ -1083,6 +1383,41 @@ function App() {
     setShowCritiqueModal(false);
     setSelectedCritiquePaper(null);
   };
+
+  const handleModeChange = (nextMode) => {
+    setAppMode(nextMode);
+    setUtilityActiveTab(null);
+  };
+
+  const handleAutonomousTabSelect = (tabId) => {
+    setAutonomousActiveTab(tabId);
+    setUtilityActiveTab(null);
+    if (appMode !== 'autonomous') {
+      setAppMode('autonomous');
+    }
+  };
+
+  const handleManualTabSelect = (tabId) => {
+    setManualActiveTab(tabId);
+    setUtilityActiveTab(null);
+    if (appMode !== 'manual') {
+      setAppMode('manual');
+    }
+  };
+
+  const handleUtilityTabSelect = (tabId) => {
+    setUtilityActiveTab(tabId);
+  };
+
+  // Credit exhaustion notification handler
+  const handleDismissCreditNotification = (notificationId) => {
+    setCreditExhaustionNotifications(prev => prev.filter(n => n.id !== notificationId));
+  };
+
+  // Hung connection notification handler
+  const handleDismissHungNotification = (notificationId) => {
+    setHungConnectionNotifications(prev => prev.filter(n => n.id !== notificationId));
+  };
   
   // Critique modal API functions
   const handleGenerateCritique = async (customPrompt, validatorConfig) => {
@@ -1103,35 +1438,126 @@ function App() {
     return response;
   };
 
+  const handleDisclaimerAcknowledge = async () => {
+    setShowDisclaimer(false);
+    setStartupSetupMessage('');
+
+    const {
+      lmAvailable,
+      hasOpenRouterKey: keyPresent,
+      hasUsableLmStudioChatModel,
+    } = await syncProviderAvailability();
+    if (keyPresent) {
+      return;
+    }
+
+    const startupChoice = localStorage.getItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY);
+    if (startupChoice === LM_STUDIO_STARTUP_CHOICE && lmAvailable && hasUsableLmStudioChatModel) {
+      return;
+    }
+
+    if (startupChoice === LM_STUDIO_STARTUP_CHOICE && (!lmAvailable || !hasUsableLmStudioChatModel)) {
+      setStartupSetupMessage(
+        'LM Studio was previously selected, but it is not fully ready. Start LM Studio, load nomic-ai/nomic-embed-text-v1.5 and at least one usable local chat model, then try again.'
+      );
+    }
+
+    setShowStartupSetupModal(true);
+  };
+
+  const handleStartupOpenRouterChoice = () => {
+    setStartupSetupMessage('');
+    setShowStartupSetupModal(false);
+    setOpenRouterKeyReason('startup_setup');
+    setShowOpenRouterKeyModal(true);
+  };
+
+  const handleCloseOpenRouterKeyModal = () => {
+    const keyWasJustSaved = openRouterKeyJustSavedRef.current;
+    const shouldReturnToStartup = openRouterKeyReason === 'startup_setup' && !keyWasJustSaved && !hasOpenRouterKey;
+    openRouterKeyJustSavedRef.current = false;
+    setShowOpenRouterKeyModal(false);
+
+    if (shouldReturnToStartup) {
+      setShowStartupSetupModal(true);
+    }
+  };
+
+  const handleStartupLmStudioChoice = async () => {
+    setCheckingLmStudioStartupChoice(true);
+    setStartupSetupMessage('');
+
+    try {
+      const { lmAvailable, hasUsableLmStudioChatModel, defaultLmStudioModelId } = await syncProviderAvailability();
+
+      if (!lmAvailable) {
+        setStartupSetupMessage(
+          'LM Studio is not detected with a loaded model yet. Install LM Studio, start the local server, load nomic-ai/nomic-embed-text-v1.5, and then try again.'
+        );
+        return;
+      }
+
+      if (!hasUsableLmStudioChatModel || !defaultLmStudioModelId) {
+        setStartupSetupMessage(
+          'LM Studio is running, but no usable chat model is currently loaded. Load at least one local chat model in addition to nomic-ai/nomic-embed-text-v1.5, then try again.'
+        );
+        return;
+      }
+
+      const { config: nextAutonomousConfig } = applyLmStudioStartupDefaults(defaultLmStudioModelId);
+      setAutonomousConfig(nextAutonomousConfig);
+      localStorage.setItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY, LM_STUDIO_STARTUP_CHOICE);
+      setShowStartupSetupModal(false);
+    } finally {
+      setCheckingLmStudioStartupChoice(false);
+    }
+  };
+
+  const handleOpenRouterKeySet = async () => {
+    if (openRouterKeyReason === 'startup_setup') {
+      const { config: nextAutonomousConfig } = await applyAutonomousProfileSelection(RECOMMENDED_PROFILE_KEY);
+      setAutonomousConfig(nextAutonomousConfig);
+      setShowStartupSetupModal(false);
+      setStartupSetupMessage('');
+    }
+
+    openRouterKeyJustSavedRef.current = true;
+    setHasOpenRouterKey(true);
+    console.log('OpenRouter API key set successfully');
+  };
+
   const mainTabs = [
     { id: 'auto-interface', label: 'Start Here: Autonomous Deep Research Controller', group: 'autonomous-main' },
-    { id: 'auto-brainstorms', label: 'Stage 1: Brainstorms', group: 'autonomous-main' },
-    { id: 'auto-papers', label: 'Stage 2: Short-Form Final Answer(s)', subtext: '(Less Hallucinatory - Short-Form Final Answers)', subtextClass: 'green', group: 'autonomous-main' },
+    { id: 'auto-brainstorms', label: 'Autonomous Stage 1: Brainstorms', group: 'autonomous-main' },
+    { id: 'auto-papers', label: 'Autonomous Stage 2: Papers', subtext: '(Less Hallucinatory - Recommended Output)', subtextClass: 'green', group: 'autonomous-main' },
     ...(autonomousConfig.tier3_enabled ? [
       { id: 'auto-final-answer', label: getFinalAnswerLabel(), subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
     ] : []),
   ];
 
   const autonomousSettingsTabs = [
-    { id: 'auto-final-answer-library', label: 'Long-Form Final Answer History', subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-settings' },
+    { id: 'auto-stage2-history', label: 'Stage 2 Final Answers History', group: 'autonomous-settings' },
+    { id: 'auto-final-answer-library', label: 'Stage 3 Final Answers History', subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-settings' },
     { id: 'auto-logs', label: 'API Call Logs', group: 'autonomous-settings' },
     { id: 'auto-settings', label: 'Autonomous Model Selection & Settings', group: 'autonomous-settings' },
   ];
 
-  const singlePaperWriterTabs = {
-    aggregator: [
-      { id: 'aggregator-interface', label: 'Interface' },
-      { id: 'aggregator-settings', label: 'Settings' },
-      { id: 'aggregator-logs', label: 'Logs' },
-      { id: 'aggregator-results', label: 'Live Results' },
-    ],
-    compiler: [
-      { id: 'compiler-interface', label: 'Interface' },
-      { id: 'compiler-settings', label: 'Settings' },
-      { id: 'compiler-logs', label: 'Logs' },
-      { id: 'compiler-live-paper', label: 'Live Paper' },
-    ]
-  };
+  const manualTabs = [
+    { id: 'aggregator-interface', label: 'Aggregator', subtext: 'Part 1', subtextClass: 'green', group: 'aggregator' },
+    { id: 'aggregator-settings', label: 'Aggregator Settings', group: 'aggregator' },
+    { id: 'aggregator-logs', label: 'Aggregator Logs', group: 'aggregator' },
+    { id: 'aggregator-results', label: 'Live Results', subtext: 'Part 1 Live Results', subtextClass: 'green', group: 'aggregator' },
+    { id: 'compiler-interface', label: 'Compiler', subtext: 'Part 2', subtextClass: 'green', group: 'compiler' },
+    { id: 'compiler-settings', label: 'Compiler Settings', group: 'compiler' },
+    { id: 'compiler-logs', label: 'Compiler Logs', group: 'compiler' },
+    { id: 'compiler-live-paper', label: 'Live Paper', subtext: 'Part 2 Live Results', subtextClass: 'green', group: 'compiler' },
+  ];
+
+  useEffect(() => {
+    if (!autonomousConfig.tier3_enabled && autonomousActiveTab === 'auto-final-answer') {
+      setAutonomousActiveTab('auto-interface');
+    }
+  }, [autonomousConfig.tier3_enabled, autonomousActiveTab]);
 
   // Sync with WorkflowPanel collapse state (stored in localStorage)
   useEffect(() => {
@@ -1177,10 +1603,10 @@ function App() {
         <div className="banner-content">
           <h1 className="banner-title">
             <span className="banner-moto">M.O.T.O.</span>
-            <span className="banner-subtitle">Deep Research Harness</span>
+            <span className="banner-subtitle">Autonomous ASI</span>
           </h1>
-          <p className="banner-variant"> A Prototype Super Intelligence - Creative Math Researcher Variant for S.T.E.M. (High Risk, High Reward Outputs)</p>
           <p className="banner-company">By Intrafere Research Group</p>
+          <p className="banner-variant">A Prototype Artificial Superintelligence - Novelty Seeking Autonomous S.T.E.M. Researcher For Automated Theorem Generation</p>
         </div>
       </div>
       
@@ -1189,6 +1615,20 @@ function App() {
       {/* They are visible at program launch and stay visible forever */}
       {/* Slide with WorkflowPanel collapse/expand animation */}
       <div className={`app-header ${workflowPanelCollapsed ? 'panel-collapsed' : ''}`}>
+        <div className="mode-switch-control">
+          <label className="mode-switch-label" htmlFor="app-mode-select">
+            Change Mode
+          </label>
+          <select
+            id="app-mode-select"
+            className="mode-switch-select"
+            value={appMode}
+            onChange={(e) => handleModeChange(e.target.value)}
+          >
+            <option value="autonomous">Autonomous S.T.E.M. ASI</option>
+            <option value="manual">Advanced Manual S.T.E.M. ASI</option>
+          </select>
+        </div>
         <button 
           className="boost-btn"
           onClick={() => setShowBoostModal(true)}
@@ -1199,8 +1639,7 @@ function App() {
         <button 
           className="boost-logs-btn"
           onClick={() => {
-            setActiveTab('boost-logs');
-            setShowSinglePaperWriter(false);
+            handleUtilityTabSelect('boost-logs');
           }}
           title="View Boost Logs"
         >
@@ -1216,8 +1655,8 @@ function App() {
           style={{
             marginLeft: '0.5rem',
             padding: '0.4rem 0.8rem',
-            backgroundColor: hasOpenRouterKey ? '#2d5a27' : '#4a3a00',
-            border: hasOpenRouterKey ? '1px solid #4CAF50' : '1px solid #f1c40f',
+            backgroundColor: hasOpenRouterKey ? '#2d5a27' : '#153815',
+            border: hasOpenRouterKey ? '1px solid #4CAF50' : '1px solid #1eff1c',
             borderRadius: '4px',
             color: '#fff',
             cursor: 'pointer',
@@ -1229,10 +1668,10 @@ function App() {
         {!lmStudioAvailable && (
           <span style={{ 
             marginLeft: '0.5rem', 
-            color: '#f1c40f', 
+            color: '#1eff1c', 
             fontSize: '0.8rem',
             padding: '0.25rem 0.5rem',
-            backgroundColor: 'rgba(241, 196, 15, 0.1)',
+            backgroundColor: 'rgba(30, 255, 28, 0.1)',
             borderRadius: '4px',
           }}>
             LM Studio Offline
@@ -1240,114 +1679,75 @@ function App() {
         )}
       </div>
       
-      <div className="tabs">
-        {mainTabs.map((tab, index) => {
-          const prevTab = mainTabs[index - 1];
-          const showSeparator = prevTab && prevTab.group !== tab.group;
-          
-          // Special styling for Final Answer tab
-          const isFinalAnswerTab = tab.id === 'auto-final-answer';
-          const tier3Classes = isFinalAnswerTab 
-            ? (autonomousStatus?.tier3_status === 'complete' 
-                ? 'tab-tier3-complete' 
-                : (autonomousStatus?.is_tier3_active ? 'tab-tier3-active' : ''))
-            : '';
-          
-          return (
-            <React.Fragment key={tab.id}>
-              {showSeparator && <div className="tab-separator" />}
-              <button
-                className={`tab ${activeTab === tab.id ? 'active' : ''} tab-${tab.group} ${tier3Classes} ${tab.subtext ? 'tab-with-subtext' : ''}`}
-                onClick={() => {
-                  setActiveTab(tab.id);
-                  setShowSinglePaperWriter(false);
-                }}
-              >
-                <div className="tab-content-wrapper">
-                  <span className="tab-main-label">{tab.label}</span>
-                  {tab.subtext && <span className={`tab-subtext ${tab.subtextClass || ''}`}>{tab.subtext}</span>}
-                </div>
-              </button>
-            </React.Fragment>
-          );
-        })}
-        
-        {/* Large spacer for settings group */}
-        <div className="tab-group-spacer-large"></div>
-        
-        {autonomousSettingsTabs.map(tab => {
-          return (
-            <React.Fragment key={tab.id}>
-              <button
-                className={`tab ${activeTab === tab.id ? 'active' : ''} tab-${tab.group}`}
-                onClick={() => {
-                  setActiveTab(tab.id);
-                  setShowSinglePaperWriter(false);
-                }}
-              >
-                {tab.label}
-              </button>
-            </React.Fragment>
-          );
-        })}
-      </div>
-      
-      {/* Expandable Single Paper Writer Section */}
-      <div className="expandable-section">
-        <button 
-          className={`expandable-trigger ${showSinglePaperWriter ? 'expanded' : ''}`}
-          onClick={() => {
-            const newState = !showSinglePaperWriter;
-            setShowSinglePaperWriter(newState);
-            localStorage.setItem('singlePaperWriterExpanded', JSON.stringify(newState));
-            if (newState && !singlePaperWriterActiveTab) {
-              setSinglePaperWriterActiveTab('aggregator-interface');
-            }
-          }}
-        >
-          <span className="expand-icon">{showSinglePaperWriter ? '▼' : '▶'}</span>
-          <span className="section-title">[Secondary Tool] SINGLE PAPER WRITER</span>
-          <span className="section-subtitle">(A manual brainstorm aggregator & paper compiler, an advanced controller mode with a "two user prompts" control mechanic, a separate optional mode from the Autonomous Deep Research mode above)</span>
-        </button>
-        
-        {showSinglePaperWriter && (
-          <div className="expandable-content">
-            <div className="subsection">
-              <div className="subsection-header">AGGREGATOR</div>
-              <div className="subsection-tabs">
-                {singlePaperWriterTabs.aggregator.map(tab => (
+      <div className={`tabs ${appMode === 'manual' ? 'tabs-manual' : ''}`}>
+        {appMode === 'autonomous' ? (
+          <>
+            {mainTabs.map((tab, index) => {
+              const prevTab = mainTabs[index - 1];
+              const showSeparator = prevTab && prevTab.group !== tab.group;
+              
+              // Special styling for Final Answer tab
+              const isFinalAnswerTab = tab.id === 'auto-final-answer';
+              const tier3Classes = isFinalAnswerTab 
+                ? (autonomousStatus?.tier3_status === 'complete' 
+                    ? 'tab-tier3-complete' 
+                    : (autonomousStatus?.is_tier3_active ? 'tab-tier3-active' : ''))
+                : '';
+              
+              return (
+                <React.Fragment key={tab.id}>
+                  {showSeparator && <div className="tab-separator" />}
                   <button
-                    key={tab.id}
-                    className={`subtab ${singlePaperWriterActiveTab === tab.id ? 'active' : ''}`}
-                    onClick={() => {
-                      setSinglePaperWriterActiveTab(tab.id);
-                      setActiveTab(null);
-                    }}
+                    className={`tab ${activeTab === tab.id ? 'active' : ''} tab-${tab.group} ${tier3Classes} ${tab.subtext ? 'tab-with-subtext' : ''}`}
+                    onClick={() => handleAutonomousTabSelect(tab.id)}
                   >
-                    {tab.label}
+                    <div className="tab-content-wrapper">
+                      <span className="tab-main-label">{tab.label}</span>
+                      {tab.subtext && <span className={`tab-subtext ${tab.subtextClass || ''}`}>{tab.subtext}</span>}
+                    </div>
                   </button>
-                ))}
-              </div>
-            </div>
+                </React.Fragment>
+              );
+            })}
             
-            <div className="subsection">
-              <div className="subsection-header">COMPILER</div>
-              <div className="subsection-tabs">
-                {singlePaperWriterTabs.compiler.map(tab => (
+            {/* Large spacer for settings group */}
+            <div className="tab-group-spacer-large"></div>
+            
+            {autonomousSettingsTabs.map(tab => {
+              return (
+                <React.Fragment key={tab.id}>
                   <button
-                    key={tab.id}
-                    className={`subtab ${singlePaperWriterActiveTab === tab.id ? 'active' : ''}`}
-                    onClick={() => {
-                      setSinglePaperWriterActiveTab(tab.id);
-                      setActiveTab(null);
-                    }}
+                    className={`tab ${activeTab === tab.id ? 'active' : ''} tab-${tab.group}`}
+                    onClick={() => handleAutonomousTabSelect(tab.id)}
                   >
                     {tab.label}
                   </button>
-                ))}
-              </div>
-            </div>
-          </div>
+                </React.Fragment>
+              );
+            })}
+          </>
+        ) : (
+          <>
+            {manualTabs.map((tab, index) => {
+              const prevTab = manualTabs[index - 1];
+              const showSeparator = prevTab && prevTab.group !== tab.group;
+
+              return (
+                <React.Fragment key={tab.id}>
+                  {showSeparator && <div className="tab-separator" />}
+                  <button
+                    className={`tab ${activeTab === tab.id ? 'active' : ''} tab-${tab.group} ${tab.subtext ? 'tab-with-subtext' : ''}`}
+                    onClick={() => handleManualTabSelect(tab.id)}
+                  >
+                    <div className="tab-content-wrapper">
+                      <span className="tab-main-label">{tab.label}</span>
+                      {tab.subtext && <span className={`tab-subtext ${tab.subtextClass || ''}`}>{tab.subtext}</span>}
+                    </div>
+                  </button>
+                </React.Fragment>
+              );
+            })}
+          </>
         )}
       </div>
       
@@ -1383,6 +1783,7 @@ function App() {
           {activeTab === 'auto-interface' && (
             <AutonomousResearchInterface
               isRunning={autonomousRunning}
+              anyWorkflowRunning={anyWorkflowRunning}
               status={autonomousStatus}
               activity={autonomousActivity}
               onStart={handleAutonomousStart}
@@ -1420,6 +1821,13 @@ function App() {
               status={autonomousStatus}
             />
           )}
+          {activeTab === 'auto-stage2-history' && (
+            <Stage2PaperHistory
+              onCurrentSessionDataChanged={async () => {
+                await Promise.all([refreshPapers(), refreshBrainstorms()]);
+              }}
+            />
+          )}
           {activeTab === 'auto-final-answer-library' && (
             <FinalAnswerLibrary />
           )}
@@ -1431,20 +1839,28 @@ function App() {
           )}
           {activeTab === 'boost-logs' && <BoostLogs />}
           
-          {/* Single Paper Writer Content - ONLY when section is expanded */}
-          {showSinglePaperWriter && singlePaperWriterActiveTab === 'aggregator-interface' && (
-            <AggregatorInterface config={config} setConfig={setConfig} />
+          {activeTab === 'aggregator-interface' && (
+            <AggregatorInterface
+              config={config}
+              setConfig={setConfig}
+              anyWorkflowRunning={anyWorkflowRunning}
+            />
           )}
-          {showSinglePaperWriter && singlePaperWriterActiveTab === 'aggregator-settings' && (
+          {activeTab === 'aggregator-settings' && (
             <AggregatorSettings config={config} setConfig={setConfig} />
           )}
-          {showSinglePaperWriter && singlePaperWriterActiveTab === 'aggregator-logs' && <AggregatorLogs />}
-          {showSinglePaperWriter && singlePaperWriterActiveTab === 'aggregator-results' && <LiveResults />}
+          {activeTab === 'aggregator-logs' && <AggregatorLogs />}
+          {activeTab === 'aggregator-results' && <LiveResults />}
           
-          {showSinglePaperWriter && singlePaperWriterActiveTab === 'compiler-interface' && <CompilerInterface activeTab={singlePaperWriterActiveTab} />}
-          {showSinglePaperWriter && singlePaperWriterActiveTab === 'compiler-settings' && <CompilerSettings />}
-          {showSinglePaperWriter && singlePaperWriterActiveTab === 'compiler-logs' && <CompilerLogs />}
-          {showSinglePaperWriter && singlePaperWriterActiveTab === 'compiler-live-paper' && <LivePaper />}
+          {activeTab === 'compiler-interface' && (
+            <CompilerInterface
+              activeTab={activeTab}
+              anyWorkflowRunning={anyWorkflowRunning}
+            />
+          )}
+          {activeTab === 'compiler-settings' && <CompilerSettings />}
+          {activeTab === 'compiler-logs' && <CompilerLogs />}
+          {activeTab === 'compiler-live-paper' && <LivePaper />}
         </div>
       </div>
       
@@ -1469,32 +1885,62 @@ function App() {
           <div className="disclaimer-overlay" onClick={(e) => e.stopPropagation()} />
           <div className="disclaimer-modal">
             <div className="disclaimer-content">
-              <h2 style={{ marginTop: 0, marginBottom: '1.5rem', color: '#f1c40f' }}>
-                  In-Development Program Disclaimer
+              <h2 style={{ marginTop: 0, marginBottom: '1.5rem', color: '#1eff1c' }}>
+                  Disclaimer & Quickstart
               </h2>
-              <p style={{ fontSize: '0.95rem', lineHeight: '1.5', marginBottom: '1.5rem' }}>
-                Disclaimer: This program is a prototype super intelligence and is actively in development. MOTO operates by forcing your selected AI to attempt to output novel solutions toward your user prompt. Quality, correctness or any other aspects of a given solution are not guaranteed and should be examined with care and scrutiny. MOTO is not meant to produce a single paper, the first paper may lack in quality, MOTO is intended to generate many papers and improve with each completely new paper, best results show after 10+ papers.
-                Monitor the harness, logs and API keys for infinite loops, wasted API calls, and any other bugs. The paper text rendering system is experimental—display issues are <em>not</em> reflective of paper quality. If formatting appears messy, try a 3rd-party LaTeX renderer or copy the raw text into another LLM chat for verification.
+              <p style={{ fontSize: '1.1rem', lineHeight: '1.6', marginBottom: '1.5rem', color: '#1eff1c' }}>
+                <strong>QUICKSTART:</strong> In LM Studio, load the embedding model <code>nomic-ai/nomic-embed-text-v1.5</code> by <strong>Nomic AI</strong> (optional but recommended), or use only an OpenRouter API key instead of LM Studio. You must leave your PC on and awake during runtime, the program will often run for days without interruption.
               </p>
-              <p style={{ fontSize: '1.1rem', lineHeight: '1.6', marginBottom: '1.5rem', color: '#ffcc00' }}>
-                <strong>QUICKSTART:</strong> (Optional) Load your Nomic embedding agent on LM STUDIO, or use an OpenRouter API key-only instead of LM STUDIO and go straight to picking your models, and then start the program - expect it to run for at the VERY LEAST hours to days once you hit run. You must leave your PC on and awake during runtime.
-              </p>
-              <p style={{ fontSize: '0.95rem', lineHeight: '1.5', marginBottom: '1.5rem', color: '#bbb' }}>
-                Please report all bugs and issues to project the repo at <a href="https://github.com/Intrafere/MOTO-Autonomous-ASI" target="_blank" rel="noopener noreferrer" style={{ color: '#f1c40f', textDecoration: 'none' }}>GitHub</a>.
-              </p>
-              <p style={{ fontSize: '0.95rem', lineHeight: '1.5', marginBottom: '1.5rem', color: '#bbb' }}>
-                Trouble shoot and modify this program easily using the code's specialized rules for AIs and Cursor.com's agentic code editing app - no programming experience required!
-              </p>
+              <div
+                style={{
+                  marginBottom: '1.5rem',
+                  padding: '1rem 1.1rem',
+                  border: '1px solid rgba(30, 255, 28, 0.24)',
+                  borderRadius: '10px',
+                  background: 'rgba(30, 255, 28, 0.05)',
+                }}
+              >
+                <p
+                  style={{
+                    margin: '0 0 0.75rem 0',
+                    fontSize: '0.82rem',
+                    fontWeight: 700,
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                    color: '#1eff1c',
+                  }}
+                >
+                  Legal Disclaimer
+                </p>
+                <p style={{ fontSize: '0.95rem', lineHeight: '1.5', margin: 0 }}>
+                  MOTO is an experimental prototype system and remains under active development. It directs selected AI models to generate novel solution attempts in response to your prompt. Outputs may be incorrect, incomplete, misleading, fabricated, poorly reasoned, or otherwise unsuitable for reliance without independent review, especially for high-stakes, academic, financial, legal, medical, engineering, or operational use.
+                  <br />
+                  <br />
+                  This software and all generated content are provided as-is and at your own risk. By using MOTO, you acknowledge that you are solely responsible for reviewing, validating, and deciding how to use any output, and that the developers, operators, and contributors are not responsible or liable for incorrect solutions, hallucinations, omissions, formatting issues, infinite loops, wasted API calls, model or provider failures, data loss, third-party charges, or any direct or indirect loss, damage, cost, or liability resulting from use of the program or its outputs.
+                </p>
+              </div>
               <button 
                 className="disclaimer-acknowledge-btn"
-                onClick={() => setShowDisclaimer(false)}
+                onClick={handleDisclaimerAcknowledge}
               >
-                Acknowledged
+                I Have Read and Acknowledge This Disclaimer
               </button>
             </div>
           </div>
         </>
       )}
+
+      <StartupProviderSetupModal
+        isOpen={showStartupSetupModal}
+        lmStudioAvailable={lmStudioAvailable}
+        hasUsableLmStudioChatModel={Boolean(lmStudioStatus.has_usable_chat_model)}
+        lmStudioModelCount={lmStudioStatus.model_count || 0}
+        lmStudioError={lmStudioStatus.error || ''}
+        statusMessage={startupSetupMessage}
+        isCheckingLmStudio={checkingLmStudioStartupChoice}
+        onChooseOpenRouter={handleStartupOpenRouterChoice}
+        onConfirmLmStudio={handleStartupLmStudioChoice}
+      />
       
       {/* Boost Control Modal */}
       <BoostControlModal 
@@ -1505,11 +1951,8 @@ function App() {
       {/* OpenRouter API Key Modal */}
       <OpenRouterApiKeyModal
         isOpen={showOpenRouterKeyModal}
-        onClose={() => setShowOpenRouterKeyModal(false)}
-        onKeySet={(key) => {
-          setHasOpenRouterKey(true);
-          console.log('OpenRouter API key set successfully');
-        }}
+        onClose={handleCloseOpenRouterKeyModal}
+        onKeySet={handleOpenRouterKeySet}
         reason={openRouterKeyReason}
       />
       
@@ -1525,6 +1968,19 @@ function App() {
         notifications={critiqueNotifications}
         onDismiss={handleDismissNotification}
         onClickNotification={handleClickNotification}
+      />
+      
+      {/* Credit Exhaustion Notification Stack - Persists until user dismisses */}
+      <CreditExhaustionNotificationStack
+        notifications={creditExhaustionNotifications}
+        onDismiss={handleDismissCreditNotification}
+        onDismissAll={() => setCreditExhaustionNotifications([])}
+      />
+
+      {/* Hung Connection Notification Stack - Persists until user dismisses */}
+      <HungConnectionNotificationStack
+        notifications={hungConnectionNotifications}
+        onDismiss={handleDismissHungNotification}
       />
       
       {/* Critique Modal - Opens when notification is clicked */}
@@ -1557,7 +2013,7 @@ function App() {
               className="footer-link"
             >
               <span className="footer-icon">ℹ️</span>
-              About M.O.T.O.
+              Read More About MOTO ASI
             </a>
             <a
               href="https://intrafere.com/structured-brainstorming-validated-feedback/"
@@ -1575,6 +2031,23 @@ function App() {
               className="footer-link footer-link-news"
             >
               MOTO News and Updates
+            </a>
+            <a
+              href="https://intrafere.com/order-a-custom-orchestrator/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="footer-link footer-link-purchase"
+            >
+              Purchase a Custom ASI Program
+            </a>
+            <a
+              href="https://github.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="footer-link footer-link-github"
+            >
+              <span className="footer-icon">⭐</span>
+              Star Us on GitHub for More ASI Programs
             </a>
           </div>
         </div>

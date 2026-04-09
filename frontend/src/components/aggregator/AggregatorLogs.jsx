@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { websocket } from '../../services/websocket';
 import { api } from '../../services/api';
+import '../settings-common.css';
 
 export default function AggregatorLogs() {
   const [events, setEvents] = useState([]);
@@ -213,16 +214,16 @@ export default function AggregatorLogs() {
 
           {recoveryStatus && recoveryStatus.in_recovery && (
             <div style={{ 
-              backgroundColor: '#fff3cd', 
-              border: '2px solid #ffc107',
+              backgroundColor: 'rgba(30, 255, 28, 0.1)', 
+              border: '2px solid #1eff1c',
               borderRadius: '8px',
               padding: '1rem',
               margin: '1rem 0'
             }}>
-              <h2 style={{ color: '#856404', margin: '0 0 0.5rem 0' }}>
+              <h2 style={{ color: '#1eff1c', margin: '0 0 0.5rem 0' }}>
                 Model Recovery in Progress
               </h2>
-              <div style={{ color: '#856404' }}>
+              <div style={{ color: '#c6ffc5' }}>
                 <div><strong>Model:</strong> {recoveryStatus.recovering_model}</div>
                 <div><strong>Stage:</strong> {recoveryStatus.recovery_stage}</div>
                 <div style={{ marginTop: '0.5rem', fontSize: '0.9rem' }}>
@@ -246,7 +247,7 @@ export default function AggregatorLogs() {
                   <div key={model} className="metric-card" style={{ 
                     borderColor: count >= recoveryStatus.corruption_threshold ? '#f44336' : '#ff9800'
                   }}>
-                    <div className="metric-label" style={{ fontSize: '0.85rem' }}>{model}</div>
+                    <div className="metric-label label--sm">{model}</div>
                     <div style={{ fontSize: '0.9rem', marginTop: '0.5rem' }}>
                       <div style={{ color: count >= recoveryStatus.corruption_threshold ? '#f44336' : '#ff9800' }}>
                         Failures: {count}/{recoveryStatus.corruption_threshold}
@@ -271,7 +272,7 @@ export default function AggregatorLogs() {
                 <div style={{ fontSize: '0.9rem', marginTop: '0.5rem' }}>
                   <div>Submissions: {submitter.total_submissions}</div>
                   <div style={{ color: '#4CAF50' }}>Acceptances: {submitter.total_acceptances}</div>
-                  <div style={{ color: '#f44336' }}>Consecutive Rejections: {submitter.consecutive_rejections}</div>
+                  <div className="error-text">Consecutive Rejections: {submitter.consecutive_rejections}</div>
                 </div>
               </div>
             ))}

@@ -3,7 +3,7 @@ import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import TextFileUploader from '../TextFileUploader';
 
-function CompilerInterface({ activeTab }) {
+function CompilerInterface({ activeTab, anyWorkflowRunning = false }) {
   const [compilerPrompt, setCompilerPrompt] = useState('');
   const [status, setStatus] = useState({ is_running: false });
   const [isStarting, setIsStarting] = useState(false);
@@ -119,6 +119,15 @@ function CompilerInterface({ activeTab }) {
   };
 
   const handleStart = async () => {
+    if (anyWorkflowRunning && !status.is_running) {
+      setError({
+        error: 'workflow_conflict',
+        reason: 'Another workflow is already running. Stop it before starting the Compiler.',
+        suggestion: 'Only one workflow mode may be active at a time.'
+      });
+      return;
+    }
+
     if (!compilerPrompt.trim()) {
       alert('Please enter a compiler-directing prompt');
       return;
@@ -174,6 +183,12 @@ function CompilerInterface({ activeTab }) {
       // Handle structured error response
       if (err.details && typeof err.details === 'object') {
         setError(err.details);
+      } else if (typeof err.details === 'string' && err.details.trim()) {
+        setError({
+          error: 'workflow_conflict',
+          reason: err.details,
+          suggestion: 'Stop the active workflow and try again.'
+        });
       } else {
         setError({
           error: 'unknown',
@@ -239,7 +254,7 @@ function CompilerInterface({ activeTab }) {
       {status.is_running && (
         <div className="critique-phase-banner" style={{
           backgroundColor: critiquePhaseActive ? '#2a2a2a' : '#1a1a1a',
-          border: critiquePhaseActive ? '2px solid #ffd700' : '2px solid #666',
+          border: critiquePhaseActive ? '2px solid #1eff1c' : '2px solid #666',
           borderRadius: '8px',
           padding: '1rem',
           marginTop: '1rem',
@@ -251,7 +266,7 @@ function CompilerInterface({ activeTab }) {
             {critiquePhaseActive ? '◎' : '▬'}
           </span>
           <div style={{ flex: 1 }}>
-            <strong style={{ color: critiquePhaseActive ? '#ffd700' : '#ccc', fontSize: '1.1rem' }}>
+            <strong style={{ color: critiquePhaseActive ? '#1eff1c' : '#ccc', fontSize: '1.1rem' }}>
               {critiquePhaseActive ? `Critique Phase (Version ${paperVersion})` : 'Paper Writing in Progress'}
             </strong>
             {critiquePhaseActive ? (
@@ -260,7 +275,7 @@ function CompilerInterface({ activeTab }) {
                   {critiqueAcceptances} / 10 critiques accepted
                 </p>
                 <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.85rem', color: '#888' }}>
-                  Collecting peer review feedback on body section...
+                  Collecting peer review feedback on the body section...
                 </p>
               </>
             ) : (
@@ -340,7 +355,7 @@ function CompilerInterface({ activeTab }) {
           <button 
             onClick={handleStart} 
             className="btn btn-primary"
-            disabled={isStarting}
+            disabled={isStarting || (anyWorkflowRunning && !status.is_running)}
           >
             {isStarting ? 'Starting...' : 'Start Compiler'}
           </button>

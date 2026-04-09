@@ -1,6 +1,10 @@
 """
 Paper Redundancy Checker - Reviews paper library for redundancy.
 Runs every 3 completed papers to maintain library quality.
+
+NO RAG BY DESIGN: Redundancy is assessed at the abstract/title level — comparing
+high-level paper topics to find overlap. Full paper content is not needed to detect
+whether two papers cover the same ground. All inputs are compact metadata summaries.
 """
 import asyncio
 import json

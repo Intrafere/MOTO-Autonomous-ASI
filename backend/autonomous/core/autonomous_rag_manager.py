@@ -69,7 +69,8 @@ class AutonomousRAGManager:
         self,
         topic_id: str,
         max_tokens: int = 50000,
-        query: str = ""
+        query: str = "",
+        exclude_sources: Optional[List[str]] = None
     ) -> Tuple[str, bool]:
         """
         Get brainstorm database content for context.
@@ -82,6 +83,7 @@ class AutonomousRAGManager:
             topic_id: Topic ID to get context for
             max_tokens: Maximum tokens available for this content
             query: Query for RAG retrieval if needed (e.g., user research prompt)
+            exclude_sources: Source names to skip during RAG packing
         
         Returns:
             Tuple of (content string, used_rag boolean)
@@ -112,7 +114,8 @@ class AutonomousRAGManager:
             context_pack = await rag_manager.retrieve(
                 query=query,
                 chunk_size=rag_config.validator_chunk_size,  # 512 for consistency
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                exclude_sources=exclude_sources
             )
             
             if context_pack and context_pack.text:
@@ -190,7 +193,8 @@ class AutonomousRAGManager:
         paper_ids: List[str],
         max_total_tokens: int = 60000,
         query: str = "",
-        include_outlines: bool = True
+        include_outlines: bool = True,
+        exclude_sources: Optional[List[str]] = None
     ) -> Tuple[str, bool]:
         """
         Get reference papers content for context.
@@ -203,6 +207,7 @@ class AutonomousRAGManager:
             paper_ids: List of paper IDs to include
             max_total_tokens: Maximum tokens for all reference papers combined
             query: Query for RAG retrieval if needed
+            exclude_sources: Source names to skip during RAG packing
         
         Returns:
             Tuple of (content string, used_rag boolean)
@@ -276,7 +281,8 @@ class AutonomousRAGManager:
         context_pack = await rag_manager.retrieve(
             query=enhanced_query,
             chunk_size=rag_config.validator_chunk_size,
-            max_tokens=max_total_tokens
+            max_tokens=max_total_tokens,
+            exclude_sources=exclude_sources
         )
         
         if context_pack and context_pack.text:
@@ -304,16 +310,31 @@ class AutonomousRAGManager:
     async def _ensure_paper_indexed(self, paper_id: str, content: str, title: str) -> None:
         """Ensure paper content is indexed in RAG for retrieval."""
         source_name = f"reference_paper_{paper_id}"
+        has_document_entry = source_name in rag_manager.document_access_order
+        has_validator_chunks = any(
+            chunk.source_file == source_name
+            for chunk in rag_manager.chunks_by_size[rag_config.validator_chunk_size]
+        )
+
+        if paper_id in self._papers_indexed and has_document_entry and has_validator_chunks:
+            return
         
         try:
-            # Check if already indexed (by checking if source exists)
-            # Add to RAG
+            # If the tracking set says this paper was indexed but its active RAG entry
+            # has been evicted, remove any partial remnants and rebuild it.
+            if paper_id in self._papers_indexed:
+                self._papers_indexed.discard(paper_id)
+
+            if has_document_entry:
+                await rag_manager.remove_document(source_name)
+
             await rag_manager.add_text(
                 content,
                 source_name,
                 chunk_sizes=rag_config.submitter_chunk_intervals,
                 is_permanent=False
             )
+            self._papers_indexed.add(paper_id)
             logger.debug(f"Indexed reference paper {paper_id}: {title}")
             
         except Exception as e:
@@ -393,6 +414,7 @@ class AutonomousRAGManager:
         
         # RAG query for retrievals
         rag_query = query or f"mathematical research paper compilation"
+        rag_exclude_sources: List[str] = []
         
         # Priority 1: Brainstorm database (highest priority after outline)
         brainstorm_budget = int(remaining_budget * 0.5)  # Allocate 50% to brainstorm
@@ -405,6 +427,13 @@ class AutonomousRAGManager:
         context["use_rag_for_brainstorm"] = used_rag
         brainstorm_tokens = count_tokens(brainstorm_content)
         remaining_budget -= brainstorm_tokens
+
+        # If brainstorm was direct-injected, exclude its RAG sources from later retrievals.
+        if brainstorm_content and not used_rag:
+            rag_exclude_sources.extend([
+                f"brainstorm_{topic_id}",
+                f"brainstorm_{topic_id}.txt"
+            ])
         
         # Priority 2: Current paper progress
         paper_tokens = count_tokens(current_paper) if current_paper else 0
@@ -415,6 +444,7 @@ class AutonomousRAGManager:
             context["current_paper"] = current_paper
             remaining_budget -= paper_tokens
             logger.debug(f"Compiler context: Paper direct injection ({paper_tokens} tokens)")
+            rag_exclude_sources.append("compiler_current_paper")
         elif paper_tokens > 0:
             # Paper doesn't fit - use RAG
             context["use_rag_for_papers"] = True
@@ -423,7 +453,8 @@ class AutonomousRAGManager:
             paper_pack = await rag_manager.retrieve(
                 query=rag_query,
                 chunk_size=rag_config.validator_chunk_size,
-                max_tokens=paper_budget
+                max_tokens=paper_budget,
+                exclude_sources=list(dict.fromkeys(rag_exclude_sources)) if rag_exclude_sources else None
             )
             
             if paper_pack and paper_pack.text:
@@ -442,7 +473,8 @@ class AutonomousRAGManager:
             ref_content, ref_used_rag = await self.get_reference_papers_context(
                 reference_paper_ids,
                 max_total_tokens=remaining_budget,
-                query=rag_query
+                query=rag_query,
+                exclude_sources=list(dict.fromkeys(rag_exclude_sources)) if rag_exclude_sources else None
             )
             context["reference_papers"] = ref_content
             context["use_rag_for_reference"] = ref_used_rag

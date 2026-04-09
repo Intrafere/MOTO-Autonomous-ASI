@@ -167,6 +167,7 @@ Submission JSON: `operation`, `old_string` (exact, pre-validated), `new_string`.
 1. Exact match
 2. Unicode hyphen normalization (en-dash, em-dash variants)
 3. Whitespace normalization (2+ spaces → single space)
+3b. All-whitespace normalization (collapses newlines/spaces/tabs → single space)
 4. Backslash normalization (`\\mathbb` → `\mathbb`)
 5. Consecutive fuzzy matching: 85% consecutive chars + last 5% exact tail anchor + unique (≥20 char minimum)
 
@@ -196,22 +197,45 @@ Prevents models' fake placeholder text (e.g., "XI. Conclusion\n*placeholder*") f
 
 Per-role context windows (all user-configurable, default 131072):
 - Validator, High-Context Submitter, High-Parameter Submitter: 131072 tokens each
+- **Settings flow**: All compiler modules read from `system_config.compiler_*` at runtime. The caller that creates `CompilerCoordinator` MUST write settings to `system_config` before init (manual mode: `/api/compiler/start`; autonomous mode: `autonomous_coordinator.py` before `CompilerCoordinator()` creation).
 - Rigor mode dynamically adjusts RAG budget if outline + system prompts exceed available context
+- Construction mode (autonomous) dynamically adjusts RAG budget when brainstorm content is present: `rag_budget = max(5000, max_allowed - outline_tokens - paper_tokens - brainstorm_tokens - 5000_overhead)`. Brainstorm always direct-injected at full fidelity; RAG evidence scales to fit remaining budget.
 
 **Context rules:** User prompt ALWAYS direct injected. Direct injection first; RAG only when doesn't fit. ~85% RAG retrieval, ~15% direct injections. Halt with error if user prompt exceeds context_window - minimum_RAG_allocation.
 
 **Prompt Size Validation** (all submitters before LLM call):
-- `outline_create`, `outline_update`, `rigor`: raises ValueError if exceeds
-- `construction`, `review`: returns None if exceeds
+- `outline_create`, `outline_update`, `rigor`, `construction`, `review`: raises ValueError if exceeds
 - `validator`: rejects submission if exceeds
 
-**Rigor Mode context**: no aggregator database; outline fully injected; paper content RAG-retrieved.
+**Rigor Mode context**: no aggregator database; outline fully injected; paper content RAG-retrieved. RAG excludes `compiler_outline.txt` (already direct-injected).
+
+**RAG source exclusion (anti-duplication)**: All compiler RAG calls pass `exclude_sources` to skip chunks from content already direct-injected. Construction excludes outline + paper + brainstorm sources; outline_update excludes outline + paper; rigor excludes outline. See `rag-design-for-overall-program.mdc` for full table.
 
 ---
 
 ## Model Tracking (Manual Mode)
 
 `PaperModelTracker` initialized on compiler start (non-autonomous). Tracks API calls via callback on `api_client_manager`. Saved paper includes: Author Attribution Header → Paper Content → Model Credits Footer (models + API call counts + Wolfram Alpha verifications if any). Format in `paper_model_tracker.py`.
+
+---
+
+## Retroactive Brainstorm Correction (Autonomous Mode Only)
+
+During paper compilation in autonomous mode (Part 3), the compiler submitter sees both the paper AND the source brainstorm database as a unified editable workspace. The submitter may optionally propose a brainstorm operation alongside its paper operation each turn.
+
+**Brainstorm operations**: `edit` (correct submission content), `delete` (remove submission), `add` (new insight discovered during synthesis).
+
+**Independent Validation Principle**: Paper and brainstorm operations are validated SEPARATELY. The validator sees ONLY the paper when validating paper edits, ONLY the brainstorm when validating brainstorm operations. Each must stand on its own merits. Neither can depend on the other for correctness.
+
+**Acceptance is independent**: Paper accepted + brainstorm rejected = valid state. Brainstorm accepted + paper rejected = valid state. No combination produces incoherence.
+
+**Brainstorm content**: Passed to construction prompts with full submission numbers. Submitter references entries by `#N` for edit/delete.
+
+**RAG refresh**: After accepted brainstorm modification, RAG is refreshed with updated brainstorm content so subsequent construction turns see corrected context.
+
+**Files**: `brainstorm_memory.py` (edit_submission, remove_submission, add_submission_retroactive), `compiler_validator.py` (validate_brainstorm_operation), `compiler_coordinator.py` (_handle_brainstorm_retroactive_operation), `construction_prompts.py` (brainstorm_operation JSON schema).
+
+**WebSocket events**: `brainstorm_retroactive_accepted`, `brainstorm_retroactive_rejected`.
 
 ---
 

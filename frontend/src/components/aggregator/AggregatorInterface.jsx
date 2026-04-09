@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
 import TextFileUploader from '../TextFileUploader';
+import '../settings-common.css';
 
-export default function AggregatorInterface({ config, setConfig }) {
+export default function AggregatorInterface({ config, setConfig, anyWorkflowRunning = false }) {
   const [isRunning, setIsRunning] = useState(false);
   const [status, setStatus] = useState(null);
   const [uploadedFiles, setUploadedFiles] = useState([]);
@@ -49,6 +50,11 @@ export default function AggregatorInterface({ config, setConfig }) {
   };
 
   const handleStart = async () => {
+    if (anyWorkflowRunning && !isRunning) {
+      alert('Another workflow is already running. Stop it before starting the Aggregator.');
+      return;
+    }
+
     if (!config.userPrompt.trim()) {
       alert('Please enter a user prompt');
       return;
@@ -97,7 +103,7 @@ export default function AggregatorInterface({ config, setConfig }) {
       setIsRunning(true);
     } catch (error) {
       console.error('Failed to start aggregator:', error);
-      alert('Failed to start aggregator. Check console for details.');
+      alert(`Failed to start aggregator: ${error.details || error.message}`);
     }
   };
 
@@ -159,7 +165,9 @@ export default function AggregatorInterface({ config, setConfig }) {
 
       <div className="button-group">
         {!isRunning ? (
-          <button onClick={handleStart}>Start Aggregator</button>
+          <button onClick={handleStart} disabled={anyWorkflowRunning && !isRunning}>
+            Start Aggregator
+          </button>
         ) : (
           <button onClick={handleStop} className="danger">Stop Aggregator</button>
         )}
@@ -179,7 +187,7 @@ export default function AggregatorInterface({ config, setConfig }) {
           </div>
           <div className="metric-card">
             <div className="metric-label">Rejected</div>
-            <div className="metric-value" style={{ color: '#f44336' }}>
+            <div className="metric-value error-text">
               {status.total_rejections}
             </div>
           </div>

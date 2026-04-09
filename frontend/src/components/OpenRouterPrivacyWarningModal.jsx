@@ -1,4 +1,5 @@
 import React from 'react';
+import './settings-common.css';
 
 /**
  * Modal that displays OpenRouter privacy policy warning.
@@ -21,20 +22,11 @@ function OpenRouterPrivacyWarningModal({ isOpen, onClose, errorData }) {
 
   return (
     <div 
-      className="modal-overlay"
+      className="inline-modal-overlay"
       onClick={handleOverlayClick}
       style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.75)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 10000,
-        padding: '20px'
+        padding: '20px',
+        zIndex: 10000
       }}
     >
       <div 
@@ -190,37 +182,26 @@ function OpenRouterPrivacyWarningModal({ isOpen, onClose, errorData }) {
         }}>
           <button
             onClick={handleOpenSettings}
+            className="btn-success-sm"
             style={{
               padding: '12px 24px',
-              backgroundColor: '#4caf50',
-              color: 'white',
-              border: 'none',
-              borderRadius: '6px',
               fontSize: '14px',
-              fontWeight: '600',
-              cursor: 'pointer',
-              transition: 'background-color 0.2s'
+              fontWeight: '600'
             }}
-            onMouseEnter={(e) => e.target.style.backgroundColor = '#45a049'}
-            onMouseLeave={(e) => e.target.style.backgroundColor = '#4caf50'}
           >
             Open Privacy Settings
           </button>
           <button
             onClick={onClose}
+            className="btn-ghost"
             style={{
               padding: '12px 24px',
-              backgroundColor: '#555',
-              color: 'white',
-              border: 'none',
-              borderRadius: '6px',
               fontSize: '14px',
               fontWeight: '600',
-              cursor: 'pointer',
-              transition: 'background-color 0.2s'
+              backgroundColor: '#555',
+              color: 'white',
+              border: 'none'
             }}
-            onMouseEnter={(e) => e.target.style.backgroundColor = '#666'}
-            onMouseLeave={(e) => e.target.style.backgroundColor = '#555'}
           >
             OK, I Understand
           </button>

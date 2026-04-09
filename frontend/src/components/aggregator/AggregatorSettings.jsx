@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api, openRouterAPI } from '../../services/api';
+import '../settings-common.css';
 
 const DEFAULT_SUBMITTER_CONFIG = {
   submitterId: 1,
@@ -294,22 +295,13 @@ export default function AggregatorSettings({ config, setConfig }) {
     return (
       <>
         {/* Provider Toggle */}
-        <div className="form-group" style={{ margin: 0 }}>
-          <label style={{ fontSize: '0.85rem' }}>Provider</label>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <div className="form-group form-group--compact">
+          <label className="label--sm">Provider</label>
+          <div className="provider-toggle-group">
             <button
               type="button"
               onClick={() => onProviderChange('lm_studio')}
-              style={{
-                flex: 1,
-                padding: '0.5rem',
-                backgroundColor: provider === 'lm_studio' ? '#4CAF50' : '#333',
-                border: 'none',
-                borderRadius: '4px',
-                color: '#fff',
-                cursor: 'pointer',
-                fontSize: '0.8rem'
-              }}
+              className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
             >
               LM Studio
             </button>
@@ -317,16 +309,7 @@ export default function AggregatorSettings({ config, setConfig }) {
               type="button"
               onClick={() => hasOpenRouterKey && onProviderChange('openrouter')}
               disabled={!hasOpenRouterKey}
-              style={{
-                flex: 1,
-                padding: '0.5rem',
-                backgroundColor: provider === 'openrouter' ? '#6c5ce7' : '#333',
-                border: 'none',
-                borderRadius: '4px',
-                color: hasOpenRouterKey ? '#fff' : '#666',
-                cursor: hasOpenRouterKey ? 'pointer' : 'not-allowed',
-                fontSize: '0.8rem'
-              }}
+              className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or' : ''}`}
               title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
             >
               OpenRouter
@@ -335,12 +318,12 @@ export default function AggregatorSettings({ config, setConfig }) {
         </div>
 
         {/* Model Selection */}
-        <div className="form-group" style={{ margin: 0 }}>
-          <label style={{ fontSize: '0.85rem' }}>{label}</label>
+        <div className="form-group form-group--compact">
+          <label className="label--sm">{label}</label>
           <select
             value={modelId || ''}
             onChange={(e) => onModelChange(e.target.value)}
-            style={{ fontSize: '0.85rem' }}
+            className="select--sm"
           >
             <option value="">Select model...</option>
             {models.map(model => {
@@ -361,12 +344,12 @@ export default function AggregatorSettings({ config, setConfig }) {
 
         {/* OpenRouter Provider Selection (only for OpenRouter) */}
         {provider === 'openrouter' && modelId && (
-          <div className="form-group" style={{ margin: 0 }}>
-            <label style={{ fontSize: '0.85rem' }}>Host Provider (optional)</label>
+          <div className="form-group form-group--compact">
+            <label className="label--sm">Host Provider (optional)</label>
             <select
               value={orProvider || ''}
               onChange={(e) => onOpenrouterProviderChange(e.target.value || null)}
-              style={{ fontSize: '0.85rem' }}
+              className="select--sm"
             >
               <option value="">Auto (let OpenRouter choose)</option>
               {providers.map(p => (
@@ -378,21 +361,21 @@ export default function AggregatorSettings({ config, setConfig }) {
 
         {/* LM Studio Fallback (only for OpenRouter) */}
         {provider === 'openrouter' && (
-          <div className="form-group" style={{ margin: 0 }}>
-            <label style={{ fontSize: '0.85rem', color: '#999' }}>
+          <div className="form-group form-group--compact">
+            <label className="label--sm label--muted">
               LM Studio Fallback (optional)
             </label>
             <select
               value={lmStudioFallbackId || ''}
               onChange={(e) => onFallbackChange(e.target.value || null)}
-              style={{ fontSize: '0.85rem', borderColor: '#444' }}
+              className="select--sm"
             >
               <option value="">No fallback</option>
               {lmStudioModels.map(model => (
                 <option key={model.id} value={model.id}>{model.id}</option>
               ))}
             </select>
-            <small style={{ color: '#666', display: 'block', marginTop: '0.25rem' }}>
+            <small className="hint-text hint-text--dim" style={{ marginTop: '0.25rem' }}>
               Used if OpenRouter credits run out
             </small>
           </div>
@@ -403,10 +386,10 @@ export default function AggregatorSettings({ config, setConfig }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div className="settings-header-row">
         <h1>Aggregator Settings</h1>
         {saveMessage && (
-          <div style={{ color: '#4CAF50', fontSize: '0.9rem', fontWeight: '500' }}>
+          <div className="save-message">
             {saveMessage}
           </div>
         )}
@@ -414,14 +397,8 @@ export default function AggregatorSettings({ config, setConfig }) {
 
       {/* OpenRouter Status Banner */}
       {!hasOpenRouterKey && (
-        <div style={{
-          backgroundColor: 'rgba(108, 92, 231, 0.1)',
-          border: '1px solid #6c5ce7',
-          borderRadius: '8px',
-          padding: '1rem',
-          marginBottom: '1.5rem'
-        }}>
-          <p style={{ color: '#a29bfe', margin: 0 }}>
+        <div className="openrouter-banner">
+          <p className="openrouter-banner__text">
             <strong>💡 OpenRouter Available:</strong> Set your OpenRouter API key in the header to enable cloud model selection for any role.
           </p>
         </div>
@@ -430,15 +407,15 @@ export default function AggregatorSettings({ config, setConfig }) {
       {loading ? (
         <div>Loading models...</div>
       ) : lmStudioModels.length === 0 && !hasOpenRouterKey ? (
-        <div style={{ color: '#f44336' }}>
+        <div className="error-text">
           <p>No models found. Make sure LM Studio is running on http://127.0.0.1:1234 or configure OpenRouter.</p>
           <button onClick={fetchModels} className="secondary">Retry</button>
         </div>
       ) : (
         <>
           {/* Number of Submitters Slider */}
-          <div className="form-group" style={{ marginBottom: '2rem', padding: '1rem', background: '#1a2332', borderRadius: '8px' }}>
-            <label style={{ fontSize: '1.1rem', fontWeight: '600' }}>
+          <div className="form-group settings-panel settings-panel--blue">
+            <label className="label--lg">
               Number of Aggregator Submitters: {numSubmitters}
             </label>
             <input
@@ -447,62 +424,46 @@ export default function AggregatorSettings({ config, setConfig }) {
               max="10"
               value={numSubmitters}
               onChange={(e) => handleNumSubmittersChange(e.target.value)}
-              style={{ width: '100%', marginTop: '0.5rem' }}
+              className="range-slider"
             />
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#888' }}>
+            <div className="range-labels">
               <span>1</span>
               <span>5</span>
               <span>10</span>
             </div>
-            <small style={{ color: '#999', display: 'block', marginTop: '0.5rem' }}>
+            <small className="hint-text">
               Multiple submitters run in parallel exploring different avenues. Each can use a different model.
             </small>
           </div>
 
           {/* Per-Submitter Configuration Cards */}
-          <div style={{ marginBottom: '2rem' }}>
-            <h3 style={{ marginBottom: '1rem', borderBottom: '1px solid #333', paddingBottom: '0.5rem' }}>
+          <div className="mb-2">
+            <h3 className="section-heading--bordered">
               Submitter Configurations
             </h3>
             
             {submitterConfigs.map((cfg, idx) => (
               <div 
                 key={cfg.submitterId}
-                style={{
-                  background: cfg.submitterId === 1 ? '#1a2838' : '#1a1a24',
-                  border: cfg.provider === 'openrouter' 
-                    ? '2px solid #6c5ce7' 
-                    : (cfg.submitterId === 1 ? '2px solid #4CAF50' : '1px solid #333'),
-                  borderRadius: '8px',
-                  padding: '1rem',
-                  marginBottom: '1rem'
-                }}
+                className={`role-config-card${cfg.provider === 'openrouter' ? ' role-config-card--openrouter role-config-card--highlight' : (cfg.submitterId === 1 ? ' role-config-card--main role-config-card--highlight' : '')}`}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                  <h4 style={{ margin: 0, color: cfg.provider === 'openrouter' ? '#a29bfe' : (cfg.submitterId === 1 ? '#4CAF50' : '#fff') }}>
+                <div className="card-header-row">
+                  <h4 style={{ margin: 0 }} className={cfg.provider === 'openrouter' ? 'card-title--purple' : (cfg.submitterId === 1 ? 'card-title--green' : '')}>
                     Submitter {cfg.submitterId} 
-                    {cfg.submitterId === 1 && <span style={{ fontWeight: 'normal' }}> (Main Submitter)</span>}
-                    {cfg.provider === 'openrouter' && <span style={{ fontWeight: 'normal', color: '#6c5ce7' }}> [OpenRouter]</span>}
+                    {cfg.submitterId === 1 && <span className="provider-badge-inline"> (Main Submitter)</span>}
+                    {cfg.provider === 'openrouter' && <span className="provider-badge-inline" style={{ color: '#6c5ce7' }}> [OpenRouter]</span>}
                   </h4>
                   {cfg.submitterId === 1 && numSubmitters > 1 && (
                     <button 
                       onClick={() => applyToAll(1)}
-                      style={{ 
-                        fontSize: '0.8rem', 
-                        padding: '0.3rem 0.6rem',
-                        background: '#4CAF50',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        color: '#fff'
-                      }}
+                      className="btn-apply-all"
                     >
                       Apply to All
                     </button>
                   )}
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: cfg.provider === 'openrouter' ? '1fr 1fr' : '1fr 1fr 1fr', gap: '1rem' }}>
+                <div className={`config-grid ${cfg.provider === 'openrouter' ? 'config-grid--2col' : 'config-grid--3col'}`}>
                   <ModelSelector
                     provider={cfg.provider}
                     modelId={cfg.modelId}
@@ -514,8 +475,8 @@ export default function AggregatorSettings({ config, setConfig }) {
                     onFallbackChange={(f) => updateSubmitterConfig(cfg.submitterId, 'lmStudioFallbackId', f)}
                   />
 
-                  <div className="form-group" style={{ margin: 0 }}>
-                    <label style={{ fontSize: '0.85rem' }}>Context Window</label>
+                  <div className="form-group form-group--compact">
+                    <label className="label--sm">Context Window</label>
                     <input
                       type="number"
                       value={cfg.contextWindow}
@@ -523,12 +484,12 @@ export default function AggregatorSettings({ config, setConfig }) {
                       min="4096"
                       max="999999"
                       step="1024"
-                      style={{ fontSize: '0.85rem' }}
+                      className="input--sm"
                     />
                   </div>
 
-                  <div className="form-group" style={{ margin: 0 }}>
-                    <label style={{ fontSize: '0.85rem' }}>Max Output Tokens</label>
+                  <div className="form-group form-group--compact">
+                    <label className="label--sm">Max Output Tokens</label>
                     <input
                       type="number"
                       value={cfg.maxOutputTokens}
@@ -536,7 +497,7 @@ export default function AggregatorSettings({ config, setConfig }) {
                       min="1000"
                       max="100000"
                       step="1000"
-                      style={{ fontSize: '0.85rem' }}
+                      className="input--sm"
                     />
                   </div>
                 </div>
@@ -545,22 +506,16 @@ export default function AggregatorSettings({ config, setConfig }) {
           </div>
 
           {/* Validator Configuration (Single) */}
-          <div style={{ 
-            marginBottom: '2rem', 
-            padding: '1rem', 
-            background: validatorProvider === 'openrouter' ? '#1a1a2e' : '#241a1a', 
-            border: validatorProvider === 'openrouter' ? '2px solid #6c5ce7' : '1px solid #663333', 
-            borderRadius: '8px' 
-          }}>
-            <h3 style={{ marginBottom: '1rem', color: validatorProvider === 'openrouter' ? '#a29bfe' : '#ff6b6b' }}>
+          <div className={`role-config-card${validatorProvider === 'openrouter' ? ' role-config-card--openrouter role-config-card--highlight' : ' settings-panel--validator'}`}>
+            <h3 className={validatorProvider === 'openrouter' ? 'card-title--purple' : ''} style={{ marginBottom: '1rem', color: validatorProvider === 'openrouter' ? undefined : '#ff6b6b' }}>
               Validator Configuration (Single)
-              {validatorProvider === 'openrouter' && <span style={{ fontWeight: 'normal', marginLeft: '0.5rem' }}>[OpenRouter]</span>}
+              {validatorProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
             </h3>
-            <small style={{ color: '#999', display: 'block', marginBottom: '1rem' }}>
-              Only one validator is allowed to maintain single Markov chain evolution of the database.
+            <small className="hint-text" style={{ marginBottom: '1rem' }}>
+              Only one validator is allowed to maintain a single Markov chain evolution of the database.
             </small>
 
-            <div style={{ display: 'grid', gridTemplateColumns: validatorProvider === 'openrouter' ? '1fr 1fr' : '1fr', gap: '1rem' }}>
+            <div className={`config-grid ${validatorProvider === 'openrouter' ? 'config-grid--2col' : 'config-grid--1col'}`}>
               <ModelSelector
                 provider={validatorProvider}
                 modelId={config.validatorModel}
@@ -598,7 +553,7 @@ export default function AggregatorSettings({ config, setConfig }) {
                 max="999999"
                 step="1024"
               />
-              <small style={{ color: '#999', display: 'block', marginTop: '0.5rem' }}>
+              <small className="hint-text">
                 {validatorProvider === 'lm_studio' 
                   ? 'Must match the context length you set in LM Studio for this model.'
                   : 'Set based on the OpenRouter model\'s context window.'
@@ -609,10 +564,7 @@ export default function AggregatorSettings({ config, setConfig }) {
             <div className="form-group">
               <label>
                 Validator Max Output Tokens{' '}
-                <span 
-                  title="Default: 25000"
-                  style={{ cursor: 'help', marginLeft: '0.5rem', color: '#888' }}
-                >
+                <span className="help-hint" title="Default: 25000">
                   ℹ️
                 </span>
               </label>
@@ -632,25 +584,24 @@ export default function AggregatorSettings({ config, setConfig }) {
             </div>
           </div>
 
-          <button onClick={fetchModels} className="secondary" style={{ marginRight: '0.5rem' }}>
+          <button onClick={fetchModels} className="secondary mr-05">
             Refresh LM Studio Models
           </button>
           {hasOpenRouterKey && (
             <>
-              <button onClick={() => fetchOpenRouterModels(freeOnly)} className="secondary" disabled={loadingOpenRouter} style={{ marginRight: '0.5rem' }}>
+              <button onClick={() => fetchOpenRouterModels(freeOnly)} className="secondary mr-05" disabled={loadingOpenRouter}>
                 {loadingOpenRouter ? 'Loading...' : 'Refresh OpenRouter Models'}
               </button>
-              <label style={{ display: 'inline-flex', alignItems: 'center', marginLeft: '1rem', fontSize: '0.9rem' }}>
+              <label className="settings-checkbox-label" style={{ marginLeft: '1rem' }}>
                 <input
                   type="checkbox"
                   checked={freeOnly}
                   onChange={(e) => setFreeOnly(e.target.checked)}
-                  style={{ marginRight: '0.5rem' }}
                 />
                 Show only free models
               </label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: '0.5rem' }}>
-                <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+              <div className="checkbox-group-col">
+                <label className="settings-checkbox-label">
                   <input
                     type="checkbox"
                     checked={freeModelLooping}
@@ -658,15 +609,11 @@ export default function AggregatorSettings({ config, setConfig }) {
                       setFreeModelLooping(e.target.checked);
                       openRouterAPI.setFreeModelSettings(e.target.checked, freeModelAutoSelector).catch(() => {});
                     }}
-                    style={{ marginRight: '0.5rem' }}
                   />
                   Enable Free Model Looping
-                  <span
-                    title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
-                    style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
-                  >(?)</span>
+                  <span className="help-hint" title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits.">(?)</span>
                 </label>
-                <label style={{ display: 'inline-flex', alignItems: 'center', fontSize: '0.9rem' }}>
+                <label className="settings-checkbox-label">
                   <input
                     type="checkbox"
                     checked={freeModelAutoSelector}
@@ -674,13 +621,9 @@ export default function AggregatorSettings({ config, setConfig }) {
                       setFreeModelAutoSelector(e.target.checked);
                       openRouterAPI.setFreeModelSettings(freeModelLooping, e.target.checked).catch(() => {});
                     }}
-                    style={{ marginRight: '0.5rem' }}
                   />
                   Use OpenRouter Free Models Auto-Selector as Backup
-                  <span
-                    title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
-                    style={{ marginLeft: '0.4rem', cursor: 'help', color: '#888', fontSize: '0.85rem' }}
-                  >(?)</span>
+                  <span className="help-hint" title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping.">(?)</span>
                 </label>
               </div>
             </>
@@ -689,9 +632,9 @@ export default function AggregatorSettings({ config, setConfig }) {
       )}
 
       {/* Current Configuration Summary */}
-      <div style={{ marginTop: '2rem', padding: '1rem', background: '#1a1a1a', borderRadius: '6px' }}>
+      <div className="settings-panel mt-1">
         <h3>Current Configuration Summary</h3>
-        <pre style={{ color: '#4CAF50', fontSize: '0.85rem', overflow: 'auto' }}>
+        <pre className="config-summary-pre">
           {JSON.stringify({
             numSubmitters: submitterConfigs.length,
             submitterConfigs: submitterConfigs.map(s => ({

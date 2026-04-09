@@ -80,6 +80,9 @@ class Coordinator:
         
         # Submitter pause control (queue overflow prevention)
         self.should_pause_submitters = False  # Flag to pause submitters when queue >= 10
+        
+        # Cleanup review toggle (disabled for short-lived mini-brainstorm phases)
+        self.enable_cleanup_review = True
     
     async def _load_stats(self) -> None:
         """Load persisted stats from file."""
@@ -128,7 +131,8 @@ class Coordinator:
         validator_max_tokens: Optional[int] = None,
         validator_provider: str = "lm_studio",
         validator_openrouter_provider: Optional[str] = None,
-        validator_lm_studio_fallback: Optional[str] = None
+        validator_lm_studio_fallback: Optional[str] = None,
+        enable_cleanup_review: bool = True
     ) -> None:
         """
         Initialize the coordinator with configuration.
@@ -146,6 +150,9 @@ class Coordinator:
             validator_lm_studio_fallback: LM Studio fallback model for validator when using OpenRouter
         """
         logger.info("Initializing coordinator...")
+        
+        # Store cleanup review toggle
+        self.enable_cleanup_review = enable_cleanup_review
         
         # Validate submitter count
         num_submitters = len(submitter_configs)
@@ -793,7 +800,7 @@ class Coordinator:
         await self._save_stats()
         
         # Trigger cleanup review every 7 acceptances
-        if self.total_acceptances % 7 == 0 and self.total_acceptances > 0:
+        if self.enable_cleanup_review and self.total_acceptances % 7 == 0 and self.total_acceptances > 0:
             await self._perform_cleanup_review()
     
     async def _handle_rejection(self, submission: Submission, result: ValidationResult) -> None:
@@ -938,7 +945,7 @@ class Coordinator:
             
             # Phase 4: Execute the removal
             logger.info(f"CLEANUP DEBUG: >>> PHASE 4: Executing removal of submission #{submission_number}...")
-            removal_success = await shared_training_memory.remove_submission(submission_number)
+            removal_success = await shared_training_memory.remove_submission(submission_number, trigger_rechunk=False)
             logger.info(f"CLEANUP DEBUG: <<< PHASE 4 Complete: removal_success={removal_success}")
             
             if removal_success:
@@ -955,6 +962,9 @@ class Coordinator:
                     "reasoning": removal_reasoning[:500],
                     "total_removals": self.removals_executed
                 })
+                
+                # Full RAG rebuild so deleted content is no longer retrievable
+                await self._rebuild_shared_training_rag_after_cleanup()
                 
                 # Log key event to persistent log
                 await event_log.add_event(
@@ -1077,6 +1087,43 @@ class Coordinator:
             })
         finally:
             # ALWAYS RELEASE LOCK
+            rag_operation_lock.release()
+    
+    async def _rebuild_shared_training_rag_after_cleanup(self) -> None:
+        """Full RAG rebuild of shared-training content after a cleanup removal.
+        
+        The normal incremental rechunk path is append-only and cannot remove
+        deleted content from RAG. After a prune we must drop all shared-training
+        RAG sources and re-add the current (post-removal) file so retrieval
+        results stay consistent with the live database.
+        """
+        current_path = Path(shared_training_memory.file_path)
+        current_count = await shared_training_memory.get_insights_count()
+        
+        await rag_operation_lock.acquire("Aggregator cleanup full re-rag")
+        try:
+            # Collect every source name that could contain shared-training chunks
+            candidate_sources = [current_path.name, current_path.with_suffix(".tmp").name]
+            for size in rag_config.submitter_chunk_intervals:
+                candidate_sources.append(f"rag_shared_training_update_{size}")
+            
+            for source in dict.fromkeys(candidate_sources):
+                if source in rag_manager.document_access_order:
+                    await rag_manager.remove_document(source)
+            
+            if current_count > 0 and current_path.exists():
+                await rag_manager.add_document(
+                    str(current_path),
+                    chunk_sizes=rag_config.submitter_chunk_intervals,
+                    is_user_file=False,
+                )
+            
+            await shared_training_memory.mark_submissions_ragged(current_count)
+            logger.info(f"Cleanup full re-RAG complete: {current_count} live submissions re-indexed")
+        except Exception as e:
+            logger.error(f"Cleanup full re-RAG failed: {e}", exc_info=True)
+            raise
+        finally:
             rag_operation_lock.release()
     
     async def get_status(self) -> SystemStatus:

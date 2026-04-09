@@ -18,6 +18,7 @@ from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
+from backend.shared.utils import count_tokens
 from backend.compiler.agents.high_context_submitter import HighContextSubmitter
 from backend.compiler.agents.high_param_submitter import HighParamSubmitter
 from backend.compiler.agents.critique_submitter import CritiqueSubmitterAgent
@@ -70,7 +71,7 @@ class CompilerCoordinator:
         self.review_acceptances = 0
         self.review_rejections = 0
         self.review_declines = 0
-        self.miniscule_edit_count = 0
+        self.minuscule_edit_count = 0
         
         # Workflow state
         self.construction_cycle_count = 0
@@ -79,6 +80,8 @@ class CompilerCoordinator:
         # Autonomous mode (for Part 3 integration)
         self.autonomous_mode = False
         self.autonomous_section_phase = None  # "body", "conclusion", "introduction", "abstract"
+        self._current_topic_id = None  # Set by autonomous coordinator for retroactive brainstorm corrections
+        self._current_reference_paper_ids: List[str] = []  # Autonomous/Tier 3 references preserved for critique and rewrite context
         
         # Critique phase state (post-body peer review)
         self.critique_submitter = None  # CritiqueSubmitterAgent instance
@@ -207,7 +210,7 @@ class CompilerCoordinator:
         self.review_acceptances = 0
         self.review_rejections = 0
         self.review_declines = 0
-        self.miniscule_edit_count = 0
+        self.minuscule_edit_count = 0
         self.construction_cycle_count = 0
         self.rigor_cycle_active = False
         self.aggregator_acceptances_last_rag = 0
@@ -957,10 +960,24 @@ INVALID:
             
             try:
                 section_phase = self.autonomous_section_phase if self.autonomous_mode else None
+                
+                # Load brainstorm content for first construction too
+                first_brainstorm_content = None
+                first_brainstorm_source = None
+                if self.autonomous_mode and self._current_topic_id:
+                    try:
+                        from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
+                        first_brainstorm_content = await brainstorm_memory.get_database_content(self._current_topic_id)
+                        first_brainstorm_source = f"brainstorm_{self._current_topic_id}.txt"
+                    except Exception:
+                        pass
+                
                 submission = await self.high_context_submitter.submit_construction(
                     is_first_portion=True,
                     section_phase=section_phase,
-                    rejection_feedback=rejection_feedback  # Pass rejection feedback for retry
+                    rejection_feedback=rejection_feedback,
+                    brainstorm_content=first_brainstorm_content,
+                    brainstorm_source_name=first_brainstorm_source
                 )
                 
                 if submission is None:
@@ -981,6 +998,23 @@ INVALID:
                     
             except FreeModelExhaustedError:
                 raise
+            except ValueError as e:
+                logger.error(f"Construction context overflow in initial loop (attempt {attempt}): {e}")
+                await self._broadcast("compiler_rejection", {
+                    "mode": "construction",
+                    "reasoning": f"Context overflow: {e}"
+                })
+                await compiler_rejection_log.add_rejection(
+                    CompilerValidationResult(
+                        submission_id=str(uuid.uuid4()),
+                        decision="reject",
+                        reasoning=str(e),
+                        summary=str(e)[:750],
+                        validation_stage="internal_error"
+                    ), "construction", ""
+                )
+                await asyncio.sleep(backoff_time)
+                continue
             except Exception as e:
                 logger.error(f"Construction submission failed with error (attempt {attempt}): {e}")
                 await self._broadcast("compiler_retry", {
@@ -1154,13 +1188,48 @@ INVALID:
             pre_critique_paper_for_construction = self.pre_critique_paper
             logger.info("Body construction with critique context (rewrite mode)")
         
-        submission = await self.high_context_submitter.submit_construction(
-            is_first_portion=False,
-            section_phase=section_phase,
-            rejection_feedback=rejection_feedback,
-            critique_feedback=critique_feedback_for_construction,
-            pre_critique_paper=pre_critique_paper_for_construction
-        )
+        # Load brainstorm content for retroactive corrections (autonomous mode only)
+        brainstorm_content_for_submitter = None
+        brainstorm_source_for_submitter = None
+        if self.autonomous_mode and self._current_topic_id:
+            try:
+                from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
+                brainstorm_content_for_submitter = await brainstorm_memory.get_database_content(self._current_topic_id)
+                brainstorm_source_for_submitter = f"brainstorm_{self._current_topic_id}.txt"
+                if brainstorm_content_for_submitter:
+                    logger.info(f"Loaded brainstorm content for retroactive corrections: {len(brainstorm_content_for_submitter)} chars")
+            except Exception as e:
+                logger.warning(f"Failed to load brainstorm for retroactive corrections: {e}")
+        
+        submission = None
+        try:
+            submission = await self.high_context_submitter.submit_construction(
+                is_first_portion=False,
+                section_phase=section_phase,
+                rejection_feedback=rejection_feedback,
+                critique_feedback=critique_feedback_for_construction,
+                pre_critique_paper=pre_critique_paper_for_construction,
+                brainstorm_content=brainstorm_content_for_submitter,
+                brainstorm_source_name=brainstorm_source_for_submitter
+            )
+        except ValueError as e:
+            logger.error(f"Construction context overflow: {e}")
+            self.construction_rejections += 1
+            overflow_reason = f"Context overflow: {e}"
+            await compiler_rejection_log.add_rejection(
+                CompilerValidationResult(
+                    submission_id=str(uuid.uuid4()),
+                    decision="reject",
+                    reasoning=overflow_reason,
+                    summary=overflow_reason[:750],
+                    validation_stage="internal_error"
+                ), "construction", ""
+            )
+            await self._broadcast("compiler_rejection", {
+                "mode": "construction",
+                "reasoning": overflow_reason
+            })
+            return False, overflow_reason
         
         if submission is None:
             logger.info("Construction not needed - paper is complete")
@@ -1492,7 +1561,8 @@ INVALID:
                     return True, None
             
             logger.info(f"Construction accepted ({word_count} words)")
-            return True, None
+            paper_accepted = True
+            paper_rejection_reason = None
         else:
             self.construction_rejections += 1
             
@@ -1505,7 +1575,88 @@ INVALID:
             })
             
             logger.info("Construction rejected")
-            return False, result.reasoning
+            paper_accepted = False
+            paper_rejection_reason = result.reasoning
+        
+        # ================================================================
+        # RETROACTIVE BRAINSTORM OPERATION (independent from paper result)
+        # ================================================================
+        if submission.brainstorm_operation and self.autonomous_mode and hasattr(self, '_current_topic_id') and self._current_topic_id:
+            await self._handle_brainstorm_retroactive_operation(submission.brainstorm_operation)
+        
+        return paper_accepted, paper_rejection_reason
+    
+    async def _handle_brainstorm_retroactive_operation(self, brainstorm_op) -> None:
+        """
+        Handle a retroactive brainstorm operation independently from the paper operation.
+        Validates the operation using the compiler validator with brainstorm-only context,
+        then applies if accepted and refreshes RAG.
+        """
+        from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
+        
+        topic_id = self._current_topic_id
+        logger.info(f"Processing retroactive brainstorm {brainstorm_op.action} for topic {topic_id}")
+        
+        try:
+            brainstorm_content = await brainstorm_memory.get_database_content(topic_id)
+            if not brainstorm_content:
+                logger.warning(f"Brainstorm {topic_id} is empty, skipping retroactive operation")
+                return
+            
+            result = await self.validator.validate_brainstorm_operation(
+                brainstorm_op, brainstorm_content
+            )
+            
+            if result.decision == "accept":
+                success = False
+                action = brainstorm_op.action
+                
+                if action == "edit":
+                    success = await brainstorm_memory.edit_submission(
+                        topic_id, brainstorm_op.submission_number, brainstorm_op.new_content
+                    )
+                elif action == "delete":
+                    success = await brainstorm_memory.remove_submission(
+                        topic_id, brainstorm_op.submission_number
+                    )
+                elif action == "add":
+                    new_num = await brainstorm_memory.add_submission_retroactive(
+                        topic_id, brainstorm_op.new_content
+                    )
+                    success = new_num is not None
+                
+                if success:
+                    logger.info(f"Retroactive brainstorm {action} accepted and applied for topic {topic_id}")
+                    
+                    # Refresh RAG with updated brainstorm content
+                    try:
+                        db_path = brainstorm_memory.get_database_path(topic_id)
+                        from backend.aggregator.core.rag_manager import rag_manager
+                        await rag_manager.add_document(
+                            db_path,
+                            chunk_sizes=[512],
+                            is_user_file=True
+                        )
+                        logger.info("RAG refreshed with updated brainstorm content")
+                    except Exception as e:
+                        logger.error(f"Failed to refresh RAG after brainstorm {action}: {e}")
+                    
+                    await self._broadcast("brainstorm_retroactive_accepted", {
+                        "action": action,
+                        "topic_id": topic_id,
+                        "submission_number": brainstorm_op.submission_number,
+                    })
+                else:
+                    logger.error(f"Retroactive brainstorm {action} was validated but failed to apply")
+            else:
+                logger.info(f"Retroactive brainstorm {brainstorm_op.action} rejected: {result.reasoning[:200]}")
+                await self._broadcast("brainstorm_retroactive_rejected", {
+                    "action": brainstorm_op.action,
+                    "topic_id": topic_id,
+                    "reasoning": result.reasoning[:500],
+                })
+        except Exception as e:
+            logger.error(f"Error handling retroactive brainstorm operation: {e}")
     
     async def _submit_and_validate_outline_update(self) -> bool:
         """Submit and validate outline update. Returns True if accepted."""
@@ -1617,7 +1768,18 @@ INVALID:
         """Submit and validate review. Returns True if accepted."""
         self.current_mode = "review"
         
-        submission = await self.high_context_submitter.submit_review()
+        submission = None
+        try:
+            submission = await self.high_context_submitter.submit_review()
+        except ValueError as e:
+            logger.error(f"Review context overflow: {e}")
+            self.review_declines += 1
+            await compiler_rejection_log.add_decline("review", f"Context overflow: {e}")
+            await self._broadcast("compiler_decline", {
+                "mode": "review",
+                "reasoning": f"Context overflow: {e}"
+            })
+            return False
         
         if submission is None:
             logger.info("No review edit needed")
@@ -1633,9 +1795,9 @@ INVALID:
         
         self.total_submissions += 1
         
-        # Check for miniscule edit
-        if submission.metadata.get("is_miniscule", False):
-            self.miniscule_edit_count += 1
+        # Check for minuscule edit
+        if submission.metadata.get("is_minuscule", False):
+            self.minuscule_edit_count += 1
         
         await self._broadcast("compiler_submission", {
             "mode": "review",
@@ -2254,6 +2416,87 @@ INVALID:
         
         # Start critique aggregation loop
         await self._run_critique_aggregation()
+
+    async def _get_reference_papers_context_for_critique(
+        self,
+        current_outline: str = "",
+        current_body: str = "",
+        aggregator_db: str = "",
+        critique_feedback: str = "",
+        pre_critique_paper: str = "",
+        accumulated_history: str = ""
+    ) -> Optional[str]:
+        """
+        Prepare reference-paper context for critique/rewrite prompts in autonomous mode.
+
+        This preserves the reference papers selected for the paper instead of
+        silently dropping them once the critique phase begins.
+        """
+        if not self.autonomous_mode or not self._current_reference_paper_ids:
+            return None
+
+        try:
+            from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
+            from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
+
+            max_input_tokens = rag_config.get_available_input_tokens(
+                system_config.compiler_critique_submitter_context_window,
+                system_config.compiler_critique_submitter_max_tokens
+            )
+
+            direct_injected_context = "\n\n".join(
+                part for part in [
+                    self.user_prompt or "",
+                    self.paper_title or "",
+                    current_outline or "",
+                    current_body or "",
+                    aggregator_db or "",
+                    critique_feedback or "",
+                    pre_critique_paper or "",
+                    accumulated_history or "",
+                ]
+                if part
+            )
+            direct_tokens = count_tokens(direct_injected_context)
+
+            # Reserve headroom for system prompt, JSON schema, rejection memory,
+            # and the static prompt framing around reference content.
+            reference_budget = min(16000, max_input_tokens - direct_tokens - 10000)
+            if reference_budget <= 0:
+                logger.warning(
+                    "Skipping critique reference context due to prompt budget "
+                    f"(direct={direct_tokens}, max_input={max_input_tokens})"
+                )
+                return None
+
+            exclude_sources = ["compiler_outline.txt", "compiler_paper.txt"]
+            if self._current_topic_id:
+                brainstorm_db_path = brainstorm_memory.get_database_path(self._current_topic_id)
+                exclude_sources.append(Path(brainstorm_db_path).name)
+
+            query = "\n\n".join(
+                part for part in [
+                    self.user_prompt or "",
+                    self.paper_title or "",
+                    current_outline or "",
+                    current_body or "",
+                    critique_feedback or "",
+                    pre_critique_paper or "",
+                ]
+                if part
+            )
+
+            reference_context, _ = await autonomous_rag_manager.get_reference_papers_context(
+                self._current_reference_paper_ids,
+                max_total_tokens=reference_budget,
+                query=query,
+                exclude_sources=exclude_sources
+            )
+
+            return reference_context or None
+        except Exception as e:
+            logger.warning(f"Failed to prepare critique reference context: {e}")
+            return None
     
     async def _run_critique_aggregation(self) -> None:
         """
@@ -2307,11 +2550,17 @@ INVALID:
                 # Get existing critiques
                 existing_critiques = await critique_memory.get_all_critiques()
                 
-                # Get reference papers if available
-                reference_papers = None  # TODO: Load if applicable
-                
                 # Format accumulated critique history from previous failed versions
                 accumulated_history = self._format_accumulated_critique_history()
+
+                # Keep autonomous reference papers available during critique/rewrite.
+                reference_papers = await self._get_reference_papers_context_for_critique(
+                    current_outline=current_outline,
+                    current_body=current_body,
+                    aggregator_db=aggregator_db,
+                    critique_feedback=existing_critiques,
+                    accumulated_history=accumulated_history
+                )
                 
                 # Generate critique submission
                 submission = await self.critique_submitter.submit_critique(
@@ -2614,10 +2863,17 @@ INVALID:
                 # Get context (aggregator DB, reference papers, etc.)
                 from backend.aggregator.memory.shared_training import shared_training_memory
                 aggregator_db = await shared_training_memory.get_all_content()
-                reference_papers = None  # TODO: Load if applicable
-                
                 # Format accumulated critique history from previous failed versions
                 accumulated_history = self._format_accumulated_critique_history()
+
+                reference_papers = await self._get_reference_papers_context_for_critique(
+                    current_outline=current_outline,
+                    current_body=current_body,
+                    aggregator_db=aggregator_db,
+                    critique_feedback=critique_feedback,
+                    pre_critique_paper=self.pre_critique_paper or "",
+                    accumulated_history=accumulated_history
+                )
                 
                 # Critique submitter makes decision
                 logger.info("Critique submitter generating rewrite decision...")
@@ -2841,6 +3097,14 @@ INVALID:
         
         # Get current outline
         current_outline = await outline_memory.get_outline()
+
+        reference_papers = await self._get_reference_papers_context_for_critique(
+            current_outline=current_outline,
+            current_body=self.pre_critique_paper or "",
+            critique_feedback=critique_feedback,
+            pre_critique_paper=self.pre_critique_paper or "",
+            accumulated_history=accumulated_history or ""
+        )
         
         # ITERATIVE EDIT LOOP
         MAX_EDITS = 20  # Safety limit to prevent infinite loops
@@ -2867,6 +3131,7 @@ INVALID:
                     current_outline=current_outline,
                     critique_feedback=critique_feedback,
                     edits_applied=edits_applied,
+                    reference_papers=reference_papers,
                     accumulated_history=accumulated_history
                 )
                 
@@ -3357,7 +3622,7 @@ INVALID:
             review_acceptances=self.review_acceptances,
             review_rejections=self.review_rejections,
             review_declines=self.review_declines,
-            miniscule_edit_count=self.miniscule_edit_count,
+            minuscule_edit_count=self.minuscule_edit_count,
             in_critique_phase=self.in_critique_phase,
             critique_acceptances=self.critique_acceptances,
             paper_version=self.paper_version,
@@ -3431,7 +3696,7 @@ INVALID:
         self.review_acceptances = 0
         self.review_rejections = 0
         self.review_declines = 0
-        self.miniscule_edit_count = 0
+        self.minuscule_edit_count = 0
         self.construction_cycle_count = 0
         self.rigor_cycle_active = False
         
@@ -3439,6 +3704,7 @@ INVALID:
         if self.autonomous_mode:
             self.autonomous_section_phase = "body"  # Reset to body phase
             logger.info("Reset autonomous section phase to body")
+        self._current_reference_paper_ids = []
         
         # Reset critique phase state
         self.in_critique_phase = False

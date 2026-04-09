@@ -122,6 +122,21 @@ def normalize_whitespace(text: str) -> str:
     return re.sub(r'  +', ' ', text)
 
 
+def normalize_all_whitespace(text: str) -> str:
+    """
+    Collapse all whitespace runs (spaces, newlines, tabs) to a single space.
+    
+    Handles the mismatch where models output paragraph breaks as '\\n\\n' but
+    the document has a single space (or vice versa). Used as a fallback after
+    the space-only normalization fails.
+    """
+    if not text:
+        return text
+    
+    import re
+    return re.sub(r'\s+', ' ', text)
+
+
 def normalize_backslashes_for_matching(text: str) -> str:
     """
     Collapse runs of 2+ consecutive backslashes to a single backslash for comparison.
@@ -191,12 +206,31 @@ def find_with_normalized_hyphens(needle: str, haystack: str) -> Tuple[int, str]:
             logger.debug(f"   Whitespace normalization matched: '{needle[:50]}...' found as '{actual_text[:50]}...'")
             return (match.start(), actual_text)
 
+    # Try full whitespace normalization (3b layer - handles newline vs space mismatches)
+    # Models may output \n\n where the document has a single space, or vice versa.
+    # Collapses ALL whitespace runs (spaces, newlines, tabs) to a single space.
+    aws_needle = normalize_all_whitespace(normalized_needle)
+    aws_haystack = normalize_all_whitespace(normalized_haystack)
+
+    aws_pos = aws_haystack.find(aws_needle)
+    if aws_pos >= 0:
+        import re
+        escaped = re.escape(aws_needle)
+        flexible_pattern = escaped.replace(r'\ ', r'\s+')
+
+        match = re.search(flexible_pattern, haystack)
+        if match:
+            actual_text = match.group(0)
+            logger.info(f"ALL_WHITESPACE_NORMALIZED_MATCH: Found at pos {match.start()}")
+            logger.debug(f"   All-whitespace normalization matched: '{needle[:50]}...' found as '{actual_text[:50]}...'")
+            return (match.start(), actual_text)
+
     # Try backslash normalization (4th layer - handles model over-escaping quirks)
     # e.g., model writes \\\\mathbb in JSON -> \\mathbb after json.loads, but document has \mathbb
-    bs_needle = normalize_backslashes_for_matching(ws_needle)
-    bs_haystack = normalize_backslashes_for_matching(ws_haystack)
+    bs_needle = normalize_backslashes_for_matching(aws_needle)
+    bs_haystack = normalize_backslashes_for_matching(aws_haystack)
 
-    if bs_needle != ws_needle:  # Only attempt if backslash normalization actually changed the needle
+    if bs_needle != aws_needle:  # Only attempt if backslash normalization actually changed the needle
         bs_pos = bs_haystack.find(bs_needle)
         if bs_pos >= 0:
             # Convert normalized needle to a regex that allows 1+ backslashes wherever
@@ -228,8 +262,9 @@ def find_with_normalized_hyphens(needle: str, haystack: str) -> Tuple[int, str]:
 
     # === DEEP DIAGNOSTICS FOR COMPLETE FAILURE ===
     logger.warning(f"MATCH_FAILED_COMPLETELY - Deep diagnostic analysis:")
-    logger.warning(f"   Needle (first 200 chars): {repr(needle[:200])}")
-    logger.warning(f"   Needle (last 200 chars): {repr(needle[-200:])}")
+    logger.warning(f"   Needle FULL:\n{needle}")
+    logger.warning(f"   Needle (first 200 chars repr): {repr(needle[:200])}")
+    logger.warning(f"   Needle (last 200 chars repr): {repr(needle[-200:])}")
     logger.warning(f"   Haystack (first 200 chars): {repr(haystack[:200])}")
     logger.warning(f"   Haystack (last 200 chars): {repr(haystack[-200:])}")
     
@@ -526,6 +561,7 @@ class CompilerValidator:
         logger.info(f"PRE_VALIDATE_START: mode={submission.mode}, operation={submission.operation}")
         if submission.old_string:
             logger.info(f"   old_string preview: {repr(submission.old_string[:100])}{'...' if len(submission.old_string) > 100 else ''}")
+            logger.debug(f"   old_string full: {repr(submission.old_string)}")
             logger.debug(f"   old_string diagnostics: {_diagnostic_char_info(submission.old_string)}")
         
         # Determine which document to check against based on mode
@@ -636,6 +672,7 @@ class CompilerValidator:
                 if outline_confusion:
                     # Provide targeted feedback for outline vs paper confusion
                     logger.warning(f"Pre-validation failed: old_string found in OUTLINE but not in PAPER (outline confusion)")
+                    logger.warning(f"FULL old_string that failed to match paper:\n{submission.old_string}")
                     return CompilerValidationResult(
                         submission_id=submission.submission_id,
                         decision="reject",
@@ -665,6 +702,7 @@ class CompilerValidator:
                     fix_suggestion = f"\n\nNo similar text found. Verify the old_string matches something in the current {document_name} exactly."
                 
                 logger.warning(f"Pre-validation failed: old_string not found in {document_name}")
+                logger.warning(f"FULL old_string that failed to match:\n{submission.old_string}")
                 return CompilerValidationResult(
                     submission_id=submission.submission_id,
                     decision="reject",
@@ -692,6 +730,7 @@ class CompilerValidator:
         match_count = normalized_doc.count(normalized_old)
         if match_count > 1:
             logger.warning(f"Pre-validation failed: old_string appears {match_count} times in {document_name} (not unique)")
+            logger.warning(f"FULL old_string that matched multiple times:\n{submission.old_string}")
             return CompilerValidationResult(
                 submission_id=submission.submission_id,
                 decision="reject",
@@ -1019,6 +1058,183 @@ class CompilerValidator:
                 json_valid=False,
                 validation_stage="internal_error"
             )
+    
+    async def validate_brainstorm_operation(
+        self,
+        brainstorm_op: "BrainstormRetroactiveOperation",
+        brainstorm_content: str
+    ) -> CompilerValidationResult:
+        """
+        Validate a retroactive brainstorm operation independently.
+        
+        The validator sees ONLY the brainstorm database and the proposed operation.
+        It never sees the paper operation that may accompany this brainstorm operation.
+        Each operation must be justified on its own merits.
+        """
+        from backend.shared.models import BrainstormRetroactiveOperation
+        logger.info(f"Validating brainstorm retroactive operation: {brainstorm_op.action}")
+        
+        prompt = self._build_brainstorm_validation_prompt(brainstorm_op, brainstorm_content)
+        
+        actual_prompt_tokens = count_tokens(prompt)
+        from backend.shared.config import system_config, rag_config
+        max_allowed_tokens = rag_config.get_available_input_tokens(
+            system_config.compiler_validator_context_window,
+            system_config.compiler_validator_max_output_tokens
+        )
+        
+        if actual_prompt_tokens > max_allowed_tokens:
+            logger.error(f"Brainstorm validation prompt too large: {actual_prompt_tokens} > {max_allowed_tokens}")
+            return CompilerValidationResult(
+                submission_id=str(uuid.uuid4()),
+                decision="reject",
+                reasoning=f"Internal error: Brainstorm validation prompt too large ({actual_prompt_tokens} tokens)",
+                summary="Internal context overflow error",
+                json_valid=False,
+                validation_stage="internal_error"
+            )
+        
+        task_id = self.get_current_task_id()
+        self.task_sequence += 1
+        
+        if self.task_tracking_callback:
+            self.task_tracking_callback("started", task_id)
+        
+        try:
+            response = await api_client_manager.generate_completion(
+                task_id=task_id,
+                role_id=self.role_id,
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=system_config.compiler_validator_max_output_tokens
+            )
+            
+            message = response["choices"][0]["message"]
+            llm_output = message.get("content") or message.get("reasoning") or ""
+            
+            validation_data = await self._parse_json_with_retry(llm_output, prompt, "", 0)
+            
+            decision = validation_data.get("decision", "reject")
+            reasoning = validation_data.get("reasoning", "No reasoning provided")
+            
+            result = CompilerValidationResult(
+                submission_id=str(uuid.uuid4()),
+                decision=decision,
+                reasoning=reasoning,
+                summary=reasoning[:750],
+                json_valid=True,
+                validation_stage="llm_validation"
+            )
+            
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
+            
+            logger.info(f"Brainstorm operation validation: {decision}")
+            return result
+            
+        except FreeModelExhaustedError:
+            raise
+        except Exception as e:
+            logger.error(f"Brainstorm operation validation failed: {e}")
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
+            return CompilerValidationResult(
+                submission_id=str(uuid.uuid4()),
+                decision="reject",
+                reasoning=f"Validation error: {str(e)}",
+                summary=f"Validation error: {str(e)}"[:750],
+                json_valid=False,
+                validation_stage="internal_error"
+            )
+    
+    def _build_brainstorm_validation_prompt(
+        self,
+        brainstorm_op: "BrainstormRetroactiveOperation",
+        brainstorm_content: str
+    ) -> str:
+        """Build prompt for brainstorm retroactive operation validation."""
+        action = brainstorm_op.action
+        
+        system_prompt = f"""You are validating a retroactive correction to a brainstorm knowledge database. This correction was proposed during paper compilation by a submitter who identified an issue in the source material.
+
+You see ONLY the brainstorm database and the proposed operation. You do NOT see the paper or any paper edits. Your decision must be based solely on whether this operation improves the brainstorm database.
+
+OPERATION TYPE: {action.upper()}
+
+"""
+        if action == "delete":
+            system_prompt += """VALIDATION CRITERIA (DELETE):
+A brainstorm submission should be REMOVED if it:
+1. Contains mathematical errors or logically unsound reasoning
+2. Is redundant with other submissions (content fully covered elsewhere)
+3. Contradicts established mathematical principles evident in other submissions
+4. Was marginally useful but provides no unique value given the current database state
+
+KEEP the submission if:
+1. It provides ANY unique information not covered elsewhere
+2. There is ANY doubt about whether it's truly harmful or redundant
+3. It offers a different perspective even if related to other content
+
+CONSERVATIVE DEFAULT: When in doubt, reject the removal (keep the submission).
+"""
+        elif action == "edit":
+            system_prompt += """VALIDATION CRITERIA (EDIT):
+A brainstorm submission edit should be ACCEPTED if:
+1. The corrected version fixes a genuine mathematical error
+2. The corrected version is more accurate than the original
+3. The correction improves the submission's value to the knowledge pool
+4. The correction is mathematically sound and well-justified
+
+REJECT the edit if:
+1. The original was not actually wrong
+2. The edit introduces new errors or reduces quality
+3. The reasoning for correction is weak or unconvincing
+4. The edit is a stylistic preference rather than a substantive correction
+
+CONSERVATIVE DEFAULT: When in doubt, reject the edit (keep the original).
+"""
+        elif action == "add":
+            system_prompt += """VALIDATION CRITERIA (ADD):
+A new brainstorm submission should be ACCEPTED if:
+1. It adds genuinely new mathematical insight not already in the database
+2. It connects existing concepts in novel ways
+3. It provides concrete methods, theorems, proofs, or techniques
+4. It is grounded in established mathematical principles
+
+REJECT the addition if:
+1. It is redundant with existing submissions
+2. It contains trivial or commonly known information already present
+3. It contains unsupported claims or logical fallacies
+4. It is too vague or generic to be actionable
+"""
+        
+        system_prompt += """
+Output your decision ONLY as JSON:
+{
+  "decision": "accept" or "reject",
+  "reasoning": "Detailed explanation of your decision"
+}
+"""
+        
+        parts = [system_prompt, "\n---\n"]
+        parts.append(f"BRAINSTORM DATABASE:\n{brainstorm_content}")
+        parts.append("\n---\n")
+        
+        if action == "delete":
+            parts.append(f"PROPOSED REMOVAL: Submission #{brainstorm_op.submission_number}")
+            parts.append(f"\nREASONING: {brainstorm_op.reasoning}")
+        elif action == "edit":
+            parts.append(f"PROPOSED EDIT: Submission #{brainstorm_op.submission_number}")
+            parts.append(f"\nNEW CONTENT:\n{brainstorm_op.new_content}")
+            parts.append(f"\nREASONING: {brainstorm_op.reasoning}")
+        elif action == "add":
+            parts.append(f"PROPOSED NEW SUBMISSION:\n{brainstorm_op.new_content}")
+            parts.append(f"\nREASONING: {brainstorm_op.reasoning}")
+        
+        parts.append("\n---\nNow validate this brainstorm operation as JSON:")
+        
+        return "\n".join(parts)
     
     def _strip_placeholder_text(self, text: str) -> str:
         """

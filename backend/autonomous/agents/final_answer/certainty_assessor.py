@@ -7,7 +7,10 @@ Uses a two-step workflow similar to reference selection:
 2. Review full content and assess certainties
 
 CRITICAL: Operates ONLY on Tier 2 papers, NOT on Tier 1 brainstorm databases.
-This ensures the final answer is based on validated, complete research.
+
+NO RAG FOR ABSTRACTS (by design): Step 1 browses abstracts/outlines which are small metadata.
+EXPANDED PAPERS OVERFLOW: Step 2 currently drops expanded papers if they don't fit.
+TODO: Should RAG expanded papers instead of dropping — see audit note in rag-design rule.
 """
 import asyncio
 import json
@@ -28,6 +31,7 @@ from backend.autonomous.prompts.final_answer_prompts import (
 )
 from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.memory.final_answer_memory import final_answer_memory
+from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
 from backend.autonomous.prompts.paper_reference_prompts import (
     get_reference_expansion_system_prompt,
     get_reference_expansion_json_schema
@@ -333,15 +337,56 @@ USER'S RESEARCH QUESTION:
             max_input = self._calculate_max_input_tokens()
             
             if prompt_tokens > max_input:
-                logger.error(f"CertaintyAssessor: Assessment prompt too large ({prompt_tokens} > {max_input})")
-                # Try without expanded papers
-                prompt = build_certainty_assessment_prompt(
-                    user_research_prompt=user_research_prompt,
-                    papers_summary=all_papers,
-                    expanded_papers=None,
-                    rejection_context=rejection_context
-                )
-                prompt_tokens = count_tokens(prompt)
+                if expanded_papers:
+                    # RAG the expanded papers instead of dropping them entirely
+                    base_prompt = build_certainty_assessment_prompt(
+                        user_research_prompt=user_research_prompt,
+                        papers_summary=all_papers,
+                        expanded_papers=None,
+                        rejection_context=rejection_context
+                    )
+                    mandatory_tokens = count_tokens(base_prompt)
+                    paper_budget = max_input - mandatory_tokens - 500
+                    
+                    if paper_budget > 2000:
+                        logger.info(f"CertaintyAssessor: RAG fallback for expanded papers (budget={paper_budget}t)")
+                        paper_ids = [p["paper_id"] for p in expanded_papers]
+                        rag_content, _ = await autonomous_rag_manager.get_reference_papers_context(
+                            paper_ids,
+                            max_total_tokens=paper_budget,
+                            query=user_research_prompt
+                        )
+                        
+                        if rag_content:
+                            rag_papers = [{
+                                "paper_id": "rag_retrieved",
+                                "title": f"RAG-retrieved content from {len(expanded_papers)} papers",
+                                "content": rag_content
+                            }]
+                            prompt = build_certainty_assessment_prompt(
+                                user_research_prompt=user_research_prompt,
+                                papers_summary=all_papers,
+                                expanded_papers=rag_papers,
+                                rejection_context=rejection_context
+                            )
+                            prompt_tokens = count_tokens(prompt)
+                        else:
+                            logger.warning("CertaintyAssessor: RAG returned empty, falling back to abstracts-only")
+                            prompt = base_prompt
+                            prompt_tokens = mandatory_tokens
+                    else:
+                        logger.warning("CertaintyAssessor: Insufficient budget for RAG, using abstracts-only")
+                        prompt = base_prompt
+                        prompt_tokens = mandatory_tokens
+                else:
+                    prompt = build_certainty_assessment_prompt(
+                        user_research_prompt=user_research_prompt,
+                        papers_summary=all_papers,
+                        expanded_papers=None,
+                        rejection_context=rejection_context
+                    )
+                    prompt_tokens = count_tokens(prompt)
+                
                 if prompt_tokens > max_input:
                     logger.error("CertaintyAssessor: Cannot fit even summary-only prompt")
                     return None

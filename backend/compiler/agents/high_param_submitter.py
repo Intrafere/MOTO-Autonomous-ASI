@@ -169,11 +169,14 @@ class HighParamSubmitter:
         )
         
         # Try initial RAG retrieval - may overflow if outline + system prompts are large
+        # Exclude outline (always direct-injected in rigor mode)
+        rigor_exclude = ["compiler_outline.txt"]
         try:
             logger.info("Step 1: Retrieving relevant paper sections via RAG...")
             context_pack = await compiler_rag_manager.retrieve_for_mode(
                 query=self.user_prompt + " " + current_paper[-1000:],
-                mode="rigor"
+                mode="rigor",
+                exclude_sources=rigor_exclude
             )
             logger.info(f"Step 1: RAG retrieval complete - {len(context_pack.text)} chars")
             
@@ -217,7 +220,8 @@ class HighParamSubmitter:
             context_pack = await compiler_rag_manager.retrieve_for_mode(
                 query=self.user_prompt + " " + current_paper[-1000:],
                 mode="rigor",
-                max_tokens=remaining_budget
+                max_tokens=remaining_budget,
+                exclude_sources=rigor_exclude
             )
             
             prompt = await build_rigor_planning_prompt(
@@ -272,6 +276,13 @@ class HighParamSubmitter:
             
             return data
             
+        except RuntimeError as e:
+            if "credits exhausted" in str(e).lower():
+                raise
+            logger.error(f"Step 1: JSON parse failed - {e}")
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
+            return None
         except Exception as e:
             logger.error(f"Step 1: JSON parse failed - {e}")
             if self.task_tracking_callback:
@@ -308,11 +319,14 @@ class HighParamSubmitter:
             )
             
             # Try RAG retrieval
+            # Exclude outline (always direct-injected in rigor mode)
+            rigor_exclude = ["compiler_outline.txt"]
             try:
                 logger.info("Step 2: Retrieving paper sections via RAG...")
                 context_pack = await compiler_rag_manager.retrieve_for_mode(
                     query=self.user_prompt + " " + current_paper[-1000:],
-                    mode="rigor"
+                    mode="rigor",
+                    exclude_sources=rigor_exclude
                 )
                 
                 # Build execution prompt
@@ -357,7 +371,8 @@ class HighParamSubmitter:
                 context_pack = await compiler_rag_manager.retrieve_for_mode(
                     query=self.user_prompt + " " + current_paper[-1000:],
                     mode="rigor",
-                    max_tokens=remaining_budget
+                    max_tokens=remaining_budget,
+                    exclude_sources=rigor_exclude
                 )
                 
                 prompt = await build_rigor_execution_prompt(
@@ -502,11 +517,14 @@ class HighParamSubmitter:
             )
             
             # Try RAG retrieval
+            # Exclude outline (always direct-injected in rigor mode)
+            rigor_exclude = ["compiler_outline.txt"]
             try:
                 logger.info("Step 2 (Wolfram): Retrieving paper sections via RAG...")
                 context_pack = await compiler_rag_manager.retrieve_for_mode(
                     query=self.user_prompt + " " + current_paper[-1000:],
-                    mode="rigor"
+                    mode="rigor",
+                    exclude_sources=rigor_exclude
                 )
                 
                 # Build Wolfram execution prompt
@@ -553,7 +571,8 @@ class HighParamSubmitter:
                 context_pack = await compiler_rag_manager.retrieve_for_mode(
                     query=self.user_prompt + " " + current_paper[-1000:],
                     mode="rigor",
-                    max_tokens=remaining_budget
+                    max_tokens=remaining_budget,
+                    exclude_sources=rigor_exclude
                 )
                 
                 prompt = await build_rigor_wolfram_execution_prompt(

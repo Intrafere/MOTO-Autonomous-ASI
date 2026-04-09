@@ -8,6 +8,7 @@ import logging
 from backend.api.middleware import setup_middleware
 from backend.api.routes import aggregator, websocket, compiler, autonomous, boost, workflow, openrouter, download
 from backend.shared.lm_studio_client import lm_studio_client
+from backend.shared.config import rag_config, system_config
 from backend.aggregator.core.coordinator import coordinator
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
@@ -30,6 +31,34 @@ async def lifespan(app: FastAPI):
     """Lifespan events for the FastAPI app."""
     # Startup
     logger.info("Starting ASI Aggregator System...")
+
+    # Restore securely persisted provider credentials before the UI checks status.
+    from backend.shared.api_client_manager import api_client_manager
+    try:
+        from backend.shared.secret_store import (
+            SecretStoreError,
+            load_openrouter_api_key,
+            load_wolfram_api_key,
+        )
+        from backend.shared.wolfram_alpha_client import initialize_wolfram_client
+
+        openrouter_api_key = load_openrouter_api_key()
+        if openrouter_api_key:
+            rag_config.openrouter_api_key = openrouter_api_key
+            rag_config.openrouter_enabled = True
+            api_client_manager.set_openrouter_api_key(openrouter_api_key)
+            logger.info("Restored OpenRouter API key from secure backend storage")
+
+        wolfram_api_key = load_wolfram_api_key()
+        if wolfram_api_key:
+            initialize_wolfram_client(wolfram_api_key)
+            system_config.wolfram_alpha_api_key = wolfram_api_key
+            system_config.wolfram_alpha_enabled = True
+            logger.info("Restored Wolfram Alpha API key from secure backend storage")
+    except SecretStoreError as e:
+        logger.warning(f"Secure credential storage unavailable on startup: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to restore provider credentials on startup: {e}")
     
     # Test LM Studio connection (non-blocking - system works without it)
     connected = await lm_studio_client.test_connection()
@@ -77,6 +106,9 @@ async def lifespan(app: FastAPI):
     from backend.shared.boost_manager import boost_manager
     boost_manager.set_broadcast_callback(websocket.broadcast_event)
     
+    # Set API client manager broadcaster (token tracking, rate limits, fallbacks)
+    api_client_manager.set_broadcast_callback(websocket.broadcast_event)
+    
     logger.info("ASI Aggregator System ready")
     
     yield
@@ -94,7 +126,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ASI Aggregator System",
     description="AI-powered aggregator with RAG and multi-agent validation",
-    version="1.0.4",
+    version="1.0.5",
     lifespan=lifespan
 )
 
@@ -117,7 +149,7 @@ async def root():
     """Root endpoint."""
     return {
         "name": "ASI Aggregator System",
-        "version": "1.0.4",
+        "version": "1.0.5",
         "status": "running"
     }
 

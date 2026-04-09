@@ -10,28 +10,28 @@
   align-items: center;
   justify-content: space-between;
   padding: 0.5rem 1rem;
-  background: #1a1a1a;
-  border-bottom: 1px solid #333;
+  background: var(--surface-2, #1a1a22);
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.07));
   flex-shrink: 0;
 }
 
 .latex-toggle-buttons {
   display: flex;
   gap: 0.25rem;
-  background: #0f0f0f;
+  background: var(--surface-0, #0b0b0f);
   padding: 0.25rem;
-  border-radius: 6px;
+  border-radius: var(--radius-sm, 6px);
 }
 
 .latex-toggle-btn {
   padding: 0.5rem 1rem;
   background: transparent;
   border: none;
-  color: #999;
+  color: var(--text-secondary, #999);
   cursor: pointer;
   font-size: 0.85rem;
   font-weight: 500;
-  border-radius: 4px;
+  border-radius: var(--radius-sm, 6px);
   transition: all 0.2s ease;
   display: flex;
   align-items: center;
@@ -39,33 +39,33 @@
 }
 
 .latex-toggle-btn:hover {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary, #fff);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .latex-toggle-btn.active {
-  background: #4CAF50;
+  background: var(--accent-green, #4CAF50);
   color: white;
   font-weight: 600;
 }
 
 .latex-indicator {
   font-size: 0.8rem;
-  color: #4CAF50;
+  color: var(--accent-green, #4CAF50);
   display: flex;
   align-items: center;
   gap: 0.25rem;
 }
 
 .latex-indicator.no-latex {
-  color: #666;
+  color: var(--text-muted, #666);
 }
 
 .latex-content-container {
   flex: 1;
   overflow-y: visible;
   padding: 3rem 4.5rem;
-  background: #0a0a0a;
+  background: var(--surface-1, #131318);
   min-height: 400px;
 }
 
@@ -194,12 +194,12 @@
 }
 
 .latex-theorem {
-  border-color: #ffd700;
-  background: rgba(255, 215, 0, 0.05);
+  border-color: #1eff1c;
+  background: rgba(30, 255, 28, 0.05);
 }
 
 .latex-theorem strong {
-  color: #ffd700;
+  color: #1eff1c;
 }
 
 .latex-lemma {
@@ -326,11 +326,11 @@
 
 .latex-chapter {
   font-size: 2rem !important;
-  border-bottom: 3px solid #ffd700 !important;
+  border-bottom: 3px solid #1eff1c !important;
   padding-bottom: 1rem !important;
   margin-top: 3rem !important;
   margin-bottom: 1.5rem !important;
-  color: #ffd700 !important;
+  color: #1eff1c !important;
 }
 
 .latex-section {
@@ -596,18 +596,18 @@
 }
 
 .latex-content-container::-webkit-scrollbar-track {
-  background: #1a1a1a;
+  background: var(--surface-2, #1a1a22);
   border-radius: 5px;
 }
 
 .latex-content-container::-webkit-scrollbar-thumb {
-  background: #444;
+  background: var(--surface-4, #2a2a36);
   border-radius: 5px;
-  border: 2px solid #1a1a1a;
+  border: 2px solid var(--surface-2, #1a1a22);
 }
 
 .latex-content-container::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: var(--border-strong, rgba(255,255,255,0.16));
 }
 
 /* ================================

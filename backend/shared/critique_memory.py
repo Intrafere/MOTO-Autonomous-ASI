@@ -19,22 +19,23 @@ The autonomous research system uses two storage modes:
    - Final answers: backend/data/auto_sessions/{session_id}/final_answer/
    - Created for new research sessions
 
-HOW TO USE base_path PARAMETER:
-- For session-based papers: Pass the paper's directory from paper_library.get_paper_path()
-- For final answers: Pass the final answer's base directory
-- If base_path is None, falls back to legacy paths (for backward compatibility)
+HOW TO USE base_dir PARAMETER:
+- For session-based papers: Pass the trusted papers directory
+- For final answers: Pass the trusted final answer directory
+- If base_dir is None, falls back to legacy paths (for backward compatibility)
 
-The compiler paper type always uses a single global file and ignores base_path.
+The compiler paper type always uses a single global file and ignores base_dir.
 """
 
 import json
-import os
 import logging
+from pathlib import Path
 from typing import List, Optional, Literal
 from datetime import datetime
 import uuid
 
 from backend.shared.models import PaperCritique
+from backend.shared.path_safety import validate_single_path_component
 
 logger = logging.getLogger(__name__)
 
@@ -45,164 +46,136 @@ MAX_CRITIQUES_PER_PAPER = 10
 PaperType = Literal["autonomous_paper", "final_answer", "compiler_paper"]
 
 
+def _get_legacy_data_dir() -> Path:
+    """Return the shared legacy data directory for critique storage."""
+    return Path(__file__).resolve().parents[1] / "data"
+
+
 def _get_critiques_file_path(
     paper_type: PaperType,
     paper_id: Optional[str] = None,
-    base_path: Optional[str] = None
-) -> str:
+    base_dir: Optional[Path] = None
+) -> Path:
     """
     Get the file path for storing critiques based on paper type.
-    
+
     Args:
         paper_type: Type of paper ("autonomous_paper", "final_answer", "compiler_paper")
         paper_id: Required for autonomous_paper type (used in filename)
-        base_path: Optional override path. If provided, critiques are stored here
-                   instead of legacy paths. This enables session-aware storage.
-        
+        base_dir: Optional trusted directory for session-aware storage.
+
     Returns:
         Path to the critiques JSON file
     """
-    # If base_path is provided, use it for session-aware storage
-    if base_path:
-        os.makedirs(base_path, exist_ok=True)
-        
+    safe_paper_id = None
+    if paper_id:
+        safe_paper_id = validate_single_path_component(paper_id, "paper ID")
+
+    if base_dir is not None:
+        base_dir.mkdir(parents=True, exist_ok=True)
+
         if paper_type == "autonomous_paper":
-            if not paper_id:
+            if not safe_paper_id:
                 raise ValueError("paper_id is required for autonomous_paper type")
-            return os.path.join(base_path, f"paper_{paper_id}_critiques.json")
-        
-        elif paper_type == "final_answer":
-            # Final answer critiques stored in the final answer directory
-            return os.path.join(base_path, "final_answer_critiques.json")
-        
-        elif paper_type == "compiler_paper":
-            # Compiler always uses global path (ignore base_path)
-            pass  # Fall through to legacy handling
-        
-        else:
+            return base_dir / f"paper_{safe_paper_id}_critiques.json"
+
+        if paper_type == "final_answer":
+            return base_dir / "final_answer_critiques.json"
+
+        if paper_type != "compiler_paper":
             raise ValueError(f"Unknown paper_type: {paper_type}")
-    
-    # Legacy paths (fallback when base_path not provided)
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-    
+
+    data_dir = _get_legacy_data_dir()
+
     if paper_type == "autonomous_paper":
-        if not paper_id:
+        if not safe_paper_id:
             raise ValueError("paper_id is required for autonomous_paper type")
-        papers_dir = os.path.join(data_dir, "auto_papers")
-        os.makedirs(papers_dir, exist_ok=True)
-        return os.path.join(papers_dir, f"paper_{paper_id}_critiques.json")
-    
-    elif paper_type == "final_answer":
-        final_answer_dir = os.path.join(data_dir, "auto_final_answer")
-        os.makedirs(final_answer_dir, exist_ok=True)
-        return os.path.join(final_answer_dir, "final_answer_critiques.json")
-    
-    elif paper_type == "compiler_paper":
-        os.makedirs(data_dir, exist_ok=True)
-        return os.path.join(data_dir, "compiler_paper_critiques.json")
-    
-    else:
-        raise ValueError(f"Unknown paper_type: {paper_type}")
+        papers_dir = data_dir / "auto_papers"
+        papers_dir.mkdir(parents=True, exist_ok=True)
+        return papers_dir / f"paper_{safe_paper_id}_critiques.json"
+
+    if paper_type == "final_answer":
+        final_answer_dir = data_dir / "auto_final_answer"
+        final_answer_dir.mkdir(parents=True, exist_ok=True)
+        return final_answer_dir / "final_answer_critiques.json"
+
+    if paper_type == "compiler_paper":
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir / "compiler_paper_critiques.json"
+
+    raise ValueError(f"Unknown paper_type: {paper_type}")
 
 
 async def save_critique(
     paper_type: PaperType,
     critique: PaperCritique,
     paper_id: Optional[str] = None,
-    base_path: Optional[str] = None
+    base_dir: Optional[Path] = None
 ) -> PaperCritique:
     """
     Save a critique to the paper's critique history.
-    
+
     Maintains a maximum of MAX_CRITIQUES_PER_PAPER critiques per paper.
     Oldest critiques are removed when the limit is exceeded.
-    
-    Args:
-        paper_type: Type of paper
-        critique: The PaperCritique to save
-        paper_id: Required for autonomous_paper type
-        base_path: Optional override path for session-aware storage.
-                   If provided, critiques are stored in this directory.
-                   If None, falls back to legacy paths.
-        
-    Returns:
-        The saved PaperCritique (with generated critique_id if not set)
     """
-    file_path = _get_critiques_file_path(paper_type, paper_id, base_path)
-    
-    # Ensure critique has an ID
+    file_path = _get_critiques_file_path(paper_type, paper_id, base_dir)
+
     if not critique.critique_id:
         critique.critique_id = str(uuid.uuid4())[:8]
-    
-    # Load existing critiques
-    critiques = await get_critiques(paper_type, paper_id, base_path)
-    
-    # Add new critique at the beginning (newest first)
+
+    critiques = await get_critiques(paper_type, paper_id, base_dir)
     critiques.insert(0, critique)
-    
-    # Enforce max limit (remove oldest)
+
     while len(critiques) > MAX_CRITIQUES_PER_PAPER:
         removed = critiques.pop()
-        logger.info(f"Removed oldest critique {removed.critique_id} to maintain limit of {MAX_CRITIQUES_PER_PAPER}")
-    
-    # Save to file
+        logger.info(
+            f"Removed oldest critique {removed.critique_id} "
+            f"to maintain limit of {MAX_CRITIQUES_PER_PAPER}"
+        )
+
     critiques_data = [c.model_dump() for c in critiques]
-    
-    # Convert datetime objects to ISO format strings for JSON serialization
-    for c in critiques_data:
-        if isinstance(c.get("date"), datetime):
-            c["date"] = c["date"].isoformat()
-    
+    for critique_dict in critiques_data:
+        if isinstance(critique_dict.get("date"), datetime):
+            critique_dict["date"] = critique_dict["date"].isoformat()
+
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(critiques_data, f, indent=2, default=str)
-        logger.info(f"Saved critique {critique.critique_id} for {paper_type}" + 
-                   (f" paper_id={paper_id}" if paper_id else "") +
-                   (f" at {file_path}" if base_path else ""))
+        logger.info(
+            f"Saved critique {critique.critique_id} for {paper_type}"
+            + (f" paper_id={paper_id}" if paper_id else "")
+            + (f" at {file_path}" if base_dir else "")
+        )
     except Exception as e:
         logger.error(f"Failed to save critique: {e}")
         raise
-    
+
     return critique
 
 
 async def get_critiques(
     paper_type: PaperType,
     paper_id: Optional[str] = None,
-    base_path: Optional[str] = None
+    base_dir: Optional[Path] = None
 ) -> List[PaperCritique]:
-    """
-    Get all critiques for a paper.
-    
-    Args:
-        paper_type: Type of paper
-        paper_id: Required for autonomous_paper type
-        base_path: Optional override path for session-aware storage.
-                   If provided, looks for critiques in this directory.
-                   If None, falls back to legacy paths.
-        
-    Returns:
-        List of PaperCritique objects (newest first)
-    """
-    file_path = _get_critiques_file_path(paper_type, paper_id, base_path)
-    
-    if not os.path.exists(file_path):
+    """Get all critiques for a paper."""
+    file_path = _get_critiques_file_path(paper_type, paper_id, base_dir)
+    if not file_path.exists():
         return []
-    
+
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             critiques_data = json.load(f)
-        
+
         critiques = []
-        for c in critiques_data:
-            # Convert ISO format strings back to datetime
-            if isinstance(c.get("date"), str):
+        for critique_dict in critiques_data:
+            if isinstance(critique_dict.get("date"), str):
                 try:
-                    c["date"] = datetime.fromisoformat(c["date"])
+                    critique_dict["date"] = datetime.fromisoformat(critique_dict["date"])
                 except ValueError:
-                    c["date"] = datetime.now()
-            critiques.append(PaperCritique(**c))
-        
+                    critique_dict["date"] = datetime.now()
+            critiques.append(PaperCritique(**critique_dict))
+
         return critiques
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse critiques file {file_path}: {e}")
@@ -215,34 +188,23 @@ async def get_critiques(
 async def clear_critiques(
     paper_type: PaperType,
     paper_id: Optional[str] = None,
-    base_path: Optional[str] = None
+    base_dir: Optional[Path] = None
 ) -> bool:
-    """
-    Delete all critiques for a paper.
-    
-    Args:
-        paper_type: Type of paper
-        paper_id: Required for autonomous_paper type
-        base_path: Optional override path for session-aware storage.
-                   If provided, deletes critiques from this directory.
-                   If None, falls back to legacy paths.
-        
-    Returns:
-        True if file was deleted, False if it didn't exist
-    """
-    file_path = _get_critiques_file_path(paper_type, paper_id, base_path)
-    
-    if os.path.exists(file_path):
+    """Delete all critiques for a paper."""
+    file_path = _get_critiques_file_path(paper_type, paper_id, base_dir)
+    if file_path.exists():
         try:
-            os.remove(file_path)
-            logger.info(f"Cleared critiques for {paper_type}" + 
-                       (f" paper_id={paper_id}" if paper_id else "") +
-                       (f" at {file_path}" if base_path else ""))
+            file_path.unlink()
+            logger.info(
+                f"Cleared critiques for {paper_type}"
+                + (f" paper_id={paper_id}" if paper_id else "")
+                + (f" at {file_path}" if base_dir else "")
+            )
             return True
         except Exception as e:
             logger.error(f"Failed to delete critiques file {file_path}: {e}")
             raise
-    
+
     return False
 
 
@@ -250,48 +212,26 @@ async def get_critique_by_id(
     paper_type: PaperType,
     critique_id: str,
     paper_id: Optional[str] = None,
-    base_path: Optional[str] = None
+    base_dir: Optional[Path] = None
 ) -> Optional[PaperCritique]:
-    """
-    Get a specific critique by its ID.
-    
-    Args:
-        paper_type: Type of paper
-        critique_id: The critique ID to find
-        paper_id: Required for autonomous_paper type
-        base_path: Optional override path for session-aware storage
-        
-    Returns:
-        The PaperCritique if found, None otherwise
-    """
-    critiques = await get_critiques(paper_type, paper_id, base_path)
-    
+    """Get a specific critique by its ID."""
+    critiques = await get_critiques(paper_type, paper_id, base_dir)
+
     for critique in critiques:
         if critique.critique_id == critique_id:
             return critique
-    
+
     return None
 
 
 async def get_latest_critique(
     paper_type: PaperType,
     paper_id: Optional[str] = None,
-    base_path: Optional[str] = None
+    base_dir: Optional[Path] = None
 ) -> Optional[PaperCritique]:
-    """
-    Get the most recent critique for a paper.
-    
-    Args:
-        paper_type: Type of paper
-        paper_id: Required for autonomous_paper type
-        base_path: Optional override path for session-aware storage
-        
-    Returns:
-        The most recent PaperCritique if any exist, None otherwise
-    """
-    critiques = await get_critiques(paper_type, paper_id, base_path)
-    
+    """Get the most recent critique for a paper."""
+    critiques = await get_critiques(paper_type, paper_id, base_dir)
     if critiques:
-        return critiques[0]  # Already sorted newest first
-    
+        return critiques[0]
+
     return None

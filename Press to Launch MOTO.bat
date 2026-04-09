@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 
 cls
 echo ================================================================
@@ -83,7 +83,8 @@ REM ================================================================
 echo [4/8] Installing Python dependencies...
 echo This may take a few minutes if this is your first time...
 echo.
-pip install -r requirements.txt
+python -m pip install --upgrade pip >nul 2>&1
+pip install --upgrade -r requirements.txt
 if errorlevel 1 (
     echo.
     echo ============================================================

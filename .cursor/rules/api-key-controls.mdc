@@ -1,7 +1,6 @@
 ---
-alwaysApply: true
+alwaysApply: false
 ---
-
 # API Key Controls & Workflow Management System
 
 ## Overview
@@ -37,11 +36,12 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 - App Attribution Headers: `HTTP-Referer: https://intrafere.com/moto-autonomous-home-ai/`, `X-Title: MOTO Deep Research Harness`
 - Credit exhaustion detection: HTTP 402 OR error messages containing "credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"
 - Raises `CreditExhaustionError` on exhaustion (no retries). Retries transient errors (max 3).
-- Temperature=0.0 default. Stop sequences on all requests: `\n}\n\n`, `\n]\n\n`, `\n}\n\n\n`, `\n]\n\n\n`
+- Temperature=0.0 default. No stop sequences (removed — caused premature truncation with certain models).
 
 #### APIClientManager (`backend/shared/api_client_manager.py`)
-- Central router for all API calls: boost check → role's OpenRouter (with permanent fallback) → LM Studio
+- Central router for all API calls: boost check → role's OpenRouter (with resettable fallback) → LM Studio
 - Tracks fallback state per role: `_role_fallback_state: Dict[str, str]`
+- `reset_openrouter_fallbacks()`: Resets all roles originally configured for OpenRouter back from LM Studio fallback. Called automatically on API key set, or manually via reset endpoint.
 - Lazy initialization: OpenRouter client initializes from `rag_config.openrouter_api_key` when first needed
 
 **CRITICAL REQUIREMENT - Role Configuration:**
@@ -55,7 +55,7 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 
 **Counter Decrement:** `boost_next_count` decrements ONLY on successful boost API calls. Failed/exhausted calls do NOT decrement.
 
-**Permanent Fallback:** Once a role falls back to LM Studio due to credit exhaustion, it NEVER retries OpenRouter for that session. Each role has independent fallback state. If no fallback configured: raises RuntimeError.
+**Resettable Fallback:** When a role hits credit exhaustion, it falls back to LM Studio for subsequent calls. User can reset all fallen-back roles via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key (auto-resets). Each role has independent fallback state. If no fallback configured: raises RuntimeError.
 
 **Categories from role_id:**
 - `aggregator_submitter_*` → "Aggregator Submitters"
@@ -77,7 +77,7 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 Coordinators read actual agent `task_sequence` counters — no prediction. Task IDs exactly match what agents will generate.
 - Aggregator: `agg_sub{N}_{seq:03d}`, `agg_val_{seq:03d}`
 - Compiler: `comp_hc_{seq:03d}`, `comp_hp_{seq:03d}`, `comp_val_{seq:03d}`
-- Autonomous: `auto_ts_{seq:03d}`, `auto_tv_{seq:03d}`
+- Autonomous: `auto_te_{seq:03d}`, `auto_tev_{seq:03d}`, `auto_ts_{seq:03d}`, `auto_tv_{seq:03d}`
 
 ---
 
@@ -93,11 +93,13 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ## WebSocket Events
 
-**Workflow:** `workflow_updated` (tasks+mode), `task_started` (task_id), `task_completed` (task_id+sequence)
+**Workflow:** `workflow_updated` (tasks+mode), `task_started` (task_id), `task_completed` (task_id+sequence), `token_usage_updated` (total_input, total_output, by_model, elapsed_seconds)
 
-**Boost:** `boost_enabled` (model_id, provider, context_window, max_output_tokens), `boost_disabled`, `task_boost_toggled` (task_id, boosted), `boost_next_count_set` (count), `category_boost_toggled` (category, boosted), `boost_credits_exhausted` (task_id, message)
+**Boost:** `boost_enabled` (model_id, provider, context_window, max_output_tokens), `boost_disabled`, `task_boost_toggled` (task_id, boosted), `boost_next_count_updated` (count), `category_boost_toggled` (category, boosted), `boost_credits_exhausted` (task_id, message)
 
-**Fallback:** `openrouter_fallback` (role_id, reason, message, fallback_model), `openrouter_fallback_failed` (role_id, reason, message)
+**Fallback:** `openrouter_fallback` (role_id, reason, message, fallback_model), `openrouter_fallback_failed` (role_id, reason, message), `openrouter_fallbacks_reset` (reset_roles, message)
+
+**Hung Connection:** `hung_connection_alert` (role_id, model, provider, elapsed_minutes, message) — fires after 15 minutes of no API response. Amber notification stack (bottom-left, offset from credit exhaustion stack). Auto-cleared on research stop and fallbacks reset.
 
 **Rate Limit:** `openrouter_rate_limit` (model, role_id, retry_after, message)
 
@@ -118,11 +120,12 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 - `GET /api/boost/openrouter-models` — Fetch OpenRouter models (Bearer key header)
 - `GET /api/boost/model-providers?model_id=` — Providers for a model
 - `GET /api/boost/logs?limit=` — Recent boost logs
-- `POST /api/boost/logs/clear` — Clear logs
+- `POST /api/boost/clear-logs` — Clear logs
 
 ### OpenRouter (`backend/api/routes/openrouter.py`)
 - `GET /api/openrouter/lm-studio-availability` — LM Studio availability check
-- `POST /api/openrouter/set-api-key` — Set and validate global OpenRouter key
+- `POST /api/openrouter/set-api-key` — Set and validate global OpenRouter key (auto-resets exhaustion flags)
+- `POST /api/openrouter/reset-exhaustion` — Reset all credit exhaustion flags + role fallback states mid-session
 - `DELETE /api/openrouter/api-key` — Clear key
 - `GET /api/openrouter/api-key-status` — `{ has_key, enabled }`
 - `GET /api/openrouter/models` — Available models (also caches free models for rotation)
@@ -135,12 +138,13 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 ### Workflow (`backend/api/routes/workflow.py`)
 - `GET /api/workflow/predictions` — Next 20 predicted tasks
 - `GET /api/workflow/history?limit=` — Completed tasks
+- `GET /api/token-stats` — Cumulative token usage (total_input, total_output, by_model, elapsed_seconds)
 
 ---
 
 ## Error Handling
 
-**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota"/"key limit"/"limit exceeded" → `CreditExhaustionError` → permanent LM Studio fallback for that role (or RuntimeError if no fallback).
+**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota"/"key limit"/"limit exceeded" → `CreditExhaustionError` → LM Studio fallback for that role (or RuntimeError if no fallback). Fallback is resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key.
 
 **Boost Exhaustion:** Falls back to primary for that task; boost stays enabled; counter NOT decremented.
 
@@ -170,7 +174,7 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 - Aggregator submitters: per-submitter pause (others continue); validator loop pauses entire validator
 - Prevents infinite retry loops (the 2000+ attempt bug)
 
-**Account Exhaustion:** HTTP 402 on any `:free` model sets `_account_credits_exhausted` flag. All subsequent free model calls short-circuit immediately. Flag clears on next successful free model call.
+**Account Exhaustion:** HTTP 402 on any `:free` model sets `_account_credits_exhausted` flag. All subsequent free model calls short-circuit immediately. Flag clears on next successful free model call, or via `POST /api/openrouter/reset-exhaustion`, or automatically when the API key is re-set.
 
 **Error Classes:**
 - `FreeModelExhaustedError` — all options exhausted, contains `soonest_retry` timestamp
@@ -188,6 +192,8 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ## Configuration Persistence
 
-**localStorage:** `openrouter_api_key`, `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`)
+**Secure backend storage (OS keyring):** OpenRouter global API key and Wolfram Alpha API key persist via `backend/shared/secret_store.py` using the OS keychain/keyring. Restored into backend memory on startup in `backend/api/main.py`.
+
+**localStorage:** `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`)
 
 **Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs, free model manager state. Boost logs persist to file (`boost_api_log.txt`).

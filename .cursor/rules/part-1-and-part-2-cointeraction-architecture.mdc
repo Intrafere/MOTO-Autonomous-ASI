@@ -70,6 +70,7 @@ The live-constructing compiler-written paper should be viewable in one tab and a
 - **Compiler defaults**: validator=25000, high-context=25000 (for outline_create/outline_update/construction/review), high-param=25000 (for rigor mode)
 - **GUI tooltips** provide recommended minimums: Submitter "25000+ for reasoning models", Validator "25000+", High-context "25000+ (outline needs 15K+)", High-param "25000+"
 - Settings are passed through API routes and stored in `rag_config` (aggregator) and `system_config` (compiler)
+- **CRITICAL**: `system_config.compiler_*` settings (context windows, max output tokens) are the single source of truth for all compiler modules. ANY code that creates a `CompilerCoordinator` MUST write its context/token settings to `system_config` BEFORE init. The manual `/api/compiler/start` route does this; autonomous mode (`autonomous_coordinator.py`) must do it explicitly before each `CompilerCoordinator()` creation.
 - Reasoning models (e.g., those with `<think>` tags or separate `reasoning` fields) may use significant tokens on internal reasoning before generating JSON output
 
 ## Other Notes

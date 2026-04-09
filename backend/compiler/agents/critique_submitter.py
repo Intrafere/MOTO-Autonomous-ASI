@@ -217,6 +217,11 @@ class CritiqueSubmitterAgent:
             
         except FreeModelExhaustedError:
             raise
+        except RuntimeError as e:
+            if "credits exhausted" in str(e).lower():
+                raise
+            logger.error(f"Error generating critique: {e}", exc_info=True)
+            return None
         except Exception as e:
             logger.error(f"Error generating critique: {e}", exc_info=True)
             return None
@@ -353,6 +358,11 @@ class CritiqueSubmitterAgent:
             
         except FreeModelExhaustedError:
             raise
+        except RuntimeError as e:
+            if "credits exhausted" in str(e).lower():
+                raise
+            logger.error(f"Error generating rewrite decision: {e}", exc_info=True)
+            return None
         except Exception as e:
             logger.error(f"Error generating rewrite decision: {e}", exc_info=True)
             return None
@@ -365,6 +375,7 @@ class CritiqueSubmitterAgent:
         current_outline: str,
         critique_feedback: str,
         edits_applied: List[Dict],
+        reference_papers: Optional[str] = None,
         accumulated_history: Optional[str] = None
     ) -> Optional[Dict]:
         """
@@ -380,6 +391,7 @@ class CritiqueSubmitterAgent:
             current_outline: Paper outline
             critique_feedback: All accepted critiques from this revision cycle
             edits_applied: List of edits already applied in this iteration
+            reference_papers: Optional reference paper content
             accumulated_history: Optional accumulated critique history from previous failed versions
             
         Returns:
@@ -401,6 +413,7 @@ class CritiqueSubmitterAgent:
                 current_outline=current_outline,
                 critique_feedback=critique_feedback,
                 edits_applied=edits_applied,
+                reference_papers=reference_papers,
                 accumulated_critique_history=accumulated_history or ""
             )
             
@@ -488,6 +501,11 @@ class CritiqueSubmitterAgent:
             
         except FreeModelExhaustedError:
             raise
+        except RuntimeError as e:
+            if "credits exhausted" in str(e).lower():
+                raise
+            logger.error(f"Error generating iterative edit: {e}", exc_info=True)
+            return None
         except Exception as e:
             logger.error(f"Error generating iterative edit: {e}", exc_info=True)
             return None

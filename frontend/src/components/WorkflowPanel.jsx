@@ -1,7 +1,16 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { websocket } from '../services/websocket';
 import { boostAPI, workflowAPI } from '../services/api';
 import './WorkflowPanel.css';
+
+const formatNumber = (n) => n.toLocaleString();
+
+const formatTime = (totalSeconds) => {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = Math.floor(totalSeconds % 60);
+  return `${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+};
 
 export default function WorkflowPanel({ isRunning }) {
   const [tasks, setTasks] = useState([]);
@@ -14,6 +23,17 @@ export default function WorkflowPanel({ isRunning }) {
   const [boostedCategories, setBoostedCategories] = useState([]);
   const [availableCategories, setAvailableCategories] = useState([]);
   const [boostEnabled, setBoostEnabled] = useState(false);
+
+  // Token tracking & timer state
+  const [tokenStats, setTokenStats] = useState({ total_input: 0, total_output: 0, by_model: {}, elapsed_seconds: 0 });
+  const [showPerModel, setShowPerModel] = useState(false);
+  const [localElapsed, setLocalElapsed] = useState(0);
+  const lastSyncRef = useRef(Date.now());
+
+  const expandPanel = useCallback(() => {
+    setCollapsed(false);
+    localStorage.setItem('workflow_panel_collapsed', 'false');
+  }, []);
 
   // Fetch boost status and categories when running
   const fetchBoostStatus = useCallback(async () => {
@@ -45,6 +65,12 @@ export default function WorkflowPanel({ isRunning }) {
     return () => clearInterval(interval);
   }, [fetchBoostStatus]);
 
+  useEffect(() => {
+    if (boostEnabled) {
+      expandPanel();
+    }
+  }, [boostEnabled, expandPanel]);
+
   // Handle setting boost next count
   const handleSetBoostNextCount = async () => {
     const count = parseInt(boostNextInput, 10);
@@ -72,6 +98,41 @@ export default function WorkflowPanel({ isRunning }) {
       console.error('Failed to toggle category:', error);
     }
   };
+
+  // Token stats: initial fetch on mount and when isRunning changes
+  useEffect(() => {
+    const fetchTokenStats = async () => {
+      try {
+        const resp = await workflowAPI.getTokenStats();
+        if (resp.success) {
+          setTokenStats(resp);
+          setLocalElapsed(resp.elapsed_seconds || 0);
+          lastSyncRef.current = Date.now();
+        }
+      } catch { /* ignore */ }
+    };
+    fetchTokenStats();
+  }, [isRunning]);
+
+  // Token stats: listen for real-time WebSocket updates
+  useEffect(() => {
+    const handleTokenUpdate = (data) => {
+      setTokenStats(data);
+      setLocalElapsed(data.elapsed_seconds || 0);
+      lastSyncRef.current = Date.now();
+    };
+    websocket.on('token_usage_updated', handleTokenUpdate);
+    return () => websocket.off('token_usage_updated', handleTokenUpdate);
+  }, []);
+
+  // Local 1-second timer tick for smooth elapsed display
+  useEffect(() => {
+    if (!isRunning) return;
+    const interval = setInterval(() => {
+      setLocalElapsed(prev => prev + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isRunning]);
 
   // Poll for workflow predictions when running
   useEffect(() => {
@@ -288,6 +349,7 @@ export default function WorkflowPanel({ isRunning }) {
     // NEW: Handle boost enabled/disabled
     const handleBoostEnabled = () => {
       setBoostEnabled(true);
+      expandPanel();
       fetchBoostStatus();
     };
 
@@ -318,7 +380,7 @@ export default function WorkflowPanel({ isRunning }) {
       websocket.off('boost_enabled', handleBoostEnabled);
       websocket.off('boost_disabled', handleBoostDisabled);
     };
-  }, [isRunning, fetchBoostStatus]);
+  }, [isRunning, fetchBoostStatus, expandPanel]);
 
   const handleTaskClick = async (task) => {
     if (task.completed) return; // Can't toggle completed tasks
@@ -379,7 +441,7 @@ export default function WorkflowPanel({ isRunning }) {
       {!collapsed && (
         <>
           <div className="workflow-mode">
-            Mode: <span className="mode-badge">{mode}</span>
+            Mode: <span className="wf-mode-badge">{mode}</span>
           </div>
 
           {/* BOOST CONTROLS - ETERNAL (always visible, even when boost not enabled) */}
@@ -439,6 +501,55 @@ export default function WorkflowPanel({ isRunning }) {
                       </button>
                     ))}
                 </div>
+              </div>
+            )}
+          </div>
+
+          {/* RESEARCH TIMER & TOKEN STATS */}
+          <div className="token-stats-section">
+            <div className="research-timer">
+              <span className="timer-label">Elapsed</span>
+              <span className="timer-value">{formatTime(localElapsed)}</span>
+            </div>
+
+            <div className="token-totals">
+              <div className="token-row">
+                <span className="token-label">Input</span>
+                <span className="token-value">{formatNumber(tokenStats.total_input)}</span>
+              </div>
+              <div className="token-row">
+                <span className="token-label">Output</span>
+                <span className="token-value">{formatNumber(tokenStats.total_output)}</span>
+              </div>
+              <div className="token-row token-total-row">
+                <span className="token-label">Total</span>
+                <span className="token-value">{formatNumber(tokenStats.total_input + tokenStats.total_output)}</span>
+              </div>
+            </div>
+
+            {Object.keys(tokenStats.by_model || {}).length > 0 && (
+              <div className="per-model-section">
+                <button
+                  className="per-model-toggle"
+                  onClick={() => setShowPerModel(prev => !prev)}
+                >
+                  {showPerModel ? '▾' : '▸'} Per Model ({Object.keys(tokenStats.by_model).length})
+                </button>
+                {showPerModel && (
+                  <div className="per-model-list">
+                    {Object.entries(tokenStats.by_model)
+                      .sort((a, b) => (b[1].input + b[1].output) - (a[1].input + a[1].output))
+                      .map(([modelId, usage]) => (
+                        <div key={modelId} className="model-row">
+                          <div className="model-name" title={modelId}>{modelId}</div>
+                          <div className="model-tokens">
+                            <span className="model-in">In: {formatNumber(usage.input)}</span>
+                            <span className="model-out">Out: {formatNumber(usage.output)}</span>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

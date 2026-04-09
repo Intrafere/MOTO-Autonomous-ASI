@@ -273,9 +273,17 @@ class SubmitterAgent:
                             self.task_tracking_callback("completed", task_id)
                         return None  # Return None instead of crashing
                         
+                except FreeModelExhaustedError:
+                    raise
+                except RuntimeError as e:
+                    if "credits exhausted" in str(e).lower():
+                        raise FreeModelExhaustedError(str(e), soonest_retry=None)
+                    logger.error(f"Submitter {self.submitter_id}: Unexpected error during completion: {e}")
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
+                    return None
                 except Exception as e:
                     logger.error(f"Submitter {self.submitter_id}: Unexpected error during completion: {e}")
-                    # Notify task completed (failed but still completed)
                     if self.task_tracking_callback:
                         self.task_tracking_callback("completed", task_id)
                     return None

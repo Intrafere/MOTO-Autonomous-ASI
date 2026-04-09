@@ -22,8 +22,10 @@ from backend.shared.openrouter_client import (
 )
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
+from backend.shared.config import rag_config
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.models import ModelConfig
+from backend.shared.token_tracker import token_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,9 @@ class APIClientManager:
         # Current autonomous phase (set by autonomous coordinator)
         self._current_autonomous_phase: str = "unknown"
         
+        # Track roles that have already broadcast fallback_failed (prevent GUI log spam)
+        self._fallback_failed_notified: set = set()
+        
         # Lock for thread-safe state updates
         self._state_lock = asyncio.Lock()
     
@@ -74,6 +79,43 @@ class APIClientManager:
         if self._broadcast_callback:
             await self._broadcast_callback(event, data or {})
     
+    async def _with_hung_connection_watchdog(
+        self,
+        coro,
+        role_id: str,
+        model: str,
+        provider: str,
+        timeout_seconds: int = 900
+    ):
+        """Wrap an API call coroutine with a watchdog that alerts after timeout_seconds (default 15 min)."""
+        async def _watchdog():
+            await asyncio.sleep(timeout_seconds)
+            minutes = timeout_seconds // 60
+            logger.warning(
+                f"API call for role '{role_id}' using {model} via {provider} "
+                f"has been running for {minutes}+ minutes — possible hung connection"
+            )
+            await self._broadcast("hung_connection_alert", {
+                "role_id": role_id,
+                "model": model,
+                "provider": provider,
+                "elapsed_minutes": minutes,
+                "message": (
+                    f"API call to {model} via {provider} has been running for {minutes}+ minutes. "
+                    f"The connection may be hung. Consider stopping and trying a different host/provider."
+                )
+            })
+
+        watchdog_task = asyncio.create_task(_watchdog())
+        try:
+            return await coro
+        finally:
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except asyncio.CancelledError:
+                pass
+
     def set_model_tracking_callback(self, callback: Optional[Callable]) -> None:
         """
         Set callback for model usage tracking during Tier 3 final answer generation.
@@ -248,17 +290,29 @@ class APIClientManager:
             start_time = time.time()
             
             try:
+                boost_api_key = (
+                    boost_manager.boost_config.openrouter_api_key or
+                    rag_config.openrouter_api_key
+                )
+                if not boost_api_key:
+                    raise RuntimeError("Boost requested but no OpenRouter API key is available")
+
                 # Create temporary client with boost API key
-                boost_client = OpenRouterClient(boost_manager.boost_config.openrouter_api_key)
+                boost_client = OpenRouterClient(boost_api_key)
                 boost_provider = boost_manager.boost_config.boost_provider
                 try:
-                    result = await boost_client.generate_completion(
+                    result = await self._with_hung_connection_watchdog(
+                        boost_client.generate_completion(
+                            model=boost_model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens or boost_manager.boost_config.boost_max_output_tokens,
+                            response_format=response_format,
+                            provider=boost_provider
+                        ),
+                        role_id=role_id,
                         model=boost_model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens or boost_manager.boost_config.boost_max_output_tokens,
-                        response_format=response_format,
-                        provider=boost_provider
+                        provider=boost_provider or "OpenRouter"
                     )
                     
                     # Calculate duration
@@ -272,6 +326,11 @@ class APIClientManager:
                         response_content = message.get("content") or message.get("reasoning") or ""
                     if result.get("usage"):
                         tokens_used = result["usage"].get("total_tokens")
+                        _pt = result["usage"].get("prompt_tokens")
+                        _ct = result["usage"].get("completion_tokens")
+                        if _pt is not None and _ct is not None:
+                            token_tracker.track(boost_model, _pt, _ct)
+                            await self._broadcast("token_usage_updated", token_tracker.get_stats())
                     
                     # Log the boost call
                     await boost_logger.log_boost_call(
@@ -554,13 +613,18 @@ class APIClientManager:
                 
                 try:
                     logger.debug(f"Role {role_id} using OpenRouter: {openrouter_model}{provider_info}")
-                    result = await self._openrouter_client.generate_completion(
+                    result = await self._with_hung_connection_watchdog(
+                        self._openrouter_client.generate_completion(
+                            model=openrouter_model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens or role_config.max_output_tokens,
+                            response_format=response_format,
+                            provider=openrouter_provider
+                        ),
+                        role_id=role_id,
                         model=openrouter_model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens or role_config.max_output_tokens,
-                        response_format=response_format,
-                        provider=openrouter_provider  # Pass specific provider if configured
+                        provider=openrouter_provider or "OpenRouter"
                     )
                     
                     # Calculate duration and extract response
@@ -572,6 +636,11 @@ class APIClientManager:
                         response_content = message.get("content") or message.get("reasoning") or ""
                     if result.get("usage"):
                         tokens_used = result["usage"].get("total_tokens")
+                        _pt = result["usage"].get("prompt_tokens")
+                        _ct = result["usage"].get("completion_tokens")
+                        if _pt is not None and _ct is not None:
+                            token_tracker.track(openrouter_model, _pt, _ct)
+                            await self._broadcast("token_usage_updated", token_tracker.get_stats())
                     
                     # Log to autonomous API logger if callback set
                     if self._autonomous_logger_callback:
@@ -752,11 +821,13 @@ class APIClientManager:
                             f"fallback model in settings."
                         )
                         logger.error(error_msg)
-                        await self._broadcast("openrouter_fallback_failed", {
-                            "role_id": role_id,
-                            "reason": "no_fallback_configured",
-                            "message": error_msg
-                        })
+                        if role_id not in self._fallback_failed_notified:
+                            self._fallback_failed_notified.add(role_id)
+                            await self._broadcast("openrouter_fallback_failed", {
+                                "role_id": role_id,
+                                "reason": "no_fallback_configured",
+                                "message": error_msg
+                            })
                         raise RuntimeError(error_msg)
                     
                     # Fallback IS configured - use it
@@ -822,13 +893,18 @@ class APIClientManager:
         start_time = time.time()
         
         try:
-            result = await lm_studio_client.generate_completion(
+            result = await self._with_hung_connection_watchdog(
+                lm_studio_client.generate_completion(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                    **kwargs
+                ),
+                role_id=role_id,
                 model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format=response_format,
-                **kwargs
+                provider="LM Studio"
             )
             
             # Calculate duration and extract response
@@ -840,6 +916,11 @@ class APIClientManager:
                 response_content = message.get("content") or message.get("reasoning") or ""
             if result.get("usage"):
                 tokens_used = result["usage"].get("total_tokens")
+                _pt = result["usage"].get("prompt_tokens")
+                _ct = result["usage"].get("completion_tokens")
+                if _pt is not None and _ct is not None:
+                    token_tracker.track(model, _pt, _ct)
+                    await self._broadcast("token_usage_updated", token_tracker.get_stats())
             
             # Log to autonomous API logger if callback set
             if self._autonomous_logger_callback:
@@ -921,14 +1002,25 @@ class APIClientManager:
                     "reason": "rate_limit",
                 })
                 try:
-                    result = await self._openrouter_client.generate_completion(
+                    result = await self._with_hung_connection_watchdog(
+                        self._openrouter_client.generate_completion(
+                            model=alt_model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            response_format=response_format,
+                        ),
+                        role_id=role_id,
                         model=alt_model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        response_format=response_format,
+                        provider="OpenRouter (free rotation)"
                     )
                     await self._track_model_usage(alt_model)
+                    if result.get("usage"):
+                        _pt = result["usage"].get("prompt_tokens")
+                        _ct = result["usage"].get("completion_tokens")
+                        if _pt is not None and _ct is not None:
+                            token_tracker.track(alt_model, _pt, _ct)
+                            await self._broadcast("token_usage_updated", token_tracker.get_stats())
                     if free_model_manager.is_account_exhausted():
                         free_model_manager.clear_account_exhaustion()
                     return result
@@ -948,14 +1040,25 @@ class APIClientManager:
                 "original_model": original_model,
             })
             try:
-                result = await self._openrouter_client.generate_completion(
+                result = await self._with_hung_connection_watchdog(
+                    self._openrouter_client.generate_completion(
+                        model=auto_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_format=response_format,
+                    ),
+                    role_id=role_id,
                     model=auto_model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format=response_format,
+                    provider="OpenRouter (auto-selector)"
                 )
                 await self._track_model_usage(auto_model)
+                if result.get("usage"):
+                    _pt = result["usage"].get("prompt_tokens")
+                    _ct = result["usage"].get("completion_tokens")
+                    if _pt is not None and _ct is not None:
+                        token_tracker.track(auto_model, _pt, _ct)
+                        await self._broadcast("token_usage_updated", token_tracker.get_stats())
                 if free_model_manager.is_account_exhausted():
                     free_model_manager.clear_account_exhaustion()
                 return result
@@ -984,6 +1087,31 @@ class APIClientManager:
             Dict mapping role_id to fallback state
         """
         return self._role_fallback_state.copy()
+    
+    async def reset_openrouter_fallbacks(self) -> Dict[str, str]:
+        """
+        Reset all roles that were originally configured for OpenRouter back to 'openrouter' state.
+        Called when user adds credits and wants to retry OpenRouter without restarting.
+        
+        Returns:
+            Dict of role_id -> new_state for roles that were reset
+        """
+        reset_roles = {}
+        async with self._state_lock:
+            for role_id, config in self._role_model_configs.items():
+                if config.provider == "openrouter" and self._role_fallback_state.get(role_id) == "lm_studio":
+                    self._role_fallback_state[role_id] = "openrouter"
+                    reset_roles[role_id] = "openrouter"
+                    logger.info(f"Reset role '{role_id}' back to OpenRouter (was fallen back to LM Studio)")
+        
+        if reset_roles:
+            self._fallback_failed_notified.difference_update(reset_roles.keys())
+            await self._broadcast("openrouter_fallbacks_reset", {
+                "reset_roles": list(reset_roles.keys()),
+                "message": f"Reset {len(reset_roles)} role(s) back to OpenRouter"
+            })
+        
+        return reset_roles
     
     async def get_embeddings(self, texts: List[str], model: str = None) -> List[List[float]]:
         """

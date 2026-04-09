@@ -20,7 +20,12 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     });
-    if (!response.ok) throw new Error('Failed to start aggregator');
+    if (!response.ok) {
+      const errorData = await response.json();
+      const error = new Error('Failed to start aggregator');
+      error.details = errorData.detail;
+      throw error;
+    }
     return response.json();
   },
 
@@ -363,6 +368,22 @@ export const autonomousAPI = {
     return response.json();
   },
 
+  // Get all Stage 2 history papers across legacy + sessions
+  async getPaperHistory() {
+    const response = await fetch(`${API_BASE}/auto-research/paper-history`);
+    if (!response.ok) throw new Error('Failed to get Stage 2 paper history');
+    return response.json();
+  },
+
+  // Get one Stage 2 history paper by session-aware identifier
+  async getHistoryPaper(sessionId, paperId) {
+    const response = await fetch(
+      `${API_BASE}/auto-research/paper-history/${encodeURIComponent(sessionId)}/${encodeURIComponent(paperId)}`
+    );
+    if (!response.ok) throw new Error(`Failed to get history paper ${sessionId}/${paperId}`);
+    return response.json();
+  },
+
   // Get statistics
   async getStats() {
     const response = await fetch(`${API_BASE}/auto-research/stats`);
@@ -467,6 +488,21 @@ export const autonomousAPI = {
     return response.json();
   },
 
+  // Delete Stage 2 history paper by session-aware identifier
+  async deleteHistoryPaper(sessionId, paperId) {
+    const response = await fetch(
+      `${API_BASE}/auto-research/paper-history/${encodeURIComponent(sessionId)}/${encodeURIComponent(paperId)}?confirm=true`,
+      {
+        method: 'DELETE',
+      }
+    );
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || `Failed to delete history paper ${sessionId}/${paperId}`);
+    }
+    return response.json();
+  },
+
   // ============================================================
   // Tier 3 - Final Answer API
   // ============================================================
@@ -526,8 +562,10 @@ export const autonomousAPI = {
   // ============================================================
 
   // Get API logs
-  async getApiLogs(limit = 100) {
-    const response = await fetch(`${API_BASE}/auto-research/api-logs?limit=${limit}`);
+  async getApiLogs(limit = 100, options = {}) {
+    const response = await fetch(`${API_BASE}/auto-research/api-logs?limit=${limit}`, {
+      signal: options.signal,
+    });
     if (!response.ok) throw new Error('Failed to get API logs');
     return response.json();
   },
@@ -595,6 +633,45 @@ export const autonomousAPI = {
       method: 'DELETE',
     });
     if (!response.ok) throw new Error('Failed to clear paper critiques');
+    return response.json();
+  },
+
+  // Generate a critique for a Stage 2 history paper
+  async generateHistoryPaperCritique(sessionId, paperId, customPrompt = null, validatorConfig = null) {
+    const body = {};
+    if (customPrompt) body.custom_prompt = customPrompt;
+
+    if (validatorConfig && validatorConfig.validator_model) {
+      body.validator_model = validatorConfig.validator_model;
+      body.validator_context_window = validatorConfig.validator_context_window;
+      body.validator_max_tokens = validatorConfig.validator_max_tokens;
+      body.validator_provider = validatorConfig.validator_provider;
+      body.validator_openrouter_provider = validatorConfig.validator_openrouter_provider;
+    }
+
+    const response = await fetch(
+      `${API_BASE}/auto-research/paper-history/${encodeURIComponent(sessionId)}/${encodeURIComponent(paperId)}/critique`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || 'Failed to generate history paper critique');
+    }
+    return response.json();
+  },
+
+  // Get all critiques for a Stage 2 history paper
+  async getHistoryPaperCritiques(sessionId, paperId) {
+    const response = await fetch(
+      `${API_BASE}/auto-research/paper-history/${encodeURIComponent(sessionId)}/${encodeURIComponent(paperId)}/critiques`
+    );
+    if (!response.ok) throw new Error('Failed to get history paper critiques');
     return response.json();
   },
 
@@ -816,6 +893,13 @@ export const workflowAPI = {
     if (!response.ok) throw new Error('Failed to get workflow history');
     return response.json();
   },
+
+  // Get cumulative token usage stats and elapsed time
+  async getTokenStats() {
+    const response = await fetch(`${API_BASE}/token-stats`);
+    if (!response.ok) throw new Error('Failed to get token stats');
+    return response.json();
+  },
 };
 
 // OpenRouter API (for per-role model selection)
@@ -920,6 +1004,17 @@ export const openRouterAPI = {
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(errorData.detail || 'Failed to update free model settings');
+    }
+    return response.json();
+  },
+
+  async resetCreditExhaustion() {
+    const response = await fetch(`${API_BASE}/openrouter/reset-exhaustion`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || 'Failed to reset credit exhaustion');
     }
     return response.json();
   },

@@ -12,6 +12,7 @@ import aiofiles
 
 from backend.shared.config import system_config
 from backend.shared.models import BrainstormMetadata, PaperMetadata
+from backend.shared.path_safety import resolve_path_within_root
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,10 @@ class ResearchMetadata:
         """Set session manager for session-based path resolution."""
         self._session_manager = session_manager
         if session_manager and session_manager.is_session_active:
-            session_path = session_manager.session_path
+            session_path = resolve_path_within_root(
+                session_manager.session_path.parent,
+                session_manager.session_path.name,
+            )
             self._metadata_path = session_path / "session_metadata.json"
             self._stats_path = session_path / "session_stats.json"
             self._workflow_state_path = session_path / "workflow_state.json"

@@ -293,12 +293,12 @@ class HighContextSubmitter:
             logger.info(f"Paper stripped: {len(current_paper)} chars → {len(paper_for_llm)} chars (markers removed)")
             
             # Retrieve aggregator database evidence
+            # Exclude outline and paper (both direct-injected in outline_update mode)
             logger.info("Retrieving aggregator database evidence via RAG...")
-            # Use just the user prompt - the outline is direct-injected anyway
-            # Truncating to 500 chars loses important context
             context_pack = await compiler_rag_manager.retrieve_for_mode(
                 query=self.user_prompt,
-                mode="outline_update"
+                mode="outline_update",
+                exclude_sources=["compiler_outline.txt", "compiler_paper.txt"]
             )
             logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
             
@@ -424,7 +424,9 @@ class HighContextSubmitter:
         section_phase: Optional[str] = None,
         rejection_feedback: Optional[str] = None,
         critique_feedback: Optional[str] = None,
-        pre_critique_paper: Optional[str] = None
+        pre_critique_paper: Optional[str] = None,
+        brainstorm_content: Optional[str] = None,
+        brainstorm_source_name: Optional[str] = None
     ) -> Optional[CompilerSubmission]:
         """
         Submit next paper construction portion.
@@ -436,6 +438,8 @@ class HighContextSubmitter:
             rejection_feedback: Feedback from a previous rejection to guide the model (e.g., "Introduction not found in document")
             critique_feedback: Accepted critique feedback from peer review (for body rewrites only)
             pre_critique_paper: Paper state before critique phase (for body rewrites - shows what failed)
+            brainstorm_content: Full brainstorm database with submission numbers (for retroactive corrections)
+            brainstorm_source_name: RAG source name for brainstorm (e.g., "brainstorm_abc123.txt") to exclude from retrieval
         
         Returns:
             CompilerSubmission for construction
@@ -456,7 +460,32 @@ class HighContextSubmitter:
             paper_for_llm = _strip_paper_markers_for_llm(current_paper)
             logger.info(f"Paper stripped: {len(current_paper)} chars → {len(paper_for_llm)} chars (markers removed)")
             
+            # Calculate RAG budget accounting for brainstorm content (prevents context overflow)
+            max_allowed_tokens = rag_config.get_available_input_tokens(
+                system_config.compiler_high_context_context_window,
+                system_config.compiler_high_context_max_output_tokens
+            )
+            outline_tokens = count_tokens(current_outline)
+            paper_tokens = count_tokens(paper_for_llm) if paper_for_llm else 0
+            brainstorm_tokens = count_tokens(brainstorm_content) if brainstorm_content else 0
+            system_overhead = 5000  # system prompt, JSON schema, headers, separators, rejection history
+            
+            reserved_tokens = outline_tokens + paper_tokens + brainstorm_tokens + system_overhead
+            rag_budget = max(5000, max_allowed_tokens - reserved_tokens)
+            
+            if brainstorm_content and brainstorm_tokens > 0:
+                logger.info(
+                    f"Context budget: max={max_allowed_tokens}, outline={outline_tokens}, "
+                    f"paper={paper_tokens}, brainstorm={brainstorm_tokens}, overhead={system_overhead}, "
+                    f"rag_budget={rag_budget}"
+                )
+            
             # Retrieve aggregator database evidence
+            # Exclude sources already direct-injected to prevent token waste
+            exclude_sources = ["compiler_outline.txt", "compiler_paper.txt"]
+            if brainstorm_source_name:
+                exclude_sources.append(brainstorm_source_name)
+            
             logger.info("Retrieving aggregator database evidence via RAG...")
             query = self.user_prompt
             if not is_first_portion and paper_for_llm:
@@ -465,7 +494,9 @@ class HighContextSubmitter:
             
             context_pack = await compiler_rag_manager.retrieve_for_mode(
                 query=query,
-                mode="construction"
+                mode="construction",
+                max_tokens=rag_budget,
+                exclude_sources=exclude_sources
             )
             logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
             
@@ -481,7 +512,8 @@ class HighContextSubmitter:
                     is_first_portion=is_first_portion,
                     rejection_feedback=rejection_feedback,
                     critique_feedback=critique_feedback,
-                    pre_critique_paper=pre_critique_paper
+                    pre_critique_paper=pre_critique_paper,
+                    brainstorm_content=brainstorm_content
                 )
             elif section_phase == "conclusion":
                 prompt = await build_conclusion_construction_prompt(
@@ -489,7 +521,8 @@ class HighContextSubmitter:
                     current_outline=current_outline,
                     current_paper=paper_for_llm,
                     rag_evidence=context_pack.text,
-                    rejection_feedback=rejection_feedback
+                    rejection_feedback=rejection_feedback,
+                    brainstorm_content=brainstorm_content
                 )
             elif section_phase == "introduction":
                 prompt = await build_introduction_construction_prompt(
@@ -497,7 +530,8 @@ class HighContextSubmitter:
                     current_outline=current_outline,
                     current_paper=paper_for_llm,
                     rag_evidence=context_pack.text,
-                    rejection_feedback=rejection_feedback
+                    rejection_feedback=rejection_feedback,
+                    brainstorm_content=brainstorm_content
                 )
             elif section_phase == "abstract":
                 prompt = await build_abstract_construction_prompt(
@@ -505,7 +539,8 @@ class HighContextSubmitter:
                     current_outline=current_outline,
                     current_paper=paper_for_llm,
                     rag_evidence=context_pack.text,
-                    rejection_feedback=rejection_feedback
+                    rejection_feedback=rejection_feedback,
+                    brainstorm_content=brainstorm_content
                 )
             else:
                 # Fallback to generic prompt for backward compatibility
@@ -522,16 +557,18 @@ class HighContextSubmitter:
                 )
             logger.info(f"Prompt built: {len(prompt)} chars")
             
-            # Validate prompt size
+            # Validate prompt size (max_allowed_tokens already calculated above for RAG budget)
             actual_prompt_tokens = count_tokens(prompt)
-            max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_high_context_context_window, system_config.compiler_high_context_max_output_tokens)
             
             if actual_prompt_tokens > max_allowed_tokens:
                 logger.error(
                     f"construction: Assembled prompt ({actual_prompt_tokens} tokens) exceeds context window "
                     f"({max_allowed_tokens} tokens after safety margin). This indicates a context allocation bug."
                 )
-                return None  # Return None to skip this submission
+                raise ValueError(
+                    f"construction: Prompt too large ({actual_prompt_tokens} tokens > {max_allowed_tokens} max). "
+                    f"Brainstorm={brainstorm_tokens} tokens, outline={outline_tokens}, paper={paper_tokens}, overhead={system_overhead}."
+                )
             
             logger.debug(f"construction prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
@@ -647,6 +684,21 @@ class HighContextSubmitter:
                 metadata={"coverage": context_pack.coverage, "is_first": is_first_portion, "phase": section_phase}
             )
             
+            # Parse optional brainstorm retroactive operation
+            brainstorm_op_data = data.get("brainstorm_operation")
+            if brainstorm_op_data and isinstance(brainstorm_op_data, dict):
+                try:
+                    from backend.shared.models import BrainstormRetroactiveOperation
+                    submission.brainstorm_operation = BrainstormRetroactiveOperation(
+                        action=brainstorm_op_data.get("action", ""),
+                        submission_number=brainstorm_op_data.get("submission_number"),
+                        new_content=brainstorm_op_data.get("new_content", ""),
+                        reasoning=brainstorm_op_data.get("reasoning", "")
+                    )
+                    logger.info(f"Brainstorm retroactive operation parsed: {submission.brainstorm_operation.action}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse brainstorm_operation, ignoring: {e}")
+            
             # Notify task completed successfully
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
@@ -656,9 +708,17 @@ class HighContextSubmitter:
             
         except FreeModelExhaustedError:
             raise
+        except ValueError:
+            raise
+        except RuntimeError as e:
+            if "credits exhausted" in str(e).lower():
+                raise
+            logger.error(f"Failed to generate construction submission: {e}", exc_info=True)
+            if self.task_tracking_callback and 'task_id' in dir():
+                self.task_tracking_callback("completed", task_id)
+            return None
         except Exception as e:
             logger.error(f"Failed to generate construction submission: {e}", exc_info=True)
-            # Notify task completed (failed but still completed)
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
             return None
@@ -666,7 +726,11 @@ class HighContextSubmitter:
     async def submit_review(self) -> Optional[CompilerSubmission]:
         """
         Submit paper review (or no-op if no edit needed).
-        Note: Aggregator DB is NOT in context for this mode.
+        
+        NO RAG BY DESIGN: Review mode evaluates the paper on its own merits —
+        checking for errors, coherence issues, and improvements against the outline.
+        No aggregator DB, brainstorm, or reference papers in context. The reviewer
+        must judge the paper as a standalone document without external source bias.
         
         Returns:
             CompilerSubmission if edit needed, None otherwise
@@ -703,7 +767,7 @@ class HighContextSubmitter:
                     f"review: Assembled prompt ({actual_prompt_tokens} tokens) exceeds context window "
                     f"({max_allowed_tokens} tokens after safety margin). This indicates a context allocation bug."
                 )
-                return None  # Return None to skip this submission
+                raise ValueError(f"review: Prompt too large ({actual_prompt_tokens} tokens > {max_allowed_tokens} max)")
             
             logger.debug(f"review prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
@@ -765,8 +829,8 @@ class HighContextSubmitter:
                 logger.info("Paper review: no edit needed")
                 return None
             
-            # Check if this is a miniscule edit
-            is_miniscule = "miniscule" in data.get("reasoning", "").lower() or "minor" in data.get("reasoning", "").lower()
+            # Check if this is a minuscule edit
+            is_minuscule = "minuscule" in data.get("reasoning", "").lower() or "minor" in data.get("reasoning", "").lower()
             
             # Create submission
             # Use new_string as content for logging
@@ -780,21 +844,29 @@ class HighContextSubmitter:
                 old_string=_normalize_string_field(data.get("old_string", "")),
                 new_string=new_string_content,  # Already normalized above
                 reasoning=data.get("reasoning", ""),
-                metadata={"is_miniscule": is_miniscule}
+                metadata={"is_minuscule": is_minuscule}
             )
             
             # Notify task completed successfully
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             
-            logger.info(f"Review submission generated: {submission.submission_id} (miniscule={is_miniscule})")
+            logger.info(f"Review submission generated: {submission.submission_id} (minuscule={is_minuscule})")
             return submission
             
         except FreeModelExhaustedError:
             raise
+        except ValueError:
+            raise
+        except RuntimeError as e:
+            if "credits exhausted" in str(e).lower():
+                raise
+            logger.error(f"Failed to generate review submission: {e}", exc_info=True)
+            if self.task_tracking_callback and 'task_id' in dir():
+                self.task_tracking_callback("completed", task_id)
+            return None
         except Exception as e:
             logger.error(f"Failed to generate review submission: {e}", exc_info=True)
-            # Notify task completed (failed but still completed)
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
             return None  # Don't crash workflow on review failure

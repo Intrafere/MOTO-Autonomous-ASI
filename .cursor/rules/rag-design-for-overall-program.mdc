@@ -1,5 +1,5 @@
 ---
-alwaysApply: true
+alwaysApply: false
 ---
 ## Important Notes When Editing RAG Systems
 The RAG system in this program is very advanced, be certain that any changes you make to the RAG system are correct changes.
@@ -12,7 +12,7 @@ If an item is direct injected, its RAG counterpart must NOT also be included.
 
 **RAG Offload Priority — Submitter:** Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files
 
-**RAG Offload Priority — Validator:** Shared Training DB → User Upload Files → Submission under review (last resort)
+**RAG Offload Priority — Validator:** Shared Training DB → User Upload Files (submission under review is always direct injected)
 
 ## Further RAG Specifications
 
@@ -62,7 +62,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Stage C — Reranking + MMR**: Blend vector (60%) + BM25 (40%); MMR λ=0.8 (80% relevance, 20% diversity); removes near-duplicates (similarity > 0.85); hard cap at context budget.
 
-**Stage D — Packing + Compression**: Assembles evidence with headers; priority: document → section → relevance. Compresses only if over budget (preserves entities, numbers, dates). Returns `ContextPack` with evidence tracking.
+**Stage D — Packing**: Assembles evidence with headers; priority: document → section → relevance. Packs chunks incrementally until budget is reached (no compression — disabled as unreliable). Skips chunks from `exclude_sources` (content already direct-injected in prompt). Returns `ContextPack` with evidence tracking.
 
 ---
 
@@ -70,7 +70,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **User Files (Permanent Cache)**: Pre-generates all 4 configs; NEVER evicted; supports submitter chunk size cycling.
 
-**Dynamic Files (Re-Chunked on Update)**: Shared training DB, rejection logs, outline, paper. Single config (current submitter cycle or validator constant). LRU eviction when > 10000 documents.
+**Dynamic Files (Re-Chunked on Update)**: Shared training DB, rejection logs, outline, paper. Single config (current submitter cycle or validator constant). LRU eviction when > 10000 documents. Per-size chunk cap: oldest non-permanent chunks trimmed when any bucket exceeds 10,000 chunks.
 
 ---
 
@@ -82,7 +82,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Re-Chunking Triggers:**
 
-*Aggregator* (immediate after each acceptance): Acquires global RAG lock → incrementally adds only new submission → releases lock. New chunks: `rag_shared_training_update_{chunk_size}`. Historical chunks accumulate (not removed). MAX_CHUNKS_PER_SIZE = 10,000.
+*Aggregator* (immediate after each acceptance): Acquires global RAG lock → incrementally adds only new submission → releases lock. New chunks: `rag_shared_training_update_{chunk_size}`. Historical chunks accumulate (not removed). `max_chunks_per_size = 10,000` enforced per bucket after each add; oldest non-permanent chunks trimmed on overflow.
 
 *Compiler* (every 10 aggregator acceptances): Monitors count every 30s → acquires global RAG lock → removes old chunks, re-adds entire file with all 4 configs → releases lock.
 
@@ -104,16 +104,26 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Overflow handling**: User prompt always direct injected; if exceeds `context_window - minimum_RAG_allocation`: HALT with error. Content too large: offload to RAG. Still doesn't fit: compress (NEVER truncate).
 
+**Source Exclusion (anti-duplication)**: `rag_manager.retrieve(exclude_sources=[...])` filters chunks from named sources during Stage D packing. Callers pass source names of content already direct-injected so RAG budget goes entirely to non-duplicated content.
+
+| Mode | Excluded Sources | Reason |
+|---|---|---|
+| Compiler construction | `compiler_outline.txt`, `compiler_paper.txt`, brainstorm source (when direct-injected) | All three always direct-injected in construction prompts |
+| Compiler outline_update | `compiler_outline.txt`, `compiler_paper.txt` | Both direct-injected in outline update prompts |
+| Compiler rigor | `compiler_outline.txt` | Outline always direct-injected; paper intentionally RAG'd (smaller context) |
+| Aggregator submitter/validator | Direct-injected user file names + direct-injected shared-training sources (current training file + `rag_shared_training_update_*`) | Prevents RAG returning chunks already in direct context when only some content is offloaded |
+| Aggregator cleanup review | Same as above, when full submissions DB is direct-injected | Prevents cleanup RAG evidence from repeating already-injected submissions |
+
 ---
 
 ## Memory Management
 
 **Cache limits:**
 - Query rewrite cache: 500 entries, 30-min TTL
-- Embedding cache: 500 entries, LRU eviction
 - BM25 cache: 1000 entries, 1-hour TTL
 - Context pack cache: 300 entries
 - Document LRU: removes oldest non-permanent document when > 10000 docs
+- Per-size chunk cap: 10,000 chunks per size bucket; oldest non-permanent trimmed on overflow; embeddings nulled before removal
 
 **Training data limits**: No shared DB size limit. Local rejections: max 5 per submitter. Observability: 1000 retrieval history, 50 gating events, 100 hard negatives.
 
@@ -143,6 +153,25 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 ---
 
+## Agents Intentionally Without RAG
+
+These agents use ONLY direct injection (no RAG fallback) by design. Each operates on compact metadata summaries where RAG is unnecessary. Documented in each file's module docstring.
+
+| Agent | Inputs | Why No RAG |
+|---|---|---|
+| Topic selector | Brainstorm metadata, paper titles/abstracts | Strategic "what to work on" decision — summaries suffice; abstracts truncated as overflow fallback |
+| Topic validator | Same as topic selector | Validates strategic decision, same compact metadata |
+| Paper title selector | Brainstorm summary, existing paper titles/abstracts | Title selection needs topic overview, not full content |
+| Paper redundancy checker | Paper titles/abstracts | Redundancy detected at abstract level, not full-content comparison |
+| Answer format selector | Certainty assessment, paper summaries | Short-form vs long-form is a structural decision, not content-deep |
+| Volume organizer | Paper summaries, certainty assessment, volume state | Chapter ordering uses paper-level metadata, not full content |
+| Compiler review mode | Outline + paper only | Evaluates paper on its own merits without external source bias |
+| Brainstorm continuation | Brainstorm summary, prior paper titles/abstracts | "Write another or move on" uses summary, not full DB |
+
+**Known oversight**: Certainty assessor Step 2 drops expanded papers when they don't fit instead of RAG'ing them. Should use RAG fallback like reference_selector does.
+
+---
+
 ## Critical Invariants
 
 1. User prompt and JSON context NEVER RAG'd — always direct injected (Parts 1, 2, 3)
@@ -156,3 +185,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 9. Contradiction check pre-acceptance
 10. Autonomous mode prompt validation before all LLM calls
 11. Read operations retry on HNSW index errors (3 attempts, 0.5s → 1s → 2s backoff)
+12. Document count tracks unique source names — repeated `add_text`/`add_document` with same source name does not inflate count
+13. Per-size chunk cap (`max_chunks_per_size`) enforced after every add — prevents unbounded in-memory embedding growth
+14. Agents that use only metadata summaries (topic selector, title selector, redundancy checker, etc.) intentionally skip RAG — see "Agents Intentionally Without RAG" table above
+15. If content is already direct-injected, it must NOT also appear in RAG retrieval results — no duplication

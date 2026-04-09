@@ -6,6 +6,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import './AutonomousResearch.css';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
+import { prependDisclaimer } from '../../utils/disclaimerHelper';
 
 const BrainstormList = ({ brainstorms, onRefresh, api }) => {
   const [expandedId, setExpandedId] = useState(null);
@@ -117,7 +118,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
     e.stopPropagation();
     if (!fileContent) return;
     
-    const blob = new Blob([fileContent], { type: 'text/plain' });
+    const blob = new Blob([prependDisclaimer(fileContent, 'brainstorm')], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -145,7 +146,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
         <div className="brainstorm-list-warning">
           (WARNING: Any given brainstorm idea may be pruned/deleted if the AI deems it to hurt the collective database quality)
         </div>
-        <div className="empty-state">
+        <div className="auto-empty-state">
           No brainstorm topics yet. Start autonomous research to create brainstorms.
         </div>
       </div>
@@ -186,7 +187,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
 
             <div className="brainstorm-card-meta">
               <span>{brainstorm.submission_count} submissions</span>
-              <span>{brainstorm.papers_generated?.length || 0} papers</span>
+              <span>{brainstorm.papers_generated?.length || 0}/3 papers</span>
               <span>Last: {formatDate(brainstorm.last_activity)}</span>
             </div>
 
@@ -249,7 +250,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
                   </div>
                   <div className="brainstorm-content-viewer" onClick={(e) => e.stopPropagation()}>
                     <LatexRenderer
-                      content={fileContent}
+                      content={prependDisclaimer(fileContent, 'brainstorm')}
                       className="brainstorm-latex-renderer"
                       showToggle={false}
                       showLatex={showLatex}

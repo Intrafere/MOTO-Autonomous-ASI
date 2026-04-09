@@ -34,6 +34,7 @@ class RAGConfig(BaseSettings):
     
     # Memory limits
     max_documents: int = 10000  # For RAG document cache; user files never evicted; high for infinite runtime
+    max_chunks_per_size: int = 10000  # Per-size chunk cap; oldest non-permanent trimmed when exceeded
     max_shared_training_insights: int = 999999  # Effectively unlimited for infinite runtime
     max_local_rejections: int = 5  # Per rules: "last 5 rejections"
     
@@ -57,8 +58,8 @@ class RAGConfig(BaseSettings):
     embedding_model: str = "text-embedding-nomic-embed-text-v1.5"
     
     # OpenRouter API (Global Configuration)
-    # This is the global API key used for per-role OpenRouter model selection
-    # Separate from boost API key which is stored in BoostConfig
+    # This is the default OpenRouter API key used for per-role model selection.
+    # API Boost can also reuse it unless the boost modal supplies an override key.
     openrouter_api_key: Optional[str] = None
     openrouter_enabled: bool = False  # True when API key is set and validated
     
@@ -151,7 +152,6 @@ class SystemConfig(BaseSettings):
     autonomous_completion_review_interval: int = 10  # Every 10 acceptances
     autonomous_paper_redundancy_interval: int = 3  # Every 3 completed papers
     autonomous_max_reference_papers: int = 6  # Max papers for reference context
-    autonomous_topic_selection_retry_limit: int = 3
     
     # Wolfram Alpha integration (optional)
     wolfram_alpha_enabled: bool = False

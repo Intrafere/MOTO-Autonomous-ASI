@@ -6,6 +6,11 @@ Selects whether the final answer should be:
 - LONG FORM: A curated volume/collection of papers with introduction and conclusion
 
 CRITICAL: Operates ONLY on Tier 2 papers, NOT on Tier 1 brainstorm databases.
+
+NO RAG BY DESIGN: This agent makes a strategic format decision using only the certainty
+assessment result and paper metadata summaries (titles/abstracts). Full paper content
+is not needed to decide short-form vs long-form — that's a structural question about
+the research landscape, not a content-deep analysis.
 """
 import asyncio
 import json

@@ -35,6 +35,8 @@ CATEGORY_PREFIXES = {
     "comp_hp": "High-Param Submitter",
     "comp_val": "Compiler Validator",
     # Autonomous
+    "auto_te": "Topic Explorer",
+    "auto_tev": "Topic Explorer Validator",
     "auto_ts": "Topic Selector",
     "auto_tv": "Topic Validator",
     "auto_cr": "Completion Reviewer",
@@ -340,6 +342,8 @@ class BoostManager:
         
         if mode in ("autonomous", "all"):
             categories.extend([
+                {"id": "auto_te", "label": "Topic Explore", "group": "Autonomous"},
+                {"id": "auto_tev", "label": "Topic Explore Val", "group": "Autonomous"},
                 {"id": "auto_ts", "label": "Topic Sel", "group": "Autonomous"},
                 {"id": "auto_tv", "label": "Topic Val", "group": "Autonomous"},
                 {"id": "auto_cr", "label": "Completion", "group": "Autonomous"},

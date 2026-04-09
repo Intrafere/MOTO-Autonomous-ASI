@@ -184,6 +184,10 @@ class CompilerSubmission(BaseModel):
     
     For outline_create mode, uses full_content operation where content is the complete outline.
     For other modes, content stores the submission for logging while old_string/new_string specify the edit.
+    
+    Retroactive brainstorm operations (optional, autonomous mode only):
+    - brainstorm_operation: Optional operation on the source brainstorm database.
+      Validated independently from paper operations. Each must stand on its own merits.
     """
     submission_id: str
     mode: Literal["outline_create", "outline_update", "construction", "review", "rigor"]
@@ -201,8 +205,29 @@ class CompilerSubmission(BaseModel):
     needs_edit: Optional[bool] = None  # For review mode: False = no edit needed
     needs_enhancement: Optional[bool] = None  # For rigor mode: False = no enhancement needed
     needs_update: Optional[bool] = None  # For outline_update mode: False = no update needed
+    
+    # Retroactive brainstorm correction (optional, autonomous paper writing only)
+    brainstorm_operation: Optional["BrainstormRetroactiveOperation"] = None
+    
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BrainstormRetroactiveOperation(BaseModel):
+    """Optional retroactive operation on the source brainstorm database.
+    
+    Proposed by the compiler submitter during paper writing and validated
+    independently from the paper operation. The validator sees ONLY the
+    brainstorm context when validating this, never the paper operation.
+    Each operation must be independently justified.
+    """
+    action: Literal["edit", "delete", "add"]
+    submission_number: Optional[int] = None  # Required for edit/delete, None for add
+    new_content: str = ""  # Required for edit/add, empty for delete
+    reasoning: str  # Independent justification (must not depend on paper operation)
+
+
+CompilerSubmission.model_rebuild()
 
 
 class CompilerValidationResult(BaseModel):
@@ -238,7 +263,7 @@ class CompilerState(BaseModel):
     review_acceptances: int = 0
     review_rejections: int = 0
     review_declines: int = 0
-    miniscule_edit_count: int = 0
+    minuscule_edit_count: int = 0
     in_critique_phase: bool = False
     critique_acceptances: int = 0
     paper_version: int = 1
@@ -326,7 +351,14 @@ class TopicValidationResult(BaseModel):
     """Result of topic validation."""
     decision: Literal["accept", "reject"]
     reasoning: str
+    summary: str = ""  # Rejection feedback (max 750 chars)
     timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class BrainstormContinuationDecision(BaseModel):
+    """Decision on whether to write another paper from the same brainstorm or move on."""
+    decision: Literal["write_another_paper", "move_on"]
+    reasoning: str
 
 
 class CompletionReviewResult(BaseModel):

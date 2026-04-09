@@ -14,6 +14,10 @@ import aiofiles
 
 from backend.shared.config import system_config
 from backend.shared.models import PaperMetadata
+from backend.shared.path_safety import (
+    resolve_path_within_root,
+    validate_single_path_component,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,16 @@ class PaperLibrary:
         """
         return str(self._get_paper_path(paper_id))
     
+    def get_outline_path(self, paper_id: str) -> str:
+        """
+        Public method to get path to paper outline file.
+        Uses session-aware path resolution.
+        
+        Returns:
+            str: Absolute path to the outline file
+        """
+        return str(self._get_outline_path(paper_id))
+    
     def _get_abstract_path(self, paper_id: str) -> Path:
         """Get path to abstract file."""
         return self._base_dir / f"paper_{paper_id}_abstract.txt"
@@ -86,6 +100,180 @@ class PaperLibrary:
     def _get_rejections_path(self, paper_id: str) -> Path:
         """Get path to paper compiler rejections file."""
         return self._base_dir / f"paper_{paper_id}_last_10_rejections.txt"
+
+    # ========================================================================
+    # HISTORY HELPERS
+    # ========================================================================
+
+    @staticmethod
+    def _build_scoped_library(base_dir: Path) -> "PaperLibrary":
+        """Create a temporary paper library instance rooted at a specific directory."""
+        scoped_library = PaperLibrary()
+        scoped_library._base_dir = base_dir
+        scoped_library._archive_dir = base_dir / "archive"
+        return scoped_library
+
+    def get_history_papers_dir(self, session_id: str) -> Optional[Path]:
+        """Resolve the papers directory for a history session."""
+        if session_id == "legacy":
+            papers_dir = Path(system_config.auto_papers_dir)
+            return papers_dir if papers_dir.exists() else None
+
+        try:
+            safe_session_id = validate_single_path_component(session_id, "session ID")
+        except ValueError:
+            return None
+
+        try:
+            sessions_root = Path(system_config.auto_sessions_base_dir)
+            session_dir = resolve_path_within_root(sessions_root, safe_session_id)
+        except ValueError:
+            return None
+
+        papers_dir = session_dir / "papers"
+        return papers_dir if papers_dir.exists() else None
+
+    async def _get_history_user_prompt(self, session_id: str) -> str:
+        """Read the user prompt associated with a legacy or session-based paper history entry."""
+        if session_id == "legacy":
+            metadata_path = Path(system_config.auto_research_metadata_file)
+            default_prompt = "Legacy research session"
+        else:
+            papers_dir = self.get_history_papers_dir(session_id)
+            if not papers_dir:
+                return "Unknown research question"
+
+            metadata_path = papers_dir.parent / "session_metadata.json"
+            default_prompt = "Unknown research question"
+
+        if not metadata_path.exists():
+            return default_prompt
+
+        try:
+            async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.loads(await f.read())
+            return (
+                metadata.get("user_prompt")
+                or metadata.get("user_research_prompt")
+                or default_prompt
+            )
+        except Exception as e:
+            logger.warning(f"Failed to read history prompt for session {session_id}: {e}")
+            return default_prompt
+
+    @staticmethod
+    def _calculate_critique_average(critique: Any) -> Optional[float]:
+        """Calculate the display average for a critique record."""
+        if not critique:
+            return None
+
+        return round(
+            (critique.novelty_rating + critique.correctness_rating + critique.impact_rating) / 3.0,
+            1
+        )
+
+    async def _list_history_papers_from_directory(self, papers_dir: Path, session_id: str) -> List[Dict[str, Any]]:
+        """List complete, non-archived papers from one legacy/session papers directory."""
+        from backend.shared.critique_memory import get_latest_critique
+
+        scoped_library = self._build_scoped_library(papers_dir)
+        user_prompt = await self._get_history_user_prompt(session_id)
+        papers = await scoped_library.get_all_papers(validate_completeness=True)
+
+        history_papers = []
+        for metadata in papers:
+            if metadata.status != "complete":
+                continue
+
+            latest_critique = await get_latest_critique(
+                paper_type="autonomous_paper",
+                paper_id=metadata.paper_id,
+                base_dir=papers_dir
+            )
+
+            history_papers.append({
+                "history_id": f"{session_id}:{metadata.paper_id}",
+                "session_id": session_id,
+                "paper_id": metadata.paper_id,
+                "title": metadata.title,
+                "abstract": metadata.abstract,
+                "word_count": metadata.word_count,
+                "source_brainstorm_ids": metadata.source_brainstorm_ids,
+                "referenced_papers": metadata.referenced_papers,
+                "status": metadata.status,
+                "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
+                "model_usage": metadata.model_usage,
+                "user_prompt": user_prompt,
+                "critique_avg": self._calculate_critique_average(latest_critique),
+            })
+
+        return history_papers
+
+    async def list_history_papers(self) -> List[Dict[str, Any]]:
+        """List all complete, non-archived Stage 2 papers from legacy and session storage."""
+        history_papers: List[Dict[str, Any]] = []
+
+        legacy_papers_dir = Path(system_config.auto_papers_dir)
+        if legacy_papers_dir.exists():
+            history_papers.extend(
+                await self._list_history_papers_from_directory(legacy_papers_dir, "legacy")
+            )
+
+        sessions_dir = Path(system_config.auto_sessions_base_dir)
+        if sessions_dir.exists():
+            for session_dir in sorted((p for p in sessions_dir.iterdir() if p.is_dir()), reverse=True):
+                papers_dir = session_dir / "papers"
+                if not papers_dir.exists():
+                    continue
+
+                history_papers.extend(
+                    await self._list_history_papers_from_directory(papers_dir, session_dir.name)
+                )
+
+        history_papers.sort(key=lambda paper: paper.get("created_at") or "", reverse=True)
+        return history_papers
+
+    async def get_history_paper(self, session_id: str, paper_id: str) -> Optional[Dict[str, Any]]:
+        """Get one complete, non-archived Stage 2 paper from legacy/session history."""
+        from backend.shared.critique_memory import get_latest_critique
+
+        papers_dir = self.get_history_papers_dir(session_id)
+        if papers_dir is None:
+            return None
+
+        scoped_library = self._build_scoped_library(papers_dir)
+        metadata = await scoped_library.get_metadata(paper_id)
+        if metadata is None or metadata.status != "complete":
+            return None
+
+        if not await scoped_library.is_paper_complete(paper_id):
+            return None
+
+        content = await scoped_library.get_paper_content(paper_id)
+        outline = await scoped_library.get_outline(paper_id)
+        latest_critique = await get_latest_critique(
+            paper_type="autonomous_paper",
+            paper_id=paper_id,
+            base_dir=papers_dir
+        )
+
+        return {
+            "history_id": f"{session_id}:{paper_id}",
+            "session_id": session_id,
+            "paper_id": metadata.paper_id,
+            "title": metadata.title,
+            "abstract": metadata.abstract,
+            "word_count": metadata.word_count,
+            "source_brainstorm_ids": metadata.source_brainstorm_ids,
+            "referenced_papers": metadata.referenced_papers,
+            "status": metadata.status,
+            "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
+            "model_usage": metadata.model_usage,
+            "user_prompt": await self._get_history_user_prompt(session_id),
+            "critique_avg": self._calculate_critique_average(latest_critique),
+            "content": content,
+            "outline": outline,
+        }
     
     # ========================================================================
     # CONTENT VALIDATION

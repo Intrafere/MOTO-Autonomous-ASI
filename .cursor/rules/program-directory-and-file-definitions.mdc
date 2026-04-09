@@ -7,6 +7,9 @@ LM Studio and its pre-loaded models can be reached at "http://127.0.0.1:1234".
 
 ## Complete Project Directory Structure and File Descriptions
 project-root/
+├── .github/                            # GitHub community health files
+│   ├── ISSUE_TEMPLATE/                 # Public issue forms + security contact routing
+│   └── pull_request_template.md        # Default pull request template
 ├── backend/
 │   ├── shared/                          # SHARED RESOURCES
 │   │   ├── __init__.py                  # Package initialization
@@ -20,11 +23,14 @@ project-root/
 │   │   ├── workflow_predictor.py        # Predicts next 20 API calls (mode-specific algorithms)
 │   │   ├── free_model_manager.py        # Free model rotation/cooldown singleton (looping + auto-selector backup)
 │   │   ├── rag_lock.py                  # Global RAG operation lock (prevents Aggregator/Compiler collision)
+│   │   ├── token_tracker.py             # Cumulative input/output token tracker singleton with per-model breakdown and research timer
 │   │   ├── wolfram_alpha_client.py      # Wolfram Alpha API client
 │   │   ├── utils.py                     # Common utilities
 │   │   ├── json_parser.py               # JSON parsing with sanitization for LLM quirks
 │   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
-│   │   └── critique_prompts.py          # Default critique prompt and builder function for validator critiques 
+│   │   ├── critique_prompts.py          # Default critique prompt and builder function for validator critiques
+│   │   ├── secret_store.py              # Secure API key persistence via OS keyring (OpenRouter, Wolfram Alpha)
+│   │   └── path_safety.py               # Safe path resolution helpers (realpath/normpath containment checks)
 │   ├── aggregator/                      # AGGREGATOR 
 │   │   ├── __init__.py
 │   │   ├── core/
@@ -66,7 +72,8 @@ project-root/
 │   │   ├── agents/
 │   │   │   ├── __init__.py              # Package initialization
 │   │   │   ├── high_context_submitter.py # 3 modes: construction, outline, review
-│   │   │   └── high_param_submitter.py   # Rigor enhancement mode
+│   │   │   ├── high_param_submitter.py   # Rigor enhancement mode
+│   │   │   └── critique_submitter.py    # Critique phase submitter (peer review)
 │   │   ├── validation/
 │   │   │   ├── __init__.py              # Package initialization
 │   │   │   └── compiler_validator.py    # Validates coherence, rigor, placement
@@ -88,7 +95,7 @@ project-root/
 │   │   ├── __init__.py                  # Package initialization
 │   │   ├── core/
 │   │   │   ├── __init__.py              # Package initialization
-│   │   │   ├── autonomous_coordinator.py # Orchestrates two-tier workflow (brainstorm → paper)
+│   │   │   ├── autonomous_coordinator.py # Orchestrates the Tier 1 → Tier 2 → Tier 3 autonomous workflow
 │   │   │   └── autonomous_rag_manager.py # Autonomous-specific RAG wrapper
 │   │   ├── agents/
 │   │   │   ├── __init__.py              # Package initialization
@@ -108,17 +115,23 @@ project-root/
 │   │   ├── prompts/
 │   │   │   ├── __init__.py              # Package initialization
 │   │   │   ├── topic_prompts.py         # Topic selection & validation prompts
+│   │   │   ├── topic_exploration_prompts.py # Builds aggregator user prompt for topic exploration phase
 │   │   │   ├── completion_prompts.py    # Completion review & self-validation prompts
 │   │   │   ├── paper_reference_prompts.py # Reference selection prompts
+│   │   │   ├── paper_title_exploration_prompts.py # Builds aggregator user prompt for paper title exploration phase
 │   │   │   ├── paper_title_prompts.py   # Paper title selection prompts
 │   │   │   ├── paper_redundancy_prompts.py # Paper redundancy review prompts
+│   │   │   ├── paper_continuation_prompts.py # Brainstorm multi-paper continuation decision prompts
 │   │   │   └── final_answer_prompts.py  # TIER 3 - Final answer assessment/selection/volume prompts
 │   │   └── memory/
 │   │       ├── __init__.py              # Package initialization
-│   │       ├── brainstorm_memory.py     # Per-brainstorm database management
+│   │       ├── brainstorm_memory.py     # Per-brainstorm database management (includes retroactive edit/remove/add during paper compilation)
 │   │       ├── paper_library.py         # Paper library management (Tier 2)
 │   │       ├── research_metadata.py     # Research metadata (brainstorms + papers associations)
 │   │       ├── autonomous_rejection_logs.py # Topic selection & completion feedback logs
+│   │       ├── topic_exploration_memory.py # In-memory candidate DB for topic exploration phase
+│   │       ├── paper_model_tracker.py   # Per-paper model usage tracking and author attribution
+│   │       ├── autonomous_api_logger.py # Autonomous API call logger singleton
 │   │       ├── final_answer_memory.py   # TIER 3 - Final answer state & volume management
 │   │       └── session_manager.py       # Prompt-based session folder organization
 │   │
@@ -137,7 +150,7 @@ project-root/
 │   │       ├── boost.py                 # Boost API endpoints (enable/disable/toggle/status)
 │   │       ├── workflow.py              # Workflow API endpoints (predictions/history)
 │   │       ├── download.py              # PDF generation endpoint via Playwright (POST /api/download/pdf)
-│   │       ├── openrouter.py            # OpenRouter API endpoints (global key, models, providers, LM Studio availability, **GET /api/model-cache** for model ID caching)
+│   │       ├── openrouter.py            # OpenRouter API endpoints (global key, models, providers, LM Studio availability, **GET /api/model-cache** for model ID caching, **POST /api/openrouter/reset-exhaustion** to reset credit exhaustion mid-session)
 │   │       └── websocket.py             # WebSocket for real-time updates
 │   │
 │   ├── data/                            # Persistent data storage
@@ -205,6 +218,7 @@ project-root/
 │   │   │   │
 │   │   │   └── autonomous/              # AUTONOMOUS RESEARCH
 │   │   │       ├── AutonomousResearchInterface.jsx  # Main control: research prompt, start/stop, current tier
+│   │   │       ├── AutonomousResearch.css     # Autonomous research styles
 │   │   │       ├── BrainstormList.jsx       # List all brainstorm topics with status
 │   │   │       ├── PaperLibrary.jsx         # Grid view of completed papers (title + abstract)
 │   │   │       ├── AutonomousResearchSettings.jsx  # Model configs for all roles
@@ -213,16 +227,27 @@ project-root/
 │   │   │       ├── LiveTier3Progress.jsx    # Real-time Tier 3 final answer display (embedded in interface)
 │   │   │       ├── FinalAnswerView.jsx      # TIER 3 - Final answer tab (separate tab for completed answers)
 │   │   │       ├── FinalAnswerLibrary.jsx   # All sessions final answer library viewer
-│   │   │       └── ArchiveViewerModal.jsx   # Research lineage archive viewer (papers + brainstorms)
+│   │   │       ├── FinalAnswerLibrary.css   # Final answer library styles
+│   │   │       ├── ArchiveViewerModal.jsx   # Research lineage archive viewer (papers + brainstorms)
+│   │   │       └── ArchiveViewerModal.css   # Archive viewer styles
 │   │   │
+│   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for OpenRouter vs LM Studio setup
 │   │   ├── OpenRouterApiKeyModal.jsx    # Modal for global OpenRouter API key configuration
 │   │   ├── PaperCritiqueModal.jsx       # Modal for displaying validator paper critiques (ratings, feedback, history)
 │   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥7.0 avg)
+│   │   ├── CreditExhaustionNotificationStack.jsx # Persistent red notifications for OpenRouter credit exhaustion with "Retry OpenRouter" reset button
+│   │   ├── HungConnectionNotificationStack.jsx # Persistent amber notifications for API calls exceeding 15 minutes (possible hung connections)
 │   │   ├── BoostLogs.jsx                # Boost API call log viewer
+│   │   ├── BoostLogs.css                # Boost logs styles
 │   │   ├── BoostControlModal.jsx        # Modal for boost configuration (next-X, category, per-task)
+│   │   ├── BoostControlModal.css        # Boost control modal styles
 │   │   ├── WorkflowPanel.jsx            # Workflow prediction panel (next 20 API calls display)
+│   │   ├── WorkflowPanel.css            # Workflow panel styles
 │   │   ├── TextFileUploader.jsx         # User file upload component
+│   │   ├── TextFileUploader.css         # File uploader styles
 │   │   ├── OpenRouterPrivacyWarningModal.jsx # Privacy policy error modal (OpenRouter data sharing)
+│   │   ├── settings-common.css          # Shared settings panel styles
+│   │   ├── critique-modal.css           # Paper critique modal styles
 │   │   │
 │   │   ├── services/
 │   │   │   ├── api.js                   # Backend API calls (includes openRouterAPI)
@@ -230,9 +255,11 @@ project-root/
 │   │   │
 │   │   ├── utils/
 │   │   │   ├── downloadHelpers.js       # PDF/raw download helpers (Playwright backend PDF)
-│   │   │   └── modelCache.js            # Frontend model cache utilities (display_name → api_id lookup)
+│   │   │   ├── modelCache.js            # Frontend model cache utilities (display_name → api_id lookup)
+│   │   │   ├── autonomousProfiles.js    # Shared autonomous recommended-profile definitions and persistence helpers
+│   │   │   └── disclaimerHelper.js      # Frontend-only disclaimer injection for brainstorm/paper views
 │   │   │
-│   │   ├── App.jsx                      # Main app with tab navigation
+│   │   ├── App.jsx                      # Main app shell with top-level mode switch (Autonomous ASI S.T.E.M. / Advanced Manual ASI S.T.E.M.) and tab navigation
 │   │   ├── index.css                    # Styles
 │   │   └── index.jsx                    # React entry point
 │   │
@@ -241,6 +268,7 @@ project-root/
 │
 ├── requirements.txt                     # Python dependencies
 ├── package.json                         # Root scripts
+├── SECURITY.md                          # Security policy and private vulnerability reporting
 ├── Press to Launch MOTO.bat             # The user's one-click program launcher.
 └── _moto_internal_launcher.ps1          # Internal PowerShell launcher (not for direct user use)
 
@@ -259,6 +287,7 @@ project-root/
 - `free_model_manager.py`: Free model rotation/cooldown singleton (looping, auto-selector `openrouter/free`, account exhaustion detection)
 - `wolfram_alpha_client.py`: Wolfram Alpha API client for rigor verification
 - `rag_lock.py`: Global RAG operation lock (prevents collision, retry logic for reads)
+- `token_tracker.py`: Cumulative input/output token tracker singleton with per-model breakdown and research timer. Reset on session start, timer start/stop tied to coordinator lifecycle. Stats broadcast via `token_usage_updated` WebSocket event after each successful LLM call.
 - `utils.py`: Token counting, text compression, file I/O
 - `json_parser.py`: JSON parsing with sanitization for LLM responses; sanitizes reasoning tokens, markdown blocks, control tokens, LaTeX escapes, control characters; **rejects truncated JSON** (raises ValueError with diagnostics) to prevent corrupted content from passing validation
 - `critique_memory.py`: Paper critique persistence (ratings, feedback, history, session-aware)
@@ -282,8 +311,8 @@ project-root/
 - Agents: `topic_selector.py`, `topic_validator.py`, `completion_reviewer.py`, `reference_selector.py`, `paper_title_selector.py`
 - Tier 3 Agents: `certainty_assessor.py`, `answer_format_selector.py`, `volume_organizer.py`
 - `paper_redundancy_checker.py`: Library quality maintenance (every 3 papers)
-- Prompts: `topic_prompts.py`, `completion_prompts.py`, `paper_reference_prompts.py`, `paper_title_prompts.py`, `paper_redundancy_prompts.py`, `final_answer_prompts.py`
-- Memory: `brainstorm_memory.py`, `paper_library.py`, `research_metadata.py`, `session_manager.py`, `autonomous_rejection_logs.py`, `final_answer_memory.py` (model tracking, archival)
+- Prompts: `topic_prompts.py`, `topic_exploration_prompts.py`, `completion_prompts.py`, `paper_reference_prompts.py`, `paper_title_exploration_prompts.py`, `paper_title_prompts.py`, `paper_redundancy_prompts.py`, `paper_continuation_prompts.py`, `final_answer_prompts.py`
+- Memory: `brainstorm_memory.py`, `paper_library.py`, `research_metadata.py`, `session_manager.py`, `autonomous_rejection_logs.py`, `topic_exploration_memory.py` (in-memory candidate DB), `paper_model_tracker.py` (per-paper model usage tracking and author attribution), `autonomous_api_logger.py` (API call logging singleton), `final_answer_memory.py` (model tracking, archival)
 
 ### API Routes
 
@@ -292,8 +321,9 @@ project-root/
 
 ### Frontend Components
 
+- `App.jsx`: Top-level GUI shell. Default mode is `Autonomous ASI S.T.E.M.` for Part 3 screens; `Advanced Manual ASI S.T.E.M.` contains the manual Part 1 Aggregator + Part 2 Compiler workspace. Shared utility controls (Boost, OpenRouter, WorkflowPanel) remain global.
 - **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
 - **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`
 - **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx`, `ArchiveViewerModal.jsx`
-- **Shared**: `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `BoostLogs.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
-- **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `api.js`, `websocket.js`
+- **Shared**: `StartupProviderSetupModal.jsx`, `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `HungConnectionNotificationStack.jsx`, `BoostLogs.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
+- **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `autonomousProfiles.js` (shared recommended-profile definitions + persistence helpers), `disclaimerHelper.js` (frontend-only disclaimer injection), `api.js`, `websocket.js`

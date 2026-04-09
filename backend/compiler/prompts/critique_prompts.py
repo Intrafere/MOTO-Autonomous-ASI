@@ -53,6 +53,8 @@ You should ONLY critique if you identify substantive issues that would improve m
 YOUR TASK:
 Assess whether the body section needs substantive critique. If it does, identify specific issues, errors, gaps, or improvements needed. If it doesn't (academically acceptable), decline to critique.
 
+PROGRESSIVE SYSTEM: You will be called multiple times (up to 5 total attempts). Focus on identifying ONE specific, well-substantiated critique per turn. Do not try to list every issue at once — address the most important issue thoroughly this turn, and you will have further opportunities to raise additional issues.
+
 WHAT TO CRITIQUE - Focus on:
 - Mathematical errors or unsound reasoning
 - Missing proofs or incomplete arguments  
@@ -872,6 +874,7 @@ def build_iterative_edit_prompt(
     current_outline: str,
     critique_feedback: str,
     edits_applied: List[Dict],
+    reference_papers: Optional[str] = None,
     accumulated_critique_history: str = ""
 ) -> str:
     """
@@ -884,6 +887,7 @@ def build_iterative_edit_prompt(
         current_outline: The paper outline
         critique_feedback: All accepted critiques from this revision cycle
         edits_applied: List of edits already applied in this iteration
+        reference_papers: Optional reference paper content
         accumulated_critique_history: Critiques from previous failed versions (if any)
         
     Returns:
@@ -915,6 +919,12 @@ def build_iterative_edit_prompt(
         f"CURRENT PAPER (after {len(edits_applied)} edit(s) applied):\n{current_paper}",
         "\n---\n",
     ])
+
+    if reference_papers:
+        parts.extend([
+            f"REFERENCE PAPERS:\n{reference_papers}",
+            "\n---\n",
+        ])
     
     # Show edits already applied
     if edits_applied:
