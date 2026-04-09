@@ -9,10 +9,10 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 
 **Key Features:**
 - **Per-Role OpenRouter Selection**: Each role independently uses LM Studio or OpenRouter
-- **Global OpenRouter API Key**: Single key for all per-role OpenRouter selections (separate from boost)
+- **Global OpenRouter API Key**: Single key for all per-role OpenRouter selections. Boost can reuse it when no explicit boost-only override key is provided.
 - **LM Studio Fallback**: Optional fallback per role on credit exhaustion
 - **Free Model Cooldown Handling**: SERIAL BOTTLENECK pause, free model looping, and auto-selector backup (see below)
-- **Boost Mode**: Separate boost API key for selective task acceleration via three modes:
+- **Boost Mode**: Selective task acceleration via three modes, using either an explicit boost override key or the active global OpenRouter key:
   - **Boost Next X Calls**: Counter-based, next X API calls regardless of task ID
   - **Category Boost**: Role-based, boosts all calls for specific role categories
   - **Per-task Toggle**: Task ID based (legacy)
@@ -67,7 +67,7 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 
 #### BoostManager (`backend/shared/boost_manager.py`)
 - Singleton. Key methods: `set_boost_config`, `clear_boost`, `set_boost_next_count`, `toggle_category_boost`, `toggle_task_boost`, `should_use_boost` (main check for coordinators), `consume_boost_count` (only after successful boost call), `is_task_boosted` (DO NOT USE in coordinators — legacy only)
-- Boost uses a **separate** OpenRouter API key. Temporary `OpenRouterClient` created per boosted task, closed immediately after.
+- Boost can use an **explicit override** OpenRouter API key, or it falls back to the active global OpenRouter key. A temporary `OpenRouterClient` is created per boosted task and closed immediately after.
 
 #### BoostLogger (`backend/shared/boost_logger.py`)
 - Singleton. Log file: `backend/data/boost_api_log.txt`

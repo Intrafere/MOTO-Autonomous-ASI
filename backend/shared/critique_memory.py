@@ -34,6 +34,7 @@ from typing import List, Optional, Literal
 from datetime import datetime
 import uuid
 
+from backend.shared.config import system_config
 from backend.shared.models import PaperCritique
 from backend.shared.path_safety import validate_single_path_component
 

@@ -136,12 +136,19 @@ try {
     }
     
     Set-Location frontend
+    $showVulnerabilityRestartHint = $false
     if (-not (Test-Path "node_modules")) {
         Write-Host "Installing Node.js dependencies..." -ForegroundColor Yellow
         Write-Host "This may take a few minutes..." -ForegroundColor Yellow
         Write-Host ""
-        npm install
-        if ($LASTEXITCODE -ne 0) {
+        $npmInstallLog = Join-Path $env:TEMP ("moto_npm_install_{0}.log" -f ([guid]::NewGuid().ToString("N")))
+        npm install 2>&1 | Tee-Object -FilePath $npmInstallLog
+        $npmInstallExit = $LASTEXITCODE
+        if (Test-Path $npmInstallLog) {
+            $showVulnerabilityRestartHint = Select-String -Path $npmInstallLog -Pattern "vulnerabilities found" -Quiet
+            Remove-Item -Path $npmInstallLog -Force -ErrorAction SilentlyContinue
+        }
+        if ($npmInstallExit -ne 0) {
             Write-Host ""
             Write-Host "============================================================" -ForegroundColor Red
             Write-Host "ERROR: Failed to install Node.js dependencies" -ForegroundColor Red
@@ -157,7 +164,13 @@ try {
     } else {
         Write-Host "Node.js dependencies already installed" -ForegroundColor Green
     }
-    Write-Host "Fixing known vulnerabilities..." -ForegroundColor Yellow
+    if ($showVulnerabilityRestartHint) {
+        Write-Host "" 
+        Write-Host "NOTE: npm reported vulnerability warnings during install." -ForegroundColor Yellow
+        Write-Host "MOTO is running npm audit fix automatically right now." -ForegroundColor Yellow
+        Write-Host "After startup finishes, restart this terminal / launcher once to check whether the warning is gone." -ForegroundColor Yellow
+    }
+    Write-Host "Fixing known vulnerabilities automatically..." -ForegroundColor Yellow
     npm audit fix 2>&1 | Out-Null
     Set-Location ..
     Write-Host ""
@@ -297,6 +310,10 @@ try {
     Write-Host ""
     Write-Host "If it didn't open, open that URL manually." -ForegroundColor Yellow
     Write-Host ""
+    if ($showVulnerabilityRestartHint) {
+        Write-Host "If you saw npm vulnerability warnings earlier, restart this terminal / launcher once now that startup is complete." -ForegroundColor Yellow
+        Write-Host ""
+    }
     Write-Host "To stop the system: Close both service windows" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "This launcher window can now be closed." -ForegroundColor Green
