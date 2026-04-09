@@ -140,8 +140,15 @@ if not exist "frontend" (
     exit /b 1
 )
 pushd frontend
-call npm install
-if errorlevel 1 (
+set "SHOW_VULN_RESTART_HINT="
+set "NPM_INSTALL_LOG=%TEMP%\moto_npm_install_%RANDOM%_%RANDOM%.log"
+call npm install >"%NPM_INSTALL_LOG%" 2>&1
+set "NPM_INSTALL_EXIT=%ERRORLEVEL%"
+type "%NPM_INSTALL_LOG%"
+findstr /i /c:"vulnerabilities found" "%NPM_INSTALL_LOG%" >nul 2>&1
+if not errorlevel 1 set "SHOW_VULN_RESTART_HINT=1"
+del "%NPM_INSTALL_LOG%" >nul 2>&1
+if not "%NPM_INSTALL_EXIT%"=="0" (
     echo.
     echo ============================================================
     echo ERROR: Failed to install Node.js dependencies
@@ -155,7 +162,14 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo Fixing known vulnerabilities - if a vulnerability was found restart your terminal after completion...
+if defined SHOW_VULN_RESTART_HINT (
+    echo.
+    echo NOTE: npm reported vulnerability warnings during install.
+    echo MOTO is running npm audit fix automatically right now.
+    echo After startup finishes, restart this terminal / launcher once to check whether the warning is gone.
+    echo.
+)
+echo Fixing known vulnerabilities automatically...
 call npm audit fix >nul 2>&1
 popd
 echo Node.js dependencies installed successfully!
@@ -298,6 +312,10 @@ echo.
 echo Browser opened automatically to: http://localhost:5173
 echo If it didn't open, open that URL manually.
 echo.
+if defined SHOW_VULN_RESTART_HINT (
+echo If you saw npm vulnerability warnings earlier, restart this terminal / launcher once now that startup is complete.
+echo.
+)
 echo To stop the system: Close both service windows
 echo.
 echo This launcher window can now be closed.
