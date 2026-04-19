@@ -36,6 +36,17 @@ export default function WorkflowPanel({ isRunning }) {
     localStorage.setItem('workflow_panel_collapsed', 'false');
   }, []);
 
+  // Token tracking & timer state
+  const [tokenStats, setTokenStats] = useState({ total_input: 0, total_output: 0, by_model: {}, elapsed_seconds: 0 });
+  const [showPerModel, setShowPerModel] = useState(false);
+  const [localElapsed, setLocalElapsed] = useState(0);
+  const lastSyncRef = useRef(Date.now());
+
+  const expandPanel = useCallback(() => {
+    setCollapsed(false);
+    localStorage.setItem('workflow_panel_collapsed', 'false');
+  }, []);
+
   // Fetch boost status and categories when running
   const fetchBoostStatus = useCallback(async () => {
     try {

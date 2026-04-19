@@ -496,6 +496,30 @@ Same two-step browsing workflow as pre-brainstorm selection (expand request → 
 
 **Prompts**: `paper_title_exploration_prompts.py` — `build_title_exploration_user_prompt()` frames the aggregation task for candidate title generation with context: user prompt, topic, brainstorm summary, existing papers, reference papers.
 
+### Paper Title Exploration (Pre-Title Candidate Brainstorm)
+
+**Purpose**: Before committing to a paper title, the system collects 5 validated candidate titles using the Part 1 aggregator infrastructure. The final title selection then chooses from candidates, synthesizes them, or proposes a new title with justification.
+
+**Architecture**: Uses `AggregatorCoordinator` from Part 1 — same parallel submitters + batch validator, but with **cleanup/pruning disabled** (`enable_cleanup_review=False`) since target is only 5 candidates.
+
+**Applies to EVERY paper creation**: Tier 2 papers (1/2/3 from brainstorm), Tier 3 short-form, Tier 3 gap/intro/conclusion chapters.
+
+**Workflow**:
+1. Aggregator starts with all configured submitters running in parallel
+2. Submitters generate candidate paper titles as standard submissions
+3. Validator checks quality, relevance, and DIVERSITY (rejects near-duplicates)
+4. Accepted candidates accumulate in temp title DB
+5. Coordinator stops at 5 acceptances (or 15 consecutive rejections safety valve)
+6. Reads title DB, formats as candidate list for final title selection
+
+**Temp DB**: `title_candidates_{topic_id}.txt` in brainstorms dir (cleaned up after phase)
+
+**WebSocket Events**: `paper_title_exploration_started`, `paper_title_exploration_progress`, `paper_title_exploration_complete`
+
+**Crash Recovery**: On resume, exploration restarts fresh (short phase, no state to preserve).
+
+**Prompts**: `paper_title_exploration_prompts.py` — `build_title_exploration_user_prompt()` frames the aggregation task for candidate title generation with context: user prompt, topic, brainstorm summary, existing papers, reference papers.
+
 ### Paper Title Selection
 
 **Context**:
