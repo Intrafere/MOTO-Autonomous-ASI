@@ -145,8 +145,29 @@
 
 .boost-categories {
   display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.boost-category-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.boost-group-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  padding-left: 0.1rem;
+}
+
+.boost-category-row {
+  display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem;
+  gap: 0.3rem;
 }
 
 .category-btn {
@@ -173,6 +194,52 @@
   font-weight: 600;
 }
 
+.boost-always-prefer-row {
+  margin-top: 0.1rem;
+}
+
+.boost-always-prefer-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.boost-always-prefer-label:has(.boost-always-prefer-checkbox:not(:disabled)) {
+  color: var(--text-primary);
+}
+
+.boost-always-prefer-checkbox {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
+.boost-always-prefer-hint {
+  margin-top: 0.25rem;
+  font-size: 0.72rem;
+  color: var(--gold);
+  font-style: italic;
+  padding-left: 1.5rem;
+}
+
+.boost-or-divider {  text-align: center;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+  margin: 0.35rem 0;
+  user-select: none;
+}
+
+.boost-mode-inactive {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 .boost-disabled-notice {
   padding: 0.75rem 1rem;
   background: var(--surface-1);
@@ -181,193 +248,6 @@
   color: var(--text-muted);
   text-align: center;
   font-style: italic;
-}
-
-.workflow-tasks {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0.5rem;
-}
-
-.no-tasks {
-  text-align: center;
-  padding: 2rem 1rem;
-  color: var(--text-muted);
-  font-style: italic;
-}
-
-.task-card {
-  background: var(--surface-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  padding: 0.75rem;
-  margin-bottom: 0.5rem;
-  display: grid;
-  grid-template-columns: auto 1fr auto auto;
-  gap: 0.75rem;
-  align-items: center;
-  transition: all var(--transition-fast);
-}
-
-.task-card:hover:not(.completed) {
-  background: var(--surface-4);
-  border-color: var(--border-default);
-  transform: translateX(-2px);
-}
-
-.task-card.boosted {
-  background: linear-gradient(135deg, var(--gold) 0%, #7dff6f 100%);
-  border-color: var(--gold);
-  color: #000;
-}
-
-.task-card.boosted .task-role,
-.task-card.boosted .task-mode,
-.task-card.boosted .task-provider {
-  color: #000;
-}
-
-.task-card.active {
-  background: #2563eb;
-  border-color: #3b82f6;
-  animation: pulse 2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.8;
-  }
-}
-
-.task-card.completed {
-  background: rgba(76, 175, 80, 0.1);
-  border-color: rgba(76, 175, 80, 0.3);
-  opacity: 0.7;
-}
-
-.task-number {
-  font-weight: 700;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  min-width: 30px;
-}
-
-.task-card.boosted .task-number {
-  color: #000;
-}
-
-.task-card.active .task-number,
-.task-card.completed .task-number {
-  color: #fff;
-}
-
-.task-info {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.task-role {
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: #fff;
-}
-
-.task-mode {
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-}
-
-.task-card.boosted .task-mode {
-  color: #333;
-}
-
-.task-badges {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.boost-icon {
-  font-size: 1.2rem;
-}
-
-.completed-icon {
-  color: #4CAF50;
-  font-size: 1.2rem;
-  font-weight: 700;
-}
-
-.active-icon {
-  color: #fff;
-  font-size: 1.2rem;
-  animation: spin 2s linear infinite;
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.task-provider {
-  font-size: 0.7rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  background: var(--surface-2);
-  padding: 0.25rem 0.5rem;
-  border-radius: var(--radius-sm);
-}
-
-.task-card.boosted .task-provider {
-  background: rgba(0, 0, 0, 0.2);
-  color: #000;
-}
-
-.workflow-legend {
-  padding: 0.75rem 1rem;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--surface-0);
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.5rem;
-  font-size: 0.75rem;
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: var(--text-secondary);
-}
-
-.legend-color {
-  width: 16px;
-  height: 16px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-default);
-}
-
-.legend-color.default {
-  background: var(--surface-3);
-}
-
-.legend-color.boosted {
-  background: linear-gradient(135deg, var(--gold) 0%, #7dff6f 100%);
-}
-
-.legend-color.active {
-  background: #2563eb;
-}
-
-.legend-color.completed {
-  background: rgba(76, 175, 80, 0.25);
 }
 
 /* Token Stats & Research Timer */
@@ -505,22 +385,3 @@
 .model-out {
   color: #e8a86a;
 }
-
-/* Scrollbar styling */
-.workflow-tasks::-webkit-scrollbar {
-  width: 6px;
-}
-
-.workflow-tasks::-webkit-scrollbar-track {
-  background: var(--surface-1);
-}
-
-.workflow-tasks::-webkit-scrollbar-thumb {
-  background: var(--surface-4);
-  border-radius: 3px;
-}
-
-.workflow-tasks::-webkit-scrollbar-thumb:hover {
-  background: var(--border-strong);
-}
-

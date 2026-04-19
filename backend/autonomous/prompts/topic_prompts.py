@@ -24,17 +24,9 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
-
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -144,17 +136,9 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
-
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 

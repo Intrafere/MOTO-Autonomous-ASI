@@ -1,8 +1,7 @@
 """
-Free Model Manager - Manages free model rotation, auto-selector backup,
-and account-wide credit exhaustion detection.
+Free Model Manager - Manages free model rotation and account-wide credit exhaustion detection.
 
-When a free OpenRouter model is rate-limited, this manager provides:
+When a free OpenRouter model fails, this manager provides:
 1. Free Model Looping: rotate to next available free model (highest context first)
 2. Auto-Selector Backup: fall back to openrouter/free as last resort
 3. Account Exhaustion Detection: halt all free model requests on 402
@@ -12,6 +11,9 @@ import time
 from typing import Dict, List, Optional, Any, Set
 
 logger = logging.getLogger(__name__)
+
+# How long to remember failed models before allowing retry (seconds)
+FAILED_MODEL_EXPIRY = 300  # 5 minutes
 
 
 class FreeModelManager:
@@ -29,6 +31,9 @@ class FreeModelManager:
 
         self._account_credits_exhausted: bool = False
         self._account_exhausted_timestamp: float = 0.0
+        
+        # Track models that failed with timestamps (model_id -> failure_time)
+        self._failed_models: Dict[str, float] = {}
 
     def configure(self, looping: bool, auto_selector: bool) -> None:
         """Set free model settings from frontend."""
@@ -37,6 +42,11 @@ class FreeModelManager:
         logger.info(
             f"Free model settings: looping={looping}, auto_selector={auto_selector}"
         )
+
+    def reset(self) -> None:
+        """Reset all transient state. Call at workflow start."""
+        self._failed_models.clear()
+        logger.debug("FreeModelManager reset - cleared failed models")
 
     def update_cached_models(self, models: List[Dict[str, Any]]) -> None:
         """
@@ -63,65 +73,56 @@ class FreeModelManager:
         self._cache_timestamp = time.time()
         logger.info(f"Cached {len(free_models)} free models for rotation")
 
+    def _cleanup_expired_failures(self) -> None:
+        """Remove models from failed list if their expiry has passed."""
+        current_time = time.time()
+        expired = [
+            model_id for model_id, fail_time in self._failed_models.items()
+            if current_time - fail_time > FAILED_MODEL_EXPIRY
+        ]
+        for model_id in expired:
+            del self._failed_models[model_id]
+            logger.debug(f"Model {model_id} failure expired, now available for retry")
+
     def get_alternative_free_model(
         self,
         current_model_id: str,
-        rate_limited_models: Dict[str, float],
-        skip_models: Optional[set] = None,
+        skip_models: Optional[Set[str]] = None,
     ) -> Optional[str]:
         """
-        Get the next available (non-rate-limited) free model, sorted by
-        highest context_length first, skipping the current model and any
-        models in skip_models.
+        Get the next available free model, sorted by highest context_length first,
+        skipping the current model and any models in skip_models.
 
-        Returns model ID string or None if all are rate-limited/skipped.
+        Returns model ID string or None if all are skipped.
         """
         if not self._cached_free_models:
             logger.debug("No cached free models available for rotation")
             return None
 
-        current_time = time.time()
+        # Clean up expired failures before checking
+        self._cleanup_expired_failures()
+
         skip = skip_models or set()
+        skip = skip | set(self._failed_models.keys())  # Also skip recently failed models
 
         for m in self._cached_free_models:
             model_id = m.get("id", "")
             if not model_id or model_id == current_model_id or model_id in skip:
                 continue
-
-            limit_time = rate_limited_models.get(model_id)
-            if limit_time is not None:
-                from backend.shared.openrouter_client import OpenRouterClient
-                if current_time - limit_time < OpenRouterClient.RATE_LIMIT_COOLDOWN:
-                    continue
-
             return model_id
 
         return None
-
-    def get_soonest_retry(
-        self, rate_limited_models: Dict[str, float]
-    ) -> Optional[float]:
-        """
-        Get the earliest future timestamp when any rate-limited model becomes available.
-        Filters out already-expired cooldowns.
-        Returns Unix timestamp or None if no active cooldowns remain.
-        """
-        if not rate_limited_models:
-            return None
-
-        from backend.shared.openrouter_client import OpenRouterClient
-        cooldown = OpenRouterClient.RATE_LIMIT_COOLDOWN
-        current_time = time.time()
-
-        soonest = None
-        for model_id, limit_time in rate_limited_models.items():
-            retry_at = limit_time + cooldown
-            if retry_at <= current_time:
-                continue
-            if soonest is None or retry_at < soonest:
-                soonest = retry_at
-
-        return soonest
+    
+    def mark_model_failed(self, model_id: str) -> None:
+        """Mark a model as failed with current timestamp."""
+        self._failed_models[model_id] = time.time()
+        logger.debug(f"Marked model as failed: {model_id} (expires in {FAILED_MODEL_EXPIRY}s)")
+    
+    def clear_failed_models(self) -> None:
+        """Clear the failed models dict (call on successful request)."""
+        if self._failed_models:
+            logger.debug(f"Clearing {len(self._failed_models)} failed models")
+            self._failed_models.clear()
 
     def mark_account_exhausted(self) -> None:
         """Mark that the OpenRouter account has no free credits (402 on free model)."""
@@ -150,6 +151,7 @@ class FreeModelManager:
             "auto_selector_enabled": self.auto_selector_enabled,
             "cached_free_model_count": len(self._cached_free_models),
             "account_credits_exhausted": self._account_credits_exhausted,
+            "failed_model_count": len(self._failed_models),
         }
 
 

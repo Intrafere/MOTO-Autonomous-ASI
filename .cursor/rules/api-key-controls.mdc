@@ -5,17 +5,16 @@ alwaysApply: false
 
 ## Overview
 
-Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic workflow prediction panel showing the next 20 API calls with boost feature.
+Enables OpenRouter integration with automatic LM Studio fallback, plus boost controls and research metrics in the workflow panel.
 
 **Key Features:**
 - **Per-Role OpenRouter Selection**: Each role independently uses LM Studio or OpenRouter
 - **Global OpenRouter API Key**: Single key for all per-role OpenRouter selections. Boost can reuse it when no explicit boost-only override key is provided.
 - **LM Studio Fallback**: Optional fallback per role on credit exhaustion
 - **Free Model Cooldown Handling**: SERIAL BOTTLENECK pause, free model looping, and auto-selector backup (see below)
-- **Boost Mode**: Selective task acceleration via three modes, using either an explicit boost override key or the active global OpenRouter key:
+- **Boost Mode**: Selective task acceleration via two modes, using either an explicit boost override key or the active global OpenRouter key:
   - **Boost Next X Calls**: Counter-based, next X API calls regardless of task ID
-  - **Category Boost**: Role-based, boosts all calls for specific role categories
-  - **Per-task Toggle**: Task ID based (legacy)
+  - **Category Boost**: Role-based, boosts all calls for specific role categories (Aggregator and Compiler only; Autonomous agents inherit from their parent roles automatically)
 - **System works without LM Studio**: Defaults to OpenRouter when LM Studio unavailable
 
 ---
@@ -51,7 +50,6 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 **Boost Mode Priority** (`should_use_boost(task_id)`):
 1. Boost Next X: `boost_next_count > 0` → True
 2. Category Boost: `_extract_role_prefix(task_id) in boosted_categories` → True
-3. Per-task Toggle: `task_id in boosted_task_ids` → True
 
 **Counter Decrement:** `boost_next_count` decrements ONLY on successful boost API calls. Failed/exhausted calls do NOT decrement.
 
@@ -66,15 +64,17 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus a dynamic
 - `autonomous_*` → "Autonomous"
 
 #### BoostManager (`backend/shared/boost_manager.py`)
-- Singleton. Key methods: `set_boost_config`, `clear_boost`, `set_boost_next_count`, `toggle_category_boost`, `toggle_task_boost`, `should_use_boost` (main check for coordinators), `consume_boost_count` (only after successful boost call), `is_task_boosted` (DO NOT USE in coordinators — legacy only)
+- Singleton. Key methods: `set_boost_config`, `clear_boost`, `set_boost_next_count`, `toggle_category_boost`, `should_use_boost` (main check for coordinators), `consume_boost_count` (only after successful boost call)
 - Boost can use an **explicit override** OpenRouter API key, or it falls back to the active global OpenRouter key. A temporary `OpenRouterClient` is created per boosted task and closed immediately after.
+- **Autonomous agent task ID inheritance**: All autonomous orchestration agents use parent role task ID prefixes — Topic Selector/Completion Reviewer/Reference Selector/Paper Title Selector/Tier 3 agents use `agg_sub1_*`; Topic Validator/Redundancy Checker use `agg_val_*`. Boosting a parent role automatically covers all autonomous agents that run on that model.
 
 #### BoostLogger (`backend/shared/boost_logger.py`)
 - Singleton. Log file: `backend/data/boost_api_log.txt`
 - Methods: `log_api_call`, `get_logs(limit)`, `clear_logs`, `get_stats`
+- Boost logs are merged into the main API call log view; boost endpoints remain available for boost-only debugging.
 
-#### Workflow Task Generation (Direct from Agent Sequences)
-Coordinators read actual agent `task_sequence` counters — no prediction. Task IDs exactly match what agents will generate.
+#### Workflow Task Generation (Internal Backend Tracking)
+Coordinators track task IDs internally for boost routing. The frontend does NOT display predicted task lists.
 - Aggregator: `agg_sub{N}_{seq:03d}`, `agg_val_{seq:03d}`
 - Compiler: `comp_hc_{seq:03d}`, `comp_hp_{seq:03d}`, `comp_val_{seq:03d}`
 - Autonomous: `auto_te_{seq:03d}`, `auto_tev_{seq:03d}`, `auto_ts_{seq:03d}`, `auto_tv_{seq:03d}`
@@ -93,9 +93,9 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ## WebSocket Events
 
-**Workflow:** `workflow_updated` (tasks+mode), `task_started` (task_id), `task_completed` (task_id+sequence), `token_usage_updated` (total_input, total_output, by_model, elapsed_seconds)
+**Workflow:** `workflow_updated` (mode), `token_usage_updated` (total_input, total_output, by_model, elapsed_seconds)
 
-**Boost:** `boost_enabled` (model_id, provider, context_window, max_output_tokens), `boost_disabled`, `task_boost_toggled` (task_id, boosted), `boost_next_count_updated` (count), `category_boost_toggled` (category, boosted), `boost_credits_exhausted` (task_id, message)
+**Boost:** `boost_enabled` (model_id, provider, context_window, max_output_tokens), `boost_disabled`, `boost_next_count_updated` (count), `category_boost_toggled` (category, boosted), `boost_credits_exhausted` (task_id, message)
 
 **Fallback:** `openrouter_fallback` (role_id, reason, message, fallback_model), `openrouter_fallback_failed` (role_id, reason, message), `openrouter_fallbacks_reset` (reset_roles, message)
 
@@ -115,11 +115,10 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 - `GET /api/boost/status` — Current config, counts, categories
 - `POST /api/boost/set-next-count` — Set Boost Next X counter `{ "count": int }`
 - `POST /api/boost/toggle-category/{category}` — Toggle category boost
-- `GET /api/boost/categories?mode=` — Available categories for mode
-- `POST /api/boost/toggle-task/{task_id}` — Legacy per-task boost toggle
+- `GET /api/boost/categories?mode=` — All categories (mode param ignored, always returns all)
 - `GET /api/boost/openrouter-models` — Fetch OpenRouter models (Bearer key header)
 - `GET /api/boost/model-providers?model_id=` — Providers for a model
-- `GET /api/boost/logs?limit=` — Recent boost logs
+- `GET /api/boost/logs?limit=` — Recent boost-only logs (debug)
 - `POST /api/boost/clear-logs` — Clear logs
 
 ### OpenRouter (`backend/api/routes/openrouter.py`)
@@ -136,7 +135,7 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 - `GET /api/model-cache` — Cached model ID mapping (display_name → api_id)
 
 ### Workflow (`backend/api/routes/workflow.py`)
-- `GET /api/workflow/predictions` — Next 20 predicted tasks
+- `GET /api/workflow/predictions` — Current workflow mode (also returns tasks for internal use)
 - `GET /api/workflow/history?limit=` — Completed tasks
 - `GET /api/token-stats` — Cumulative token usage (total_input, total_output, by_model, elapsed_seconds)
 
@@ -196,4 +195,4 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 **localStorage:** `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`)
 
-**Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs, free model manager state. Boost logs persist to file (`boost_api_log.txt`).
+**Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs, free model manager state. Boost logs persist to file (`boost_api_log.txt`) and are merged into the main API call log view.

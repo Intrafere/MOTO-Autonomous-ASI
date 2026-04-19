@@ -4,8 +4,9 @@ Includes Tier 1 (Brainstorm), Tier 2 (Paper Writing), and Tier 3 (Final Answer) 
 """
 import asyncio
 import logging
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 
 from backend.shared.models import AutonomousResearchStartRequest, CritiqueRequest
@@ -22,6 +23,7 @@ from backend.autonomous.memory.session_manager import session_manager
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
 from backend.aggregator.core.coordinator import coordinator
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
+from backend.shared.boost_logger import boost_logger
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,196 @@ def _validate_history_session_id(session_id: str) -> None:
     """Reject malformed history session identifiers before building any filesystem paths."""
     if not session_id:
         raise HTTPException(status_code=400, detail="Session ID is required")
+
+
+def _parse_api_log_timestamp(timestamp: Optional[str]) -> datetime:
+    """Parse log timestamps for sorting and deduplication."""
+    if not timestamp:
+        return datetime.min
+
+    try:
+        return datetime.fromisoformat(timestamp)
+    except ValueError:
+        return datetime.min
+
+
+def _normalize_autonomous_api_log(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize autonomous log entries into the combined API log shape."""
+    return {
+        **entry,
+        "source": "api",
+        "boosted": bool(entry.get("boosted", False)),
+        "boost_mode": entry.get("boost_mode"),
+        "provider": entry.get("provider") or "unknown",
+        "phase": entry.get("phase") or "unknown",
+        "prompt_preview": entry.get("prompt_preview") or "",
+        "prompt_full": entry.get("prompt_full") or entry.get("prompt_preview") or "",
+        "response_preview": entry.get("response_preview") or "",
+        "response_full": entry.get("response_full") or entry.get("response_preview") or "",
+    }
+
+
+def _normalize_boost_api_log(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize boost log entries so they can be shown in the main API log view."""
+    prompt_preview = entry.get("prompt_preview") or ""
+    response_preview = entry.get("response_preview") or ""
+    response_full = entry.get("response_full") or response_preview
+
+    return {
+        **entry,
+        "source": "boost",
+        "boosted": True,
+        "provider": entry.get("provider") or "openrouter",
+        "phase": entry.get("phase") or "boost",
+        "prompt_preview": prompt_preview,
+        "prompt_full": entry.get("prompt_full") or prompt_preview,
+        "response_preview": response_preview,
+        "response_full": response_full,
+    }
+
+
+def _build_api_log_match_key(entry: Dict[str, Any]) -> tuple:
+    """Build a stable key used to deduplicate boost entries already logged elsewhere."""
+    return (
+        entry.get("task_id") or "",
+        entry.get("role_id") or "",
+        entry.get("model") or "",
+        bool(entry.get("success", True)),
+    )
+
+
+def _merge_combined_api_logs(
+    autonomous_logs: List[Dict[str, Any]],
+    boost_logs: List[Dict[str, Any]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """
+    Combine autonomous and boost logs into one list.
+
+    Autonomous boosted calls are often already mirrored into the autonomous logger,
+    so boost entries are merged into matching autonomous entries when possible.
+    """
+    combined_logs = [_normalize_autonomous_api_log(entry) for entry in autonomous_logs]
+    candidate_map: Dict[tuple, List[int]] = {}
+
+    for index, entry in enumerate(combined_logs):
+        candidate_map.setdefault(_build_api_log_match_key(entry), []).append(index)
+
+    for raw_boost_entry in boost_logs:
+        boost_entry = _normalize_boost_api_log(raw_boost_entry)
+        boost_timestamp = _parse_api_log_timestamp(boost_entry.get("timestamp"))
+        matching_indices = candidate_map.get(_build_api_log_match_key(boost_entry), [])
+        merged = False
+
+        for index in matching_indices:
+            existing_entry = combined_logs[index]
+            if existing_entry.get("_boost_merged"):
+                continue
+
+            existing_timestamp = _parse_api_log_timestamp(existing_entry.get("timestamp"))
+            if abs((existing_timestamp - boost_timestamp).total_seconds()) > 2:
+                continue
+
+            existing_entry["source"] = "api+boost"
+            existing_entry["boosted"] = True
+            existing_entry["boost_mode"] = boost_entry.get("boost_mode")
+            existing_entry["_boost_merged"] = True
+
+            if not existing_entry.get("prompt_full"):
+                existing_entry["prompt_full"] = boost_entry.get("prompt_full") or ""
+            if not existing_entry.get("prompt_preview"):
+                existing_entry["prompt_preview"] = boost_entry.get("prompt_preview") or ""
+            if not existing_entry.get("response_full"):
+                existing_entry["response_full"] = boost_entry.get("response_full") or ""
+            if not existing_entry.get("response_preview"):
+                existing_entry["response_preview"] = boost_entry.get("response_preview") or ""
+
+            merged = True
+            break
+
+        if not merged:
+            combined_logs.append(boost_entry)
+
+    combined_logs.sort(
+        key=lambda entry: _parse_api_log_timestamp(entry.get("timestamp")),
+        reverse=True,
+    )
+
+    for entry in combined_logs:
+        entry.pop("_boost_merged", None)
+
+    return combined_logs[:limit]
+
+
+def _build_combined_api_stats(logs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build summary stats for the merged API log view."""
+    if not logs:
+        return {
+            "total_calls": 0,
+            "successful_calls": 0,
+            "failed_calls": 0,
+            "success_rate": 0.0,
+            "boosted_calls": 0,
+            "by_phase": {},
+            "by_model": {},
+            "by_provider": {},
+            "by_source": {},
+            "by_boost_mode": {},
+        }
+
+    successful_calls = sum(1 for log in logs if log.get("success", True))
+    boosted_calls = sum(1 for log in logs if log.get("boosted"))
+    by_phase: Dict[str, int] = {}
+    by_model: Dict[str, int] = {}
+    by_provider: Dict[str, int] = {}
+    by_source: Dict[str, int] = {}
+    by_boost_mode: Dict[str, int] = {}
+
+    for log in logs:
+        phase = log.get("phase") or "unknown"
+        model = log.get("model") or "unknown"
+        provider = log.get("provider") or "unknown"
+        source = log.get("source") or "unknown"
+
+        by_phase[phase] = by_phase.get(phase, 0) + 1
+        by_model[model] = by_model.get(model, 0) + 1
+        by_provider[provider] = by_provider.get(provider, 0) + 1
+        by_source[source] = by_source.get(source, 0) + 1
+
+        if log.get("boosted"):
+            boost_mode = log.get("boost_mode") or "unknown"
+            by_boost_mode[boost_mode] = by_boost_mode.get(boost_mode, 0) + 1
+
+    total_calls = len(logs)
+
+    return {
+        "total_calls": total_calls,
+        "successful_calls": successful_calls,
+        "failed_calls": total_calls - successful_calls,
+        "success_rate": successful_calls / total_calls if total_calls else 0.0,
+        "boosted_calls": boosted_calls,
+        "by_phase": by_phase,
+        "by_model": by_model,
+        "by_provider": by_provider,
+        "by_source": by_source,
+        "by_boost_mode": by_boost_mode,
+    }
+
+
+async def _get_combined_api_logs(limit: int = 100) -> Dict[str, Any]:
+    """Fetch, deduplicate, and summarize the combined autonomous + boost API logs."""
+    fetch_limit = max(limit * 3, 300)
+    autonomous_logs = await autonomous_api_logger.get_logs(limit=fetch_limit)
+    boost_logs = await boost_logger.get_logs(limit=fetch_limit)
+    combined_logs = _merge_combined_api_logs(autonomous_logs, boost_logs, limit=limit)
+    combined_stats = _build_combined_api_stats(
+        _merge_combined_api_logs(
+            autonomous_logs,
+            boost_logs,
+            limit=max(fetch_limit, len(autonomous_logs) + len(boost_logs)),
+        )
+    )
+    return {"logs": combined_logs, "stats": combined_stats}
 
     if session_id == "legacy":
         return
@@ -307,6 +499,7 @@ async def _generate_autonomous_paper_critique(
         host_provider=config["validator_openrouter_provider"],
         date=datetime.now(),
         prompt_used=prompt_to_use,
+        critique_source="user_request",
         novelty_rating=critique_data.get("novelty_rating", 0),
         novelty_feedback=critique_data.get("novelty_feedback", ""),
         correctness_rating=critique_data.get("correctness_rating", 0),
@@ -2222,6 +2415,7 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
             host_provider=validator_openrouter_provider,
             date=datetime.now(),
             prompt_used=prompt_to_use,
+            critique_source="user_request",
             novelty_rating=critique_data.get("novelty_rating", 0),
             novelty_feedback=critique_data.get("novelty_feedback", ""),
             correctness_rating=critique_data.get("correctness_rating", 0),
@@ -2366,13 +2560,12 @@ async def get_autonomous_api_logs(limit: int = 100):
         Dict with logs and statistics
     """
     try:
-        logs = await autonomous_api_logger.get_logs(limit=limit)
-        stats = await autonomous_api_logger.get_stats()
+        combined = await _get_combined_api_logs(limit=limit)
         
         return {
             "success": True,
-            "logs": logs,
-            "stats": stats
+            "logs": combined["logs"],
+            "stats": combined["stats"],
         }
     except Exception as e:
         logger.error(f"Failed to get autonomous API logs: {e}")
@@ -2389,10 +2582,11 @@ async def clear_autonomous_api_logs():
     """
     try:
         await autonomous_api_logger.clear_logs()
+        await boost_logger.clear_logs()
         
         return {
             "success": True,
-            "message": "Autonomous API logs cleared successfully"
+            "message": "Combined API logs cleared successfully"
         }
     except Exception as e:
         logger.error(f"Failed to clear autonomous API logs: {e}")
@@ -2408,11 +2602,11 @@ async def get_autonomous_api_stats():
         Statistics dict (total calls, by phase, by model, success rate, etc.)
     """
     try:
-        stats = await autonomous_api_logger.get_stats()
+        combined = await _get_combined_api_logs(limit=1000)
         
         return {
             "success": True,
-            "stats": stats
+            "stats": combined["stats"]
         }
     except Exception as e:
         logger.error(f"Failed to get autonomous API stats: {e}")

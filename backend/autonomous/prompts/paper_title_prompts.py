@@ -3,14 +3,17 @@ Paper Title Prompts - System prompts for paper title selection.
 """
 from typing import List, Dict, Any
 
+from backend.autonomous.prompts.paper_reference_prompts import get_reference_title_text
+
 
 def get_paper_title_system_prompt() -> str:
     """Get system prompt for paper title selection."""
     return """You are selecting a title for a mathematical research paper. Your role is to:
 
 1. Review your brainstorm topic and database content
-2. Review any existing papers generated from this brainstorm (if any)
-3. Select an appropriate, descriptive title for the new paper
+2. Review any selected reference papers informing this paper (if any)
+3. Review any existing papers generated from this brainstorm (if any)
+4. Select an appropriate, descriptive title for the new paper
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -23,22 +26,14 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
 YOUR TASK:
-Choose a title that accurately captures the mathematical content of your brainstorm.
+Choose a title that accurately captures the mathematical content and scope of the planned paper.
 
 IMPORTANT CLARIFICATION:
 - The brainstorm submissions are the SOURCE MATERIAL for your paper
@@ -94,8 +89,9 @@ def get_paper_title_validator_system_prompt() -> str:
 
 1. Review the proposed title
 2. Review the brainstorm content the paper will be based on
-3. Review any EXISTING COMPLETED PAPERS from the same brainstorm (if any)
-4. Decide if the title is appropriate
+3. Review any selected reference papers informing the paper (if any)
+4. Review any EXISTING COMPLETED PAPERS from the same brainstorm (if any)
+5. Decide if the title is appropriate
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -108,17 +104,9 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -145,6 +133,7 @@ VALIDATION CRITERIA:
 
 ACCEPT the title if:
 - It accurately represents the brainstorm content (this is EXPECTED - the paper is based on the brainstorm!)
+- It remains consistent with the paper's intended scope when selected reference papers are present
 - It is appropriately specific (not too broad or narrow)
 - It differentiates from EXISTING COMPLETED PAPERS from the same brainstorm (if any exist)
 - It follows mathematical paper title conventions
@@ -230,9 +219,13 @@ def build_paper_title_prompt(
     
     # Add selected reference papers if any
     if reference_papers:
-        parts.append("SELECTED REFERENCE PAPERS:\n")
+        parts.append("SELECTED REFERENCE PAPERS (inform this paper's scope and title):\n")
         for p in reference_papers:
-            parts.append(f"\n- {p.get('title', 'N/A')}")
+            abstract = p.get("abstract", "N/A")
+            if isinstance(abstract, str) and len(abstract) > 220:
+                abstract = abstract[:220] + "..."
+            parts.append(f"\n- {p.get('paper_id', 'N/A')}: {get_reference_title_text(p)}")
+            parts.append(f"\n  Abstract: {abstract}")
         parts.append("\n---\n")
     
     # Inject validated candidate titles from exploration phase
@@ -265,7 +258,8 @@ def build_paper_title_validation_prompt(
     brainstorm_summary: str,
     existing_papers_from_brainstorm: List[Dict[str, Any]],
     proposed_title: str,
-    title_reasoning: str
+    title_reasoning: str,
+    reference_papers: List[Dict[str, Any]] = None
 ) -> str:
     """
     Build the paper title validation prompt.
@@ -277,6 +271,7 @@ def build_paper_title_validation_prompt(
         existing_papers_from_brainstorm: Papers already created from this brainstorm
         proposed_title: The proposed paper title
         title_reasoning: The reasoning provided for the title
+        reference_papers: Selected reference papers informing the paper's scope
     
     Returns:
         Complete prompt string
@@ -303,6 +298,16 @@ def build_paper_title_validation_prompt(
         parts.append("\n---\n")
     else:
         parts.append("EXISTING PAPERS FROM THIS BRAINSTORM: None\n---\n")
+
+    if reference_papers:
+        parts.append("SELECTED REFERENCE PAPERS:\n")
+        for p in reference_papers:
+            abstract = p.get("abstract", "N/A")
+            if isinstance(abstract, str) and len(abstract) > 220:
+                abstract = abstract[:220] + "..."
+            parts.append(f"\n- {p.get('paper_id', 'N/A')}: {get_reference_title_text(p)}")
+            parts.append(f"\n  Abstract: {abstract}")
+        parts.append("\n---\n")
     
     # Add proposed title
     parts.append("PROPOSED TITLE:\n")

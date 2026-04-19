@@ -13,6 +13,17 @@ from typing import Optional
 from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 
 
+CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES:
+- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
+- Theoretical claims must be supported by sound derivation, proof, or explicit assumptions inside the paper.
+- Literature claims must include explicit in-text citations identifying the external source.
+- Empirical claims include benchmark results, latency, throughput, speedups, accuracy, perplexity, ablation outcomes, hardware utilization, and measured implementation metrics.
+- Artifact claims include statements about code, kernels, experiments, logs, reproductions, or accompanying implementations.
+- Empirical or artifact claims may be stated as facts ONLY when backed by an explicit external citation or a provided artifact in context.
+- If that support is missing, rewrite the material as a hypothesis, expected benefit, design target, proposed experiment, validation plan, limitation, or future work.
+- NEVER invent citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts."""
+
+
 # =============================================================================
 # PHASE-SPECIFIC CONSTRUCTION PROMPTS
 # =============================================================================
@@ -32,17 +43,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -54,6 +59,13 @@ This paper is constructed OUT OF ORDER intentionally. The writing sequence is:
 4. ABSTRACT last - summarizes the complete paper
 
 WHY BODY FIRST? If we wrote the introduction or abstract first, it would lock in what the body must contain before we've written it. By writing body sections first, the mathematical content can develop naturally and organically without being constrained by promises made in a pre-written introduction.
+
+SOURCE USAGE PRINCIPLE:
+- Treat the brainstorm/aggregator database as optional high-value source material and exploration history, not a mandatory checklist
+- Use it when it helps you achieve the strongest rigorous paper toward the user's prompt
+- You may synthesize beyond brainstorm/database material using sound mathematical reasoning
+- Do NOT force coverage of every source entry
+- Do NOT ignore clearly crucial source material for the scope you are writing
 
 CRITICAL - SYSTEM-MANAGED MARKERS (NOT YOUR OUTPUT):
 
@@ -117,11 +129,12 @@ Set section_complete=false if:
 CRITICAL REQUIREMENTS:
 - Follow the outline structure for body sections
 - Build upon what's already written
-- Capture relevant content from the aggregator database
+- Use brainstorm/aggregator content when it helps, but you are not required to cover every source entry
 - Do not repeat content already in the document
 - Check for existing section headers before creating new ones
 - Write clear, rigorous mathematical exposition
 - ALL content must be rooted in sound mathematical reasoning
+- Unsupported empirical or artifact claims must be rewritten as hypotheses, validation plans, limitations, or future work instead of being asserted as completed results
 
 EXACT STRING MATCHING FOR EDITS:
 This system uses EXACT STRING MATCHING. To insert or modify content, you must:
@@ -214,17 +227,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -306,6 +313,7 @@ WHAT TO INCLUDE IN CONCLUSION:
 - Connections between results
 - Brief mention of limitations or open questions (optional)
 - Final remarks on the mathematical significance
+- If empirical validation was not actually supported, state the limitation plainly instead of summarizing unsupported benchmark claims as established fact
 
 CRITICAL - SECTION HEADER FORMAT:
 - Use EXACTLY "Conclusion" as the section header (NO Roman numeral prefix)
@@ -335,6 +343,7 @@ CRITICAL REQUIREMENTS:
 - Summarize, don't introduce new material
 - Maintain coherent narrative flow from body to conclusion
 - Write clear, rigorous mathematical exposition
+- Do not convert unsupported empirical ideas into factual claims while summarizing
 
 EXACT STRING MATCHING FOR EDITS:
 This system uses EXACT STRING MATCHING. To replace the conclusion placeholder:
@@ -369,17 +378,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -497,6 +500,7 @@ CRITICAL REQUIREMENTS:
 - Describe results without full proofs
 - Set up the mathematical context
 - Make the reader want to continue reading
+- Do not promise empirical validation, benchmark numbers, or artifacts unless they are explicitly supported
 
 EXACT STRING MATCHING FOR EDITS:
 This system uses EXACT STRING MATCHING. To replace the introduction placeholder:
@@ -531,17 +535,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -630,6 +628,7 @@ WHAT TO INCLUDE IN ABSTRACT:
 - Key methods or approaches used
 - Significance of the results
 - Typically 150-300 words
+- Unsupported empirical claims must be reframed as expected benefits, proposed validation, or limitations rather than as verified outcomes
 
 CRITICAL - SECTION HEADER FORMAT:
 - Use EXACTLY "Abstract" as the section header (NO Roman numeral prefix)
@@ -659,6 +658,7 @@ CRITICAL REQUIREMENTS:
 - Be concise but comprehensive
 - State results, not just topics
 - Avoid technical jargon where possible
+- NEVER summarize unsupported benchmark numbers, hardware measurements, or code artifacts as if they were verified
 
 EXACT STRING MATCHING FOR EDITS:
 This system uses EXACT STRING MATCHING. To replace the abstract placeholder:
@@ -702,23 +702,17 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
 1. Review the current outline
 2. Review the current document progress (what's already written)
-3. Review the aggregator database
+3. Review any aggregator/brainstorm database evidence that seems useful
 4. Write the next logical portion of the document or expansion of a section
 
 CRITICAL - SECTION ORDER ENFORCEMENT:
@@ -744,12 +738,13 @@ YOUR TASK:
 CRITICAL REQUIREMENTS:
 - Follow the outline structure
 - Build upon what's already written
-- Capture relevant content from the aggregator database
+- Use brainstorm/aggregator content when it helps, but you are not required to cover every source entry
 - Maintain coherent narrative flow
 - Write clear, rigorous mathematical exposition
 - Do not repeat content already in the document
 - Check for existing section headers before creating new ones
 - ALL content must be rooted in sound mathematical reasoning
+- Unsupported empirical or artifact claims must be rewritten conservatively rather than asserted as established fact
 
 EXACT STRING MATCHING FOR EDITS:
 This system uses EXACT STRING MATCHING. To insert or modify content, you must:
@@ -1019,12 +1014,19 @@ each of these critique points while preserving the mathematical content that was
         parts.append("TASK: Write the NEXT logical portion following the section order (body → conclusion → intro → abstract).")
     
     parts.append("\n---\n")
+    parts.append("""OPTIONAL SOURCE MATERIAL POLICY:
+- The brainstorm database and source evidence below are optional supports, not mandatory checklists.
+- Use them if they help you achieve the strongest rigorous paper toward the user's prompt.
+- You may synthesize beyond them using sound mathematical reasoning.
+- Do NOT force coverage of every source entry.
+""")
+    parts.append("\n---\n")
     
     if brainstorm_content:
-        parts.append(f"BRAINSTORM DATABASE (editable - you may propose corrections via brainstorm_operation):\n{brainstorm_content}")
+        parts.append(f"BRAINSTORM DATABASE (optional source material; editable via brainstorm_operation):\n{brainstorm_content}")
         parts.append("\n---\n")
     
-    parts.append(f"AGGREGATOR DATABASE EVIDENCE:\n{rag_evidence}")
+    parts.append(f"SOURCE DATABASE EVIDENCE (optional support - use if helpful):\n{rag_evidence}")
     parts.append("\n---\n")
     parts.append("Now generate your submission as JSON (remember to set section_complete appropriately):")
     

@@ -19,7 +19,6 @@ import {
 } from './components/autonomous';
 import WorkflowPanel from './components/WorkflowPanel';
 import BoostControlModal from './components/BoostControlModal';
-import BoostLogs from './components/BoostLogs';
 import StartupProviderSetupModal from './components/StartupProviderSetupModal';
 import OpenRouterApiKeyModal from './components/OpenRouterApiKeyModal';
 import OpenRouterPrivacyWarningModal from './components/OpenRouterPrivacyWarningModal';
@@ -91,8 +90,11 @@ function App() {
   const [manualActiveTab, setManualActiveTab] = useState(
     () => localStorage.getItem(MANUAL_TAB_STORAGE_KEY) || 'aggregator-interface'
   );
-  const [utilityActiveTab, setUtilityActiveTab] = useState(null);
-  const activeTab = utilityActiveTab || (appMode === 'manual' ? manualActiveTab : autonomousActiveTab);
+  const activeTab = appMode === 'manual' ? manualActiveTab : autonomousActiveTab;
+  const shimmerAccentsEnabled = (() => {
+    const saved = localStorage.getItem('banner_shimmer_enabled');
+    return saved !== null ? JSON.parse(saved) : true;
+  })();
   
   // Models list (fetched from API)
   const [models, setModels] = useState([]);
@@ -455,6 +457,8 @@ function App() {
     
     // Helper to add activity with limit (prevents unbounded array growth causing UI freeze)
     const MAX_ACTIVITY_EVENTS = 500;
+    // Helper to get timestamp from server or fallback to client time
+    const getTimestamp = (data) => data?._serverTimestamp || new Date().toISOString();
     const addActivity = (event) => {
       setAutonomousActivity(prev => [...prev, event].slice(-MAX_ACTIVITY_EVENTS));
     };
@@ -487,7 +491,7 @@ function App() {
     unsubscribers.push(websocket.on('topic_exploration_started', (data) => {
       addActivity({
         event: 'topic_exploration_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Topic exploration started (target: ${data.target || 5} candidates${data.resumed_count ? `, resuming with ${data.resumed_count}` : ''})`,
         data
       });
@@ -496,7 +500,7 @@ function App() {
     unsubscribers.push(websocket.on('topic_exploration_progress', (data) => {
       addActivity({
         event: 'topic_exploration_progress',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Exploration candidate ${data.accepted}/${data.target} accepted: ${data.latest_question ? data.latest_question.substring(0, 100) + '...' : ''}`,
         data
       });
@@ -505,7 +509,7 @@ function App() {
     unsubscribers.push(websocket.on('topic_exploration_complete', (data) => {
       addActivity({
         event: 'topic_exploration_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Topic exploration complete: ${data.accepted_count} candidates collected from ${data.total_attempts} attempts`,
         data
       });
@@ -515,7 +519,7 @@ function App() {
     unsubscribers.push(websocket.on('paper_title_exploration_started', (data) => {
       addActivity({
         event: 'paper_title_exploration_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Title exploration started (target: ${data.target || 5} candidate titles)`,
         data
       });
@@ -524,7 +528,7 @@ function App() {
     unsubscribers.push(websocket.on('paper_title_exploration_progress', (data) => {
       addActivity({
         event: 'paper_title_exploration_progress',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Title candidate ${data.accepted}/${data.target} accepted`,
         data
       });
@@ -533,7 +537,7 @@ function App() {
     unsubscribers.push(websocket.on('paper_title_exploration_complete', (data) => {
       addActivity({
         event: 'paper_title_exploration_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Title exploration complete: ${data.accepted_count} candidates collected from ${data.total_attempts} attempts`,
         data
       });
@@ -543,7 +547,7 @@ function App() {
     unsubscribers.push(websocket.on('topic_selected', (data) => {
       addActivity({
         event: 'topic_selected',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Topic selected: ${data.topic_prompt}`,
         data
       });
@@ -552,7 +556,7 @@ function App() {
     unsubscribers.push(websocket.on('topic_selection_rejected', (data) => {
       addActivity({
         event: 'topic_selection_rejected',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Topic selection rejected`,
         data
       });
@@ -563,7 +567,7 @@ function App() {
       const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : 'N/A';
       addActivity({
         event: 'submission_accepted',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Submitter ${data.submitter_id} [${modelName}]: ✓ ACCEPTED (total: ${data.total_acceptances})`,
         data
       });
@@ -573,7 +577,7 @@ function App() {
       const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : 'N/A';
       addActivity({
         event: 'submission_rejected',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED (total: ${data.total_rejections})`,
         data
       });
@@ -583,7 +587,7 @@ function App() {
     unsubscribers.push(websocket.on('completion_review_started', (data) => {
       addActivity({
         event: 'completion_review_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Completion review started`,
         data
       });
@@ -592,7 +596,7 @@ function App() {
     unsubscribers.push(websocket.on('completion_review_result', (data) => {
       addActivity({
         event: 'completion_review_result',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Decision: ${data.decision}`,
         data
       });
@@ -601,7 +605,7 @@ function App() {
     unsubscribers.push(websocket.on('manual_paper_writing_triggered', (data) => {
       addActivity({
         event: 'manual_paper_writing_triggered',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Manual override: Forcing paper writing for ${data.topic_id} (${data.submission_count} submissions)`,
         data
       });
@@ -612,7 +616,7 @@ function App() {
       autonomousTierRef.current = 'tier2_paper_writing';
       addActivity({
         event: 'paper_writing_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Paper writing started: ${data.title}`,
         data
       });
@@ -625,7 +629,7 @@ function App() {
       const iterationSuffix = data.iteration ? ` (iteration ${data.iteration})` : '';
       addActivity({
         event: 'compiler_acceptance',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `${modeLabel}: ✓ ACCEPTED${iterationSuffix}`,
         data
       });
@@ -638,7 +642,7 @@ function App() {
       const reason = formatReason(data.reasoning);
       addActivity({
         event: 'compiler_rejection',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `${modeLabel}: ✗ REJECTED${iterationSuffix}${reason ? ` - ${reason}` : ''}`,
         data
       });
@@ -650,7 +654,7 @@ function App() {
       const reason = formatReason(data.reasoning, 100);
       addActivity({
         event: 'compiler_decline',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `${modeLabel}: ↷ DECLINED${reason ? ` - ${reason}` : ''}`,
         data
       });
@@ -660,7 +664,7 @@ function App() {
       if (!isAutonomousTier2Active()) return;
       addActivity({
         event: 'outline_locked',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Outline locked after ${data.total_iterations || data.iteration || '?'} iteration(s)`,
         data
       });
@@ -670,7 +674,7 @@ function App() {
     unsubscribers.push(websocket.on('critique_phase_started', (data) => {
       addActivity({
         event: 'critique_phase_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Critique phase started (Paper v${data.paper_version || '?'}, target: ${data.target_critiques || 5} critiques)`,
         data
       });
@@ -681,7 +685,7 @@ function App() {
       if (data.total_attempts % 2 === 0 || data.total_attempts >= data.target) {
         addActivity({
           event: 'critique_progress',
-          timestamp: new Date().toISOString(),
+          timestamp: getTimestamp(data),
           message: `Critique progress: ${data.acceptances} accepted, ${data.rejections} rejected (${data.total_attempts}/${data.target} attempts)`,
           data
         });
@@ -691,7 +695,7 @@ function App() {
     unsubscribers.push(websocket.on('body_rewrite_started', (data) => {
       addActivity({
         event: 'body_rewrite_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `REWRITE PHASE: Total rewrite started for Paper v${data.version || '?'}${data.title_changed ? ' (Title updated)' : ''}`,
         data
       });
@@ -700,7 +704,7 @@ function App() {
     unsubscribers.push(websocket.on('partial_revision_complete', (data) => {
       addActivity({
         event: 'partial_revision_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `PARTIAL REVISION: Applied ${data.edits_applied || 0} targeted edits (Paper v${data.version || '?'})${data.title_changed ? ' (Title updated)' : ''}`,
         data
       });
@@ -709,7 +713,7 @@ function App() {
     unsubscribers.push(websocket.on('critique_phase_ended', (data) => {
       addActivity({
         event: 'critique_phase_ended',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Critique phase complete (${data.decision || 'unknown'})`,
         data
       });
@@ -718,7 +722,7 @@ function App() {
     unsubscribers.push(websocket.on('critique_phase_skipped', (data) => {
       addActivity({
         event: 'critique_phase_skipped',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Critique phase skipped: ${data.reason || 'user override'}`,
         data
       });
@@ -731,7 +735,7 @@ function App() {
       const trigger = data.trigger || 'complete';
       addActivity({
         event: 'phase_transition',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Phase transition: ${fromPhase} → ${toPhase} (${trigger})`,
         data
       });
@@ -740,7 +744,7 @@ function App() {
     unsubscribers.push(websocket.on('paper_completed', (data) => {
       addActivity({
         event: 'paper_completed',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Paper completed: ${data.title}`,
         data
       });
@@ -751,7 +755,7 @@ function App() {
     unsubscribers.push(websocket.on('paper_redundancy_review', (data) => {
       addActivity({
         event: 'paper_redundancy_review',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Redundancy review: ${data.should_remove ? 'Removing paper' : 'No removal'}`,
         data
       });
@@ -771,7 +775,7 @@ function App() {
       }
       addActivity({
         event: 'auto_research_resumed',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Research resumed (${data?.tier || 'unknown tier'})`,
         data
       });
@@ -792,7 +796,7 @@ function App() {
       autonomousTierRef.current = 'tier3_final_answer';
       addActivity({
         event: 'tier3_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Tier 3 Final Answer generation started`,
         data
       });
@@ -811,7 +815,7 @@ function App() {
       }
       addActivity({
         event: 'tier3_result',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message,
         data
       });
@@ -820,7 +824,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_format_selected', (data) => {
       addActivity({
         event: 'tier3_format_selected',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Answer format: ${data.format === 'short_form' ? 'Short Form (Single Paper)' : 'Long Form (Volume)'}`,
         data
       });
@@ -830,7 +834,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_volume_organized', (data) => {
       addActivity({
         event: 'tier3_volume_organized',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Volume organized: "${data.title}" (${data.chapters?.length || 0} chapters)`,
         data
       });
@@ -839,7 +843,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_chapter_started', (data) => {
       addActivity({
         event: 'tier3_chapter_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Writing chapter ${data.chapter_order}: ${data.title}`,
         data
       });
@@ -848,7 +852,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_chapter_complete', (data) => {
       addActivity({
         event: 'tier3_chapter_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Chapter ${data.chapter_order} complete: ${data.title}`,
         data
       });
@@ -857,7 +861,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_rejection', (data) => {
       addActivity({
         event: 'tier3_rejection',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Tier 3 submission rejected: ${data.phase || 'unknown phase'}`,
         data
       });
@@ -866,7 +870,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_complete', (data) => {
       addActivity({
         event: 'tier3_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `🏆 FINAL ANSWER COMPLETE! ${data.format === 'short_form' ? 'Paper' : 'Volume'}: "${data.title}"`,
         data
       });
@@ -878,7 +882,7 @@ function App() {
     unsubscribers.push(websocket.on('reference_selection_started', (data) => {
       addActivity({
         event: 'reference_selection_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Reference selection started (${data.mode})`,
         data
       });
@@ -887,7 +891,7 @@ function App() {
     unsubscribers.push(websocket.on('reference_selection_complete', (data) => {
       addActivity({
         event: 'reference_selection_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Reference selection complete: ${data.selected_count} papers selected`,
         data
       });
@@ -898,7 +902,7 @@ function App() {
       autonomousTierRef.current = 'tier2_paper_writing';
       addActivity({
         event: 'paper_writing_resumed',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Paper writing resumed: ${data.title}`,
         data
       });
@@ -908,7 +912,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_forced', (data) => {
       addActivity({
         event: 'tier3_forced',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Tier 3 forced with mode: ${data.mode} (${data.completed_papers} papers available)`,
         data
       });
@@ -917,7 +921,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_phase_changed', (data) => {
       addActivity({
         event: 'tier3_phase_changed',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Tier 3 phase: ${data.description || data.phase}`,
         data
       });
@@ -926,7 +930,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_paper_started', (data) => {
       addActivity({
         event: 'tier3_paper_started',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Writing final answer paper: ${data.title}`,
         data
       });
@@ -935,7 +939,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_short_form_complete', (data) => {
       addActivity({
         event: 'tier3_short_form_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Short form paper complete: ${data.title}`,
         data
       });
@@ -944,7 +948,7 @@ function App() {
     unsubscribers.push(websocket.on('tier3_long_form_complete', (data) => {
       addActivity({
         event: 'tier3_long_form_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Long form volume complete: ${data.title} (${data.total_chapters} chapters)`,
         data
       });
@@ -959,7 +963,7 @@ function App() {
       // Also add to activity log
       addActivity({
         event: 'openrouter_privacy_error',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         ...data
       });
     }));
@@ -978,7 +982,7 @@ function App() {
       // Also add to activity log
       addActivity({
         event: 'openrouter_rate_limit',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `⏳ Rate limit: ${data.model} (retry in 1 hour)`,
         ...data
       });
@@ -988,7 +992,7 @@ function App() {
       console.info('Free model rotated:', data);
       addActivity({
         event: 'free_model_rotated',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `🔄 Model rotated: ${data.from_model} → ${data.to_model} (${data.role_id})`,
         ...data
       });
@@ -998,7 +1002,7 @@ function App() {
       console.info('Free model auto-selector used:', data);
       addActivity({
         event: 'free_model_auto_selector_used',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `🔄 Auto-selector backup: openrouter/free used for ${data.role_id}`,
         ...data
       });
@@ -1008,7 +1012,7 @@ function App() {
       console.warn('Serial bottleneck - workflow paused:', data);
       addActivity({
         event: 'serial_bottleneck_paused',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `⏸️ SERIAL BOTTLENECK: ${data.role_id} paused for ${Math.round((data.wait_seconds || 0) / 60)} min`,
         ...data
       });
@@ -1018,7 +1022,7 @@ function App() {
       console.info('Serial bottleneck resolved:', data);
       addActivity({
         event: 'serial_bottleneck_resumed',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `▶️ SERIAL BOTTLENECK resolved: ${data.role_id} resumed`,
         ...data
       });
@@ -1028,7 +1032,7 @@ function App() {
       console.error('All free models exhausted:', data);
       addActivity({
         event: 'all_free_models_exhausted',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `❌ All free models exhausted: ${data.message}`,
         ...data
       });
@@ -1038,7 +1042,7 @@ function App() {
       console.error('Account credits exhausted:', data);
       addActivity({
         event: 'account_credits_exhausted',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `❌ Account free credits depleted: ${data.message}`,
         ...data
       });
@@ -1050,7 +1054,7 @@ function App() {
           role_id: roleId,
           reason: 'account_credits_exhausted',
           message: data.message || 'Account free credits depleted.',
-          timestamp: new Date().toISOString()
+          timestamp: getTimestamp(data)
         }];
       });
     }));
@@ -1060,7 +1064,7 @@ function App() {
       console.warn('OpenRouter fallback triggered:', data);
       addActivity({
         event: 'openrouter_fallback',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `⚠️ OpenRouter credits exhausted for ${data.role_id} — fell back to ${data.fallback_model || 'LM Studio'}`,
         ...data
       });
@@ -1073,7 +1077,7 @@ function App() {
           reason,
           message: data.message,
           fallback_model: data.fallback_model,
-          timestamp: new Date().toISOString()
+          timestamp: getTimestamp(data)
         }];
       });
     }));
@@ -1083,7 +1087,7 @@ function App() {
       console.error('OpenRouter fallback failed:', data);
       addActivity({
         event: 'openrouter_fallback_failed',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `🛑 OpenRouter credits exhausted for ${data.role_id} — NO FALLBACK configured!`,
         ...data
       });
@@ -1094,7 +1098,7 @@ function App() {
           role_id: data.role_id,
           reason: 'no_fallback_configured',
           message: data.message,
-          timestamp: new Date().toISOString()
+          timestamp: getTimestamp(data)
         }];
       });
     }));
@@ -1104,7 +1108,7 @@ function App() {
       console.warn('Boost credits exhausted:', data);
       addActivity({
         event: 'boost_credits_exhausted',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `⚠️ Boost credits exhausted for task ${data.task_id}`,
         ...data
       });
@@ -1115,7 +1119,7 @@ function App() {
           role_id: `Boost (${data.task_id || 'unknown'})`,
           reason: 'boost_credits_exhausted',
           message: data.message || 'Boost API credits exhausted. Falling back to primary model.',
-          timestamp: new Date().toISOString()
+          timestamp: getTimestamp(data)
         }];
       });
     }));
@@ -1124,7 +1128,7 @@ function App() {
       console.info('OpenRouter fallbacks reset:', data);
       addActivity({
         event: 'openrouter_fallbacks_reset',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `OpenRouter reset: ${data.message}`,
         ...data
       });
@@ -1152,7 +1156,7 @@ function App() {
     unsubscribers.push(websocket.on('final_answer_complete', (data) => {
       addActivity({
         event: 'final_answer_complete',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `Final answer complete! Format: ${data.format}`,
         data
       });
@@ -1195,7 +1199,7 @@ function App() {
       // Also add to activity log
       addActivity({
         event: 'high_score_critique',
-        timestamp: new Date().toISOString(),
+        timestamp: getTimestamp(data),
         message: `⭐ High-score critique: ${data.paper_title} (avg: ${data.average_rating})`,
         data
       });
@@ -1386,12 +1390,10 @@ function App() {
 
   const handleModeChange = (nextMode) => {
     setAppMode(nextMode);
-    setUtilityActiveTab(null);
   };
 
   const handleAutonomousTabSelect = (tabId) => {
     setAutonomousActiveTab(tabId);
-    setUtilityActiveTab(null);
     if (appMode !== 'autonomous') {
       setAppMode('autonomous');
     }
@@ -1399,14 +1401,9 @@ function App() {
 
   const handleManualTabSelect = (tabId) => {
     setManualActiveTab(tabId);
-    setUtilityActiveTab(null);
     if (appMode !== 'manual') {
       setAppMode('manual');
     }
-  };
-
-  const handleUtilityTabSelect = (tabId) => {
-    setUtilityActiveTab(tabId);
   };
 
   // Credit exhaustion notification handler
@@ -1529,7 +1526,7 @@ function App() {
   const mainTabs = [
     { id: 'auto-interface', label: 'Start Here: Autonomous Deep Research Controller', group: 'autonomous-main' },
     { id: 'auto-brainstorms', label: 'Autonomous Stage 1: Brainstorms', group: 'autonomous-main' },
-    { id: 'auto-papers', label: 'Autonomous Stage 2: Papers', subtext: '(Less Hallucinatory - Recommended Output)', subtextClass: 'green', group: 'autonomous-main' },
+    { id: 'auto-papers', label: 'Autonomous Stage 2: Papers', group: 'autonomous-main' },
     ...(autonomousConfig.tier3_enabled ? [
       { id: 'auto-final-answer', label: getFinalAnswerLabel(), subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
     ] : []),
@@ -1595,14 +1592,10 @@ function App() {
   return (
     <div className="app">
       {/* Banner Section */}
-      <div className={`app-banner ${(() => {
-        const saved = localStorage.getItem('banner_shimmer_enabled');
-        const enabled = saved !== null ? JSON.parse(saved) : true;
-        return !enabled ? 'no-shimmer' : '';
-      })()}`}>
+      <div className={`app-banner ${shimmerAccentsEnabled ? '' : 'no-shimmer'}`}>
         <div className="banner-content">
           <h1 className="banner-title">
-            <span className="banner-moto">M.O.T.O.</span>
+            <span className="banner-moto" aria-label="M.O.T.O.">M.O.T.O.</span>
             <span className="banner-subtitle">Autonomous ASI</span>
           </h1>
           <p className="banner-company">By Intrafere Research Group</p>
@@ -1635,15 +1628,6 @@ function App() {
           title="Configure API Boost"
         >
           ⚡ API Boost
-        </button>
-        <button 
-          className="boost-logs-btn"
-          onClick={() => {
-            handleUtilityTabSelect('boost-logs');
-          }}
-          title="View Boost Logs"
-        >
-          Boost Logs
         </button>
         <button 
           className="openrouter-key-btn"
@@ -1679,7 +1663,7 @@ function App() {
         )}
       </div>
       
-      <div className={`tabs ${appMode === 'manual' ? 'tabs-manual' : ''}`}>
+      <div className={`tabs ${appMode === 'manual' ? 'tabs-manual' : ''} ${shimmerAccentsEnabled ? 'tabs-shimmer-enabled' : ''}`}>
         {appMode === 'autonomous' ? (
           <>
             {mainTabs.map((tab, index) => {
@@ -1837,7 +1821,6 @@ function App() {
               events={autonomousActivity}
             />
           )}
-          {activeTab === 'boost-logs' && <BoostLogs />}
           
           {activeTab === 'aggregator-interface' && (
             <AggregatorInterface
@@ -2047,7 +2030,7 @@ function App() {
               className="footer-link footer-link-github"
             >
               <span className="footer-icon">⭐</span>
-              Star Us on GitHub for More ASI Programs
+              Visit MOTO's GitHub (Star Us for More ASI Programs)
             </a>
           </div>
         </div>

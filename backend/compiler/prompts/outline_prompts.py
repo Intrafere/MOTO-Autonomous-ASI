@@ -5,13 +5,21 @@ Outline prompts for mathematical document structure generation.
 from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 
 
+OUTLINE_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES FOR OUTLINES:
+- Do NOT turn unsupported benchmark-style claims into committed outline sections.
+- Numeric empirical claims in headings or subsection titles (speedup, latency, throughput, perplexity, accuracy, hardware measurements, benchmark names, etc.) are forbidden unless explicitly backed by an external citation or provided artifact in context.
+- If empirical support is missing, describe the material conservatively as a proposed evaluation, validation plan, expected benefit, design target, future-work task, or open question.
+- Literature claims should identify the external source in-text when they are important enough to shape the outline.
+- Never invent citations, experiments, measurements, or code artifacts while constructing an outline."""
+
+
 def get_outline_create_system_prompt() -> str:
     """Get system prompt for initial outline creation."""
     return """You are creating the initial outline for a mathematical document. Your role is to:
 
 1. Review the aggregated database (accepted submissions from the aggregator tool)
 2. Review the user's compiler-directing prompt
-3. Create a comprehensive outline that captures ALL relevant, unique content from the database
+3. Create the strongest rigorous outline you can for the target paper, using the aggregated database whenever it meaningfully helps
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -24,17 +32,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + OUTLINE_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -149,16 +151,24 @@ V. Conclusion
 The outline is a TABLE OF CONTENTS showing section names and subsections. It does NOT contain the actual paper content.
 
 YOUR TASK:
+SOURCE USAGE PRINCIPLE:
+- Treat the aggregator/brainstorm database as optional high-value source material and exploration history, not a mandatory checklist
+- Use it when it helps you achieve the strongest rigorous paper for the user's compiler-directing prompt
+- You may selectively synthesize, extend, or depart from brainstorm/database material if that better serves the paper
+- Do NOT force coverage of every brainstorm/database entry
+- Do NOT ignore clearly crucial source material for the scope you choose
+
 - Produce a numbered outline with major sections and subsections
-- Reflect every non-trivial point from the aggregator database
+- Incorporate the strongest helpful source ideas where appropriate
 - Flag gaps explicitly if the evidence is insufficient
-- Reference supporting content from the aggregator database where appropriate
+- Reference supporting content from the aggregator database where appropriate, but do not mirror it mechanically
 - Ensure outline supports a coherent, logical flow for the final mathematical document
+- Replace unsupported empirical result claims with neutral headings such as "Evaluation Plan", "Proposed Validation", or "Expected Runtime Benefits"
 
 ITERATIVE REFINEMENT PROCESS:
 This is an iterative outline creation phase. You may submit multiple versions:
 
-1. Generate your best outline based on aggregator database and user prompt
+1. Generate your best outline based on the user prompt, your chosen paper scope, and any helpful source material from the aggregator database
 2. The validator will review and provide detailed feedback (accept or reject)
 3. If accepted: Review feedback - you can still refine further OR mark outline_complete=true
 4. If rejected: Review feedback and generate improved outline
@@ -171,7 +181,7 @@ VALIDATOR FEEDBACK YOU WILL RECEIVE:
 - Actionable suggestions for refinement
 
 WHEN TO MARK outline_complete=true (LOCK OUTLINE):
-- The outline comprehensively captures ALL relevant unique content from aggregator database
+- The outline makes strong use of any source material it chooses to use and does not omit clearly crucial material for its chosen scope
 - Required sections (Abstract, Introduction, Body, Conclusion) present with exact names
 - Sections follow logical mathematical progression (definitions → theorems → proofs)
 - The outline optimally serves the paper title and user's compiler-directing prompt
@@ -180,9 +190,10 @@ WHEN TO MARK outline_complete=true (LOCK OUTLINE):
 
 WHEN TO MARK outline_complete=false (CONTINUE REFINING):
 - After reviewing validator feedback, you see opportunities for improvement
-- Important content from aggregator database is still missing
+- Clearly crucial source material or supporting structure is still missing
 - Structural organization could be enhanced
 - Subsection granularity needs adjustment
+- You want to incorporate more useful brainstorm/database material
 - You want to incorporate validator suggestions before locking
 
 HARD LIMIT:
@@ -203,14 +214,15 @@ The validator checks YOUR SUBMISSION for placeholder text, not the existing outl
 
 CRITICAL REQUIREMENTS:
 - The outline MUST include: Introduction, at least one Body section, and Conclusion (Abstract is optional)
-- Every significant piece of unique information from the database should have a place in the outline
+- Clearly crucial source material for the chosen scope should have a place in the outline, but you do NOT need to mirror every brainstorm/database entry
 - The outline should support a coherent, logical flow for the final document
 - Sections should build upon each other logically (definitions → theorems → proofs)
 - The outline should align with the user's compiler-directing prompt goals
 - DO NOT include a separate References or Citations section in the outline
-- All content must be rooted in sound mathematical reasoning from the aggregator database
+- All content must be rooted in sound mathematical reasoning; aggregator/brainstorm material is optional support, not a mandatory checklist
 - NO unfounded claims or logical fallacies
 - Focus on rigorous mathematical arguments
+- DO NOT include unsupported numeric empirical claims in section or subsection headings
 
 The validator will REJECT your outline if:
 - Missing required sections: Introduction or Conclusion
@@ -218,6 +230,7 @@ The validator will REJECT your outline if:
 - If Abstract is included, it must use proper format: "Abstract", "I. Abstract", or "0. Abstract" (not descriptive text)
 - Sections are out of order (e.g., Conclusion before body sections)
 - No body sections between Introduction and Conclusion
+- The outline includes unsupported benchmark-style numbers or hardware results as if already established
 
 CRITICAL - HOW TO FIX COMMON REJECTION:
 If validator says "MISSING_REQUIRED_SECTION: Introduction", ensure you have a line with "Introduction" or "I. Introduction".
@@ -258,7 +271,7 @@ def get_outline_update_system_prompt() -> str:
     """Get system prompt for outline updates."""
     return """You are reviewing the current document outline to decide if it needs updating. Your role is to:
 
-1. Review the aggregator database for any content not yet captured in the outline
+1. Review the aggregator database for any source material that may strengthen the outline
 2. Review the current document construction progress
 3. Decide if the outline needs modification to better serve the document
 
@@ -273,17 +286,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + OUTLINE_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -295,9 +302,15 @@ The outline MUST maintain these exact sections in this exact order:
 4. **Conclusion** - Summary of findings (exactly "Conclusion" or "N. Conclusion")
 
 YOUR TASK:
+SOURCE USAGE PRINCIPLE:
+- Treat the aggregator/brainstorm database as optional support, not a mandatory checklist
+- Update the outline if source material would materially strengthen the paper
+- Do NOT force additions just because a brainstorm/database entry exists
+- Do NOT ignore clearly crucial source material for the scope you are keeping
+
 Decide if the outline requires updates. Consider:
-- Relevance to current content from aggregator database
-- Missing content that should be included in outline
+- Relevance to current source content when it helps the paper
+- Missing content that should be included in outline to better serve the user prompt
 - Structural issues in current outline
 - Alignment with document construction progress
 
@@ -306,15 +319,16 @@ You must NEVER include placeholder markers like "[HARD CODED PLACEHOLDER FOR...]
 All outline content must be actual section/subsection names and descriptions, not placeholder text.
 
 WHEN TO UPDATE THE OUTLINE (ADDITIONS ONLY):
-- Important content from aggregator DB is missing from current outline
+- Clearly important source content or a better structure is missing from current outline
 - Document construction reveals needed additional sections
-- New pertinent information should be added to complete the document relative to the user-prompt title
+- New pertinent information from source material or rigorous synthesis should be added to better serve the user-prompt title
+- Unsupported empirical claims should be converted into cautious evaluation-plan sections rather than asserted-results sections
 
 CRITICAL: You can ONLY ADD to the outline, NOT delete or remove existing sections.
 CRITICAL: New body sections MUST be inserted BEFORE the Conclusion section.
 
 WHEN NOT TO UPDATE:
-- Current outline already contains all pertinent information
+- Current outline already serves the paper well even if some brainstorm/database items remain unused
 - No new relevant content needs to be added
 
 CRITICAL - SYSTEM-MANAGED MARKERS (NOT YOUR OUTPUT):
@@ -331,11 +345,12 @@ If you include placeholder markers like "[HARD CODED PLACEHOLDER FOR...]" or anc
 The validator checks YOUR SUBMISSION for placeholder text, not the existing outline structure.
 
 CRITICAL REQUIREMENTS FOR UPDATES:
-- All content must be rooted in sound mathematical reasoning from the aggregator database
+- All added content must be rooted in sound mathematical reasoning; source database material is optional support, not a mandatory checklist
 - NO unfounded claims or logical fallacies
 - Focus on rigorous mathematical arguments
 - NEVER change the names of Abstract, Introduction, or Conclusion sections
 - New body sections must be inserted between Introduction and Conclusion
+- DO NOT add unsupported numeric empirical claims in section or subsection headings
 
 EXACT STRING MATCHING FOR EDITS:
 If updating, this system uses EXACT STRING MATCHING. You must:
@@ -435,7 +450,7 @@ Example (Iteration 6 - Ready to Lock):
 {
   "content": "Abstract\\n\\nI. Introduction\\n   A. Historical context of circle-squaring\\n   B. Problem statement and impossibility\\n   C. Overview of proof approach\\n\\nII. Preliminaries and Definitions\\n   A. Compass and straightedge constructions\\n   B. Field extensions and constructible numbers\\n   C. Algebraic vs. transcendental numbers\\n   D. Galois theory connections\\n\\nIII. Main Theoretical Results\\n   A. Theorem: Characterization of constructible lengths\\n   B. Theorem: Lindemann-Weierstrass (transcendence of pi)\\n   C. Theorem: Baker's theorem and applications\\n   D. Corollary: Impossibility of squaring the circle\\n\\nIV. Proofs and Derivations\\n   A. Proof of constructibility characterization\\n   B. Outline of Lindemann-Weierstrass proof\\n   C. Derivation of main impossibility result\\n\\nV. Conclusion\\n   A. Summary of impossibility result\\n   B. Related problems and historical significance",
   "outline_complete": true,
-  "reasoning": "Outline now comprehensively captures ALL content from aggregator database. Added Galois theory subsection (addressing feedback from iteration 2). Added Baker's theorem coverage (addressing feedback from iterations 2-4). Structure follows logical progression from basic definitions through theorems to proofs. All required sections present with correct names. Ready to lock and begin paper construction."
+  "reasoning": "Outline now captures the strongest useful source material from the aggregator database while staying focused on the best paper structure for the prompt. Added Galois theory subsection (addressing feedback from iteration 2). Added Baker's theorem coverage (addressing feedback from iterations 2-4). Structure follows logical progression from basic definitions through theorems to proofs. All required sections present with correct names. Ready to lock and begin paper construction."
 }
 
 CRITICAL JSON ESCAPE RULES:
@@ -455,7 +470,7 @@ Example (Outline Update - No update needed):
   "operation": "insert_after",
   "old_string": "",
   "new_string": "",
-  "reasoning": "The current outline already captures all relevant content from the aggregator database. All theorems and proofs mentioned in accepted submissions have corresponding outline sections."
+  "reasoning": "The current outline already serves the paper well. The strongest useful material from the aggregator database is already represented, and no additional source content is necessary for this scope."
 }
 
 Example (Outline Update - Adding subsection under Section II):
@@ -527,7 +542,7 @@ Do NOT keep generating similar outlines indefinitely - if accepted, decide to lo
     parts.extend([
         f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}",
         "\n---\n",
-        f"AGGREGATOR DATABASE EVIDENCE:\n{rag_evidence}",
+        f"SOURCE DATABASE EVIDENCE (optional support - use if helpful):\n{rag_evidence}",
         "\n---\n",
         "Now generate your outline as JSON:"
     ])
@@ -580,7 +595,7 @@ LEARN FROM THESE PAST MISTAKES.
     
     if rag_evidence:
         parts.append("\n---\n")
-        parts.append(f"AGGREGATOR DATABASE EVIDENCE:\n{rag_evidence}")
+        parts.append(f"SOURCE DATABASE EVIDENCE (optional support - use if helpful):\n{rag_evidence}")
     
     parts.append("\n---\n")
     parts.append("Now decide if outline update is needed (respond as JSON):")

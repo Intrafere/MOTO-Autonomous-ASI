@@ -11,6 +11,7 @@ from backend.shared.models import AggregatorStartRequest, SystemStatus, ModelInf
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.config import system_config, rag_config
 from backend.shared.token_tracker import token_tracker
+from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.event_log import event_log
@@ -195,9 +196,10 @@ async def clear_all_submissions():
 async def upload_file(file: UploadFile = File(...)):
     """Upload a user file."""
     try:
-        # Save to user_uploads directory
-        file_path = Path(system_config.user_uploads_dir) / file.filename
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        safe_filename = validate_single_path_component(file.filename, "filename")
+        uploads_dir = Path(system_config.user_uploads_dir)
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        file_path = resolve_path_within_root(uploads_dir, safe_filename)
         
         async with aiofiles.open(file_path, 'wb') as f:
             content = await file.read()
@@ -205,7 +207,7 @@ async def upload_file(file: UploadFile = File(...)):
         
         return {
             "status": "uploaded",
-            "filename": file.filename,
+            "filename": safe_filename,
             "path": str(file_path)
         }
     except Exception as e:

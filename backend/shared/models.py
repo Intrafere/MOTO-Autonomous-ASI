@@ -53,6 +53,7 @@ class ValidationResult(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     contradiction_check_passed: bool = True
     json_valid: bool = True
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class CleanupReviewResult(BaseModel):
@@ -385,7 +386,7 @@ class ReferenceExpansionRequest(BaseModel):
 
 class ReferenceSelectionResult(BaseModel):
     """Final selection of reference papers."""
-    selected_papers: List[str] = Field(default_factory=list)  # Max 6 paper IDs
+    selected_papers: List[str] = Field(default_factory=list)  # Caller-specific cap
     reasoning: str
 
 
@@ -645,6 +646,7 @@ class PaperCritique(BaseModel):
     host_provider: Optional[str] = None  # e.g., "Anthropic", "Google AI" (for OpenRouter)
     date: datetime = Field(default_factory=datetime.now)
     prompt_used: Optional[str] = None  # The prompt used for this critique (for regeneration)
+    critique_source: Literal["system_auto", "user_request", "unknown"] = "unknown"
     
     # Ratings (1-10 scale)
     novelty_rating: int = Field(default=0, ge=0, le=10)

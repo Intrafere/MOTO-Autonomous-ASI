@@ -35,7 +35,11 @@ class WebSocketService {
       
       try {
         const message = JSON.parse(event.data);
-        this.emit(message.type, message.data);
+        // Include server timestamp in the data if available
+        const dataWithTimestamp = message.timestamp 
+          ? { ...message.data, _serverTimestamp: message.timestamp }
+          : message.data;
+        this.emit(message.type, dataWithTimestamp);
       } catch (e) {
         console.error('Failed to parse WebSocket message:', e);
       }

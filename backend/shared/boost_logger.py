@@ -1,6 +1,7 @@
 """
 Boost Logger - Logs raw API outputs from boost (OpenRouter) API calls.
-Stores logs in a persistent file for viewing in the Boost Logs tab.
+Stores logs in a persistent file so boost-routed calls can be merged into the
+main API call log view.
 """
 import asyncio
 import json

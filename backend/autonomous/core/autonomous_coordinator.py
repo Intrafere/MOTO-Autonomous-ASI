@@ -24,6 +24,7 @@ from backend.shared.models import (
 )
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.free_model_manager import free_model_manager
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.token_tracker import token_tracker
 
@@ -558,6 +559,7 @@ class AutonomousCoordinator:
             self._current_topic_id = workflow_state.get("current_topic_id")
             self._current_paper_id = workflow_state.get("current_paper_id")
             self._current_reference_papers = workflow_state.get("reference_paper_ids", [])
+            self._current_paper_title = workflow_state.get("current_paper_title")
             self._acceptance_count = workflow_state.get("acceptance_count", 0)
             self._rejection_count = workflow_state.get("rejection_count", 0)
             self._consecutive_rejections = workflow_state.get("consecutive_rejections", 0)
@@ -789,6 +791,40 @@ class AutonomousCoordinator:
                 
         except Exception as e:
             logger.error(f"Failed to load saved paper {paper_id} to compiler: {e}")
+
+    async def _preserve_failed_paper_state(self, paper_id: str, paper_title: str) -> None:
+        """
+        Preserve in-progress paper state after a compiler failure so retries resume.
+
+        This keeps the current paper ID/title and stores the best-known phase in the
+        workflow state. The next compilation attempt will then skip title generation
+        and continue from the current paper/outline instead of restarting from scratch.
+        """
+        current_paper = await compiler_paper_memory.get_paper()
+        current_outline = await outline_memory.get_outline()
+
+        resume_phase = None
+        if current_paper and current_paper.strip():
+            resume_phase = self._detect_paper_phase(current_paper)
+        elif current_outline and current_outline.strip():
+            resume_phase = "body"
+        else:
+            resume_phase = self._resume_paper_phase or "body"
+
+        self._current_paper_id = paper_id
+        self._current_paper_title = paper_title
+        self._resume_paper_phase = resume_phase
+
+        await self._save_workflow_state(
+            tier="tier2_paper_writing",
+            phase=resume_phase
+        )
+
+        logger.info(
+            f"Preserved failed paper state for resume: paper={paper_id}, "
+            f"phase={resume_phase}, paper_chars={len(current_paper or '')}, "
+            f"outline_chars={len(current_outline or '')}"
+        )
     
     async def _save_workflow_state(self, tier: str = None, phase: str = None) -> None:
         """Save current workflow state for crash recovery."""
@@ -812,6 +848,7 @@ class AutonomousCoordinator:
             "current_tier": tier or self._state.current_tier,
             "current_topic_id": self._current_topic_id,
             "current_paper_id": self._current_paper_id,
+            "current_paper_title": self._current_paper_title,
             "paper_phase": phase,
             "reference_paper_ids": self._current_reference_papers,  # Persist reference papers across restarts
             "acceptance_count": self._acceptance_count,
@@ -854,6 +891,9 @@ class AutonomousCoordinator:
         self._running = True
         self._stop_event.clear()
         self._state.is_running = True
+        
+        # Reset free model manager state for fresh start
+        free_model_manager.reset()
         
         # Set up autonomous API logging callback
         async def log_callback(task_id, role_id, model, provider, prompt, response, 
@@ -938,7 +978,9 @@ class AutonomousCoordinator:
                                     f"for brainstorm {self._current_topic_id} - retrying..."
                                 )
                                 await asyncio.sleep(5)
-                            if await self._paper_compilation_workflow():
+                            if await self._paper_compilation_workflow(
+                                emit_resume_event=(_resume_paper_attempt == 1)
+                            ):
                                 break
 
                         if not self._stop_event.is_set():
@@ -1325,28 +1367,13 @@ class AutonomousCoordinator:
                     logger.info("Brainstorm cycle complete, returning to topic selection")
 
               except FreeModelExhaustedError as e:
-                if e.soonest_retry:
-                    wait_secs = max(0, e.soonest_retry - time.time())
-                    wait_mins = round(wait_secs / 60, 1)
-                    logger.warning(
-                        f"SERIAL BOTTLENECK: Autonomous research paused for {wait_mins} minutes "
-                        f"(all free models rate-limited)"
-                    )
-                    await self._broadcast("serial_bottleneck_paused", {
-                        "role_id": "autonomous",
-                        "model": str(e),
-                        "wait_seconds": round(wait_secs),
-                        "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
-                    })
-                    await asyncio.sleep(wait_secs)
-                    await self._broadcast("serial_bottleneck_resumed", {"role_id": "autonomous"})
-                else:
-                    logger.error(f"AutonomousCoordinator: all free models exhausted, no cooldown: {e}")
-                    await self._broadcast("all_free_models_exhausted", {
-                        "message": f"All free models exhausted: {e}"
-                    })
-                    await self._save_workflow_state()
-                    break
+                # All free models exhausted after retries - wait briefly and retry
+                logger.warning(f"AutonomousCoordinator: all free models exhausted: {e}")
+                await self._broadcast("free_models_exhausted", {
+                    "role_id": "autonomous",
+                    "message": str(e),
+                })
+                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
 
         except Exception as e:
             logger.error(f"AutonomousCoordinator error: {e}")
@@ -1711,28 +1738,13 @@ class AutonomousCoordinator:
                     logger.info("Brainstorm cycle complete, returning to topic selection")
 
               except FreeModelExhaustedError as e:
-                if e.soonest_retry:
-                    wait_secs = max(0, e.soonest_retry - time.time())
-                    wait_mins = round(wait_secs / 60, 1)
-                    logger.warning(
-                        f"SERIAL BOTTLENECK: Resumed research paused for {wait_mins} minutes "
-                        f"(all free models rate-limited)"
-                    )
-                    await self._broadcast("serial_bottleneck_paused", {
-                        "role_id": "autonomous_resumed",
-                        "model": str(e),
-                        "wait_seconds": round(wait_secs),
-                        "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
-                    })
-                    await asyncio.sleep(wait_secs)
-                    await self._broadcast("serial_bottleneck_resumed", {"role_id": "autonomous_resumed"})
-                else:
-                    logger.error(f"Resumed research: all free models exhausted, no cooldown: {e}")
-                    await self._broadcast("all_free_models_exhausted", {
-                        "message": f"All free models exhausted: {e}"
-                    })
-                    await self._save_workflow_state()
-                    break
+                # All free models exhausted after retries - wait briefly and retry
+                logger.warning(f"Resumed research: all free models exhausted: {e}")
+                await self._broadcast("free_models_exhausted", {
+                    "role_id": "autonomous_resumed",
+                    "message": str(e),
+                })
+                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
 
         except Exception as e:
             logger.error(f"Error in resumed research loop: {e}")
@@ -2278,8 +2290,10 @@ class AutonomousCoordinator:
         - Accelerate convergence on valuable insights by standing on prior work
         
         Returns:
-            List of selected paper_ids (max 6)
+            List of selected paper_ids for the topic-cycle base reference cap
         """
+        max_reference_papers = system_config.autonomous_topic_cycle_max_reference_papers
+
         # Get available papers
         papers_summary = await autonomous_rag_manager.get_all_papers_summary()
         
@@ -2309,7 +2323,8 @@ class AutonomousCoordinator:
             brainstorm_summary=brainstorm_summary,
             available_papers=papers_summary,
             mode="initial",  # Pre-brainstorm mode
-            already_selected=[]  # No papers selected yet
+            already_selected=[],  # No papers selected yet
+            max_total_papers=max_reference_papers,
         )
         
         await self._broadcast("reference_selection_complete", {
@@ -2341,6 +2356,35 @@ class AutonomousCoordinator:
             else:
                 logger.warning(f"Reference paper not found: {paper_path}")
         return paths
+
+    async def _get_reference_paper_details(
+        self,
+        paper_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get compact metadata summaries for reference papers used in title prompts.
+        """
+        reference_details: List[Dict[str, Any]] = []
+
+        for paper_id in paper_ids or []:
+            metadata = await paper_library.get_metadata(paper_id)
+            if not metadata:
+                logger.warning(f"Reference paper metadata not found: {paper_id}")
+                continue
+
+            reference_title_display = await paper_library.get_reference_title_display(
+                paper_id,
+                metadata.title,
+            )
+
+            reference_details.append({
+                "paper_id": paper_id,
+                "title": metadata.title,
+                "reference_title_display": reference_title_display,
+                "abstract": metadata.abstract
+            })
+
+        return reference_details
     
     # ========================================================================
     # PHASE 2: BRAINSTORM AGGREGATION
@@ -2970,7 +3014,11 @@ class AutonomousCoordinator:
     # PHASE 3: PAPER COMPILATION
     # ========================================================================
     
-    async def _paper_compilation_workflow(self, skip_reference_selection: bool = False) -> bool:
+    async def _paper_compilation_workflow(
+        self,
+        skip_reference_selection: bool = False,
+        emit_resume_event: bool = False
+    ) -> bool:
         """
         Complete paper compilation workflow.
         Order: Reference selection -> Title -> Body -> Conclusion -> Intro -> Abstract
@@ -2981,6 +3029,9 @@ class AutonomousCoordinator:
         Args:
             skip_reference_selection: If True, skip reference selection (for paper 2/3 
                 from same brainstorm - reuses existing references).
+            emit_resume_event: If True, broadcast `paper_writing_resumed` for a true
+                interrupted-workflow resume. Automatic in-process retries should keep
+                retrying silently and must not be mislabeled as resumed.
         
         Returns:
             True if paper was successfully compiled, False otherwise.
@@ -3001,9 +3052,11 @@ class AutonomousCoordinator:
             paper_id = self._current_paper_id
             is_resuming_paper = True
             
-            # Get paper title from metadata
+            # Prefer the in-memory/workflow-state title for retries of unsaved papers.
             paper_metadata = await research_metadata.get_paper_entry(paper_id)
-            if paper_metadata:
+            if self._current_paper_title:
+                paper_title = self._current_paper_title
+            elif paper_metadata:
                 paper_title = paper_metadata.get("title", f"Paper {paper_id}")
                 self._current_paper_title = paper_title
             else:
@@ -3023,11 +3076,12 @@ class AutonomousCoordinator:
             
             logger.info(f"RESUME: Continuing paper {paper_id} compilation (title: {paper_title[:50]}...)")
             
-            await self._broadcast("paper_writing_resumed", {
-                "paper_id": paper_id,
-                "title": paper_title,
-                "source_brainstorm_id": self._current_topic_id
-            })
+            if emit_resume_event:
+                await self._broadcast("paper_writing_resumed", {
+                    "paper_id": paper_id,
+                    "title": paper_title,
+                    "source_brainstorm_id": self._current_topic_id
+                })
         else:
             # FRESH START: Run full title/reference selection workflow
             # Step 1: Reference selection (if papers exist) - skip for continuation papers
@@ -3049,18 +3103,23 @@ class AutonomousCoordinator:
             existing_papers = await research_metadata.get_papers_by_brainstorm(
                 self._current_topic_id
             )
+            reference_details = await self._get_reference_paper_details(reference_paper_ids)
             
             candidate_titles = await self._paper_title_exploration_phase(
                 topic_prompt=topic_prompt,
                 brainstorm_summary=brainstorm_summary,
-                existing_papers=existing_papers
+                existing_papers=existing_papers,
+                reference_papers=reference_details
             )
             
             if self._stop_event.is_set():
                 return False
             
             # Step 3: Final title selection (informed by candidate titles)
-            paper_title = await self._paper_title_selection(candidate_titles=candidate_titles)
+            paper_title = await self._paper_title_selection(
+                candidate_titles=candidate_titles,
+                reference_papers=reference_details
+            )
             
             if paper_title is None:
                 logger.error("Paper title selection failed")
@@ -3085,7 +3144,10 @@ class AutonomousCoordinator:
             })
         
         # Save workflow state with paper details
-        await self._save_workflow_state(tier="tier2_paper_writing", phase="outline")
+        await self._save_workflow_state(
+            tier="tier2_paper_writing",
+            phase=(self._resume_paper_phase or "body") if is_resuming_paper else "outline"
+        )
         
         # Step 3: Paper compilation (using Part 2 compiler infrastructure)
         # Pass is_resume flag and phase to preserve existing paper content when resuming
@@ -3097,18 +3159,13 @@ class AutonomousCoordinator:
             resume_phase=self._resume_paper_phase if is_resuming_paper else None
         )
         
-        # Clear resume state after compilation attempt (whether success or failure)
-        # This prevents stale resume state from affecting future papers
-        if is_resuming_paper:
-            self._resume_paper_phase = None
-        
         if paper_content is None:
             logger.error("Paper compilation failed")
-            # CRITICAL: Clear stale paper_id to prevent future compilations from
-            # entering RESUME MODE for this failed paper with mismatched brainstorm data
-            self._current_paper_id = None
-            self._current_paper_title = None
+            await self._preserve_failed_paper_state(paper_id, paper_title)
             return False
+
+        # Clear resume state after a successful compilation attempt.
+        self._resume_paper_phase = None
         
         # Get final outline
         from backend.compiler.memory.outline_memory import outline_memory as compiler_outline_memory
@@ -3130,21 +3187,26 @@ class AutonomousCoordinator:
         Run additional reference paper selection workflow before paper writing.
         
         This allows the AI to select ADDITIONAL references discovered to be relevant
-        during brainstorming, up to the 6 paper limit.
+        during brainstorming, while staying within the topic-cycle base reference cap.
         
         The papers already selected during pre-brainstorm reference selection are
         preserved and shown as "ALREADY SELECTED" to the AI.
         
         Returns:
-            Combined list of all selected paper_ids (max 6 total)
+            Combined list of all selected paper_ids for this topic cycle
         """
+        max_reference_papers = system_config.autonomous_topic_cycle_max_reference_papers
+
         # Start with papers already selected during pre-brainstorm
         already_selected = self._current_reference_papers.copy()
         
         # Check how many more we can select
-        remaining_slots = 6 - len(already_selected)
+        remaining_slots = max_reference_papers - len(already_selected)
         if remaining_slots <= 0:
-            logger.info(f"Already have {len(already_selected)} reference papers (max 6), skipping additional selection")
+            logger.info(
+                f"Already have {len(already_selected)} reference papers "
+                f"(max {max_reference_papers}), skipping additional selection"
+            )
             return already_selected
         
         # Get available papers
@@ -3158,6 +3220,10 @@ class AutonomousCoordinator:
         available_for_selection = [
             p for p in papers_summary 
             if p.get("paper_id") not in already_selected
+        ]
+        already_selected_details = [
+            p for p in papers_summary
+            if p.get("paper_id") in already_selected
         ]
         
         if not available_for_selection:
@@ -3186,14 +3252,19 @@ class AutonomousCoordinator:
             brainstorm_summary=brainstorm_summary,
             available_papers=available_for_selection,
             mode="additional",  # Additional selection mode
-            already_selected=already_selected  # Papers already selected
+            already_selected=already_selected,  # Papers already selected
+            already_selected_papers=already_selected_details,
+            max_total_papers=max_reference_papers,
         )
         
-        # Combine with already selected (respecting max 6 limit)
+        # Combine with already selected (respecting the topic-cycle cap)
         combined = already_selected + additional_ids
-        if len(combined) > 6:
-            logger.warning(f"Combined references ({len(combined)}) exceeds limit, truncating to 6")
-            combined = combined[:6]
+        if len(combined) > max_reference_papers:
+            logger.warning(
+                f"Combined references ({len(combined)}) exceeds limit, "
+                f"truncating to {max_reference_papers}"
+            )
+            combined = combined[:max_reference_papers]
         
         # Update current reference papers
         self._current_reference_papers = combined
@@ -3209,11 +3280,18 @@ class AutonomousCoordinator:
         logger.info(f"Additional reference selection: {len(additional_ids)} new + {len(already_selected)} existing = {len(combined)} total")
         return combined
     
-    async def _paper_title_selection(self, candidate_titles: str = "") -> Optional[str]:
-        """Select paper title, optionally informed by candidate titles from exploration."""
+    async def _paper_title_selection(
+        self,
+        candidate_titles: str = "",
+        reference_papers: Optional[List[Dict[str, Any]]] = None
+    ) -> Optional[str]:
+        """Select paper title, optionally informed by candidate titles and references."""
         metadata = await brainstorm_memory.get_metadata(self._current_topic_id)
         if metadata is None:
             return None
+
+        if reference_papers is None and self._current_reference_papers:
+            reference_papers = await self._get_reference_paper_details(self._current_reference_papers)
         
         # Get brainstorm summary
         brainstorm_summary = await autonomous_rag_manager.get_brainstorm_summary(
@@ -3231,6 +3309,7 @@ class AutonomousCoordinator:
             topic_prompt=metadata.topic_prompt,
             brainstorm_summary=brainstorm_summary,
             existing_papers_from_brainstorm=existing_papers,
+            reference_papers=reference_papers,
             candidate_titles=candidate_titles,
             stop_event=self._stop_event
         )
@@ -3780,17 +3859,17 @@ class AutonomousCoordinator:
         # Add paper reference to brainstorm
         await brainstorm_memory.add_paper_reference(self._current_topic_id, paper_id)
         
-        # Update counts
-        self._papers_completed_count += 1
-        
-        await self._broadcast("paper_completed", {
-            "paper_id": paper_id,
-            "title": title,
-            "word_count": paper_metadata.word_count
-        })
-        
-        # Trigger auto-critique generation in background (only if marking as complete)
         if mark_complete:
+            # Update counts
+            self._papers_completed_count += 1
+
+            await self._broadcast("paper_completed", {
+                "paper_id": paper_id,
+                "title": title,
+                "word_count": paper_metadata.word_count
+            })
+
+            # Trigger auto-critique generation in background (only if marking as complete)
             asyncio.create_task(self._auto_generate_paper_critique(
                 paper_id=paper_id,
                 paper_title=title
@@ -3921,6 +4000,7 @@ class AutonomousCoordinator:
                 host_provider=self._validator_openrouter_provider,
                 date=datetime.now(),
                 prompt_used=DEFAULT_CRITIQUE_PROMPT,  # Always uses default for auto-critiques
+                critique_source="system_auto",
                 novelty_rating=novelty,
                 novelty_feedback=critique_data.get("novelty_feedback", ""),
                 correctness_rating=correctness,
@@ -4787,6 +4867,8 @@ class AutonomousCoordinator:
         Select reference papers for Tier 3 final answer.
         Directly selects papers without brainstorm context.
         """
+        max_reference_papers = system_config.autonomous_tier3_short_form_max_reference_papers
+
         # For Tier 3, we browse ALL papers and select those most useful for answering
         selected_ids = await self._reference_selector.select_references(
             user_research_prompt=self._user_research_prompt,
@@ -4794,7 +4876,8 @@ class AutonomousCoordinator:
             brainstorm_summary="[No brainstorm - Tier 3 operates on completed papers only]",
             available_papers=all_papers,
             mode="initial",  # Fresh selection for Tier 3
-            already_selected=[]
+            already_selected=[],
+            max_total_papers=max_reference_papers,
         )
         
         return selected_ids
@@ -4810,16 +4893,7 @@ class AutonomousCoordinator:
         Runs paper title exploration first to collect 5 candidate titles.
         """
         # Get reference paper details
-        reference_details = []
-        for paper_id in reference_papers:
-            content = await paper_library.get_paper_content(paper_id)
-            metadata = await paper_library.get_metadata(paper_id)
-            if metadata:
-                reference_details.append({
-                    "paper_id": paper_id,
-                    "title": metadata.title,
-                    "abstract": metadata.abstract
-                })
+        reference_details = await self._get_reference_paper_details(reference_papers)
         
         # Run title exploration phase for Tier 3
         topic_prompt = f"[TIER 3 FINAL ANSWER] Certainty: {assessment.certainty_level}"
@@ -4841,6 +4915,7 @@ class AutonomousCoordinator:
             topic_prompt=topic_prompt,
             brainstorm_summary=brainstorm_summary,
             existing_papers_from_brainstorm=[],
+            reference_papers=reference_details,
             candidate_titles=candidate_titles,
             stop_event=self._stop_event
         )
@@ -4995,11 +5070,7 @@ class AutonomousCoordinator:
         ]
         
         # Run title exploration for this chapter
-        ref_details = []
-        for pid in reference_ids:
-            meta = await paper_library.get_metadata(pid)
-            if meta:
-                ref_details.append({"paper_id": pid, "title": meta.title, "abstract": meta.abstract})
+        ref_details = await self._get_reference_paper_details(reference_ids)
         
         candidate_titles = await self._paper_title_exploration_phase(
             topic_prompt=f"[VOLUME CHAPTER: {chapter.chapter_type}] {context}",
@@ -5017,6 +5088,7 @@ class AutonomousCoordinator:
             topic_prompt=f"[VOLUME CHAPTER: {chapter.chapter_type}] {context}",
             brainstorm_summary=f"Known Certainties:\n{assessment.known_certainties_summary}",
             existing_papers_from_brainstorm=[],
+            reference_papers=ref_details,
             candidate_titles=candidate_titles,
             stop_event=self._stop_event
         )
@@ -5271,12 +5343,12 @@ class AutonomousCoordinator:
                 # 20 slots: topic selection (submit/validate pairs)
                 for i in range(20):
                     if i % 2 == 0:
-                        task_id = f"auto_ts_{ts_seq:03d}"
+                        task_id = f"agg_sub1_{ts_seq:03d}"
                         role = "Topic Selector"
                         mode = "Topic Selection"
                         ts_seq += 1
                     else:
-                        task_id = f"auto_tv_{tv_seq:03d}"
+                        task_id = f"agg_val_{tv_seq:03d}"
                         role = "Topic Validator"
                         mode = "Topic Validation"
                         tv_seq += 1

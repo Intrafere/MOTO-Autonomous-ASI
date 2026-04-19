@@ -11,6 +11,8 @@ Compiler runs independently from aggregator (manual start via API only). Strict 
 
 Reads aggregator database + user prompt, distills into a single coherent paper. 1 high-context submitter + 1 high-param submitter + 1 validator. Sequential workflow (no parallel submitters).
 
+Aggregator/brainstorm database material is high-priority optional source context, not a mandatory checklist. Compiler submitters may selectively use, synthesize beyond, or depart from database material when that better serves the user's prompt and remains rigorous. Validator must not reject solely for selective non-use of database material.
+
 **Context Anchors**:
 - **Paper Anchor**: `[HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]`
 - **Outline Anchor** (two lines): `[HARD CODED BRACKETED DESIGNATION THAT SHOWS END-OF-PAPER DESIGNATION MARK]` then `[HARD CODED END-OF-OUTLINE MARK -- ALL OUTLINE CONTENT SHOULD BE ABOVE THIS LINE]`

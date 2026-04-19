@@ -3,6 +3,7 @@ WebSocket route for real-time updates.
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import List, Dict
+from datetime import datetime
 import asyncio
 import logging
 import json
@@ -34,7 +35,8 @@ class ConnectionManager:
         """Broadcast message to all connected clients."""
         message = json.dumps({
             "type": event_type,
-            "data": data
+            "data": data,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
         })
         
         disconnected = []

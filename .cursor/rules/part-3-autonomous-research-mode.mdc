@@ -59,10 +59,12 @@ The autonomous coordinator USES actual Part 1 aggregator infrastructure for brai
 ### Part 2 Compiler Integration (Tier 2)
 The autonomous coordinator USES actual Part 2 compiler infrastructure for paper compilation:
 - Creates separate `CompilerCoordinator` instance per paper
-- Configures with brainstorm database as primary source
-- Adds reference papers (up to 6) to RAG context if selected
+- Configures with brainstorm database as high-priority optional source material
+- Adds selected reference papers to RAG context if selected (topic-cycle cap 3; Tier 3 short-form cap 6)
 - Monitors compiler progress to detect abstract completion (final section)
 - Extracts abstract from completed paper for metadata storage
+
+Compiler submitters may selectively use, synthesize beyond, or depart from brainstorm material when that better serves the user's prompt and remains rigorous. Validator must not reject solely for selective non-use of brainstorm/database material.
 
 **Critical Implementation Details**:
 - **system_config propagation (REQUIRED)**: Before creating `CompilerCoordinator`, autonomous mode MUST write all compiler context/token settings to `system_config` (e.g., `system_config.compiler_high_context_context_window = self._high_context_context`). Compiler modules read from `system_config` at init — the manual `/api/compiler/start` route does this, but autonomous mode bypasses that route and must do it explicitly. Applies to both `_compile_paper_from_brainstorm()` and `_compile_tier3_paper()`.
@@ -224,7 +226,7 @@ After topic selection is validated, the reference selector:
 1. Reviews ALL completed paper abstracts
 2. Requests expansion of papers that would be VERY USEFUL for brainstorm exploration
 3. Reviews full content of expanded papers
-4. Selects up to 6 papers to use as context during brainstorming
+4. Selects up to 3 papers to use as topic-cycle base context during brainstorming
 5. Selected papers are loaded into brainstorm aggregator as `user_files`
 
 ### Why Outlines Are Included
@@ -242,11 +244,12 @@ After topic selection is validated, the reference selector:
 - Outlines are fetched from `paper_{paper_id}_outline.txt`
 - If outline is unavailable, displays "[Not available]"
 - Outlines are included in BOTH abstract review (Step 1) AND full paper review (Step 2)
+- Paper titles shown during reference review and later selected-reference contexts include compact validator-review snapshots: initial system critique always, plus up to the latest 4 user-triggered critiques when available. Snapshot content is model ID + novelty/correctness/impact ratings only (no feedback text).
 
 ### Two-Step Browsing Workflow
 
 **Step 1**: Review abstracts+outlines → Request expansion of promising papers  
-**Step 2**: Review full content → Final selection (max 6 papers)
+**Step 2**: Review full content → Final selection (max 3 papers)
 
 Context: Direct inject if fits (~40% budget), RAG if too large. No truncation.
 
@@ -257,7 +260,7 @@ Context: Direct inject if fits (~40% budget), RAG if too large. No truncation.
 - Current brainstorm topic prompt (direct injection)
 - ALL Tier 2 paper titles + abstracts + outlines (direct injection if fits, RAG if too large)
 
-JSON schemas defined in `json-prompt-design.mdc`. Two-step: submitter requests paper expansions (`expand_papers`, `proceed_without_references`), then makes final selection (`selected_papers`). Max 6 papers total.
+JSON schemas defined in `json-prompt-design.mdc`. Two-step: submitter requests paper expansions (`expand_papers`, `proceed_without_references`), then makes final selection (`selected_papers`). Max 3 papers total for the topic cycle.
 
 **Context Handling (DIRECT INJECTION FIRST, RAG SECOND):**
 
@@ -274,7 +277,7 @@ JSON schemas defined in `json-prompt-design.mdc`. Two-step: submitter requests p
 - Submitter CHOOSES which papers to expand (not automatic expansion of all papers)
 - Submitter makes FINAL selection after reviewing full content
 - System intelligently handles large papers via RAG when needed
-- Maximum 6 papers enforced across both selection modes
+- Maximum 3 papers enforced across the topic-cycle selection modes
 
 ### Context for Pre-Brainstorm Reference Selection
 - User's high-level research prompt (direct injection)
@@ -284,7 +287,7 @@ JSON schemas defined in `json-prompt-design.mdc`. Two-step: submitter requests p
 
 ### Key Design Points
 - **Same references persist**: References selected here are used for BOTH brainstorming AND paper writing
-- **Additional selection later**: AI can select MORE references (up to 6 total) before paper writing
+- **Additional selection later**: AI can select MORE references (up to 3 total) before paper writing
 - **No re-selection/removal**: Already-selected references remain selected throughout topic cycle
 
 ---
@@ -445,7 +448,7 @@ Once completion review decides WRITE_PAPER (and self-validates), the system tran
 
 **SKIP THIS STEP if**:
 - No Tier 2 papers exist yet, OR
-- Already at max capacity (6 papers selected during pre-brainstorm)
+- Already at max capacity (3 papers selected during pre-brainstorm)
 
 **Context**:
 - Papers already selected for brainstorming (shown as "ALREADY SELECTED")
@@ -455,7 +458,7 @@ Once completion review decides WRITE_PAPER (and self-validates), the system tran
 **Key Differences from Pre-Brainstorm Selection**:
 - Shows which papers are ALREADY SELECTED (cannot be removed)
 - Only shows papers NOT YET selected for expansion
-- Maximum additional papers = 6 - (already selected count)
+- Maximum additional papers = 3 - (already selected count)
 - Benefits from brainstorm insights to identify newly-relevant papers
 
 ### Two-Step Browsing Workflow (Additional Mode)
@@ -467,7 +470,31 @@ Same two-step browsing workflow as pre-brainstorm selection (expand request → 
 - Rejects if reasoning is unsound or selection doesn't align with brainstorm content
 - Rejection feedback goes to rolling cache
 
-**Final Reference List**: Already-selected papers + newly-selected papers (max 6 total)
+**Final Reference List**: Already-selected papers + newly-selected papers (max 3 total)
+
+### Paper Title Exploration (Pre-Title Candidate Brainstorm)
+
+**Purpose**: Before committing to a paper title, the system collects 5 validated candidate titles using the Part 1 aggregator infrastructure. The final title selection then chooses from candidates, synthesizes them, or proposes a new title with justification.
+
+**Architecture**: Uses `AggregatorCoordinator` from Part 1 — same parallel submitters + batch validator, but with **cleanup/pruning disabled** (`enable_cleanup_review=False`) since target is only 5 candidates.
+
+**Applies to EVERY paper creation**: Tier 2 papers (1/2/3 from brainstorm), Tier 3 short-form, Tier 3 gap/intro/conclusion chapters.
+
+**Workflow**:
+1. Aggregator starts with all configured submitters running in parallel
+2. Submitters generate candidate paper titles as standard submissions
+3. Validator checks quality, relevance, and DIVERSITY (rejects near-duplicates)
+4. Accepted candidates accumulate in temp title DB
+5. Coordinator stops at 5 acceptances (or 15 consecutive rejections safety valve)
+6. Reads title DB, formats as candidate list for final title selection
+
+**Temp DB**: `title_candidates_{topic_id}.txt` in brainstorms dir (cleaned up after phase)
+
+**WebSocket Events**: `paper_title_exploration_started`, `paper_title_exploration_progress`, `paper_title_exploration_complete`
+
+**Crash Recovery**: On resume, exploration restarts fresh (short phase, no state to preserve).
+
+**Prompts**: `paper_title_exploration_prompts.py` — `build_title_exploration_user_prompt()` frames the aggregation task for candidate title generation with context: user prompt, topic, brainstorm summary, existing papers, reference papers.
 
 ### Paper Title Exploration (Pre-Title Candidate Brainstorm)
 
@@ -497,8 +524,8 @@ Same two-step browsing workflow as pre-brainstorm selection (expand request → 
 
 **Context**:
 - User's high-level research prompt
-- Current brainstorm database (RAG)
-- Selected reference papers (if any, RAG)
+- Current brainstorm summary (direct injection; no full brainstorm RAG in title selection)
+- Selected reference paper summaries (if any, direct injection)
 - ALL existing paper titles from THIS brainstorm topic (direct injection)
 - ALL existing paper abstracts from THIS brainstorm topic (if any, direct injection)
 - **5 validated candidate titles from Paper Title Exploration phase** (direct injection)
@@ -521,10 +548,11 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `paper_title`, `reasoni
 
 **Validator Role**:
 - Topic validator reviews title selection
+- Validator also sees selected reference paper summaries (if any) so acceptance/rejection reflects the intended paper scope
 - Rejects if title is too similar to **EXISTING COMPLETED PAPERS** from this brainstorm (NOT brainstorm submissions!)
 - Rejects if title doesn't align with brainstorm content
 - DO NOT reject simply because title reflects brainstorm submission content - that is INTENDED behavior
-- Rejection feedback goes to rolling cache
+- Rejection feedback is threaded into subsequent retries within the current title-selection loop (keeps last 5 attempts in local retry history)
 
 ---
 
@@ -872,7 +900,7 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `answer_format` (short_
 
 **Workflow**:
 
-1. **Reference Selection**: Browse all papers, select up to 6 for direct injection
+1. **Reference Selection**: Browse all papers, select up to 6 for Tier 3 short-form context
 2. **Title Selection**: Title that directly answers user's prompt (uses existing `PaperTitleSelectorAgent`)
 3. **Paper Compilation**: Use existing Tier 2 compiler infrastructure
    - Outline creation → Body → Conclusion → Introduction → Abstract
@@ -911,6 +939,8 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `volume_title`, `chapte
 1. **Gap Papers** (if any): Write in chapter order
 2. **Conclusion Paper**: Synthesizes all chapters, directly answers user's question
 3. **Introduction Paper**: Frames the volume, provides roadmap (written LAST)
+
+**Chapter Reference Scope**: Gap/introduction/conclusion chapter writing uses all `existing_paper` chapters chosen for the organized volume as references. There is no separate 6-paper selector inside long-form chapter writing.
 
 **Volume Assembly**: After all chapters are written:
 - Papers are combined into final volume
@@ -1517,7 +1547,8 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
   - Constrained section order (body → conclusion → intro → abstract)
   - AI-generated paper titles instead of user-provided prompts
   - Reference paper selection workflow
-  - Brainstorm database as primary source
+  - Brainstorm database as high-priority optional source material
+  - Selective non-use of brainstorm/database material is allowed when the resulting paper is stronger, rigorous, and aligned with the prompt
 
 ### Running Modes
 - **Part 1, Part 2, and Part 3 remain user-selectable modes**
@@ -1599,7 +1630,7 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 5. **Paper is NOT complete until abstract is written AND validated** - Sequential order must complete
 6. **Same model MUST self-validate completion review decisions** - SPECIAL SELF-VALIDATION MODE
 7. **Completion review counts both acceptances and removals** - Pruning counts toward 10-acceptance trigger
-8. **Maximum 6 reference papers total** - Context budget constraint (applies to brainstorm AND paper writing)
+8. **Maximum 3 topic-cycle base reference papers total** - Applies across pre-brainstorm + additional selection for brainstorm/Tier 2 paper writing. Tier 3 short-form keeps its own 6-paper selection cap, and Tier 3 long-form chapter writing uses all selected `existing_paper` volume chapters as references.
 9. **Paper section order is FIXED**: Body → Conclusion → Introduction → Abstract - Cannot skip or reorder
 10. **Paper redundancy review is CONSERVATIVE** - Maximum 1 removal per cycle, when in doubt keep
 11. **Workflow state is ALWAYS persisted for crash recovery** - System auto-resumes from last checkpoint on restart

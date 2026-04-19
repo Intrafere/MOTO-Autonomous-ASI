@@ -4,11 +4,11 @@ export const AUTONOMOUS_SETTINGS_STORAGE_KEY = 'autonomous_research_settings';
 export const AUTONOMOUS_PROFILES_STORAGE_KEY = 'autonomous_research_profiles';
 export const STARTUP_PROVIDER_CHOICE_STORAGE_KEY = 'startup_provider_choice';
 export const LM_STUDIO_STARTUP_CHOICE = 'lm_studio';
-export const RECOMMENDED_PROFILE_KEY = 'recommended_fast_affordable_mid';
-export const RECOMMENDED_CHEAPER_PROFILE_KEY = 'recommended_cheaper_lower_knowledge';
+export const RECOMMENDED_PROFILE_KEY = 'recommended_slower_affordable_higher_knowledge';
+export const RECOMMENDED_ALTERNATE_PROFILE_KEY = 'recommended_fast_affordable_mid';
 export const RECOMMENDED_PROFILE_KEYS = [
   RECOMMENDED_PROFILE_KEY,
-  RECOMMENDED_CHEAPER_PROFILE_KEY,
+  RECOMMENDED_ALTERNATE_PROFILE_KEY,
 ];
 
 const DEFAULT_SUBMITTER_CONFIG = {
@@ -127,6 +127,68 @@ const DEFAULT_AUTONOMOUS_SETTINGS = {
 
 export const RECOMMENDED_PROFILES = {
   [RECOMMENDED_PROFILE_KEY]: {
+    name: 'Slower, less affordable, higher knowledge',
+    numSubmitters: 3,
+    submitters: [
+      {
+        modelId: 'google/gemini-3.1-pro-preview',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1048576,
+        maxOutputTokens: 65500,
+      },
+      {
+        modelId: 'moonshotai/kimi-k2.5',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 262000,
+        maxOutputTokens: 40000,
+      },
+      {
+        modelId: 'deepseek/deepseek-v3.2',
+        provider: 'openrouter',
+        openrouterProvider: 'AtlasCloud',
+        lmStudioFallbackId: null,
+        contextWindow: 163800,
+        maxOutputTokens: 30000,
+      },
+    ],
+    validator: {
+      modelId: 'moonshotai/kimi-k2.5',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 262000,
+      maxOutputTokens: 40000,
+    },
+    highContext: {
+      modelId: 'google/gemini-3.1-pro-preview',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500,
+    },
+    highParam: {
+      modelId: 'google/gemini-3.1-pro-preview',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500,
+    },
+    critique: {
+      modelId: 'z-ai/glm-5.1',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 202752,
+      maxOutputTokens: 65500,
+    },
+  },
+  [RECOMMENDED_ALTERNATE_PROFILE_KEY]: {
     name: 'Fast, affordable, mid-tier knowledge',
     numSubmitters: 3,
     submitters: [
@@ -156,12 +218,12 @@ export const RECOMMENDED_PROFILES = {
       },
     ],
     validator: {
-      modelId: 'x-ai/grok-4.1-fast',
+      modelId: 'qwen/qwen3.5-flash-02-23',
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,
-      contextWindow: 2000000,
-      maxOutputTokens: 30000,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500,
     },
     highContext: {
       modelId: 'moonshotai/kimi-k2.5',
@@ -181,50 +243,6 @@ export const RECOMMENDED_PROFILES = {
     },
     critique: {
       modelId: 'google/gemini-3.1-pro-preview',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
-    },
-  },
-  [RECOMMENDED_CHEAPER_PROFILE_KEY]: {
-    name: 'Cheaper, lower knowledge',
-    numSubmitters: 3,
-    submitters: Array.from({ length: 3 }, () => ({
-      modelId: 'qwen/qwen3.5-flash-02-23',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
-    })),
-    validator: {
-      modelId: 'qwen/qwen3.5-flash-02-23',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
-    },
-    highContext: {
-      modelId: 'qwen/qwen3.5-flash-02-23',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
-    },
-    highParam: {
-      modelId: 'qwen/qwen3.5-flash-02-23',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
-    },
-    critique: {
-      modelId: 'qwen/qwen3.5-flash-02-23',
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,

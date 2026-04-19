@@ -261,7 +261,10 @@ function FinalAnswerLibrary() {
           <h2>Stage 3 Final Answers History</h2>
           <p>Loading completed Stage 3 final answers...</p>
         </div>
-        <div className="loading-spinner">⟳ Loading...</div>
+        <div className="library-loading">
+          <span className="library-loading__icon" aria-hidden="true">⟳</span>
+          <span className="library-loading__text">Loading...</span>
+        </div>
       </div>
     );
   }

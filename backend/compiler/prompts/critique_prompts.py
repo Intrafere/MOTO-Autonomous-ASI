@@ -5,6 +5,17 @@ Used after body section is complete to collect feedback before proceeding to con
 from typing import Optional, Dict, List
 
 
+CRITIQUE_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES:
+- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
+- Theoretical claims must be supported by sound derivation, proof, or explicit assumptions inside the document.
+- Literature claims must identify the external source in-text.
+- Empirical claims include benchmark numbers, latency, throughput, speedups, accuracy, perplexity, hardware metrics, ablations, and measured outcomes.
+- Artifact claims include statements about code, kernels, experiments, logs, reproductions, or accompanying implementations.
+- Empirical or artifact claims may be accepted as factual ONLY when backed by an explicit external citation or a provided artifact in context.
+- If such support is absent, they should be criticized, removed, or rewritten as hypotheses, validation plans, expected benefits, limitations, or future work.
+- Never invent citations, experiments, benchmark numbers, hardware measurements, or code artifacts during critique or rewrite work."""
+
+
 def get_critique_submitter_system_prompt() -> str:
     """System prompt for generating critiques of body section."""
     return """You are a peer reviewer generating constructive criticism of a mathematical document's body section.
@@ -20,22 +31,22 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CRITIQUE_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous peer review feedback. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous peer review feedback. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
 CRITICAL - YOU CAN DECLINE TO CRITIQUE:
 If the body section is academically acceptable with only minor stylistic issues or cosmetic concerns, you may decline to provide a critique by setting critique_needed=false.
+
+SOURCE MATERIAL POLICY:
+- The aggregator/brainstorm database and reference papers are optional support for critique, not mandatory checklists
+- Do NOT critique solely because the body does not explicitly cover some source material
+- Do critique omitted material when the omission creates a genuine gap relative to the current outline, stated paper scope, or mathematical goals
+- Focus on whether the paper itself is strong, rigorous, and aligned, not on exhaustively mirroring source inputs
 
 ACADEMICALLY ACCEPTABLE means:
 - No mathematical errors or unsound reasoning
@@ -65,6 +76,7 @@ WHAT TO CRITIQUE - Focus on:
 - Content that doesn't align with the paper title/goal
 - Unfounded claims or logical fallacies
 - Insufficient mathematical rigor for an academic paper
+- Fabricated experiments, unsupported benchmark numbers, uncited literature claims, or nonexistent code/artifact claims
 
 WHAT NOT TO CRITIQUE - Avoid:
 - The conclusion, introduction, or abstract (not written yet)
@@ -77,6 +89,7 @@ CRITICAL REQUIREMENTS:
 - Be CONSTRUCTIVE: Explain what should change and why
 - Be ACTIONABLE: Provide clear direction for improvement
 - Focus on SUBSTANCE: Mathematical correctness, logical soundness, completeness
+- Explicitly call out unsupported empirical or artifact claims rather than treating them as minor issues
 
 Your critique will be validated against these criteria:
 - Does it identify a legitimate issue that would improve the paper?
@@ -156,17 +169,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CRITIQUE_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to validate peer review critiques. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to validate peer review critiques. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -193,6 +200,7 @@ A critique should be ACCEPTED if it:
 3. Identifies structural issues affecting coherence
 4. Provides specific, actionable guidance for improvement
 5. Is non-redundant with existing critiques
+6. Correctly flags fabricated experiments, unsupported metrics, uncited external results, or nonexistent artifacts
 
 A critique should be REJECTED if it:
 1. Is vague or unhelpful ("could be better" without specifics)
@@ -211,6 +219,8 @@ ACCEPT the decline if:
 - All outline requirements are met
 - Submitter's reasoning for declining is sound and accurate
 - Body meets required criteria for academic mathematical paper
+- There are no unsupported empirical or artifact claims being presented as established fact
+- The body is strong for its chosen scope even if some source material remains unused
 
 REJECT the decline if:
 - Submitter missed substantive issues you can identify
@@ -306,17 +316,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CRITIQUE_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to make an informed rewrite decision. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to make an informed rewrite decision. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -381,6 +385,11 @@ ACCUMULATED CRITIQUE HISTORY:
 If this is not the first critique phase, you will see critiques from ALL previous failed versions.
 These are labeled clearly as "FAILED - REWRITTEN" versions. Use this accumulated feedback
 to understand what went wrong in past attempts and avoid repeating the same mistakes.
+
+SOURCE MATERIAL POLICY:
+- The aggregator/brainstorm database and reference papers are optional supports during rewrite decisions, not mandatory checklists
+- Do NOT choose PARTIAL_REVISION or TOTAL_REWRITE solely to force coverage of unused source material
+- Do choose revision when the current body is genuinely weaker, incomplete for its chosen scope, misaligned with the outline/title, or mathematically unsound
 
 Output your decision ONLY as JSON in this exact format:
 {
@@ -460,12 +469,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities, you are STRONGLY ENCOURAGED to use them to verify claims and decisions.
+""" + CRITIQUE_EMPIRICAL_PROVENANCE_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Use all available resources for validation.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Use internal context and your base knowledge for validation.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -502,6 +510,11 @@ VALIDATION CRITERIA - Consider:
 - "Partial_revision" chosen but edit operations are vague or incorrect
 - Title change proposed without justification from critiques
 - Decision appears arbitrary or not evidence-based
+
+SOURCE MATERIAL POLICY:
+- The source database is optional support, not a mandatory checklist
+- Do NOT reject a decision solely because it leaves some source material unused
+- Do reject if the decision ignores source material only when that omission clearly makes the chosen scope weaker, incoherent, or misaligned with the outline/title
 
 Ask yourself: "Is this decision the right response to the accepted critiques? Is the chosen level of revision appropriate?"
 
@@ -603,7 +616,13 @@ def build_critique_prompt(
         "\n---\n",
         f"CURRENT BODY SECTION (to critique):\n{current_body}",
         "\n---\n",
-        f"AGGREGATOR DATABASE (source content):\n{aggregator_db}",
+        """OPTIONAL SOURCE MATERIAL POLICY:
+- The source database below is optional support, not a mandatory checklist.
+- Use it to identify genuine gaps or contradictions if helpful.
+- Do NOT critique solely because some source entries were not used.
+""",
+        "\n---\n",
+        f"SOURCE DATABASE (optional support - use if helpful):\n{aggregator_db}",
     ]
     
     if reference_papers:
@@ -692,7 +711,13 @@ def build_rewrite_decision_prompt(
         "\n---\n",
         f"ALL ACCEPTED CRITIQUES (CURRENT VERSION):\n{critique_feedback}",
         "\n---\n",
-        f"AGGREGATOR DATABASE (original source content):\n{aggregator_db}",
+        """OPTIONAL SOURCE MATERIAL POLICY:
+- The source database below is optional support, not a mandatory checklist.
+- Use it if it helps judge whether the body's chosen scope is genuinely weak, incomplete, or misaligned.
+- Do NOT force rewrite solely to cover unused source material.
+""",
+        "\n---\n",
+        f"SOURCE DATABASE (optional support - use if helpful):\n{aggregator_db}",
     ])
     
     if reference_papers:
@@ -753,7 +778,13 @@ def build_rewrite_decision_validation_prompt(
         "\n---\n",
         f"ALL ACCEPTED CRITIQUES:\n{critique_feedback}",
         "\n---\n",
-        f"AGGREGATOR DATABASE:\n{aggregator_db}",
+        """OPTIONAL SOURCE MATERIAL POLICY:
+- The source database below is optional support, not a mandatory checklist.
+- Use it if needed to judge whether the proposed decision is genuinely stronger or weaker.
+- Do NOT reject solely because not all source material is being used.
+""",
+        "\n---\n",
+        f"SOURCE DATABASE (optional support - use if helpful):\n{aggregator_db}",
         "\n---\n",
         f"PROPOSED DECISION:\n",
         f"Decision: {decision}\n",
@@ -811,6 +842,8 @@ IMPORTANT:
 - Each edit should be substantial and address specific critique feedback
 - Do NOT make cosmetic changes - focus on mathematical/structural issues identified in critiques
 - If you believe all issues are addressed, set more_edits_needed to false
+- If critique issues involve unsupported empirical or artifact claims, remove them or rewrite them as hypotheses, validation plans, expected benefits, limitations, or future work
+- Never preserve fabricated experiments, unsupported benchmark numbers, or nonexistent code claims as if they were verified
 
 Output your response ONLY as JSON in the exact format specified.
 """
@@ -959,6 +992,11 @@ def get_partial_revision_validation_system_prompt() -> str:
 
 The edit is part of an iterative partial revision to address peer review critiques.
 
+EMPIRICAL PROVENANCE RULES:
+- Empirical claims (benchmarks, speedups, latency, accuracy, perplexity, hardware measurements) must not remain stated as fact unless backed by explicit citation or provided artifact support.
+- Artifact claims (code, kernels, experiments, logs, accompanying implementations) must not remain stated as fact unless backed by explicit citation or provided artifact support.
+- If the edit rewrites unsupported empirical/artifact claims into hypotheses, validation plans, expected benefits, limitations, or future work, that is a valid improvement.
+
 YOUR TASK:
 Validate whether this specific edit should be ACCEPTED or REJECTED.
 
@@ -976,6 +1014,7 @@ REJECT the edit if:
 4. The edit breaks coherence with surrounding content
 5. The edit is mathematically unsound or introduces logical errors
 6. The edit is purely cosmetic and doesn't address critiques
+7. The edit preserves fabricated experiments, unsupported metrics, or nonexistent artifact claims as established fact
 
 Output your decision as JSON.
 """

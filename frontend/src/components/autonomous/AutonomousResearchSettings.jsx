@@ -1479,7 +1479,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
               <h4 className="form-group--compact">Wolfram Alpha Integration (Optional)</h4>
               <small className="hint-text">
-                Enable Wolfram Alpha API for computational verification in rigor mode. Shared with manual compiler mode.
+                Enable Wolfram Alpha API for computational verification in rigor mode. When selecting your key select "full results" for your key type, then copy your APP ID and save it here. This key is also shared with the manual compiler mode.
                 Get your API key from <a href="https://products.wolframalpha.com/api" target="_blank" rel="noopener noreferrer">developer.wolframalpha.com</a>
               </small>
 
@@ -1672,9 +1672,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   }}
                 />
                 <span className="settings-option-copy">
-                  <span className="settings-option-title">Enable banner shimmer</span>
+                  <span className="settings-option-title">Enable shimmer accents</span>
                   <span className="settings-option-description">
-                    Keeps the animated banner shimmer on. Disable this when recording video to reduce motion and visual noise.
+                    Keeps the animated banner shimmer and subtle active-tab border sheen on. Disable this when recording video to reduce motion and visual noise.
                   </span>
                 </span>
               </label>

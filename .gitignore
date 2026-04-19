@@ -82,6 +82,7 @@ backend/data/chroma_db/*
 !backend/data/chroma_db/.gitkeep
 
 backend/data/boost_api_log.txt
+backend/data/boost_state.json
 backend/data/model_cache.json
 backend/data/paper_version_*.txt
 backend/data/critique_feedback_*.txt

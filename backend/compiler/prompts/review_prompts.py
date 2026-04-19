@@ -5,6 +5,39 @@ Review prompts for mathematical document cleanup and error correction.
 from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 
 
+EMPIRICAL_PROVENANCE_REVIEW_RULES = """EMPIRICAL PROVENANCE AND CITATION RULES:
+- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
+- Theoretical claims must be supported by sound derivation, proof, or explicit assumptions inside the paper.
+- Literature claims must include explicit in-text citations identifying the external source. Do NOT rely on vague phrases like "studies show" or "the literature suggests".
+- Empirical claims include benchmarks, latency, throughput, speedups, accuracy, perplexity, ablations, wall-clock measurements, hardware utilization numbers, and dataset/task results.
+- Artifact claims include statements about code, kernels, measurements, experiments, benchmark logs, reproductions, or "accompanying" implementations.
+- Empirical or artifact claims are acceptable ONLY if they are backed by an explicit external citation or by a provided artifact in context. If not backed, they must be removed or rewritten as hypotheses, design goals, expected benefits, proposed experiments, or future work.
+- NEVER invent citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts.
+- If external information is retained, it must remain explicitly cited in-text. Do NOT imply that unsupported facts were externally verified."""
+
+
+EMPIRICAL_RED_TEAM_REVIEW_FOCUS = """PRE-ABSTRACT EMPIRICAL RED-TEAM TASK:
+Your highest-priority job is to catch and neutralize:
+- fabricated experiments
+- nonexistent code or artifacts
+- unsupported benchmark numbers
+- uncited external results
+- benchmark-shaped claims presented as established facts
+
+Inspect especially for:
+- speedup, latency, throughput, bandwidth, utilization, clock-cycle, memory, or hardware claims
+- accuracy, perplexity, benchmark score, ablation, or evaluation claims
+- mentions of specific hardware (A100, H100, NEON, AVX, tensor cores, etc.) with measured outcomes
+- phrases like "empirical results", "experiments show", "we validate", "measured", "observed", "see accompanying code", or "implementation achieves"
+
+If a claim lacks explicit citation or artifact support, prefer conservative edits that:
+- delete the claim, or
+- rewrite it as hypothesis / expected benefit / design target / proposed experiment / future work, or
+- explicitly state that verification has not been performed.
+
+Do NOT preserve unsupported benchmark numbers merely because they fit the narrative."""
+
+
 def get_review_system_prompt() -> str:
     """Get system prompt for document review/cleanup mode."""
     return """You are reviewing the current mathematical document draft for errors and needed improvements. Your role is to:
@@ -24,17 +57,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + EMPIRICAL_PROVENANCE_REVIEW_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -79,6 +106,9 @@ WHEN TO MAKE AN EDIT:
 - Significant clarity improvements possible
 - Forward-looking structural language outside introduction (e.g., 'Section III will...', bulleted lists of future content)
 - Unfounded claims or logical fallacies that should be corrected
+- Unsupported empirical claims, unsupported artifact/code claims, or uncited literature claims
+- Numeric benchmark-style claims in narrative text that are not explicitly sourced
+- Statements implying experiments, measurements, or implementations that are not actually evidenced
 
 WHEN NOT TO MAKE AN EDIT:
 - Document is acceptable for a draft in progress
@@ -182,7 +212,8 @@ Example (Deletion - removing redundant content):
 async def build_review_prompt(
     user_prompt: str,
     current_paper: str,
-    current_outline: str
+    current_outline: str,
+    review_focus: str = "general"
 ) -> str:
     """
     Build complete prompt for review mode.
@@ -193,6 +224,7 @@ async def build_review_prompt(
         user_prompt: User's compiler-directing prompt
         current_paper: Current document to review
         current_outline: Current outline for structural reference (always fully injected)
+        review_focus: "general" or "empirical_red_team"
     
     Returns:
         Complete prompt string
@@ -211,6 +243,11 @@ async def build_review_prompt(
 {rejection_history}
 
 LEARN FROM THESE PAST MISTAKES.
+---
+""")
+
+    if review_focus == "empirical_red_team":
+        parts.append(f"""{EMPIRICAL_RED_TEAM_REVIEW_FOCUS}
 ---
 """)
     

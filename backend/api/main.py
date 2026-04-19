@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ASI Aggregator System",
     description="AI-powered aggregator with RAG and multi-agent validation",
-    version="1.0.5",
+    version="1.0.6",
     lifespan=lifespan
 )
 
@@ -149,7 +149,7 @@ async def root():
     """Root endpoint."""
     return {
         "name": "ASI Aggregator System",
-        "version": "1.0.5",
+        "version": "1.0.6",
         "status": "running"
     }
 

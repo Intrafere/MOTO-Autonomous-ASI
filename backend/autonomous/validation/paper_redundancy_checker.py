@@ -50,7 +50,7 @@ class PaperRedundancyChecker:
     
     def get_current_task_id(self) -> str:
         """Get the task ID for the current/next API call."""
-        return f"auto_prc_{self.task_sequence:03d}"
+        return f"agg_val_{self.task_sequence:03d}"
     
     async def check_redundancy(
         self,

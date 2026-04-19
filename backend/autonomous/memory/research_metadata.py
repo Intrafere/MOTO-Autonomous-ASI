@@ -223,6 +223,7 @@ class ResearchMetadata:
             "current_tier": None,  # "tier1_aggregation", "tier2_paper_writing", or "tier3_final_answer"
             "current_topic_id": None,
             "current_paper_id": None,
+            "current_paper_title": None,
             "paper_phase": None,  # "body", "conclusion", "introduction", "abstract"
             "acceptance_count": 0,
             "rejection_count": 0,
@@ -437,7 +438,7 @@ class ResearchMetadata:
             # Update stats
             self._stats["total_papers_completed"] = sum(
                 1 for p in self._data.get("papers", [])
-                if p.get("status") != "archived"
+                if p.get("status") == "complete"
             )
             self._stats["current_paper_id"] = metadata.paper_id
             await self._save_stats()
@@ -485,7 +486,7 @@ class ResearchMetadata:
         await self._ensure_initialized()
         return [
             p for p in self._data.get("papers", [])
-            if p.get("status") != "archived"
+            if p.get("status") == "complete"
         ]
     
     async def get_brainstorm_entry(self, topic_id: str) -> Optional[Dict[str, Any]]:
@@ -510,7 +511,7 @@ class ResearchMetadata:
         return [
             p for p in self._data.get("papers", [])
             if topic_id in p.get("source_brainstorm_ids", [])
-            and p.get("status") != "archived"
+            and p.get("status") == "complete"
         ]
     
     # ========================================================================
@@ -632,7 +633,7 @@ class ResearchMetadata:
                 # Update stats
                 self._stats["total_papers_completed"] = sum(
                     1 for p in self._data.get("papers", [])
-                    if p.get("status") != "archived"
+                    if p.get("status") == "complete"
                 )
                 self._stats["total_papers_archived"] = sum(
                     1 for p in self._data.get("papers", [])

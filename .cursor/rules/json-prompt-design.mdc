@@ -2424,21 +2424,21 @@ Proceed Without References:
 
 **File:** `backend/autonomous/prompts/paper_reference_prompts.py`
 
-**Function:** `get_reference_selection_json_schema()`
+**Function:** `get_reference_selection_json_schema(max_papers)`
 
 ```
 REQUIRED JSON FORMAT:
 {
-  "selected_papers": ["array of up to 6 paper_ids"],
+  "selected_papers": ["array of up to caller cap paper_ids"],
   "reasoning": "string - Why these specific papers are very useful for the upcoming paper"
 }
 
 FIELD REQUIREMENTS:
-- selected_papers: Array of paper IDs (maximum 6, can be empty)
+- selected_papers: Array of paper IDs (maximum = caller-provided cap, can be empty)
 - reasoning: ALWAYS required
 
 CONSTRAINTS:
-- Maximum 6 papers can be selected (hard limit for context budget)
+- Caller supplies the cap: 3 for the normal topic-cycle reference workflow, 6 for Tier 3 short-form reference selection
 - Papers must be selected from those shown in expansion request
 
 EXAMPLE:
@@ -2620,9 +2620,10 @@ All Part 3 prompts follow similar assembly patterns to Part 1 and Part 2:
 - Purpose: Add additional relevant papers based on brainstorm insights
 
 **Paper Title Selection:**
-- Brainstorm database (RAG)
-- Existing paper titles from same brainstorm
-- Selected reference papers (if any, RAG)
+- Brainstorm summary (direct injection; no full brainstorm RAG)
+- Existing paper titles and abstracts from same brainstorm
+- Selected reference paper title/abstract summaries (if any, direct injection)
+- Validated candidate titles from title exploration (direct injection)
 
 **Paper Compilation:**
 - Uses Part 2 Compiler context (outline, paper, brainstorm DB, reference papers)
