@@ -4,11 +4,11 @@ export const AUTONOMOUS_SETTINGS_STORAGE_KEY = 'autonomous_research_settings';
 export const AUTONOMOUS_PROFILES_STORAGE_KEY = 'autonomous_research_profiles';
 export const STARTUP_PROVIDER_CHOICE_STORAGE_KEY = 'startup_provider_choice';
 export const LM_STUDIO_STARTUP_CHOICE = 'lm_studio';
-export const RECOMMENDED_PROFILE_KEY = 'recommended_fast_affordable_mid';
-export const RECOMMENDED_CHEAPER_PROFILE_KEY = 'recommended_cheaper_lower_knowledge';
+export const RECOMMENDED_PROFILE_KEY = 'recommended_slower_affordable_higher_knowledge';
+export const RECOMMENDED_ALTERNATE_PROFILE_KEY = 'recommended_fast_affordable_mid';
 export const RECOMMENDED_PROFILE_KEYS = [
   RECOMMENDED_PROFILE_KEY,
-  RECOMMENDED_CHEAPER_PROFILE_KEY,
+  RECOMMENDED_ALTERNATE_PROFILE_KEY,
 ];
 
 const DEFAULT_SUBMITTER_CONFIG = {
@@ -127,24 +127,24 @@ const DEFAULT_AUTONOMOUS_SETTINGS = {
 
 export const RECOMMENDED_PROFILES = {
   [RECOMMENDED_PROFILE_KEY]: {
-    name: 'Fast, affordable, mid-tier knowledge',
+    name: 'Slower, less affordable, higher knowledge',
     numSubmitters: 3,
     submitters: [
       {
+        modelId: 'google/gemini-3.1-pro-preview',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1048576,
+        maxOutputTokens: 65500,
+      },
+      {
         modelId: 'moonshotai/kimi-k2.5',
         provider: 'openrouter',
-        openrouterProvider: 'SiliconFlow',
+        openrouterProvider: null,
         lmStudioFallbackId: null,
         contextWindow: 262000,
         maxOutputTokens: 40000,
-      },
-      {
-        modelId: 'openai/gpt-oss-120b',
-        provider: 'openrouter',
-        openrouterProvider: 'Groq',
-        lmStudioFallbackId: null,
-        contextWindow: 131072,
-        maxOutputTokens: 25000,
       },
       {
         modelId: 'deepseek/deepseek-v3.2',
@@ -156,20 +156,20 @@ export const RECOMMENDED_PROFILES = {
       },
     ],
     validator: {
-      modelId: 'x-ai/grok-4.1-fast',
+      modelId: 'moonshotai/kimi-k2.5',
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,
-      contextWindow: 2000000,
-      maxOutputTokens: 30000,
-    },
-    highContext: {
-      modelId: 'moonshotai/kimi-k2.5',
-      provider: 'openrouter',
-      openrouterProvider: 'SiliconFlow',
-      lmStudioFallbackId: null,
       contextWindow: 262000,
       maxOutputTokens: 40000,
+    },
+    highContext: {
+      modelId: 'google/gemini-3.1-pro-preview',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500,
     },
     highParam: {
       modelId: 'google/gemini-3.1-pro-preview',
@@ -180,16 +180,16 @@ export const RECOMMENDED_PROFILES = {
       maxOutputTokens: 65500,
     },
     critique: {
-      modelId: 'google/gemini-3.1-pro-preview',
+      modelId: 'z-ai/glm-5.1',
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,
-      contextWindow: 1048576,
+      contextWindow: 202752,
       maxOutputTokens: 65500,
     },
   },
-  [RECOMMENDED_CHEAPER_PROFILE_KEY]: {
-    name: 'Cheaper, lower-knowledge validator',
+  [RECOMMENDED_ALTERNATE_PROFILE_KEY]: {
+    name: 'Fast, affordable, mid-tier knowledge',
     numSubmitters: 3,
     submitters: [
       {

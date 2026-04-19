@@ -17,6 +17,7 @@ from backend.shared.models import CompilerState, CompilerSubmission, CompilerVal
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
 from backend.compiler.agents.high_context_submitter import HighContextSubmitter
@@ -574,6 +575,9 @@ class CompilerCoordinator:
         self.is_running = True
         logger.info("Starting compiler...")
         
+        # Reset free model manager state for fresh start
+        free_model_manager.reset()
+        
         # Refresh workflow predictions at start
         await self.refresh_workflow_predictions()
         
@@ -668,29 +672,15 @@ class CompilerCoordinator:
         except asyncio.CancelledError:
             logger.info("Compiler workflow cancelled")
         except FreeModelExhaustedError as e:
-            if e.soonest_retry:
-                wait_secs = max(0, e.soonest_retry - time.time())
-                wait_mins = round(wait_secs / 60, 1)
-                logger.warning(
-                    f"SERIAL BOTTLENECK: Compiler paused for {wait_mins} minutes "
-                    f"(all free models rate-limited)"
-                )
-                await self._broadcast("serial_bottleneck_paused", {
-                    "role_id": "compiler",
-                    "model": str(e),
-                    "wait_seconds": round(wait_secs),
-                    "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
-                })
-                await asyncio.sleep(wait_secs)
-                await self._broadcast("serial_bottleneck_resumed", {"role_id": "compiler"})
-                if self.is_running:
-                    asyncio.create_task(self._main_workflow())
-            else:
-                logger.error(f"Compiler: all free models exhausted, no cooldown: {e}")
-                self.is_running = False
-                await self._broadcast("all_free_models_exhausted", {
-                    "message": f"All free models exhausted for compiler: {e}"
-                })
+            # All free models exhausted after retries - wait briefly and retry
+            logger.warning(f"Compiler: all free models exhausted: {e}")
+            await self._broadcast("free_models_exhausted", {
+                "role_id": "compiler",
+                "message": str(e),
+            })
+            await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+            if self.is_running:
+                asyncio.create_task(self._main_workflow())
         except Exception as e:
             logger.error(f"Compiler workflow error: {e}", exc_info=True)
             self.is_running = False
@@ -1150,6 +1140,7 @@ INVALID:
     
     # Maximum retries for premature decline/completion rejections
     MAX_PREMATURE_RETRIES = 5
+    PRE_ABSTRACT_RED_TEAM_MAX_PASSES = 2
     
     async def _submit_and_validate_construction(self, rejection_feedback: Optional[str] = None, retry_count: int = 0) -> Tuple[bool, Optional[str]]:
         """
@@ -1310,7 +1301,6 @@ INVALID:
                     self.construction_rejections += 1
                     
                     # Log as rejection
-                    from backend.shared.models import CompilerValidationResult
                     rejection_result = CompilerValidationResult(
                         submission_id=str(uuid.uuid4()),
                         decision="reject",
@@ -1393,7 +1383,6 @@ INVALID:
                     logger.warning(f"Rejecting empty phase completion: {rejection_reason}")
                     self.construction_rejections += 1
                     
-                    from backend.shared.models import CompilerValidationResult
                     rejection_result = CompilerValidationResult(
                         submission_id=str(uuid.uuid4()),
                         decision="reject",
@@ -1501,7 +1490,6 @@ INVALID:
                 self.construction_rejections += 1
                 
                 # Create emergency rejection
-                from backend.shared.models import CompilerValidationResult
                 emergency_result = CompilerValidationResult(
                     submission_id=submission.submission_id,
                     decision="reject",
@@ -1709,7 +1697,6 @@ INVALID:
                 self.outline_rejections += 1
                 
                 # Create emergency rejection
-                from backend.shared.models import CompilerValidationResult
                 emergency_result = CompilerValidationResult(
                     submission_id=submission.submission_id,
                     decision="reject",
@@ -1764,31 +1751,39 @@ INVALID:
             logger.info("Outline update rejected")
             return False
     
-    async def _submit_and_validate_review(self) -> bool:
+    async def _submit_and_validate_review(self, review_focus: str = "general") -> bool:
         """Submit and validate review. Returns True if accepted."""
         self.current_mode = "review"
+        review_label = "empirical red-team review" if review_focus == "empirical_red_team" else "review"
         
         submission = None
         try:
-            submission = await self.high_context_submitter.submit_review()
+            submission = await self.high_context_submitter.submit_review(review_focus=review_focus)
         except ValueError as e:
-            logger.error(f"Review context overflow: {e}")
+            logger.error(f"{review_label.capitalize()} context overflow: {e}")
             self.review_declines += 1
             await compiler_rejection_log.add_decline("review", f"Context overflow: {e}")
             await self._broadcast("compiler_decline", {
                 "mode": "review",
+                "review_focus": review_focus,
                 "reasoning": f"Context overflow: {e}"
             })
             return False
         
         if submission is None:
-            logger.info("No review edit needed")
+            logger.info(f"No {review_label} edit needed")
             self.review_declines += 1
-            await compiler_rejection_log.add_decline("review", "No errors or improvements needed")
+            decline_reason = (
+                "No fabricated experiments or unsupported metrics found"
+                if review_focus == "empirical_red_team"
+                else "No errors or improvements needed"
+            )
+            await compiler_rejection_log.add_decline("review", decline_reason)
             
             await self._broadcast("compiler_decline", {
                 "mode": "review",
-                "reasoning": "No errors or improvements needed"
+                "review_focus": review_focus,
+                "reasoning": decline_reason
             })
             
             return False
@@ -1801,7 +1796,8 @@ INVALID:
         
         await self._broadcast("compiler_submission", {
             "mode": "review",
-            "submission_id": submission.submission_id
+            "submission_id": submission.submission_id,
+            "review_focus": review_focus
         })
         
         current_paper = await paper_memory.get_paper()
@@ -1826,7 +1822,6 @@ INVALID:
                 self.review_rejections += 1
                 
                 # Create emergency rejection
-                from backend.shared.models import CompilerValidationResult
                 emergency_result = CompilerValidationResult(
                     submission_id=submission.submission_id,
                     decision="reject",
@@ -1841,6 +1836,7 @@ INVALID:
                 await self._broadcast("compiler_rejection", {
                     "mode": "review",
                     "submission_id": submission.submission_id,
+                    "review_focus": review_focus,
                     "reasoning": "Emergency rejection: exact string match failed"
                 })
                 
@@ -1860,7 +1856,8 @@ INVALID:
             
             await self._broadcast("compiler_acceptance", {
                 "mode": "review",
-                "submission_id": submission.submission_id
+                "submission_id": submission.submission_id,
+                "review_focus": review_focus
             })
             
             await self._broadcast("paper_updated", {
@@ -1868,7 +1865,7 @@ INVALID:
                 "preview": updated_paper[:500]
             })
             
-            logger.info(f"Review edit accepted ({word_count} words)")
+            logger.info(f"{review_label.capitalize()} edit accepted ({word_count} words)")
             return True
         else:
             self.review_rejections += 1
@@ -1878,17 +1875,63 @@ INVALID:
             await self._broadcast("compiler_rejection", {
                 "mode": "review",
                 "submission_id": submission.submission_id,
+                "review_focus": review_focus,
                 "reasoning": result.reasoning
             })
             
-            logger.info("Review edit rejected")
+            logger.info(f"{review_label.capitalize()} edit rejected")
             return False
+
+    async def _run_pre_abstract_red_team_review(self) -> None:
+        """Run a dedicated empirical-provenance red-team pass before abstract writing."""
+        logger.info("=" * 80)
+        logger.info("STARTING PRE-ABSTRACT EMPIRICAL RED-TEAM REVIEW")
+        logger.info("=" * 80)
+
+        await self._broadcast("empirical_red_team_started", {
+            "phase": "pre_abstract",
+            "max_passes": self.PRE_ABSTRACT_RED_TEAM_MAX_PASSES
+        })
+
+        edits_applied = 0
+        passes_run = 0
+
+        for _ in range(self.PRE_ABSTRACT_RED_TEAM_MAX_PASSES):
+            if not self.is_running:
+                break
+
+            passes_run += 1
+            accepted = await self._submit_and_validate_review(review_focus="empirical_red_team")
+            if not accepted:
+                break
+            edits_applied += 1
+
+        await self._broadcast("empirical_red_team_complete", {
+            "phase": "pre_abstract",
+            "passes_run": passes_run,
+            "edits_applied": edits_applied
+        })
+
+        logger.info(
+            f"Pre-abstract empirical red-team review complete "
+            f"(passes={passes_run}, edits_applied={edits_applied})"
+        )
     
     async def _submit_and_validate_rigor(self) -> bool:
         """Submit and validate rigor enhancement. Returns True if accepted."""
         self.current_mode = "rigor"
         
-        submission = await self.high_param_submitter.submit_rigor_enhancement()
+        try:
+            submission = await self.high_param_submitter.submit_rigor_enhancement()
+        except ValueError as e:
+            logger.error(f"Rigor enhancement error: {e}")
+            self.rigor_declines += 1
+            await compiler_rejection_log.add_decline("rigor", f"LLM error: {e}")
+            await self._broadcast("compiler_decline", {
+                "mode": "rigor",
+                "reasoning": f"LLM error: {e}"
+            })
+            return False
         
         if submission is None:
             logger.info("No rigor enhancement needed")
@@ -1932,7 +1975,6 @@ INVALID:
                 self.rigor_rejections += 1
                 
                 # Create emergency rejection
-                from backend.shared.models import CompilerValidationResult
                 emergency_result = CompilerValidationResult(
                     submission_id=submission.submission_id,
                     decision="reject",
@@ -3568,6 +3610,9 @@ INVALID:
             if not has_introduction:
                 logger.error("Cannot transition from introduction phase: No Introduction section found in paper")
                 return False  # Block transition
+
+            logger.info("Introduction complete - running pre-abstract empirical red-team review")
+            await self._run_pre_abstract_red_team_review()
             
             self.autonomous_section_phase = "abstract"
             logger.info("Phase transition: introduction → abstract (explicit section_complete)")

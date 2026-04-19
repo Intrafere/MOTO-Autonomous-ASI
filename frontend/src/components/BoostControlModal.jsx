@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { boostAPI, openRouterAPI } from '../services/api';
 import './BoostControlModal.css';
+
+const BOOST_SETTINGS_STORAGE_KEY = 'boost_modal_settings';
 
 export default function BoostControlModal({ isOpen, onClose }) {
   const [apiKey, setApiKey] = useState('');
@@ -18,8 +20,47 @@ export default function BoostControlModal({ isOpen, onClose }) {
   const [boostStatus, setBoostStatus] = useState(null);
   const [freeOnly, setFreeOnly] = useState(false);
   const [hasGlobalKey, setHasGlobalKey] = useState(false);
+  
+  // Track mouse down position to prevent closing on text selection drag
+  const mouseDownTargetRef = useRef(null);
 
   const hasAvailableKey = Boolean(apiKey.trim() || hasGlobalKey);
+  
+  // Load saved settings from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(BOOST_SETTINGS_STORAGE_KEY);
+      if (saved) {
+        const settings = JSON.parse(saved);
+        if (settings.boostModel) setBoostModel(settings.boostModel);
+        if (settings.selectedProvider) setSelectedProvider(settings.selectedProvider);
+        if (settings.contextWindow) setContextWindow(settings.contextWindow);
+        if (settings.maxOutputTokens) setMaxOutputTokens(settings.maxOutputTokens);
+        if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
+      }
+    } catch (e) {
+      console.error('Failed to load boost settings from localStorage:', e);
+    }
+  }, []);
+  
+  // Save settings to localStorage whenever they change
+  useEffect(() => {
+    // Only save if we have meaningful values (not initial empty state)
+    if (boostModel || selectedProvider || contextWindow !== 131072 || maxOutputTokens !== 25000 || freeOnly) {
+      try {
+        const settings = {
+          boostModel,
+          selectedProvider,
+          contextWindow,
+          maxOutputTokens,
+          freeOnly
+        };
+        localStorage.setItem(BOOST_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+      } catch (e) {
+        console.error('Failed to save boost settings to localStorage:', e);
+      }
+    }
+  }, [boostModel, selectedProvider, contextWindow, maxOutputTokens, freeOnly]);
 
   const fetchProviders = async (modelId, keyOverride = undefined) => {
     if (!modelId) {
@@ -53,6 +94,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
       if (response.status) {
         setBoostStatus(response.status);
         if (response.status.enabled) {
+          // Boost is enabled - use backend values (they're authoritative)
           setBoostModel(response.status.model_id);
           setSelectedProvider(response.status.provider || '');
           setContextWindow(response.status.context_window);
@@ -60,8 +102,23 @@ export default function BoostControlModal({ isOpen, onClose }) {
           if (response.status.model_id) {
             await fetchProviders(response.status.model_id, effectiveKey);
           }
+          
+          // Also save to localStorage so settings persist even if backend restarts
+          try {
+            const settings = {
+              boostModel: response.status.model_id,
+              selectedProvider: response.status.provider || '',
+              contextWindow: response.status.context_window,
+              maxOutputTokens: response.status.max_output_tokens,
+              freeOnly
+            };
+            localStorage.setItem(BOOST_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+          } catch (e) {
+            console.error('Failed to sync boost settings to localStorage:', e);
+          }
         } else {
           setProviders([]);
+          // Boost not enabled - localStorage values are already loaded in useEffect
         }
       }
     } catch (error) {
@@ -258,11 +315,29 @@ export default function BoostControlModal({ isOpen, onClose }) {
     }
   };
 
+  // Handle overlay click - only close if mousedown AND mouseup both happened on overlay
+  // This prevents closing when user drags to select text in inputs
+  const handleOverlayMouseDown = (e) => {
+    mouseDownTargetRef.current = e.target;
+  };
+  
+  const handleOverlayClick = (e) => {
+    // Only close if both mousedown and click happened on the overlay itself
+    if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
+      onClose();
+    }
+    mouseDownTargetRef.current = null;
+  };
+
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="boost-modal" onClick={(e) => e.stopPropagation()}>
+    <div 
+      className="modal-overlay" 
+      onMouseDown={handleOverlayMouseDown}
+      onClick={handleOverlayClick}
+    >
+      <div className="boost-modal">
         <div className="modal-header">
           <h2>API Boost Configuration</h2>
           <button className="close-btn" onClick={onClose}>×</button>
@@ -378,7 +453,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
               <input
                 type="number"
                 value={contextWindow}
-                onChange={(e) => setContextWindow(parseInt(e.target.value))}
+                onChange={(e) => setContextWindow(parseInt(e.target.value) || 131072)}
                 min="4096"
                 max="999999"
                 step="1024"
@@ -391,7 +466,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
               <input
                 type="number"
                 value={maxOutputTokens}
-                onChange={(e) => setMaxOutputTokens(parseInt(e.target.value))}
+                onChange={(e) => setMaxOutputTokens(parseInt(e.target.value) || 25000)}
                 min="1000"
                 max="100000"
                 step="1000"

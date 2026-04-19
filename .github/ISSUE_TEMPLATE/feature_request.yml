@@ -1,0 +1,57 @@
+name: Feature request
+description: Suggest an improvement or new capability for MOTO.
+title: "[Feature]: "
+body:
+  - type: checkboxes
+    attributes:
+      label: Before submitting
+      description: Confirm the following before opening a feature request.
+      options:
+        - label: I searched existing issues and did not find a duplicate request.
+          required: true
+        - label: I reviewed the relevant architecture notes in `.cursor/rules/` for the areas this may affect.
+          required: false
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What problem, limitation, or missing workflow are you trying to address?
+      placeholder: It is difficult to see why a Tier 3 phase was skipped when reviewing past sessions...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior or capability you want to add.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any alternatives or workarounds you have considered.
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: Likely impact areas
+      description: Select every area this request may affect.
+      options:
+        - label: Aggregator (Tier 1)
+        - label: Compiler (Tier 2)
+        - label: Autonomous Research (Tier 3)
+        - label: RAG / retrieval pipeline
+        - label: Backend API
+        - label: Frontend / UI
+        - label: Documentation
+  - type: textarea
+    id: architecture
+    attributes:
+      label: Architecture impact
+      description: Explain any expected impact on workflows, models, persistence, or UI behavior.
+      placeholder: This would add a new Tier 3 status event and a small settings toggle in the autonomous UI...
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add mockups, examples, related issues, or anything else that helps explain the request.

@@ -29,7 +29,7 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
-from backend.shared.config import rag_config
+from backend.shared.config import rag_config, system_config
 from backend.shared.models import ReferenceExpansionRequest, ReferenceSelectionResult
 from backend.autonomous.prompts.paper_reference_prompts import (
     build_reference_expansion_prompt,
@@ -76,7 +76,7 @@ class ReferenceSelectorAgent:
     
     def get_current_task_id(self) -> str:
         """Get the task ID for the current/next API call."""
-        return f"auto_rs_{self.task_sequence:03d}"
+        return f"agg_sub1_{self.task_sequence:03d}"
     
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""
@@ -89,7 +89,9 @@ class ReferenceSelectorAgent:
         brainstorm_summary: str,
         available_papers: List[Dict[str, Any]],
         mode: str = "initial",
-        already_selected: List[str] = None
+        already_selected: List[str] = None,
+        already_selected_papers: List[Dict[str, Any]] = None,
+        max_total_papers: Optional[int] = None,
     ) -> List[str]:
         """
         Complete reference selection workflow.
@@ -103,25 +105,37 @@ class ReferenceSelectorAgent:
             available_papers: List of papers with title, abstract, word count
             mode: Selection mode - "initial" (pre-brainstorm) or "additional" (pre-paper)
             already_selected: List of paper_ids already selected (for "additional" mode)
+            max_total_papers: Total paper cap for this workflow. In "additional" mode,
+                already selected papers count toward this total.
         
         Returns:
-            List of selected paper_ids (max 6 for initial, remaining slots for additional)
+            List of selected paper_ids, capped by the caller's policy
         """
         if already_selected is None:
             already_selected = []
+        if already_selected_papers is None:
+            already_selected_papers = []
+        if max_total_papers is None:
+            max_total_papers = system_config.autonomous_tier3_short_form_max_reference_papers
         
         if not available_papers:
             logger.info(f"ReferenceSelector [{mode}]: No papers available, skipping reference selection")
             return []
         
         # Calculate max papers based on mode
-        max_papers = 6 if mode == "initial" else (6 - len(already_selected))
+        max_papers = max_total_papers if mode == "initial" else (max_total_papers - len(already_selected))
         if max_papers <= 0:
-            logger.info(f"ReferenceSelector [{mode}]: Already at max capacity ({len(already_selected)} papers)")
+            logger.info(
+                f"ReferenceSelector [{mode}]: Already at max capacity "
+                f"({len(already_selected)} of {max_total_papers} papers)"
+            )
             return []
         
-        logger.info(f"ReferenceSelector [{mode}]: Starting selection (max {max_papers} papers, "
-                   f"{len(available_papers)} available, {len(already_selected)} already selected)")
+        logger.info(
+            f"ReferenceSelector [{mode}]: Starting selection "
+            f"(limit={max_papers}, total_cap={max_total_papers}, "
+            f"{len(available_papers)} available, {len(already_selected)} already selected)"
+        )
         
         # Step 1: Show abstracts and ask which to expand
         expansion_request = await self._request_expansion(
@@ -130,7 +144,9 @@ class ReferenceSelectorAgent:
             brainstorm_summary,
             available_papers,
             mode=mode,
-            already_selected=already_selected
+            already_selected=already_selected,
+            already_selected_papers=already_selected_papers,
+            max_total_papers=max_total_papers,
         )
         
         if expansion_request is None:
@@ -175,7 +191,9 @@ class ReferenceSelectorAgent:
         brainstorm_summary: str,
         papers_with_abstracts: List[Dict[str, Any]],
         mode: str = "initial",
-        already_selected: List[str] = None
+        already_selected: List[str] = None,
+        already_selected_papers: List[Dict[str, Any]] = None,
+        max_total_papers: int = 6,
     ) -> Optional[ReferenceExpansionRequest]:
         """
         Request which papers to expand (Step 1: abstracts only).
@@ -187,6 +205,8 @@ class ReferenceSelectorAgent:
         """
         if already_selected is None:
             already_selected = []
+        if already_selected_papers is None:
+            already_selected_papers = []
         
         try:
             # Build prompt based on mode
@@ -196,7 +216,8 @@ class ReferenceSelectorAgent:
                     user_research_prompt=user_research_prompt,
                     topic_prompt=topic_prompt,
                     brainstorm_summary=brainstorm_summary,
-                    papers_with_abstracts=papers_with_abstracts
+                    papers_with_abstracts=papers_with_abstracts,
+                    max_papers=max_total_papers,
                 )
             else:
                 # Additional: select more papers before paper writing
@@ -205,7 +226,9 @@ class ReferenceSelectorAgent:
                     topic_prompt=topic_prompt,
                     brainstorm_summary=brainstorm_summary,
                     papers_with_abstracts=papers_with_abstracts,
-                    already_selected=already_selected
+                    already_selected=already_selected,
+                    already_selected_papers=already_selected_papers,
+                    max_total_papers=max_total_papers,
                 )
             
             # Validate prompt size
@@ -293,6 +316,10 @@ class ReferenceSelectorAgent:
                 expanded.append({
                     "paper_id": paper_id,
                     "title": paper_meta.get("title", "Unknown"),
+                    "reference_title_display": paper_meta.get(
+                        "reference_title_display",
+                        paper_meta.get("title", "Unknown"),
+                    ),
                     "word_count": paper_meta.get("word_count", len(content.split())),
                     "content": content,
                     "outline": outline  # NEW: Include outline
@@ -320,7 +347,7 @@ class ReferenceSelectorAgent:
         
         Args:
             mode: "initial" for pre-brainstorm, "additional" for pre-paper
-            max_papers: Maximum papers to select (6 for initial, remaining slots for additional)
+            max_papers: Maximum papers to select for this call
         """
         try:
             max_input = self._calculate_max_input_tokens()

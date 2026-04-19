@@ -77,7 +77,7 @@ class CertaintyAssessor:
     
     def get_current_task_id(self) -> str:
         """Get the task ID for the current/next API call."""
-        return f"auto_ca_{self.task_sequence:03d}"
+        return f"agg_sub1_{self.task_sequence:03d}"
     
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""

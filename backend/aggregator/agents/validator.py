@@ -3,7 +3,7 @@ Validator agent - validates submissions sequentially.
 Always uses 512-char chunks for consistency.
 """
 import asyncio
-from typing import Optional, Dict, Callable, List
+from typing import Optional, Dict, Callable, List, Any
 import logging
 import httpx
 
@@ -191,6 +191,7 @@ class ValidatorAgent:
             
             # Generate validation with retry for 400 errors
             response = None
+            call_metadata = {}
             max_retries = 3  # 400 errors won't fix themselves - fail fast
             
             for attempt in range(max_retries):
@@ -204,6 +205,7 @@ class ValidatorAgent:
                         temperature=0.0,  # Deterministic validation - evolving context provides diversity
                         max_tokens=rag_config.validator_max_output_tokens  # User-configurable max output tokens
                     )
+                    call_metadata = api_client_manager.extract_call_metadata(response)
                     break  # Success
                     
                 except (httpx.HTTPStatusError, ValueError) as e:
@@ -367,6 +369,7 @@ class ValidatorAgent:
                         )
                     
                     if retry_response.get("choices"):
+                        call_metadata = api_client_manager.extract_call_metadata(retry_response)
                         retry_output = retry_response["choices"][0]["message"]["content"]
                         
                         try:
@@ -417,7 +420,8 @@ class ValidatorAgent:
                 reasoning=parsed["reasoning"],
                 summary=summary,
                 contradiction_check_passed=True,
-                json_valid=True
+                json_valid=True,
+                metadata={"llm_call": call_metadata}
             )
             
             return result
@@ -620,6 +624,7 @@ class ValidatorAgent:
                 self.task_tracking_callback("started", task_id)
             
             # Generate validation using api_client_manager for boost support
+            call_metadata = {}
             response = await api_client_manager.generate_completion(
                 task_id=task_id,
                 role_id=self.role_id,
@@ -628,6 +633,7 @@ class ValidatorAgent:
                 temperature=0.0,
                 max_tokens=rag_config.validator_max_output_tokens
             )
+            call_metadata = api_client_manager.extract_call_metadata(response)
             
             if not response or not response.get("choices"):
                 logger.error("Batch validator: No choices in response")
@@ -655,7 +661,9 @@ class ValidatorAgent:
             except Exception as e:
                 logger.warning(f"Batch validator: JSON parse failed: {e}")
                 # Attempt conversational retry
-                parsed = await self._retry_batch_json_parse(prompt, llm_output, batch_size, task_id)
+                parsed, retry_call_metadata = await self._retry_batch_json_parse(prompt, llm_output, batch_size, task_id)
+                if retry_call_metadata:
+                    call_metadata = retry_call_metadata
                 if parsed is None:
                     return [
                         ValidationResult(
@@ -663,7 +671,8 @@ class ValidatorAgent:
                             decision="reject",
                             reasoning=f"Validator JSON error: {e}",
                             summary="Validator output error",
-                            json_valid=False
+                            json_valid=False,
+                            metadata={"llm_call": call_metadata}
                         )
                         for s in submissions
                     ]
@@ -729,7 +738,8 @@ class ValidatorAgent:
                     reasoning=reasoning,
                     summary=summary,
                     contradiction_check_passed=True,
-                    json_valid=True
+                    json_valid=True,
+                    metadata={"llm_call": call_metadata}
                 ))
             
             # Notify task completed successfully
@@ -763,7 +773,7 @@ class ValidatorAgent:
         failed_output: str, 
         batch_size: int,
         task_id: str
-    ) -> Optional[Dict]:
+    ) -> tuple[Optional[Dict], Dict[str, Any]]:
         """
         Attempt conversational retry for batch JSON parsing.
         
@@ -774,7 +784,7 @@ class ValidatorAgent:
             task_id: Task ID for tracking retry attempt
         
         Returns:
-            Parsed JSON dict if successful, None otherwise
+            Tuple of (parsed JSON dict if successful, call metadata dict)
         """
         logger.info("Batch validator: Attempting conversational retry for JSON parse")
         
@@ -805,6 +815,7 @@ class ValidatorAgent:
         )
         
         try:
+            call_metadata = {}
             # CRITICAL FIX: Truncate failed output to prevent context overflow during retry
             max_failed_output_chars = 2000  # ~500 tokens - enough for error context
             if len(failed_output) > max_failed_output_chars:
@@ -848,16 +859,17 @@ class ValidatorAgent:
                     temperature=0.0,
                     max_tokens=rag_config.validator_max_output_tokens  # Respect max_tokens on retry
                 )
+            call_metadata = api_client_manager.extract_call_metadata(retry_response)
             
             if retry_response.get("choices"):
                 retry_output = retry_response["choices"][0]["message"]["content"]
                 parsed = parse_json(retry_output)
                 logger.info("Batch validator: Conversational retry succeeded!")
-                return parsed
+                return parsed, call_metadata
         except Exception as e:
             logger.warning(f"Batch validator: Retry failed - {e}")
         
-        return None
+        return None, {}
     
     def _get_system_prompt(self) -> str:
         """Get system prompt for single submission."""

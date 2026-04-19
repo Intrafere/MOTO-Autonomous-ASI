@@ -12,6 +12,7 @@ import aiofiles
 
 from backend.shared.config import system_config
 from backend.shared.models import BrainstormMetadata
+from backend.shared.path_safety import validate_single_path_component
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +48,13 @@ class BrainstormMemory:
         self._base_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Brainstorm memory initialized at {self._base_dir}")
     
+    def _safe_topic_id(self, topic_id: str) -> str:
+        """Validate topic_id as a single path component."""
+        return validate_single_path_component(topic_id, "topic ID")
+
     def _get_database_path(self, topic_id: str) -> Path:
         """Get path to brainstorm database file."""
-        return self._base_dir / f"brainstorm_{topic_id}.txt"
+        return self._base_dir / f"brainstorm_{self._safe_topic_id(topic_id)}.txt"
     
     def get_database_path(self, topic_id: str) -> str:
         """
@@ -63,15 +68,15 @@ class BrainstormMemory:
     
     def _get_metadata_path(self, topic_id: str) -> Path:
         """Get path to brainstorm metadata JSON file."""
-        return self._base_dir / f"brainstorm_{topic_id}_metadata.json"
+        return self._base_dir / f"brainstorm_{self._safe_topic_id(topic_id)}_metadata.json"
     
     def _get_submitter_rejections_path(self, topic_id: str, submitter_id: int) -> Path:
         """Get path to submitter rejection log file."""
-        return self._base_dir / f"brainstorm_{topic_id}_submitter_{submitter_id}_rejections.txt"
+        return self._base_dir / f"brainstorm_{self._safe_topic_id(topic_id)}_submitter_{submitter_id}_rejections.txt"
     
     def _get_completion_feedback_path(self, topic_id: str) -> Path:
         """Get path to completion feedback file."""
-        return self._base_dir / f"completion_feedback_{topic_id}.txt"
+        return self._base_dir / f"completion_feedback_{self._safe_topic_id(topic_id)}.txt"
     
     # ========================================================================
     # METADATA OPERATIONS

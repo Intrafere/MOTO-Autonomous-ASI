@@ -594,10 +594,7 @@ class HighContextSubmitter:
             # Check for empty response
             if not response.get("choices") or not response["choices"][0].get("message"):
                 logger.error("construction: LLM returned empty response structure")
-                # Notify task completed (failed but still completed)
-                if self.task_tracking_callback:
-                    self.task_tracking_callback("completed", task_id)
-                return None
+                raise ValueError("LLM returned empty response")
             
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
@@ -723,7 +720,7 @@ class HighContextSubmitter:
                 self.task_tracking_callback("completed", task_id)
             return None
     
-    async def submit_review(self) -> Optional[CompilerSubmission]:
+    async def submit_review(self, review_focus: str = "general") -> Optional[CompilerSubmission]:
         """
         Submit paper review (or no-op if no edit needed).
         
@@ -735,7 +732,7 @@ class HighContextSubmitter:
         Returns:
             CompilerSubmission if edit needed, None otherwise
         """
-        logger.info("Starting paper review for errors/improvements...")
+        logger.info(f"Starting paper review for errors/improvements (focus={review_focus})...")
         
         try:
             # Get current outline and paper (NO aggregator DB context for this mode)
@@ -754,7 +751,8 @@ class HighContextSubmitter:
             prompt = await build_review_prompt(
                 user_prompt=self.user_prompt,
                 current_outline=current_outline,  # ALWAYS fully injected
-                current_paper=paper_for_llm
+                current_paper=paper_for_llm,
+                review_focus=review_focus
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
             
@@ -789,6 +787,12 @@ class HighContextSubmitter:
                 temperature=0.0,  # Deterministic generation - evolving context provides diversity
                 max_tokens=system_config.compiler_high_context_max_output_tokens  # User-configurable (outline creation, update, construction, review)
             )
+            
+            # Check for empty response
+            if not response.get("choices") or not response["choices"][0].get("message"):
+                logger.error("review: LLM returned empty response structure")
+                raise ValueError("LLM returned empty response")
+            
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
@@ -844,7 +848,10 @@ class HighContextSubmitter:
                 old_string=_normalize_string_field(data.get("old_string", "")),
                 new_string=new_string_content,  # Already normalized above
                 reasoning=data.get("reasoning", ""),
-                metadata={"is_minuscule": is_minuscule}
+                metadata={
+                    "is_minuscule": is_minuscule,
+                    "review_focus": review_focus
+                }
             )
             
             # Notify task completed successfully

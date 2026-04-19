@@ -54,7 +54,7 @@ class PaperTitleSelectorAgent:
     
     def get_current_task_id(self) -> str:
         """Get the task ID for the current/next API call."""
-        return f"auto_pt_{self.task_sequence:03d}"
+        return f"agg_sub1_{self.task_sequence:03d}"
     
     async def select_title(
         self,
@@ -122,6 +122,7 @@ class PaperTitleSelectorAgent:
                 topic_prompt,
                 brainstorm_summary,
                 existing_papers_from_brainstorm,
+                reference_papers,
                 selection.paper_title,
                 selection.reasoning
             )
@@ -290,6 +291,7 @@ class PaperTitleSelectorAgent:
         topic_prompt: str,
         brainstorm_summary: str,
         existing_papers_from_brainstorm: List[Dict[str, Any]],
+        reference_papers: List[Dict[str, Any]],
         proposed_title: str,
         title_reasoning: str
     ) -> Tuple[bool, str]:
@@ -306,6 +308,7 @@ class PaperTitleSelectorAgent:
                 topic_prompt=topic_prompt,
                 brainstorm_summary=brainstorm_summary,
                 existing_papers_from_brainstorm=existing_papers_from_brainstorm,
+                reference_papers=reference_papers,
                 proposed_title=proposed_title,
                 title_reasoning=title_reasoning
             )

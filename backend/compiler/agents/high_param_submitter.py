@@ -252,6 +252,9 @@ class HighParamSubmitter:
         )
         
         # Extract content
+        if not response.get("choices") or not response["choices"][0].get("message"):
+            logger.error("Step 1: LLM returned empty response structure")
+            raise ValueError("LLM returned empty response")
         message = response["choices"][0]["message"]
         llm_output = message.get("content") or message.get("reasoning") or ""
         logger.info(f"Step 1: LLM completion received - {len(llm_output)} chars")
@@ -405,6 +408,9 @@ class HighParamSubmitter:
             )
             
             # Extract content
+            if not response.get("choices") or not response["choices"][0].get("message"):
+                logger.error("Step 2: LLM returned empty response structure")
+                raise ValueError("LLM returned empty response")
             message = response["choices"][0]["message"]
             llm_output = message.get("content") or message.get("reasoning") or ""
             logger.info(f"Step 2: LLM completion received - {len(llm_output)} chars")
@@ -606,6 +612,9 @@ class HighParamSubmitter:
             )
             
             # Extract content
+            if not response.get("choices") or not response["choices"][0].get("message"):
+                logger.error("Step 2 (Wolfram): LLM returned empty response structure")
+                raise ValueError("LLM returned empty response")
             message = response["choices"][0]["message"]
             llm_output = message.get("content") or message.get("reasoning") or ""
             logger.info(f"Step 2 (Wolfram): LLM completion received - {len(llm_output)} chars")

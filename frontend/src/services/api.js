@@ -813,9 +813,22 @@ export const boostAPI = {
   // NEW: Boost Next X Calls (Counter-based mode)
   // ============================================================
   
+  // Enable or disable always-prefer-boost mode
+  async setAlwaysPrefer(enabled) {
+    const response = await fetch(`${API_BASE}/boost/set-always-prefer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || 'Failed to set always-prefer boost');
+    }
+    return response.json();
+  },
+
   // Set the number of next API calls to boost
-  async setNextCount(count) {
-    const response = await fetch(`${API_BASE}/boost/set-next-count`, {
+  async setNextCount(count) {    const response = await fetch(`${API_BASE}/boost/set-next-count`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ count }),
@@ -847,33 +860,6 @@ export const boostAPI = {
   async getCategories(mode = 'all') {
     const response = await fetch(`${API_BASE}/boost/categories?mode=${mode}`);
     if (!response.ok) throw new Error('Failed to get boost categories');
-    return response.json();
-  },
-
-  // ============================================================
-  // NEW: Boost Logs
-  // ============================================================
-
-  // Get boost API call logs
-  async getLogs(limit = 100) {
-    const response = await fetch(`${API_BASE}/boost/logs?limit=${limit}`);
-    if (!response.ok) throw new Error('Failed to get boost logs');
-    return response.json();
-  },
-
-  // Get a specific log entry with full response
-  async getLogEntry(index) {
-    const response = await fetch(`${API_BASE}/boost/logs/${index}`);
-    if (!response.ok) throw new Error('Failed to get log entry');
-    return response.json();
-  },
-
-  // Clear all boost logs
-  async clearLogs() {
-    const response = await fetch(`${API_BASE}/boost/clear-logs`, {
-      method: 'POST',
-    });
-    if (!response.ok) throw new Error('Failed to clear boost logs');
     return response.json();
   },
 };

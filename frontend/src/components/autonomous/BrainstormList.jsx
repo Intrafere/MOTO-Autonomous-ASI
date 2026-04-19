@@ -162,7 +162,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
         </button>
       </div>
       <div className="brainstorm-list-warning">
-        (WARNING: Any given brainstorm idea may be pruned/deleted if the AI deems it to hurt the collective database quality.)
+        (WARNING: Any given brainstorm idea may be pruned/deleted if the AI deems it to hurt the collective database quality. These brainstorms are the real powerhouse behind the ASI creativity! The brainstorms themselves often contain many great ideas that get turned into the stage 2 papers.)
       </div>
 
       {brainstorms.map((brainstorm) => (

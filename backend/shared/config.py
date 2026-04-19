@@ -151,7 +151,8 @@ class SystemConfig(BaseSettings):
     # Autonomous workflow settings
     autonomous_completion_review_interval: int = 10  # Every 10 acceptances
     autonomous_paper_redundancy_interval: int = 3  # Every 3 completed papers
-    autonomous_max_reference_papers: int = 6  # Max papers for reference context
+    autonomous_topic_cycle_max_reference_papers: int = 3  # Max pre-brainstorm + additional references per topic cycle
+    autonomous_tier3_short_form_max_reference_papers: int = 6  # Max references for Tier 3 short-form selection
     
     # Wolfram Alpha integration (optional)
     wolfram_alpha_enabled: bool = False

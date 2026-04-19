@@ -20,6 +20,17 @@ from backend.compiler.memory.outline_memory import outline_memory
 logger = logging.getLogger(__name__)
 
 
+CLAIM_TYPE_VALIDATION_RULES = """CLAIM TYPE VALIDATION (CRITICAL):
+- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
+- Theoretical claims are acceptable only if they are supported by sound derivation, proof, or explicit assumptions in the document.
+- Literature claims are acceptable only if they include explicit in-text citations identifying the external source. Vague phrases like "studies show" are insufficient.
+- Empirical claims include benchmark numbers, latency, throughput, speedups, accuracy, perplexity, ablations, hardware metrics, measured runtimes, and evaluation outcomes.
+- Artifact claims include statements about code, kernels, experiments, benchmark logs, reproductions, or accompanying implementations.
+- Empirical or artifact claims may be presented as established fact ONLY when backed by an explicit external citation or a provided artifact in context.
+- If empirical or artifact support is absent, acceptable wording is limited to hypothesis, expected benefit, design target, proposed experiment, validation plan, limitation, or future work.
+- Reject content that invents citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts."""
+
+
 def _diagnostic_char_info(text: str, max_chars: int = 100) -> str:
     """
     Generate diagnostic information about a string's characters.
@@ -999,6 +1010,18 @@ class CompilerValidator:
                 max_tokens=system_config.compiler_validator_max_output_tokens  # User-configurable
             )
             
+            # Check for empty response
+            if not response.get("choices") or not response["choices"][0].get("message"):
+                logger.error("CompilerValidator: LLM returned empty response structure")
+                return CompilerValidationResult(
+                    submission_id=submission.submission_id,
+                    decision="reject",
+                    reasoning="Validation LLM returned empty response (no choices)",
+                    summary="LLM empty response",
+                    json_valid=False,
+                    validation_stage="llm_validation"
+                )
+            
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
@@ -1109,6 +1132,19 @@ class CompilerValidator:
                 temperature=0.0,
                 max_tokens=system_config.compiler_validator_max_output_tokens
             )
+            
+            if not response.get("choices") or not response["choices"][0].get("message"):
+                logger.error("CompilerValidator: Brainstorm validation LLM returned empty response")
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+                return CompilerValidationResult(
+                    submission_id=str(uuid.uuid4()),
+                    decision="reject",
+                    reasoning="Validation LLM returned empty response (no choices)",
+                    summary="LLM empty response",
+                    json_valid=False,
+                    validation_stage="llm_validation"
+                )
             
             message = response["choices"][0]["message"]
             llm_output = message.get("content") or message.get("reasoning") or ""
@@ -1310,6 +1346,8 @@ Output your decision ONLY as JSON:
         
         parts.append(f"CURRENT DOCUMENT:\n{current_paper}\n---\n")
         parts.append(f"SUBMISSION TO VALIDATE:\n")
+        if submission.metadata.get("review_focus"):
+            parts.append(f"Review Focus: {submission.metadata['review_focus']}\n")
         parts.append(f"Operation: {submission.operation}\n")
         if submission.old_string:
             parts.append(f"Old String (to find): {submission.old_string}\n")
@@ -1334,17 +1372,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CLAIM_TYPE_VALIDATION_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -1378,16 +1410,23 @@ OUTLINE VALIDATION CRITERIA:
 1. SECTION_STRUCTURE: MUST include Introduction, at least one Body section, and Conclusion with exact names (Abstract is optional but recommended)
 2. SECTION_ORDER: [Abstract →] Introduction → Body sections → Conclusion (this exact order, where Abstract is optional)
 3. COHERENCE: Logically structured with clear sections and subsections
-4. COMPLETENESS: Captures all relevant content from aggregator database in relation to what is relevant to the title set in the user prompt
+4. COMPLETENESS: Makes effective use of any source material it chooses to use and does not omit clearly crucial material for its chosen scope
 5. ALIGNMENT: Aligns with user's compiler-directing prompt goals
 6. COMPREHENSIVENESS: Provides sufficient detail to guide mathematical document construction
 7. MATHEMATICAL PROGRESSION: Body sections follow logical progression (definitions → main results → theorems → proofs)
 8. IN-TEXT CITATIONS ONLY: Must NOT include a separate References or Citations section
 9. ANCHOR PRESERVATION: Must not attempt to add content after the end-of-outline anchor markers
-10. LOGICAL GROUNDING: Outline must reference actual content from aggregator database based on sound mathematical principles, not unfounded claims
+10. LOGICAL GROUNDING: Outline may draw from aggregator database material, reference papers, or rigorous reasoning, but it must remain grounded in sound mathematical principles and avoid unfounded claims
 11. NO PLACEHOLDER TEXT: Must not contain any placeholder markers (e.g., "[HARD CODED PLACEHOLDER FOR...", "[PLACEHOLDER FOR...", "TO BE WRITTEN AFTER..."). Placeholders are structural markers only - all submitted content must be actual outline content.
+12. EMPIRICAL PROVENANCE: Must not include unsupported numeric empirical claims in section/subsection headings or outline prose unless explicitly backed by citation or provided artifact support
 
 **CRITICAL**: Criterion #11 checks the SUBMISSION CONTENT ONLY. The CURRENT OUTLINE may contain system-managed anchor markers (normal and expected). Do NOT reject a submission just because anchor markers exist in the current outline - only reject if the SUBMISSION ITSELF contains placeholder or anchor text (pre-validation at line 326 catches this before you see it).
+
+SOURCE MATERIAL POLICY:
+- The aggregator/brainstorm database is optional support, not a mandatory checklist
+- Do NOT reject solely because an outline does not explicitly use or cover database material
+- Do reject if the outline ignores clearly crucial source material in a way that makes its chosen scope weak, incoherent, or misaligned with the user prompt
+- Accept selective or divergent outline structures when they better serve the user's prompt and remain rigorous
 
 YOUR TASK:
 Verify the submission meets ALL criteria above. Accept only if ALL criteria pass. Reject if ANY criterion fails.
@@ -1397,11 +1436,12 @@ REJECTION CATEGORIES (provide specific feedback):
 - INCORRECT_SECTION_ORDER: Sections are out of order (must be: [Abstract →] Introduction → Body → Conclusion, where Abstract is optional)
 - INCORRECT_SECTION_NAME: Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction"; if Abstract included, must be "Abstract", "I. Abstract", or "0. Abstract")
 - STRUCTURAL: Body sections not in logical mathematical progression order
-- INCOMPLETENESS: Missing critical content from aggregator database that's relevant to document title
+- INCOMPLETENESS: Missing clearly crucial source material or necessary structure for the chosen scope
 - MISALIGNMENT: Doesn't serve user's compiler-directing prompt goals
 - INSUFFICIENT_DETAIL: Lacks necessary granularity to guide mathematical document construction
 - FORMAT_VIOLATION: Includes separate References/Citations section (NOT allowed)
 - ANCHOR_VIOLATION: Content placed after outline anchor markers
+- EMPIRICAL_PROVENANCE: Unsupported benchmark, hardware, or artifact claim presented as established fact
 
 SECTION NAME VALIDATION (CRITICAL):
 
@@ -1445,7 +1485,7 @@ This is an OUTLINE showing section names - not the actual paper content."
             "outline_create": """MODE-SPECIFIC CRITERIA (Outline Creation):
 - Outline MUST include: Introduction, at least one Body section, Conclusion (Abstract is optional)
 - Section names MUST match exactly: "Introduction", "Conclusion" (if Abstract included: "Abstract", "I. Abstract", or "0. Abstract")
-- Outline captures all relevant unique content from aggregator database
+- Outline makes effective use of any helpful aggregator database content when relevant, but need not mirror all entries
 - Outline provides clear structure for mathematical document construction
 - Outline aligns with user's compiler-directing prompt
 - Body sections follow logical mathematical progression
@@ -1559,17 +1599,11 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-WEB SEARCH STRONGLY ENCOURAGED:
-If your model has access to real-time web search capabilities (such as Perplexity Sonar or similar), you are STRONGLY ENCOURAGED to use them to:
-- Verify mathematical claims against current published research
-- Access recent developments and contemporary mathematical literature
-- Cross-reference theorems, proofs, and techniques with authoritative sources
-- Supplement analysis with verified external information
-- Validate approaches against established mathematical consensus
+""" + CLAIM_TYPE_VALIDATION_RULES + """
 
-The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use all available resources - internal context as exploration history, your base knowledge for reasoning, and web search (if available) for verification and current information.
-
-WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth. If you have web search, use it.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ 
+ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
@@ -1612,8 +1646,15 @@ DOCUMENT VALIDATION CRITERIA:
 8. ANCHOR PRESERVATION: Must not attempt to add content after the end-of-document anchor marker ("[HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]")
 9. LOGICAL GROUNDING: Must not contain unfounded claims or logical fallacies. All claims must be grounded in established mathematical principles and sound reasoning.
 10. NO PLACEHOLDER TEXT: Must not contain any placeholder markers (e.g., "[HARD CODED PLACEHOLDER FOR...", "[PLACEHOLDER FOR...", "TO BE WRITTEN AFTER..."). Placeholders are structural markers indicating where sections WILL BE written - all submitted content must be actual mathematical prose, not placeholder text.
+11. CLAIM TYPE VALIDATION: The submission must satisfy the acceptance criteria for each theoretical, literature, empirical, and artifact claim it makes
 
 **CRITICAL**: Criterion #10 checks the SUBMISSION CONTENT ONLY. The CURRENT DOCUMENT may contain system-managed placeholders and anchors (normal during construction). Do NOT reject a submission just because placeholders exist in the current document - only reject if the SUBMISSION ITSELF contains placeholder text (pre-validation at line 780 catches this before you see it).
+
+SOURCE MATERIAL POLICY:
+- Brainstorm/aggregator content, reference papers, and the model's rigorous reasoning are all allowed inputs
+- The brainstorm database is optional support, not a mandatory checklist
+- Do NOT reject solely because the submission does not explicitly use brainstorm content or because it departs from brainstorm phrasing
+- Reject only if the submission ignores clearly necessary established content for its claimed scope, conflicts with the outline, or becomes weaker/less rigorous as a result
 
 YOUR TASK:
 Verify the submission meets ALL criteria above. If even ONE criterion fails, reject the submission.
@@ -1653,9 +1694,17 @@ CITATION FORMAT CHECK (if applicable):
 - Reject if content appears to be a bibliography or reference list
 - In-text citations (if present) should be integrated within the narrative
 
+CLAIM TYPE CHECK (CRITICAL):
+- Theoretical claims: accept only if supported by sound derivation, proof, or explicit assumptions in the document
+- Literature claims: reject if they rely on external facts without explicit in-text citation
+- Empirical claims: reject if benchmark numbers, hardware measurements, speedups, perplexity/accuracy results, or evaluation outcomes are presented as established fact without citation or provided artifact support
+- Artifact claims: reject if the content claims code, experiments, kernels, logs, or accompanying implementations exist without citation or provided artifact support
+- If unsupported empirical/artifact material is phrased as hypothesis, validation plan, limitation, expected benefit, or future work, it may be acceptable
+
 MATHEMATICAL RIGOR CHECK (CRITICAL):
 - Reject if content contains unfounded claims or logical fallacies
 - Accept only content rooted in established mathematical principles and sound reasoning
+- Reject fabricated experiments, nonexistent code/artifact claims, unsupported metrics, or invented citations
 
 """
         
@@ -1679,17 +1728,19 @@ This means it is CORRECT and EXPECTED that:
 MODE-SPECIFIC CRITERIA (Document Construction):
 - Outline Adherence: Follows the outline structure appropriately
 - Logical Flow: Builds logically from existing document content
-- Evidence Integration: Captures relevant aggregator database content
+- Source Use: Any brainstorm/aggregator content that is used is integrated coherently; selective non-use is acceptable when the paper remains stronger, rigorous, and aligned with the prompt
 - Non-Repetition: Doesn't repeat existing document sections
 - Section Uniqueness: Doesn't create section headers that already exist in current document
 - Placement Context: Content fits naturally at the pre-validated location
 - Content Check: No forward-looking structural previews outside introduction
 - Mathematical Accuracy: Content is based on established mathematical principles and sound reasoning
+- Empirical Provenance: Unsupported benchmark or artifact claims are rewritten conservatively, not asserted as verified results
 
 VERIFICATION CHECKLIST:
 ✓ Does it follow the current outline (the outline is the TEMPLATE, not actual content)?
 ✓ Does it build coherently from what's already written in the ACTUAL DOCUMENT?
-✓ Does it integrate content from the aggregator database?
+✓ If it uses brainstorm/aggregator material, does it integrate it coherently?
+✓ If it departs from source material, does the result still better serve the prompt with sound reasoning?
 ✓ Does it avoid repeating existing content in the ACTUAL DOCUMENT?
 ✓ Does it avoid creating duplicate section headers that exist in the CURRENT PAPER/DOCUMENT (NOT the outline template)?
 ✓ Does the new_string content fit naturally at the insertion/replacement location?
@@ -1723,6 +1774,7 @@ REJECT if: Any criterion fails (especially duplicate section headers, placement 
 - Edit maintains or improves overall quality
 - Placement Context: Edit fits naturally at the pre-validated location
 - Content Check: No forward-looking structural previews outside introduction
+- Empirical Provenance: Edit appropriately removes or downgrades unsupported empirical/artifact claims when present
 
 REJECTION FEEDBACK FORMAT:
 If rejecting, use this structure:
@@ -1741,6 +1793,7 @@ REJECT if: Edit is unnecessary, harmful, or placement context inappropriate""",
 - Placement Context: Enhancement fits naturally at the pre-validated location
 - Content Check: No forward-looking structural previews outside introduction
 - Mathematical Check: Enhancement provides rigorous, sound mathematical improvements
+- Empirical Provenance: Enhancement does not introduce unsupported benchmark or artifact claims
 
 REJECTION FEEDBACK FORMAT:
 If rejecting, use this structure:

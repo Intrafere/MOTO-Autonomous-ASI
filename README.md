@@ -1,16 +1,16 @@
 # MOTO Autonomous ASI - Novel S.T.E.M. Solution Variant for ASI Automated Theory Generation
 # Autonomous Superintelligence Deep Research Harness
-**Version: 1.0.5**
+**Version: 1.0.6**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 16+](https://img.shields.io/badge/node-16+-green.svg)](https://nodejs.org/)
 
-**A breakthrough in AI automated theorem generation. An autonomous AI/ASI research system that generates novel and publication-worthy research papers autonomously powered by Intrafere Research Group's new ASI discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/). Top-P exploration changes how we look at AI weights, a specific combination of reiterative brainstorming, validation, feedback, and pruning allows for superintelligence exploration and data extraction from nearly any combination of AI models. This is useful for any discipline with an interest in creative and novel solution generation for mathematics: physicists, engineers, mathematicians, chemists, etc. This harness can also easily be modified for other research topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.**
+**A breakthrough in AI automated theorem generation. An autonomous AI/ASI research system that generates novel and publication-worthy research papers. This ASI is autonomously powered by Intrafere Research Group's new ASI discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/). Top-P exploration assist in decyphering how we explore AI weights, a specific combination of reiterative brainstorming, validation, feedback, and pruning allows for superintelligence exploration and creative multi-model data extraction from nearly any combination of AI models. This is useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.**
 
-### The Core Discovery: Top-P Exploration (Solution Basin Aggregation)
+### The Core Discovery: Top-P Exploration 
 
-MOTO is built on a [key insight](https://intrafere.com/structured-brainstorming-validated-feedback/) about how generative transformers operate: **transformers predict what tokens come next, so providing them with their own prior ideas enables deeper probing of the solution space**. This is called **solution basin aggregation** — each brainstorming pass explores a richer, more informed landscape, and the cross-recombination of "mined" knowledge compounds to create new insights that do not exist from the model's training alone. Intrafere considers this the mechanism that produces [ASI-like results](https://intrafere.com/structured-brainstorming-validated-feedback/) in practice. MOTO essentially "mines" creativity from a transformer's knowledge set, and this compounding effect is what differentiates it from traditional single-pass AI.
+MOTO is built on a [key insight](https://intrafere.com/structured-brainstorming-validated-feedback/) about how generative transformers operate: **transformers predict what tokens come next, so providing them with their own prior ideas enables deeper probing of the solution space**. At Intrafere, we have been calling this constrained brainstorming **solution basin aggregation** — each round of brainstorming explores a richer, more informed landscape, and the cross-recombination of "mined" knowledge compounds to create new insights that do not exist from the model's training alone. Intrafere considers this the mechanism that produces [ASI-like results](https://intrafere.com/structured-brainstorming-validated-feedback/) in practice. MOTO essentially "mines" creativity from a transformer's knowledge set, and this compounding effect is what differentiates it from traditional single-pass AI.
 
 The brainstorming phase runs **multiple submitters in parallel**, each independently exploring the solution space, funneled into a **single bottleneck validator** — a completely separate model instance whose only job is to decide whether each submission genuinely advances the knowledge base. This architectural separation between creative exploration and critical evaluation mitigates the hallucination loops and drift that plague single-model autonomous agents. Every rejection carries specific feedback that steers the next round of exploration, so failure is never wasted. Iterative pruning continuously removes entries that become redundant as stronger ideas emerge, producing an ever-denser, self-refining knowledge base. [View the learning curve data](https://intrafere.com/motos-brainstorming-potential-data/) for empirical evidence of this approach.
 
@@ -20,7 +20,7 @@ Once a brainstorm is sufficiently explored, MOTO writes a research paper from it
 
 MOTO may produce many brilliant papers as it runs; these intermediate papers are answers that rival traditional paid cloud deep research. As the user, observe MOTO as often or as little as you'd like — skip its autonomy and force it into final answer generation, or stop it early and select one of its highly creative pre-final answer papers. If the operator allows, let MOTO run for many hours and produce a final answer from its experimental mode. MOTO autonomously decides whether to output a short-form answer or collect existing papers into a long-form academic volume. With models over 131,000 token context limits, the harness easily produces final volumes exceeding 40,000 words autonomously. The built-in "critique" feature allows the user to direct-inject the full volume into nearly any AI model of their choice for evaluation. MOTO writes papers in reverse order — body first, conclusion second, introduction last — to avoid constraining the creative process with premature structural commitments. MOTO is an experimental system; the AI(s) are producing this content partially unguided and all papers should be judged with extreme scrutiny.
 
-Give the program a try, MOTO is as cool as it sounds – there is a one-click installer. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green “< > Code” drop-down menu on the top right of this GitHub page, download the zip file, extract it to your desktop then double-click "Press to Launch MOTO.bat". Put in your OpenRouter.AI API key (or optionally connect LM Studio for faster performance), select your agents in the settings profile – if desired and you are unsure you may use the preselected “fastest” profile.
+Give the program a try, MOTO is as cool as it sounds – there is a one-click installer. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green “< > Code” drop-down menu on the top right of this GitHub page, download the zip file, extract it to your desktop then double-click "Click To Launch MOTO.bat". Put in your OpenRouter.AI API key (or optionally connect LM Studio for faster performance), select your agents in the settings profile – if desired and you are unsure you may use the preselected “fastest” profile.
 
 ***Now you are set up and every time you press launch your home lab is ready for your prompt!*** **Give MOTO the toughest question you can think of and press start to begin YOUR creations!**
 
@@ -61,7 +61,7 @@ Before installation, you need:
 
 1. Clone or download this repository
 2. Start LM Studio and load your models and "nomic-embed-text-v1.5" agent **and/or** have your OpenRouter API key ready
-3. **Double-click `Press to Launch MOTO.bat`**
+3. **Double-click `Click To Launch MOTO.bat`**
 4. After acknowledging the disclaimer, choose one of the startup setup paths:
    - Enter your OpenRouter API key
    - Confirm that LM Studio is already running with a loaded model
@@ -155,7 +155,7 @@ moto-math-variant/
 │       └── services/        # API and WebSocket clients
 ├── .cursor/
 │   └── rules/               # AI agent design specifications (full system documentation)
-├── Press to Launch MOTO.bat  # One-click Windows launcher
+├── Click To Launch MOTO.bat  # One-click Windows launcher
 ├── requirements.txt         # Python dependencies
 └── package.json             # Node.js dependencies
 ```

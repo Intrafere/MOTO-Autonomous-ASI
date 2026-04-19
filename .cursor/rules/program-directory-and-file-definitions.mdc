@@ -18,7 +18,7 @@ project-root/
 │   │   ├── lm_studio_client.py          # LM Studio HTTP API client
 │   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion detection)
 │   │   ├── api_client_manager.py        # Unified API router (OpenRouter/LM Studio fallback + boost)
-│   │   ├── boost_manager.py             # Singleton boost manager (tracks boosted tasks)
+│   │   ├── boost_manager.py             # Singleton boost manager (tracks boost modes: next-count, always-prefer, category)
 │   │   ├── boost_logger.py              # Boost API call logger (persists to boost_api_log.txt)
 │   │   ├── workflow_predictor.py        # Predicts next 20 API calls (mode-specific algorithms)
 │   │   ├── free_model_manager.py        # Free model rotation/cooldown singleton (looping + auto-selector backup)
@@ -222,7 +222,7 @@ project-root/
 │   │   │       ├── BrainstormList.jsx       # List all brainstorm topics with status
 │   │   │       ├── PaperLibrary.jsx         # Grid view of completed papers (title + abstract)
 │   │   │       ├── AutonomousResearchSettings.jsx  # Model configs for all roles
-│   │   │       ├── AutonomousResearchLogs.jsx      # Metrics, graphs, event log
+│   │   │       ├── AutonomousResearchLogs.jsx      # Metrics, graphs, event log, combined API call logs
 │   │   │       ├── LivePaperProgress.jsx    # Real-time Tier 2 paper display (embedded in interface)
 │   │   │       ├── LiveTier3Progress.jsx    # Real-time Tier 3 final answer display (embedded in interface)
 │   │   │       ├── FinalAnswerView.jsx      # TIER 3 - Final answer tab (separate tab for completed answers)
@@ -237,12 +237,10 @@ project-root/
 │   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥7.0 avg)
 │   │   ├── CreditExhaustionNotificationStack.jsx # Persistent red notifications for OpenRouter credit exhaustion with "Retry OpenRouter" reset button
 │   │   ├── HungConnectionNotificationStack.jsx # Persistent amber notifications for API calls exceeding 15 minutes (possible hung connections)
-│   │   ├── BoostLogs.jsx                # Boost API call log viewer
-│   │   ├── BoostLogs.css                # Boost logs styles
-│   │   ├── BoostControlModal.jsx        # Modal for boost configuration (next-X, category, per-task)
+│   │   ├── BoostControlModal.jsx        # Modal for boost configuration (next-X, category, always-prefer)
 │   │   ├── BoostControlModal.css        # Boost control modal styles
-│   │   ├── WorkflowPanel.jsx            # Workflow prediction panel (next 20 API calls display)
-│   │   ├── WorkflowPanel.css            # Workflow panel styles
+│   │   ├── WorkflowPanel.jsx            # Boost controls panel (Boost Next X, Always Prefer, Category Boost, token stats, research timer)
+│   │   ├── WorkflowPanel.css            # Boost controls panel styles
 │   │   ├── TextFileUploader.jsx         # User file upload component
 │   │   ├── TextFileUploader.css         # File uploader styles
 │   │   ├── OpenRouterPrivacyWarningModal.jsx # Privacy policy error modal (OpenRouter data sharing)
@@ -269,7 +267,7 @@ project-root/
 ├── requirements.txt                     # Python dependencies
 ├── package.json                         # Root scripts
 ├── SECURITY.md                          # Security policy and private vulnerability reporting
-├── Press to Launch MOTO.bat             # The user's one-click program launcher.
+├── Click To Launch MOTO.bat             # The user's one-click program launcher.
 └── _moto_internal_launcher.ps1          # Internal PowerShell launcher (not for direct user use)
 
 ## File Purpose Descriptions
@@ -281,9 +279,9 @@ project-root/
 - `lm_studio_client.py`: LM Studio HTTP client (completions, embeddings, model listing)
 - `openrouter_client.py`: OpenRouter HTTP client (credit exhaustion detection, fallback)
 - `api_client_manager.py`: Unified API router (OpenRouter/LM Studio fallback + boost + model tracking)
-- `boost_manager.py`: Singleton boost manager (tracks boosted tasks, broadcasts events)
-- `boost_logger.py`: Boost API call logger (persists to `boost_api_log.txt`)
-- `workflow_predictor.py`: Predicts next 20 API calls (mode-specific algorithms)
+- `boost_manager.py`: Singleton boost manager (three modes: Boost Next X Calls, Always Prefer Boost, Category Boost; broadcasts events)
+- `boost_logger.py`: Boost API call logger (persists boost-routed calls for the combined API log view)
+- `workflow_predictor.py`: Predicts next 20 API calls for internal boost routing (not displayed in UI)
 - `free_model_manager.py`: Free model rotation/cooldown singleton (looping, auto-selector `openrouter/free`, account exhaustion detection)
 - `wolfram_alpha_client.py`: Wolfram Alpha API client for rigor verification
 - `rag_lock.py`: Global RAG operation lock (prevents collision, retry logic for reads)
@@ -325,5 +323,5 @@ project-root/
 - **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
 - **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`
 - **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx`, `ArchiveViewerModal.jsx`
-- **Shared**: `StartupProviderSetupModal.jsx`, `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `HungConnectionNotificationStack.jsx`, `BoostLogs.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
+- **Shared**: `StartupProviderSetupModal.jsx`, `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `HungConnectionNotificationStack.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
 - **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `autonomousProfiles.js` (shared recommended-profile definitions + persistence helpers), `disclaimerHelper.js` (frontend-only disclaimer injection), `api.js`, `websocket.js`

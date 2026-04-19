@@ -199,10 +199,9 @@ async def save_critique(
         logger.info(
             f"Saved critique {critique.critique_id} for {paper_type}"
             + (f" paper_id={paper_id}" if paper_id else "")
-            + (f" at {file_path}" if base_dir else "")
         )
     except Exception as e:
-        logger.error(f"Failed to save critique: {e}")
+        logger.error(f"Failed to save critique for {paper_type}: {e}")
         raise
 
     return critique
@@ -233,10 +232,10 @@ async def get_critiques(
 
         return critiques
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse critiques file {file_path}: {e}")
+        logger.error(f"Failed to parse critiques for {paper_type}: {e}")
         return []
     except Exception as e:
-        logger.error(f"Failed to load critiques from {file_path}: {e}")
+        logger.error(f"Failed to load critiques for {paper_type}: {e}")
         return []
 
 
@@ -253,11 +252,10 @@ async def clear_critiques(
             logger.info(
                 f"Cleared critiques for {paper_type}"
                 + (f" paper_id={paper_id}" if paper_id else "")
-                + (f" at {file_path}" if base_dir else "")
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to delete critiques file {file_path}: {e}")
+            logger.error(f"Failed to delete critiques for {paper_type}: {e}")
             raise
 
     return False

@@ -246,7 +246,10 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
           <h2>Stage 2 Final Answer History</h2>
           <p>Loading completed Stage 2 papers from all sessions...</p>
         </div>
-        <div className="loading-spinner">⟳ Loading...</div>
+        <div className="library-loading">
+          <span className="library-loading__icon" aria-hidden="true">⟳</span>
+          <span className="library-loading__text">Loading...</span>
+        </div>
       </div>
     );
   }

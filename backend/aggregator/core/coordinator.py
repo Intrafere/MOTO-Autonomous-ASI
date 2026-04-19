@@ -18,6 +18,7 @@ from backend.shared.rag_lock import rag_operation_lock
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.free_model_manager import free_model_manager
 from backend.aggregator.agents.submitter import SubmitterAgent
 from backend.aggregator.agents.validator import ValidatorAgent
 from backend.aggregator.core.queue_manager import queue_manager
@@ -165,6 +166,7 @@ class Coordinator:
         # Store configurations
         self.submitter_configs = submitter_configs
         self.validator_model = validator_model
+        self.validator_provider = validator_provider
         
         # Override validator context window if provided
         if validator_context_window is not None:
@@ -504,19 +506,18 @@ class Coordinator:
         self.is_running = True
         logger.info("Starting coordinator...")
         
+        # Reset free model manager state for fresh start
+        free_model_manager.reset()
+        
         # Refresh workflow predictions at start
         await self.refresh_workflow_predictions()
         
         if self.single_model_mode:
             # Single-model mode: Round-based sequential workflow
-            # NOTE: Boost routing (if enabled) is INDEPENDENT - it only affects which API
-            # each call uses (OpenRouter vs LM Studio), not whether calls are parallel/serial
             logger.info("Starting single-model workflow (sequential submitters + validator)")
             self._main_task = asyncio.create_task(self._single_model_workflow())
         else:
             # Multi-model mode: Parallel submitters + independent validator
-            # NOTE: Boost can be active here - submitters run in parallel regardless,
-            # boost only affects which API endpoint each call uses
             logger.info("Starting multi-model workflow (parallel submitters)")
             for submitter in self.submitters:
                 await submitter.start()
@@ -617,28 +618,14 @@ class Coordinator:
                 logger.info(f"Validator loop cancelled at iteration {iteration}")
                 break
             except FreeModelExhaustedError as e:
-                if e.soonest_retry:
-                    wait_secs = max(0, e.soonest_retry - time.time())
-                    wait_mins = round(wait_secs / 60, 1)
-                    logger.warning(
-                        f"SERIAL BOTTLENECK: Validator paused for {wait_mins} minutes "
-                        f"(all free models rate-limited)"
-                    )
-                    if self.broadcast_callback:
-                        await self.broadcast_callback("serial_bottleneck_paused", {
-                            "role_id": "aggregator_validator",
-                            "model": str(e),
-                            "wait_seconds": round(wait_secs),
-                            "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
-                        })
-                    await asyncio.sleep(wait_secs)
-                    if self.broadcast_callback:
-                        await self.broadcast_callback("serial_bottleneck_resumed", {
-                            "role_id": "aggregator_validator",
-                        })
-                else:
-                    logger.error(f"Validator: all free models exhausted, no cooldown info: {e}")
-                    await asyncio.sleep(60)
+                # All free models exhausted after retries - wait briefly and retry
+                logger.warning(f"Validator: all free models exhausted: {e}")
+                if self.broadcast_callback:
+                    await self.broadcast_callback("free_models_exhausted", {
+                        "role_id": "aggregator_validator",
+                        "message": str(e),
+                    })
+                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except Exception as e:
                 logger.error(f"Validator loop error on iteration {iteration}: {e}", exc_info=True)
                 await asyncio.sleep(2)
@@ -733,28 +720,14 @@ class Coordinator:
                 logger.info(f"Single-model workflow cancelled at round {round_number}")
                 break
             except FreeModelExhaustedError as e:
-                if e.soonest_retry:
-                    wait_secs = max(0, e.soonest_retry - time.time())
-                    wait_mins = round(wait_secs / 60, 1)
-                    logger.warning(
-                        f"SERIAL BOTTLENECK: Single-model workflow paused for {wait_mins} minutes "
-                        f"(all free models rate-limited)"
-                    )
-                    if self.broadcast_callback:
-                        await self.broadcast_callback("serial_bottleneck_paused", {
-                            "role_id": "aggregator_single_model",
-                            "model": str(e),
-                            "wait_seconds": round(wait_secs),
-                            "resume_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.soonest_retry)),
-                        })
-                    await asyncio.sleep(wait_secs)
-                    if self.broadcast_callback:
-                        await self.broadcast_callback("serial_bottleneck_resumed", {
-                            "role_id": "aggregator_single_model",
-                        })
-                else:
-                    logger.error(f"Single-model workflow: all free models exhausted, no cooldown info: {e}")
-                    await asyncio.sleep(60)
+                # All free models exhausted after retries - wait briefly and retry
+                logger.warning(f"Single-model workflow: all free models exhausted: {e}")
+                if self.broadcast_callback:
+                    await self.broadcast_callback("free_models_exhausted", {
+                        "role_id": "aggregator_single_model",
+                        "message": str(e),
+                    })
+                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except Exception as e:
                 logger.error(f"Single-model workflow error at round {round_number}: {e}", exc_info=True)
                 await asyncio.sleep(5)
@@ -769,22 +742,40 @@ class Coordinator:
         await shared_training_memory.add_accepted_submission(submission.content)
         
         # Notify submitter
-        submitter = self.submitters[submission.submitter_id - 1]
-        await submitter.handle_acceptance()
+        submitter = next((s for s in self.submitters if s.submitter_id == submission.submitter_id), None)
+        if submitter:
+            await submitter.handle_acceptance()
         
         # Get submitter config for model info
         submitter_config = self.submitter_configs[submission.submitter_id - 1] if submission.submitter_id <= len(self.submitter_configs) else None
+        submitter_call = submission.metadata.get("llm_call", {}) if submission.metadata else {}
+        validator_call = result.metadata.get("llm_call", {}) if result.metadata else {}
+        configured_submitter_model = submitter_config.model_id if submitter_config else (submitter.model_name if submitter else "unknown")
+        configured_submitter_provider = submitter_config.provider if submitter_config else ("openrouter" if submission.submitter_id == 11 else "lm_studio")
+        actual_submitter_model = submitter_call.get("effective_model") or configured_submitter_model
+        actual_submitter_provider = submitter_call.get("provider") or configured_submitter_provider
+        actual_validator_model = validator_call.get("effective_model") or self.validator_model
+        actual_validator_provider = validator_call.get("provider") or self.validator_provider
         
         # Broadcast
         await self._broadcast("submission_accepted", {
             "submission_id": submission.submission_id,
             "submitter_id": submission.submitter_id,
-            "submitter_model": submitter_config.model_id if submitter_config else submitter.model_name,
-            "submitter_provider": submitter_config.provider if submitter_config else "lm_studio",
+            "submitter_model": actual_submitter_model,
+            "submitter_provider": actual_submitter_provider,
+            "submitter_configured_model": configured_submitter_model,
+            "submitter_configured_provider": configured_submitter_provider,
+            "submitter_boosted": bool(submitter_call.get("boosted", False)),
+            "submitter_boost_mode": submitter_call.get("boost_mode"),
             "content": submission.content,
             "reasoning": result.reasoning,
             "total_acceptances": self.total_acceptances,
-            "validator_model": self.validator_model
+            "validator_model": actual_validator_model,
+            "validator_provider": actual_validator_provider,
+            "validator_configured_model": self.validator_model,
+            "validator_configured_provider": self.validator_provider,
+            "validator_boosted": bool(validator_call.get("boosted", False)),
+            "validator_boost_mode": validator_call.get("boost_mode"),
         })
         
         logger.info(f"Accepted submission from submitter {submission.submitter_id} (total: {self.total_acceptances})")
@@ -808,21 +799,39 @@ class Coordinator:
         self.total_rejections += 1
         
         # Notify submitter (stores last 5 rejections in local memory)
-        submitter = self.submitters[submission.submitter_id - 1]
-        await submitter.handle_rejection(result.summary, submission.content)
+        submitter = next((s for s in self.submitters if s.submitter_id == submission.submitter_id), None)
+        if submitter:
+            await submitter.handle_rejection(result.summary, submission.content)
         
         # Get submitter config for model info
         submitter_config = self.submitter_configs[submission.submitter_id - 1] if submission.submitter_id <= len(self.submitter_configs) else None
+        submitter_call = submission.metadata.get("llm_call", {}) if submission.metadata else {}
+        validator_call = result.metadata.get("llm_call", {}) if result.metadata else {}
+        configured_submitter_model = submitter_config.model_id if submitter_config else (submitter.model_name if submitter else "unknown")
+        configured_submitter_provider = submitter_config.provider if submitter_config else ("openrouter" if submission.submitter_id == 11 else "lm_studio")
+        actual_submitter_model = submitter_call.get("effective_model") or configured_submitter_model
+        actual_submitter_provider = submitter_call.get("provider") or configured_submitter_provider
+        actual_validator_model = validator_call.get("effective_model") or self.validator_model
+        actual_validator_provider = validator_call.get("provider") or self.validator_provider
         
         # Broadcast
         await self._broadcast("submission_rejected", {
             "submission_id": submission.submission_id,
             "submitter_id": submission.submitter_id,
-            "submitter_model": submitter_config.model_id if submitter_config else submitter.model_name,
-            "submitter_provider": submitter_config.provider if submitter_config else "lm_studio",
+            "submitter_model": actual_submitter_model,
+            "submitter_provider": actual_submitter_provider,
+            "submitter_configured_model": configured_submitter_model,
+            "submitter_configured_provider": configured_submitter_provider,
+            "submitter_boosted": bool(submitter_call.get("boosted", False)),
+            "submitter_boost_mode": submitter_call.get("boost_mode"),
             "reasoning": result.reasoning,
             "total_rejections": self.total_rejections,
-            "validator_model": self.validator_model
+            "validator_model": actual_validator_model,
+            "validator_provider": actual_validator_provider,
+            "validator_configured_model": self.validator_model,
+            "validator_configured_provider": self.validator_provider,
+            "validator_boosted": bool(validator_call.get("boosted", False)),
+            "validator_boost_mode": validator_call.get("boost_mode"),
         })
         
         logger.info(f"Rejected submission from submitter {submission.submitter_id} (total: {self.total_rejections})")

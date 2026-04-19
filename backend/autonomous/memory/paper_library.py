@@ -57,9 +57,13 @@ class PaperLibrary:
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Paper library initialized at {self._base_dir}")
     
+    def _safe_paper_id(self, paper_id: str) -> str:
+        """Validate paper_id as a single path component."""
+        return validate_single_path_component(paper_id, "paper ID")
+
     def _get_paper_path(self, paper_id: str) -> Path:
         """Get path to paper file."""
-        return self._base_dir / f"paper_{paper_id}.txt"
+        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}.txt"
     
     def get_paper_path(self, paper_id: str) -> str:
         """
@@ -83,23 +87,23 @@ class PaperLibrary:
     
     def _get_abstract_path(self, paper_id: str) -> Path:
         """Get path to abstract file."""
-        return self._base_dir / f"paper_{paper_id}_abstract.txt"
+        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_abstract.txt"
     
     def _get_source_brainstorm_path(self, paper_id: str) -> Path:
         """Get path to cached source brainstorm file."""
-        return self._base_dir / f"paper_{paper_id}_source_brainstorm.txt"
+        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_source_brainstorm.txt"
     
     def _get_outline_path(self, paper_id: str) -> Path:
         """Get path to paper outline file."""
-        return self._base_dir / f"paper_{paper_id}_outline.txt"
+        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_outline.txt"
     
     def _get_metadata_path(self, paper_id: str) -> Path:
         """Get path to paper metadata JSON file."""
-        return self._base_dir / f"paper_{paper_id}_metadata.json"
+        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_metadata.json"
     
     def _get_rejections_path(self, paper_id: str) -> Path:
         """Get path to paper compiler rejections file."""
-        return self._base_dir / f"paper_{paper_id}_last_10_rejections.txt"
+        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_last_10_rejections.txt"
 
     # ========================================================================
     # HISTORY HELPERS
@@ -274,6 +278,66 @@ class PaperLibrary:
             "content": content,
             "outline": outline,
         }
+
+    @staticmethod
+    def _format_reference_review_entry(label: str, critique: Any) -> str:
+        """Format one compact critique snapshot for reference-paper prompt context."""
+        return (
+            f"{label} {critique.model_id} "
+            f"N{critique.novelty_rating}/10 "
+            f"C{critique.correctness_rating}/10 "
+            f"I{critique.impact_rating}/10"
+        )
+
+    async def get_reference_title_display(self, paper_id: str, title: str) -> str:
+        """
+        Build a compact title string that includes reference-review ratings.
+
+        Shows the initial system auto-critique when available, plus the latest
+        four non-system critique runs. Legacy critique files created before
+        critique_source existed fall back to treating the oldest critique as the
+        initial run.
+        """
+        from backend.shared.critique_memory import get_critiques
+
+        critiques = await get_critiques(
+            paper_type="autonomous_paper",
+            paper_id=paper_id,
+            base_dir=self._base_dir,
+        )
+        if not critiques:
+            return title
+
+        explicit_system = next(
+            (
+                critique
+                for critique in reversed(critiques)
+                if getattr(critique, "critique_source", "unknown") == "system_auto"
+            ),
+            None,
+        )
+        initial_run = explicit_system or critiques[-1]
+        initial_run_id = getattr(initial_run, "critique_id", None)
+        initial_label = "System initial:" if explicit_system else "Initial run:"
+
+        review_entries = [self._format_reference_review_entry(initial_label, initial_run)]
+
+        user_runs = []
+        for critique in critiques:
+            if initial_run_id and critique.critique_id == initial_run_id:
+                continue
+            if getattr(critique, "critique_source", "unknown") == "system_auto":
+                continue
+            user_runs.append(critique)
+            if len(user_runs) >= 4:
+                break
+
+        for idx, critique in enumerate(user_runs, start=1):
+            review_entries.append(
+                self._format_reference_review_entry(f"User#{idx}:", critique)
+            )
+
+        return f"{title} [Validator reviews: {' | '.join(review_entries)}]"
     
     # ========================================================================
     # CONTENT VALIDATION
@@ -709,7 +773,8 @@ class PaperLibrary:
         Returns minimal metadata without full content.
         
         Returns:
-            List of dicts with paper_id, title, abstract, outline, word_count, source_brainstorm_ids, created_at
+            List of dicts with paper_id, title, reference_title_display, abstract,
+            outline, word_count, source_brainstorm_ids, created_at
         """
         return await self.get_all_papers_with_outlines()
     
@@ -719,7 +784,8 @@ class PaperLibrary:
         Used for Tier 3 reference selection.
         
         Returns:
-            List of dicts with paper_id, title, abstract, outline, word_count, source_brainstorm_ids
+            List of dicts with paper_id, title, reference_title_display, abstract,
+            outline, word_count, source_brainstorm_ids
         """
         papers = await self.get_all_papers(validate_completeness=True)
         
@@ -727,10 +793,15 @@ class PaperLibrary:
         for paper in papers:
             # Fetch outline for this paper
             outline = await self.get_outline(paper.paper_id)
+            reference_title_display = await self.get_reference_title_display(
+                paper.paper_id,
+                paper.title,
+            )
             
             summaries.append({
                 "paper_id": paper.paper_id,
                 "title": paper.title,
+                "reference_title_display": reference_title_display,
                 "abstract": paper.abstract,
                 "outline": outline,  # NEW: Include outline
                 "word_count": paper.word_count,

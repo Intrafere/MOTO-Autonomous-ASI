@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a reproducible problem in MOTO.
+title: "[Bug]: "
+body:
+  - type: checkboxes
+    attributes:
+      label: Before submitting
+      description: Confirm the following before opening a public issue.
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I reviewed the relevant documentation in `README.md`, `CONTRIBUTING.md`, or `.cursor/rules/` when applicable.
+          required: false
+        - label: This is not a security vulnerability or secret exposure. I will use `security@intrafere.com` for security reports.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Which part of the project is impacted?
+      options:
+        - Aggregator (Tier 1)
+        - Compiler (Tier 2)
+        - Autonomous Research (Tier 3)
+        - Frontend / UI
+        - API / backend
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: Clear description of what is happening.
+      placeholder: The compiler validator rejects a valid section update after the outline is accepted...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: List the exact steps needed to trigger the problem.
+      placeholder: |
+        1. Open...
+        2. Click...
+        3. Start...
+        4. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include anything relevant about your setup.
+      placeholder: |
+        - OS: Windows 11
+        - Python version:
+        - Node.js version:
+        - LM Studio version:
+        - Models used:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Paste relevant backend logs, browser console output, stack traces, or screenshots.
+      render: shell
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Add any other details that might help reproduce or diagnose the issue.

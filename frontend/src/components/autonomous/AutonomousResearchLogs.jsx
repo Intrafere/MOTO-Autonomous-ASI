@@ -12,9 +12,12 @@ const EMPTY_API_STATS = Object.freeze({
   successful_calls: 0,
   failed_calls: 0,
   success_rate: 0,
+  boosted_calls: 0,
   by_phase: {},
   by_model: {},
   by_provider: {},
+  by_source: {},
+  by_boost_mode: {},
 });
 
 const AutonomousResearchLogs = ({ stats, events }) => {
@@ -152,7 +155,33 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'brainstorm': return 'Brainstorm';
       case 'paper_compilation': return 'Paper';
       case 'tier3': return 'Tier 3';
+      case 'boost': return 'Boost';
       default: return phase || 'Unknown';
+    }
+  };
+
+  const getSourceLabel = (source) => {
+    switch (source) {
+      case 'api+boost': return 'Boosted';
+      case 'boost': return 'Boost Only';
+      default: return 'Standard';
+    }
+  };
+
+  const getBoostModeLabel = (mode) => {
+    switch (mode) {
+      case 'next_count': return 'Next X';
+      case 'category': return 'Category';
+      case 'task_id': return 'Task ID';
+      default: return mode || 'Unknown';
+    }
+  };
+
+  const getProviderLabel = (provider) => {
+    switch (provider) {
+      case 'openrouter': return 'OR';
+      case 'lm_studio': return 'LMS';
+      default: return provider || 'UNK';
     }
   };
 
@@ -170,7 +199,8 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         const submitterId = data.submitter_id;
         const isAccepted = event.event === 'submission_accepted';
         
-        if (submitterId) {
+        // Use explicit check for submitter_id to handle edge cases (0 is valid but falsy)
+        if (submitterId !== undefined && submitterId !== null) {
           const key = `${submitterId}`;
           
           if (!stats[key]) {
@@ -482,6 +512,10 @@ const AutonomousResearchLogs = ({ stats, events }) => {
               </span>
               <span className="stat-label">Success Rate</span>
             </div>
+            <div className="stat-card">
+              <span className="stat-value">{apiStats.boosted_calls || 0}</span>
+              <span className="stat-label">Boosted Calls</span>
+            </div>
           </div>
         )}
 
@@ -497,6 +531,28 @@ const AutonomousResearchLogs = ({ stats, events }) => {
           </div>
         )}
 
+        {apiStats && apiStats.by_source && Object.keys(apiStats.by_source).length > 0 && (
+          <div className="phase-stats">
+            <span className="phase-stats-label">By Source:</span>
+            {Object.entries(apiStats.by_source).map(([source, count]) => (
+              <span key={source} className="phase-stat-badge">
+                {getSourceLabel(source)}: {count}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {apiStats && apiStats.by_boost_mode && Object.keys(apiStats.by_boost_mode).length > 0 && (
+          <div className="phase-stats">
+            <span className="phase-stats-label">Boost Modes:</span>
+            {Object.entries(apiStats.by_boost_mode).map(([mode, count]) => (
+              <span key={mode} className="phase-stat-badge">
+                {getBoostModeLabel(mode)}: {count}
+              </span>
+            ))}
+          </div>
+        )}
+
         {/* API Logs List */}
         <div className="api-logs-list">
           {apiLogsLoading ? (
@@ -505,7 +561,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
             <div className="logs-empty">
               <p>No API calls logged yet.</p>
               <p className="logs-empty-hint">
-                Start autonomous research to see API call logs here.
+                Run a workflow and make API calls to see the combined logs here.
               </p>
             </div>
           ) : (
@@ -525,10 +581,16 @@ const AutonomousResearchLogs = ({ stats, events }) => {
                     <div className="log-task">
                       <span className="log-task-id">{log.task_id}</span>
                       <span className="log-phase-badge">{getPhaseLabel(log.phase)}</span>
+                      <span className={`log-source-badge ${log.boosted ? 'boosted' : 'standard'}`}>
+                        {getSourceLabel(log.source)}
+                      </span>
+                      {log.boost_mode && (
+                        <span className="log-boost-mode-badge">{getBoostModeLabel(log.boost_mode)}</span>
+                      )}
                     </div>
                     <div className="log-meta">
                       <span className="log-model">{log.model}</span>
-                      <span className="log-provider-badge">{log.provider === 'openrouter' ? 'OR' : 'LMS'}</span>
+                      <span className="log-provider-badge">{getProviderLabel(log.provider)}</span>
                       <span className="log-duration">{formatDuration(log.duration_ms)}</span>
                       {log.tokens_used && (
                         <span className="log-tokens">{log.tokens_used} tokens</span>
@@ -546,6 +608,11 @@ const AutonomousResearchLogs = ({ stats, events }) => {
                       <pre>{log.role_id}</pre>
                     </div>
 
+                    <div className="log-detail-section">
+                      <h4>Source</h4>
+                      <pre>{getSourceLabel(log.source)}{log.boost_mode ? ` (${getBoostModeLabel(log.boost_mode)})` : ''}</pre>
+                    </div>
+
                     {log.error && (
                       <div className="log-detail-section error">
                         <h4>Error</h4>
@@ -559,7 +626,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
                         <button 
                           onClick={(e) => {
                             e.stopPropagation();
-                            copyToClipboard(log.prompt_full);
+                            copyToClipboard(log.prompt_full || log.prompt_preview || '');
                           }}
                           className="copy-btn"
                           title="Copy full prompt to clipboard"
@@ -576,7 +643,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
                         <button 
                           onClick={(e) => {
                             e.stopPropagation();
-                            copyToClipboard(log.response_full);
+                            copyToClipboard(log.response_full || log.response_preview || '');
                           }}
                           className="copy-btn"
                           title="Copy full response to clipboard"

@@ -309,6 +309,40 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
 # NEW: Boost Next X Calls (Counter-based mode)
 # ============================================================
 
+class BoostAlwaysPreferRequest(BaseModel):
+    """Request body for toggling always-prefer-boost mode."""
+    enabled: bool
+
+
+@router.post("/api/boost/set-always-prefer")
+async def set_boost_always_prefer(request: BoostAlwaysPreferRequest) -> Dict[str, Any]:
+    """
+    Enable or disable always-prefer-boost mode.
+    
+    When enabled, every API call attempts boost first and falls back to the
+    primary model on any failure. Mutually exclusive with next_count and category
+    modes — caller should clear those first.
+    """
+    try:
+        if not boost_manager.boost_config or not boost_manager.boost_config.enabled:
+            raise HTTPException(status_code=400, detail="Boost must be enabled first")
+        
+        await boost_manager.set_always_prefer(request.enabled)
+        
+        logger.info(f"Boost always-prefer set to {request.enabled}")
+        
+        return {
+            "success": True,
+            "enabled": request.enabled,
+            "message": "Boost will be attempted for every API call" if request.enabled else "Always-prefer boost disabled"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to set always-prefer boost: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to set always-prefer: {str(e)}")
+
+
 @router.post("/api/boost/set-next-count")
 async def set_boost_next_count(request: BoostNextCountRequest) -> Dict[str, Any]:
     """
@@ -345,10 +379,6 @@ async def set_boost_next_count(request: BoostNextCountRequest) -> Dict[str, Any]
         logger.error(f"Failed to set boost next count: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to set count: {str(e)}")
 
-
-# ============================================================
-# NEW: Category Boost (Role-based mode)
-# ============================================================
 
 @router.post("/api/boost/toggle-category/{category}")
 async def toggle_category_boost(category: str) -> Dict[str, Any]:

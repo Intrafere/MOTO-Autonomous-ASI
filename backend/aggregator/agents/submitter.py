@@ -145,18 +145,9 @@ class SubmitterAgent:
                 await asyncio.sleep(2)
                 
             except FreeModelExhaustedError as e:
-                if e.soonest_retry:
-                    import time as _time
-                    wait_secs = max(0, e.soonest_retry - _time.time())
-                    wait_mins = round(wait_secs / 60, 1)
-                    logger.warning(
-                        f"SERIAL BOTTLENECK: Submitter {self.submitter_id} paused for "
-                        f"{wait_mins} minutes (all free models rate-limited)"
-                    )
-                    await asyncio.sleep(wait_secs)
-                else:
-                    logger.error(f"Submitter {self.submitter_id}: all free models exhausted: {e}")
-                    await asyncio.sleep(60)
+                # All free models exhausted after retries - wait briefly and retry
+                logger.warning(f"Submitter {self.submitter_id}: all free models exhausted: {e}")
+                await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except Exception as e:
                 logger.error(f"Submitter {self.submitter_id} error on iteration {iteration}: {e}", exc_info=True)
                 await asyncio.sleep(5)
@@ -236,6 +227,7 @@ class SubmitterAgent:
             
             # Generate completion with retry for 400 errors
             response = None
+            call_metadata = {}
             max_retries = 3  # 400 errors won't fix themselves - fail fast
             
             for attempt in range(max_retries):
@@ -249,6 +241,7 @@ class SubmitterAgent:
                         temperature=0.0,  # Deterministic generation - evolving context provides diversity
                         max_tokens=self.max_output_tokens  # Per-submitter max output tokens
                     )
+                    call_metadata = api_client_manager.extract_call_metadata(response)
                     break  # Success
                     
                 except (httpx.HTTPStatusError, ValueError) as e:
@@ -277,7 +270,7 @@ class SubmitterAgent:
                     raise
                 except RuntimeError as e:
                     if "credits exhausted" in str(e).lower():
-                        raise FreeModelExhaustedError(str(e), soonest_retry=None)
+                        raise FreeModelExhaustedError(str(e))
                     logger.error(f"Submitter {self.submitter_id}: Unexpected error during completion: {e}")
                     if self.task_tracking_callback:
                         self.task_tracking_callback("completed", task_id)
@@ -389,6 +382,7 @@ class SubmitterAgent:
                         )
                     
                     if retry_response_1.get("choices"):
+                        call_metadata = api_client_manager.extract_call_metadata(retry_response_1)
                         retry_output_1 = retry_response_1["choices"][0]["message"]["content"]
                         
                         try:
@@ -460,6 +454,7 @@ class SubmitterAgent:
                                     )
                                 
                                 if retry_response_2.get("choices"):
+                                    call_metadata = api_client_manager.extract_call_metadata(retry_response_2)
                                     retry_output_2 = retry_response_2["choices"][0]["message"]["content"]
                                     
                                     try:
@@ -526,7 +521,8 @@ class SubmitterAgent:
                 chunk_size_used=chunk_size,
                 metadata={
                     "chunk_size": chunk_size,
-                    "rag_used": bool(allocation["rag_context"])
+                    "rag_used": bool(allocation["rag_context"]),
+                    "llm_call": call_metadata,
                 }
             )
             

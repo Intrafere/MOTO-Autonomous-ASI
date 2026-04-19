@@ -2,10 +2,11 @@
 API Client Manager - Unified manager for routing API calls to OpenRouter or LM Studio.
 Handles fallback on credit exhaustion and boost integration.
 
-Supports three boost modes:
+Supports four boost modes:
 1. Boost Next X Calls - Counter-based, applies to next X API calls
 2. Category Boost - Role-based, boosts all calls for specific role categories
-3. Per-task Toggle - Task ID based (legacy)
+3. Always Prefer Boost - Tries boost for every call, falls back on failure
+4. Per-task Toggle - Task ID based (legacy)
 """
 import asyncio
 import logging
@@ -35,6 +36,7 @@ class APIClientManager:
     Central manager for routing API calls to OpenRouter or LM Studio.
     Handles fallback on credit exhaustion and boost integration.
     """
+    CALL_METADATA_KEY = "_moto_call_metadata"
     
     def __init__(self):
         self._openrouter_client: Optional[OpenRouterClient] = None
@@ -171,6 +173,48 @@ class APIClientManager:
                 await self._model_tracking_callback(model_id)
             except Exception as e:
                 logger.error(f"Error in model tracking callback: {e}")
+
+    def _annotate_response_with_call_metadata(
+        self,
+        response: Dict[str, Any],
+        *,
+        task_id: str,
+        role_id: str,
+        configured_model: str,
+        actual_model: str,
+        configured_provider: Optional[str],
+        actual_provider: str,
+        boosted: bool,
+        boost_mode: Optional[str] = None,
+        openrouter_provider: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Attach effective routing details to a successful API response."""
+        if not isinstance(response, dict):
+            return response
+
+        response[self.CALL_METADATA_KEY] = {
+            "task_id": task_id,
+            "role_id": role_id,
+            "configured_model": configured_model,
+            "effective_model": actual_model,
+            "configured_provider": configured_provider or actual_provider,
+            "effective_provider": actual_provider,
+            "provider": actual_provider,
+            "boosted": boosted,
+            "boost_mode": boost_mode,
+            "openrouter_provider": openrouter_provider,
+        }
+        return response
+
+    def extract_call_metadata(self, response: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Return routing metadata attached to a successful API response."""
+        if not isinstance(response, dict):
+            return {}
+
+        metadata = response.get(self.CALL_METADATA_KEY)
+        if isinstance(metadata, dict):
+            return metadata.copy()
+        return {}
     
     def set_openrouter_api_key(self, api_key: str) -> None:
         """
@@ -223,6 +267,10 @@ class APIClientManager:
         if not boost_manager.boost_config or not boost_manager.boost_config.enabled:
             return None
         
+        # Check always-prefer mode (every call uses boost, fall back on failure)
+        if boost_manager.boost_always_prefer:
+            return "always_prefer"
+        
         # Check boost_next_count first (counter-based mode)
         if boost_manager.boost_next_count > 0:
             return "next_count"
@@ -272,6 +320,11 @@ class APIClientManager:
         Returns:
             API response dict
         """
+        requested_model = model
+        async with self._state_lock:
+            initial_role_config = self._role_model_configs.get(role_id)
+        configured_provider = initial_role_config.provider if initial_role_config else None
+
         # Check if task should use boost (unified check for all boost modes)
         boost_mode = self._determine_boost_mode(task_id)
         
@@ -318,9 +371,33 @@ class APIClientManager:
                     # Calculate duration
                     duration_ms = (time.time() - start_time) * 1000
                     
+                    # Check for missing choices (upstream provider timeout/error)
+                    if not result.get("choices"):
+                        import json as _json
+                        raw_response = _json.dumps(result)[:2000]
+                        logger.error(f"OpenRouter boost response missing 'choices' after {duration_ms:.0f}ms - raw: {raw_response}")
+                        
+                        # Log as failure
+                        await boost_logger.log_boost_call(
+                            task_id=task_id,
+                            role_id=role_id,
+                            model=boost_model,
+                            prompt_preview=prompt_preview,
+                            response_content="",
+                            tokens_used=None,
+                            duration_ms=duration_ms,
+                            success=False,
+                            boost_mode=boost_mode,
+                            error="Response missing 'choices' - upstream provider timeout or error"
+                        )
+                        
+                        # Raise so retry/fallback logic can handle it
+                        raise ValueError(f"OpenRouter response missing 'choices' after {duration_ms:.0f}ms (upstream provider timeout)")
+                    
                     # Extract response content for logging
                     response_content = ""
                     tokens_used = None
+                    
                     if result.get("choices"):
                         message = result["choices"][0].get("message", {})
                         response_content = message.get("content") or message.get("reasoning") or ""
@@ -331,6 +408,19 @@ class APIClientManager:
                         if _pt is not None and _ct is not None:
                             token_tracker.track(boost_model, _pt, _ct)
                             await self._broadcast("token_usage_updated", token_tracker.get_stats())
+
+                    result = self._annotate_response_with_call_metadata(
+                        result,
+                        task_id=task_id,
+                        role_id=role_id,
+                        configured_model=requested_model,
+                        actual_model=boost_model,
+                        configured_provider=configured_provider,
+                        actual_provider="openrouter",
+                        boosted=True,
+                        boost_mode=boost_mode,
+                        openrouter_provider=boost_provider,
+                    )
                     
                     # Log the boost call
                     await boost_logger.log_boost_call(
@@ -408,12 +498,10 @@ class APIClientManager:
                 logger.warning(f"Boost model rate limited for task {task_id}: {e}")
                 
                 # Broadcast rate limit event to frontend
-                retry_after_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.retry_after))
                 await self._broadcast("openrouter_rate_limit", {
                     "model": boost_model,
                     "role_id": role_id,
-                    "retry_after": retry_after_iso,
-                    "message": f"OpenRouter free model rate limit hit. Retrying after 1 hour."
+                    "message": f"OpenRouter rate limit hit for '{boost_model}' after retries exhausted."
                 })
                 
                 # Fall through to primary model (boost has no fallback concept)
@@ -600,11 +688,8 @@ class APIClientManager:
                         await self._broadcast("account_credits_exhausted", {
                             "message": "OpenRouter account free credits depleted. Add credits at openrouter.ai or configure LM Studio fallback."
                         })
-                        rate_limited = self._openrouter_client.get_rate_limited_models()
-                        soonest = free_model_manager.get_soonest_retry(rate_limited)
                         raise FreeModelExhaustedError(
-                            f"Account free credits exhausted and no LM Studio fallback for role '{role_id}'.",
-                            soonest_retry=soonest
+                            f"Account free credits exhausted and no LM Studio fallback for role '{role_id}'."
                         )
                 
                 provider_info = f" via {openrouter_provider}" if openrouter_provider else ""
@@ -629,6 +714,14 @@ class APIClientManager:
                     
                     # Calculate duration and extract response
                     duration_ms = (time.time() - start_time) * 1000
+                    
+                    # Check for missing choices (upstream provider timeout/error)
+                    if not result.get("choices"):
+                        import json as _json
+                        raw_response = _json.dumps(result)[:2000]
+                        logger.error(f"OpenRouter response missing 'choices' after {duration_ms:.0f}ms - raw: {raw_response}")
+                        raise ValueError(f"OpenRouter response missing 'choices' after {duration_ms:.0f}ms (upstream provider timeout)")
+                    
                     response_content = ""
                     tokens_used = None
                     if result.get("choices"):
@@ -641,6 +734,19 @@ class APIClientManager:
                         if _pt is not None and _ct is not None:
                             token_tracker.track(openrouter_model, _pt, _ct)
                             await self._broadcast("token_usage_updated", token_tracker.get_stats())
+
+                    result = self._annotate_response_with_call_metadata(
+                        result,
+                        task_id=task_id,
+                        role_id=role_id,
+                        configured_model=requested_model,
+                        actual_model=openrouter_model,
+                        configured_provider=role_config.provider if role_config else configured_provider or "openrouter",
+                        actual_provider="openrouter",
+                        boosted=False,
+                        boost_mode=None,
+                        openrouter_provider=openrouter_provider,
+                    )
                     
                     # Log to autonomous API logger if callback set
                     if self._autonomous_logger_callback:
@@ -686,35 +792,36 @@ class APIClientManager:
                     
                     logger.warning(f"OpenRouter rate limit for role {role_id}: {e}")
                     
-                    retry_after_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(e.retry_after))
                     await self._broadcast("openrouter_rate_limit", {
                         "model": openrouter_model,
                         "role_id": role_id,
-                        "retry_after": retry_after_iso,
-                        "message": f"OpenRouter free model rate limit hit for '{openrouter_model}'."
+                        "message": f"OpenRouter rate limit hit for '{openrouter_model}' after retries exhausted."
                     })
+                    
+                    # Mark this model as failed for rotation
+                    free_model_manager.mark_model_failed(openrouter_model)
                     
                     # --- FREE MODEL ROTATION CHAIN ---
                     rotated_result = await self._try_free_model_rotation(
                         task_id=task_id,
                         role_id=role_id,
                         original_model=openrouter_model,
+                        configured_model=requested_model,
+                        configured_provider=role_config.provider if role_config else configured_provider or "openrouter",
                         messages=messages,
                         temperature=temperature,
                         max_tokens=max_tokens or role_config.max_output_tokens,
                         response_format=response_format,
                     )
                     if rotated_result is not None:
+                        free_model_manager.clear_failed_models()  # Success - clear failures
                         return rotated_result
                     
                     # Rotation chain exhausted — try LM Studio fallback
                     if not role_config.lm_studio_fallback_id:
-                        rate_limited = self._openrouter_client.get_rate_limited_models() if self._openrouter_client else {}
-                        soonest = free_model_manager.get_soonest_retry(rate_limited)
                         raise FreeModelExhaustedError(
                             f"All free model options exhausted for role '{role_id}'. "
-                            f"No LM Studio fallback configured.",
-                            soonest_retry=soonest
+                            f"No LM Studio fallback configured."
                         )
                     
                     fallback_model = role_config.lm_studio_fallback_id
@@ -909,6 +1016,14 @@ class APIClientManager:
             
             # Calculate duration and extract response
             duration_ms = (time.time() - start_time) * 1000
+            
+            # Check for missing choices
+            if not result.get("choices"):
+                import json as _json
+                raw_response = _json.dumps(result)[:2000]
+                logger.error(f"LM Studio response missing 'choices' after {duration_ms:.0f}ms - raw: {raw_response}")
+                raise ValueError(f"LM Studio response missing 'choices' after {duration_ms:.0f}ms")
+            
             response_content = ""
             tokens_used = None
             if result.get("choices"):
@@ -921,6 +1036,18 @@ class APIClientManager:
                 if _pt is not None and _ct is not None:
                     token_tracker.track(model, _pt, _ct)
                     await self._broadcast("token_usage_updated", token_tracker.get_stats())
+
+            result = self._annotate_response_with_call_metadata(
+                result,
+                task_id=task_id,
+                role_id=role_id,
+                configured_model=requested_model,
+                actual_model=model,
+                configured_provider=role_config.provider if role_config else configured_provider or "lm_studio",
+                actual_provider="lm_studio",
+                boosted=False,
+                boost_mode=None,
+            )
             
             # Log to autonomous API logger if callback set
             if self._autonomous_logger_callback:
@@ -970,6 +1097,8 @@ class APIClientManager:
         task_id: str,
         role_id: str,
         original_model: str,
+        configured_model: str,
+        configured_provider: str,
         messages: List[Dict[str, str]],
         temperature: float,
         max_tokens: int,
@@ -982,14 +1111,12 @@ class APIClientManager:
         if not self._openrouter_client:
             return None
 
-        rate_limited = self._openrouter_client.get_rate_limited_models()
-
         # Step 1: Free Model Looping — iterate through available free models
         if free_model_manager.looping_enabled:
             tried_models = {original_model}
             while True:
                 alt_model = free_model_manager.get_alternative_free_model(
-                    original_model, rate_limited, skip_models=tried_models
+                    original_model, skip_models=tried_models
                 )
                 if not alt_model or alt_model in tried_models:
                     break
@@ -1021,11 +1148,22 @@ class APIClientManager:
                         if _pt is not None and _ct is not None:
                             token_tracker.track(alt_model, _pt, _ct)
                             await self._broadcast("token_usage_updated", token_tracker.get_stats())
+                    result = self._annotate_response_with_call_metadata(
+                        result,
+                        task_id=task_id,
+                        role_id=role_id,
+                        configured_model=configured_model,
+                        actual_model=alt_model,
+                        configured_provider=configured_provider,
+                        actual_provider="openrouter",
+                        boosted=False,
+                        boost_mode=None,
+                    )
                     if free_model_manager.is_account_exhausted():
                         free_model_manager.clear_account_exhaustion()
                     return result
                 except RateLimitError:
-                    rate_limited = self._openrouter_client.get_rate_limited_models()
+                    free_model_manager.mark_model_failed(alt_model)
                     logger.warning(f"Rotated model {alt_model} also rate-limited, trying next")
                 except CreditExhaustionError as inner_e:
                     logger.warning(f"Rotated model {alt_model} credit exhaustion: {inner_e}")
@@ -1059,6 +1197,17 @@ class APIClientManager:
                     if _pt is not None and _ct is not None:
                         token_tracker.track(auto_model, _pt, _ct)
                         await self._broadcast("token_usage_updated", token_tracker.get_stats())
+                result = self._annotate_response_with_call_metadata(
+                    result,
+                    task_id=task_id,
+                    role_id=role_id,
+                    configured_model=configured_model,
+                    actual_model=auto_model,
+                    configured_provider=configured_provider,
+                    actual_provider="openrouter",
+                    boosted=False,
+                    boost_mode=None,
+                )
                 if free_model_manager.is_account_exhausted():
                     free_model_manager.clear_account_exhaustion()
                 return result

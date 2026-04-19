@@ -5,18 +5,34 @@ Tracks which workflow tasks should use the boost OpenRouter API key.
 Supports three boost modes:
 1. Boost Next X Calls - Counter-based, applies to next X API calls regardless of task ID
 2. Category Boost - Role-based, boosts all calls matching a role prefix (e.g., all Submitter 1 calls)
-3. Per-task Toggle - Task ID based (may have ID matching issues with workflow predictions)
+3. Always Prefer Boost - Every API call attempts boost first; falls back to primary on failure
+
+Autonomous Research mode agents use the same role prefixes as their parent roles:
+- Topic Selector, Completion Reviewer, Reference Selector, Paper Title Selector,
+  Certainty Assessor, Format Selector, Volume Organizer → agg_sub1 (Submitter 1)
+- Topic Validator, Redundancy Checker → agg_val (Agg Validator)
+- Brainstorm aggregation submitters/validator → agg_sub1..10, agg_val (via Coordinator)
+- Paper compilation → comp_hc, comp_hp, comp_val, comp_crit (via CompilerCoordinator)
+
+State is persisted to backend/data/boost_state.json for crash recovery.
 """
 import asyncio
+import json
 import logging
+import os
 from typing import Optional, Set, Callable, Any, Dict, List
 
 from backend.shared.models import BoostConfig
 
 logger = logging.getLogger(__name__)
 
+# Persistence file path
+BOOST_STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'boost_state.json')
 
-# Category prefixes for different roles
+
+# Category prefixes for different roles — labels match Settings panel titles exactly.
+# Autonomous Research agents share the same prefixes as their parent roles
+# (see module docstring for full mapping).
 CATEGORY_PREFIXES = {
     # Aggregator
     "agg_sub1": "Submitter 1",
@@ -29,20 +45,12 @@ CATEGORY_PREFIXES = {
     "agg_sub8": "Submitter 8",
     "agg_sub9": "Submitter 9",
     "agg_sub10": "Submitter 10",
-    "agg_val": "Aggregator Validator",
+    "agg_val": "Agg Validator",
     # Compiler
-    "comp_hc": "High-Context Submitter",
-    "comp_hp": "High-Param Submitter",
+    "comp_hc": "High-Context Model",
+    "comp_hp": "High-Param Model",
     "comp_val": "Compiler Validator",
-    # Autonomous
-    "auto_te": "Topic Explorer",
-    "auto_tev": "Topic Explorer Validator",
-    "auto_ts": "Topic Selector",
-    "auto_tv": "Topic Validator",
-    "auto_cr": "Completion Reviewer",
-    "auto_rs": "Reference Selector",
-    "auto_pt": "Paper Title Selector",
-    "auto_prc": "Paper Redundancy Checker",
+    "comp_crit": "Critique Submitter",
 }
 
 
@@ -54,7 +62,9 @@ class BoostManager:
     Supports three boost modes:
     - boost_next_count: Boost the next X API calls (counter-based)
     - boosted_categories: Boost all calls for specific role categories
-    - boosted_task_ids: Boost specific task IDs (legacy, may have matching issues)
+    - boost_always_prefer: Try boost first for every API call, fall back on failure
+    
+    State is automatically persisted to disk for crash recovery.
     """
     
     _instance = None
@@ -74,15 +84,77 @@ class BoostManager:
         self.boosted_task_ids: Set[str] = set()
         self._broadcast_callback: Optional[Callable] = None
         
-        # NEW: Counter-based boost mode
+        # Counter-based boost mode
         self.boost_next_count: int = 0
         
-        # NEW: Category-based boost mode (role prefixes like "agg_sub1", "comp_hc")
+        # Category-based boost mode (role prefixes like "agg_sub1", "comp_hc")
         self.boosted_categories: Set[str] = set()
+        
+        # Always-prefer boost mode: try boost for every call, fall back on failure
+        self.boost_always_prefer: bool = False
         
         self._initialized = True
         
+        # Load persisted state on initialization
+        self._load_state()
+        
         logger.info("BoostManager initialized")
+    
+    def _load_state(self) -> None:
+        """Load persisted boost state from disk."""
+        try:
+            if os.path.exists(BOOST_STATE_FILE):
+                with open(BOOST_STATE_FILE, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
+                
+                # Restore boost config if it was enabled
+                if state.get('enabled') and state.get('model_id'):
+                    self.boost_config = BoostConfig(
+                        enabled=True,
+                        openrouter_api_key=state.get('api_key', ''),
+                        boost_model_id=state.get('model_id'),
+                        boost_provider=state.get('provider'),
+                        boost_context_window=state.get('context_window', 131072),
+                        boost_max_output_tokens=state.get('max_output_tokens', 25000)
+                    )
+                
+                # Restore boost modes
+                self.boost_next_count = state.get('boost_next_count', 0)
+                self.boosted_categories = set(state.get('boosted_categories', []))
+                self.boost_always_prefer = state.get('boost_always_prefer', False)
+                self.boosted_task_ids = set(state.get('boosted_task_ids', []))
+                
+                logger.info(f"Loaded boost state: enabled={state.get('enabled')}, model={state.get('model_id')}, "
+                           f"next_count={self.boost_next_count}, categories={len(self.boosted_categories)}, "
+                           f"always_prefer={self.boost_always_prefer}")
+        except Exception as e:
+            logger.warning(f"Failed to load boost state: {e}")
+    
+    def _save_state(self) -> None:
+        """Persist current boost state to disk."""
+        try:
+            # Ensure data directory exists
+            os.makedirs(os.path.dirname(BOOST_STATE_FILE), exist_ok=True)
+            
+            state = {
+                'enabled': self.boost_config is not None and self.boost_config.enabled,
+                'model_id': self.boost_config.boost_model_id if self.boost_config else None,
+                'provider': self.boost_config.boost_provider if self.boost_config else None,
+                'context_window': self.boost_config.boost_context_window if self.boost_config else 131072,
+                'max_output_tokens': self.boost_config.boost_max_output_tokens if self.boost_config else 25000,
+                'api_key': self.boost_config.openrouter_api_key if self.boost_config else '',
+                'boost_next_count': self.boost_next_count,
+                'boosted_categories': list(self.boosted_categories),
+                'boost_always_prefer': self.boost_always_prefer,
+                'boosted_task_ids': list(self.boosted_task_ids)
+            }
+            
+            with open(BOOST_STATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+            
+            logger.debug("Boost state saved to disk")
+        except Exception as e:
+            logger.warning(f"Failed to save boost state: {e}")
     
     def set_broadcast_callback(self, callback: Callable) -> None:
         """Set callback for broadcasting WebSocket events."""
@@ -109,6 +181,9 @@ class BoostManager:
                 f"max_tokens={config.boost_max_output_tokens}"
             )
             
+            # Persist state
+            self._save_state()
+            
             await self._broadcast("boost_enabled", {
                 "model_id": config.boost_model_id,
                 "provider": config.boost_provider,
@@ -125,6 +200,10 @@ class BoostManager:
                 self.boosted_task_ids.clear()
                 self.boosted_categories.clear()
                 self.boost_next_count = 0
+                self.boost_always_prefer = False
+                
+                # Persist state
+                self._save_state()
                 
                 await self._broadcast("boost_disabled", {})
     
@@ -147,6 +226,9 @@ class BoostManager:
                 self.boosted_task_ids.add(task_id)
                 boosted = True
                 logger.debug(f"Task {task_id} boost enabled")
+            
+            # Persist state
+            self._save_state()
             
             await self._broadcast("task_boost_toggled", {
                 "task_id": task_id,
@@ -182,10 +264,35 @@ class BoostManager:
             self.boost_next_count = max(0, count)
             logger.info(f"Boost next count set to {self.boost_next_count}")
             
+            # Persist state
+            self._save_state()
+            
             await self._broadcast("boost_next_count_updated", {
                 "count": self.boost_next_count
             })
     
+    async def set_always_prefer(self, enabled: bool) -> None:
+        """
+        Enable or disable always-prefer-boost mode.
+        
+        When enabled, every API call attempts boost first and falls back to the
+        primary model on any failure. Mutually exclusive with next_count and
+        category modes (caller should clear those before enabling this).
+        
+        Args:
+            enabled: True to enable, False to disable
+        """
+        async with self._lock:
+            self.boost_always_prefer = enabled
+            logger.info(f"Boost always-prefer {'enabled' if enabled else 'disabled'}")
+            
+            # Persist state
+            self._save_state()
+            
+            await self._broadcast("boost_always_prefer_updated", {
+                "enabled": enabled
+            })
+
     async def toggle_category_boost(self, category: str) -> bool:
         """
         Toggle boost for an entire category (role prefix).
@@ -205,6 +312,9 @@ class BoostManager:
                 self.boosted_categories.add(category)
                 boosted = True
                 logger.info(f"Category {category} boost enabled")
+            
+            # Persist state
+            self._save_state()
             
             await self._broadcast("category_boost_toggled", {
                 "category": category,
@@ -249,6 +359,10 @@ class BoostManager:
         if not self.boost_config or not self.boost_config.enabled:
             return False
         
+        # Check always-prefer mode (every call uses boost, fall back on failure)
+        if self.boost_always_prefer:
+            return True
+        
         # Check boost_next_count first (counter-based mode)
         if self.boost_next_count > 0:
             return True
@@ -274,6 +388,9 @@ class BoostManager:
                 self.boost_next_count -= 1
                 logger.debug(f"Boost count consumed, remaining: {self.boost_next_count}")
                 
+                # Persist state
+                self._save_state()
+                
                 await self._broadcast("boost_next_count_updated", {
                     "count": self.boost_next_count
                 })
@@ -292,6 +409,7 @@ class BoostManager:
                 "boosted_task_count": 0,
                 "boost_next_count": 0,
                 "boosted_categories": [],
+                "boost_always_prefer": False,
                 "boosted_tasks": []
             }
         
@@ -303,54 +421,51 @@ class BoostManager:
             "max_output_tokens": self.boost_config.boost_max_output_tokens,
             "boosted_task_count": len(self.boosted_task_ids),
             "boosted_tasks": list(self.boosted_task_ids),
-            # NEW: Include new boost modes
             "boost_next_count": self.boost_next_count,
-            "boosted_categories": list(self.boosted_categories)
+            "boosted_categories": list(self.boosted_categories),
+            "boost_always_prefer": self.boost_always_prefer
         }
     
     def get_available_categories(self, mode: str = "all") -> List[Dict[str, str]]:
         """
-        Get list of available boost categories based on current workflow mode.
+        Get list of all boost categories in the same order as Settings panels.
+        All categories are always returned regardless of mode.
+        
+        Autonomous Research agents automatically inherit boosts from their parent roles:
+        - Submitter 1 (agg_sub1) covers: Topic Selector, Completion Reviewer,
+          Reference Selector, Paper Title Selector, Certainty Assessor, Format Selector,
+          Volume Organizer
+        - Agg Validator (agg_val) covers: Topic Validator, Redundancy Checker
+        - Compiler roles cover paper compilation phases
         
         Args:
-            mode: "aggregator", "compiler", "autonomous", or "all"
+            mode: ignored — kept for API compatibility
             
         Returns:
-            List of category dicts with id and label
+            List of category dicts with id, label, and group
         """
         categories = []
         
-        if mode in ("aggregator", "all"):
-            for i in range(1, 11):
-                categories.append({
-                    "id": f"agg_sub{i}",
-                    "label": f"Sub {i}",
-                    "group": "Aggregator"
-                })
+        # Aggregator (matches AggregatorSettings order: Submitters 1-10, then Validator)
+        for i in range(1, 11):
             categories.append({
-                "id": "agg_val",
-                "label": "Validator",
+                "id": f"agg_sub{i}",
+                "label": f"Submitter {i}",
                 "group": "Aggregator"
             })
+        categories.append({
+            "id": "agg_val",
+            "label": "Agg Validator",
+            "group": "Aggregator"
+        })
         
-        if mode in ("compiler", "all"):
-            categories.extend([
-                {"id": "comp_hc", "label": "High-Context", "group": "Compiler"},
-                {"id": "comp_hp", "label": "High-Param", "group": "Compiler"},
-                {"id": "comp_val", "label": "Validator", "group": "Compiler"},
-            ])
-        
-        if mode in ("autonomous", "all"):
-            categories.extend([
-                {"id": "auto_te", "label": "Topic Explore", "group": "Autonomous"},
-                {"id": "auto_tev", "label": "Topic Explore Val", "group": "Autonomous"},
-                {"id": "auto_ts", "label": "Topic Sel", "group": "Autonomous"},
-                {"id": "auto_tv", "label": "Topic Val", "group": "Autonomous"},
-                {"id": "auto_cr", "label": "Completion", "group": "Autonomous"},
-                {"id": "auto_rs", "label": "Ref Sel", "group": "Autonomous"},
-                {"id": "auto_pt", "label": "Paper Title", "group": "Autonomous"},
-                {"id": "auto_prc", "label": "Redundancy", "group": "Autonomous"},
-            ])
+        # Compiler (matches CompilerSettings order: Validator, High-Context, High-Param, Critique)
+        categories.extend([
+            {"id": "comp_val", "label": "Compiler Validator", "group": "Compiler"},
+            {"id": "comp_hc", "label": "High-Context Model", "group": "Compiler"},
+            {"id": "comp_hp", "label": "High-Param Model", "group": "Compiler"},
+            {"id": "comp_crit", "label": "Critique Submitter", "group": "Compiler"},
+        ])
         
         return categories
     

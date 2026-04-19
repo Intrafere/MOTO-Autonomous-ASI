@@ -1,5 +1,5 @@
 # MOTO Internal Launcher (PowerShell)
-# This is an internal script. Use "Press to Launch MOTO.bat" instead.
+# This is an internal script. Use "Click To Launch MOTO.bat" instead.
 # If needed manually: powershell -ExecutionPolicy Bypass -File _moto_internal_launcher.ps1
 
 # ================================================================
@@ -140,30 +140,30 @@ try {
     if (-not (Test-Path "node_modules")) {
         Write-Host "Installing Node.js dependencies..." -ForegroundColor Yellow
         Write-Host "This may take a few minutes..." -ForegroundColor Yellow
-        Write-Host ""
-        $npmInstallLog = Join-Path $env:TEMP ("moto_npm_install_{0}.log" -f ([guid]::NewGuid().ToString("N")))
-        npm install 2>&1 | Tee-Object -FilePath $npmInstallLog
-        $npmInstallExit = $LASTEXITCODE
-        if (Test-Path $npmInstallLog) {
-            $showVulnerabilityRestartHint = Select-String -Path $npmInstallLog -Pattern "vulnerabilities found" -Quiet
-            Remove-Item -Path $npmInstallLog -Force -ErrorAction SilentlyContinue
-        }
-        if ($npmInstallExit -ne 0) {
-            Write-Host ""
-            Write-Host "============================================================" -ForegroundColor Red
-            Write-Host "ERROR: Failed to install Node.js dependencies" -ForegroundColor Red
-            Write-Host "============================================================" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "Please check:" -ForegroundColor Yellow
-            Write-Host "- Internet connection is working" -ForegroundColor Yellow
-            Write-Host "- package.json exists in frontend directory" -ForegroundColor Yellow
-            Set-Location ..
-            Exit-WithPause -ExitCode 1
-        }
-        Write-Host "Node.js dependencies installed successfully" -ForegroundColor Green
     } else {
-        Write-Host "Node.js dependencies already installed" -ForegroundColor Green
+        Write-Host "Updating Node.js dependencies..." -ForegroundColor Yellow
     }
+    Write-Host ""
+    $npmInstallLog = Join-Path $env:TEMP ("moto_npm_install_{0}.log" -f ([guid]::NewGuid().ToString("N")))
+    npm install 2>&1 | Tee-Object -FilePath $npmInstallLog
+    $npmInstallExit = $LASTEXITCODE
+    if (Test-Path $npmInstallLog) {
+        $showVulnerabilityRestartHint = Select-String -Path $npmInstallLog -Pattern "vulnerabilities found" -Quiet
+        Remove-Item -Path $npmInstallLog -Force -ErrorAction SilentlyContinue
+    }
+    if ($npmInstallExit -ne 0) {
+        Write-Host ""
+        Write-Host "============================================================" -ForegroundColor Red
+        Write-Host "ERROR: Failed to install Node.js dependencies" -ForegroundColor Red
+        Write-Host "============================================================" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Please check:" -ForegroundColor Yellow
+        Write-Host "- Internet connection is working" -ForegroundColor Yellow
+        Write-Host "- package.json exists in frontend directory" -ForegroundColor Yellow
+        Set-Location ..
+        Exit-WithPause -ExitCode 1
+    }
+    Write-Host "Node.js dependencies up to date" -ForegroundColor Green
     if ($showVulnerabilityRestartHint) {
         Write-Host "" 
         Write-Host "NOTE: npm reported vulnerability warnings during install." -ForegroundColor Yellow

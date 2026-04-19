@@ -491,12 +491,23 @@
    LOADING / ERROR
    ============================================================================ */
 
-.loading-spinner {
-  text-align: center;
+.library-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
   padding: 40px;
   color: #1eff1c;
   font-size: 1.2rem;
-  animation: spin 2s linear infinite;
+}
+
+.library-loading__icon {
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+
+.library-loading__text {
+  display: inline-block;
 }
 
 @keyframes spin {

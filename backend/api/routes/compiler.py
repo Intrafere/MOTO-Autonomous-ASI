@@ -615,6 +615,7 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
             host_provider=validator_openrouter_provider,
             date=datetime.now(),
             prompt_used=prompt_to_use,
+            critique_source="user_request",
             novelty_rating=critique_data.get("novelty_rating", 0),
             novelty_feedback=critique_data.get("novelty_feedback", ""),
             correctness_rating=critique_data.get("correctness_rating", 0),
