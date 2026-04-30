@@ -1,6 +1,7 @@
 ---
 alwaysApply: false
 ---
+
 ## Important Notes When Editing RAG Systems
 The RAG system in this program is very advanced, be certain that any changes you make to the RAG system are correct changes.
 
@@ -35,7 +36,16 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Core Principle**: Direct injection first, RAG semantic search only when content doesn't fit.
 
-**Embedding**: `text-embedding-nomic-embed-text-v1.5` via LM Studio, or `openai/text-embedding-3-small` via OpenRouter fallback. Routing via `APIClientManager.get_embeddings()`.
+**Embedding**: Dual-contract routing via `APIClientManager.get_embeddings()`:
+
+| Mode | Primary | Fallback | Lock |
+|------|---------|----------|------|
+| Default (`generic_mode=False`) | `text-embedding-nomic-embed-text-v1.5` via LM Studio | `openai/text-embedding-3-small` via OpenRouter | Global RAG lock acquired |
+| Generic (`generic_mode=True`) | `FastEmbedProvider` (in-process ONNX, `nomic-embed-text-v1.5` INT8) | None (fail fast if fastembed missing) | Embedding lock SKIPPED (thread-safe); ChromaDB write lock still acquired |
+
+`get_embeddings()` in generic mode early-returns to `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain.
+
+**Batch query optimization**: `_vector_search()` batches all query embeddings into one `get_embeddings()` call (benefits both modes).
 
 **Key files:**
 - `aggregator/core/rag_manager.py` — 4-stage pipeline orchestrator
@@ -48,9 +58,10 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 ## Architecture: Concurrency
 
-- **Global RAG Lock**: ChromaDB write operations + embedding API calls acquire lock to prevent race conditions
+- **Global RAG Lock**: ChromaDB write operations acquire lock to prevent race conditions. Embedding API calls also acquire lock in default mode.
+- **Generic mode lock skip**: FastEmbed is in-process and thread-safe — embedding calls skip the global RAG lock. ChromaDB write locking remains in both modes.
 - **Read retry**: Vector search auto-retries with exponential backoff (0.5s → 1s → 2s, max 3 attempts) on HNSW index errors during concurrent writes
-- **Embedding rate limiting**: Semaphore limits concurrent embedding requests to 2
+- **Embedding rate limiting**: Semaphore limits concurrent embedding requests to 2 (default mode only; generic mode uses in-process FastEmbed)
 
 ---
 
@@ -149,7 +160,11 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Autonomous (Part 3)**: Per-topic brainstorm databases; reference paper content always RAG'd; same no-truncation principle; all agents validate prompt size before LLM calls.
 
-**Training DB files**: `data/rag_shared_training.txt` (accepted submissions only, no validator reasoning); `data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt` (max 5).
+**Proof Verification Stage (optional, gated on `lean4_enabled`)**: Proof identification, formalization, and lemma search agents operate outside the RAG pipeline. Verified `ProofRecord` summaries and `FailedProofCandidate` hints (from `proof_prompts.format_failure_hints_for_injection`) are **highest-priority direct injections** into subsequent brainstorm/paper submitter prompts when present — never RAG'd. Lean source files under the session `proofs/` directory are not indexed into Chroma.
+
+**Embedding provider routing**: See dual-contract table above. Default mode uses LM Studio with OpenRouter fallback. Generic mode uses in-process FastEmbed. Both modes produce compatible vector dimensions for the same ChromaDB collections.
+
+**Training DB files**: `rag_shared_training.txt` and `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt` live under the active instance data root (default desktop paths: `backend/data/rag_shared_training.txt` and `backend/data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt`).
 
 ---
 
@@ -167,6 +182,7 @@ These agents use ONLY direct injection (no RAG fallback) by design. Each operate
 | Volume organizer | Paper summaries, certainty assessment, volume state | Chapter ordering uses paper-level metadata, not full content |
 | Compiler review mode | Outline + paper only | Evaluates paper on its own merits without external source bias |
 | Brainstorm continuation | Brainstorm summary, prior paper titles/abstracts | "Write another or move on" uses summary, not full DB |
+| Proof identification / formalization / lemma search | Candidate theorem text, Lean error output, targeted Mathlib lemma metadata | Operates on compact Lean source + structured hints; proof agents consume `ProofRecord` direct-injection summaries and do not route through the RAG pipeline |
 
 **Known oversight**: Certainty assessor Step 2 drops expanded papers when they don't fit instead of RAG'ing them. Should use RAG fallback like reference_selector does.
 

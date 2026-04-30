@@ -4,7 +4,7 @@ alwaysApply: true
 
 ## The Unified Mode Design:
 
- This describes additional architecture for the synergy between the part 1 database aggregator tool and part 2 aggregator-compiler tool.
+ This describes additional architecture for the synergy between the part 1 database aggregator tool and part 2 aggregator-compiler tool. Both modes operate identically in default and generic deployment — the only difference is provider availability (see `hosted-web-contract.mdc` for details on generic mode).
 
  NOTE: This is a continuously-running program that does not stop itself, the user selects the aggregator to start, then starts the compiler when they desire, and then the user choses when to turn off each selective mode by turning the off switch. There is no "solution stop token" as in normal AI solution generation.
  
@@ -20,6 +20,8 @@ The user should be able to save any mid-way progress of the aggregation database
 The live-constructing aggregation results should be viewable in one tab and also a save function that allows the user to save the whole current aggregation database to a .txt file. This aggregation database should be viewable in rea-time as the aggregation submittors write it.
 
 The live-constructing compiler-written paper should be viewable in one tab and also a save function that allows the user to save the whole current aggregation database to a .txt file. This paper should be viewable in real-time as the compiler constructs it.
+
+**Generic mode frontend note**: In generic mode the MOTO sandbox is API-only — the React frontend is served by the Web Team's separate website, not from the sandbox. The frontend calls `GET /api/features` on mount and hides LM Studio UI options when `generic_mode=True`. All other frontend functionality is identical.
 
 
 ## Autonomous Research Mode (Part 3) - User Controls
@@ -52,8 +54,8 @@ The live-constructing compiler-written paper should be viewable in one tab and a
 
 ### Compiler Single-Submitter (Part 2)
 - Fixed 2-submitter architecture (NOT configurable):
-  - **High-Context Submitter**: Handles outline_create, outline_update, construction, review modes
-  - **High-Parameter Submitter**: Handles rigor enhancement mode
+  - **High-Context Submitter**: Handles outline_create, outline_update, construction, review modes. During construction, may invoke the Wolfram Alpha tool up to 20 times per submission when `system_config.wolfram_alpha_enabled=true`.
+  - **High-Parameter Submitter**: Handles rigor mode. Rigor is the **Lean-4-verified-theorem flow**: discovery → up to 5 Lean 4 formalization attempts (with error feedback) → novelty classification → placement (2 attempts, validator uses `rigor_lean_placement` mode forcing `rigor_check=True`) → Theorems Appendix fallback. The compiler writes verified proofs directly into the shared `proof_database` (same database used by autonomous mode); novel proofs automatically enter the highest-priority direct-injection block on the next submitter instantiation.
 - Sequential Markov chain workflow (only one submission at a time)
 - Each compiler submitter has its own model, context, and max token settings (separate from aggregator)
 - UI shows these as separate "High-Context Submitter" and "High-Parameter Submitter" sections
@@ -66,6 +68,7 @@ The live-constructing compiler-written paper should be viewable in one tab and a
 
 ## API Call Output Notes (User-Configurable)
 - **All `max_tokens` limits are user-configurable via GUI settings** (like context window sizes). Users can adjust these per model role based on their specific models' capabilities.
+- **OpenRouter GUI auto-fill**: When an OpenRouter model is selected, the UI auto-fills context window from the model `context_length` and auto-fills max output tokens as `min(20% of model context_length, smallest available host max_completion_tokens)`. Choosing a specific OpenRouter host recalculates from that host's smallest available `max_completion_tokens`.
 - **Aggregator defaults**: submitter=25000 tokens, validator=25000 tokens (reasoning models need 15K-25K for internal reasoning + output)
 - **Compiler defaults**: validator=25000, high-context=25000 (for outline_create/outline_update/construction/review), high-param=25000 (for rigor mode)
 - **GUI tooltips** provide recommended minimums: Submitter "25000+ for reasoning models", Validator "25000+", High-context "25000+ (outline needs 15K+)", High-param "25000+"

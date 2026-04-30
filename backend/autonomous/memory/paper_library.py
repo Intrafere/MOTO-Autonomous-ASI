@@ -117,6 +117,34 @@ class PaperLibrary:
         scoped_library._archive_dir = base_dir / "archive"
         return scoped_library
 
+    @staticmethod
+    def _normalize_history_prompt(prompt: Any) -> str:
+        """Normalize prompt values loaded from mixed metadata schemas."""
+        return prompt.strip() if isinstance(prompt, str) else ""
+
+    @classmethod
+    def _derive_history_prompt_from_session_id(cls, session_id: str) -> str:
+        """Recover a readable prompt from the session folder slug when metadata is blank."""
+        if session_id == "legacy":
+            return "Legacy research session"
+
+        prompt_slug = re.sub(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$", "", session_id or "")
+        prompt = prompt_slug.replace("_", " ").strip()
+        if not prompt:
+            return "Unknown research question"
+
+        return prompt[0].upper() + prompt[1:]
+
+    @classmethod
+    def _resolve_history_prompt(cls, session_id: str, *candidates: Any) -> str:
+        """Choose the best history prompt and fall back to a readable session slug."""
+        for candidate in candidates:
+            prompt = cls._normalize_history_prompt(candidate)
+            if prompt and prompt != "Unknown research question":
+                return prompt
+
+        return cls._derive_history_prompt_from_session_id(session_id)
+
     def get_history_papers_dir(self, session_id: str) -> Optional[Path]:
         """Resolve the papers directory for a history session."""
         if session_id == "legacy":
@@ -141,29 +169,27 @@ class PaperLibrary:
         """Read the user prompt associated with a legacy or session-based paper history entry."""
         if session_id == "legacy":
             metadata_path = Path(system_config.auto_research_metadata_file)
-            default_prompt = "Legacy research session"
         else:
             papers_dir = self.get_history_papers_dir(session_id)
             if not papers_dir:
-                return "Unknown research question"
+                return self._derive_history_prompt_from_session_id(session_id)
 
             metadata_path = papers_dir.parent / "session_metadata.json"
-            default_prompt = "Unknown research question"
 
         if not metadata_path.exists():
-            return default_prompt
+            return self._derive_history_prompt_from_session_id(session_id)
 
         try:
             async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
                 metadata = json.loads(await f.read())
-            return (
-                metadata.get("user_prompt")
-                or metadata.get("user_research_prompt")
-                or default_prompt
+            return self._resolve_history_prompt(
+                session_id,
+                metadata.get("user_prompt"),
+                metadata.get("user_research_prompt"),
             )
         except Exception as e:
             logger.warning(f"Failed to read history prompt for session {session_id}: {e}")
-            return default_prompt
+            return self._derive_history_prompt_from_session_id(session_id)
 
     @staticmethod
     def _calculate_critique_average(critique: Any) -> Optional[float]:
@@ -381,6 +407,8 @@ class PaperLibrary:
                 r"##\s*Abstract",
                 r"#\s*Abstract",
                 r"\*\*Abstract\*\*",
+                r"\\(?:section|chapter)\*?\{Abstract\}",
+                r"\\begin\{abstract\}",
                 r"^Abstract\s*$"  # Abstract on its own line
             ]
             
@@ -399,6 +427,7 @@ class PaperLibrary:
                 r"##\s*Introduction",
                 r"#\s*Introduction",
                 r"\*\*Introduction\*\*",
+                r"\\(?:section|chapter)\*?\{(?:I\.?\s*)?Introduction\}",
                 r"^I\.\s*Introduction",
                 r"^Introduction\s*$"
             ]
@@ -418,6 +447,7 @@ class PaperLibrary:
                 r"##\s*Conclusion",
                 r"#\s*Conclusion",
                 r"\*\*Conclusion\*\*",
+                r"\\(?:section|chapter)\*?\{Conclusion\}",
                 r"^\w+\.\s*Conclusion",  # e.g., "V. Conclusion"
                 r"^Conclusion\s*$"
             ]
@@ -549,6 +579,58 @@ class PaperLibrary:
         except Exception as e:
             logger.error(f"Failed to read paper {paper_id}: {e}")
             return ""
+
+    async def append_proofs_section(self, paper_id: str, proofs_data: Any) -> bool:
+        """Append verified proofs to the bottom of a saved paper."""
+        async with self._lock:
+            paper_path = self._get_paper_path(paper_id)
+            if not paper_path.exists():
+                logger.error(f"Paper not found for proof append: {paper_id}")
+                return False
+
+            proofs = proofs_data if isinstance(proofs_data, list) else [proofs_data]
+            header = "=== PROOFS GENERATED FROM THIS PAPER (Lean 4 Verified) ==="
+
+            try:
+                async with aiofiles.open(paper_path, "r", encoding="utf-8") as handle:
+                    existing_content = await handle.read()
+
+                after_header = existing_content.split(header, 1)[1] if header in existing_content else ""
+                next_index = len(re.findall(r"(?m)^Proof \d+:", after_header)) + 1
+
+                lines: List[str] = []
+                if header not in existing_content:
+                    lines.extend(["", "", header, ""])
+                elif not existing_content.endswith("\n"):
+                    lines.append("")
+
+                for proof in proofs:
+                    theorem_statement = str(getattr(proof, "theorem_statement", "") or proof.get("theorem_statement", "")).strip()
+                    proof_id = str(getattr(proof, "proof_id", "") or proof.get("proof_id", "")).strip()
+                    novel = bool(getattr(proof, "novel", False) if hasattr(proof, "novel") else proof.get("novel", False))
+                    lean_code = str(getattr(proof, "lean_code", "") or proof.get("lean_code", "")).strip()
+                    status = "Verified (Novel)" if novel else "Verified (Known)"
+
+                    lines.extend(
+                        [
+                            f"Proof {next_index}: {theorem_statement}",
+                            f"Status: {status}",
+                            f"Proof ID: {proof_id or 'N/A'}",
+                            "Lean 4 Code:",
+                            lean_code or "[no Lean 4 code saved]",
+                            "---",
+                        ]
+                    )
+                    next_index += 1
+
+                async with aiofiles.open(paper_path, "a", encoding="utf-8") as handle:
+                    await handle.write("\n".join(lines) + "\n")
+
+                logger.info("Appended %s proof(s) to paper %s", len(proofs), paper_id)
+                return True
+            except Exception as exc:
+                logger.error(f"Failed to append proofs to paper {paper_id}: {exc}")
+                return False
     
     async def get_abstract(self, paper_id: str) -> str:
         """Get paper abstract."""

@@ -69,6 +69,11 @@ class QueueManager:
         """Get current queue size."""
         async with self._lock:
             return len(self.queue)
+
+    async def count_for_submitter(self, submitter_id: int) -> int:
+        """Count how many pending submissions were produced by a specific submitter."""
+        async with self._lock:
+            return sum(1 for s in self.queue if s.submitter_id == submitter_id)
     
     async def clear(self) -> None:
         """Clear the queue."""
@@ -103,7 +108,7 @@ class QueueManager:
             
             # Check for overflow (for monitoring/logging only - coordinator handles pausing)
             if len(self.queue) >= self.overflow_threshold:
-                logger.warning(
+                logger.debug(
                     f"Queue size ({len(self.queue)}) >= overflow threshold ({self.overflow_threshold}). "
                     f"Submitters should be paused by coordinator."
                 )

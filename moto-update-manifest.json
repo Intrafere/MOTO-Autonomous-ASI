@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "version": "1.0.7",
+  "build_commit": "d352090d687bd3475acfee17f29f7f0cfb17264e",
+  "update_channel": "main",
+  "api_contract_version": "build5-v1"
+}

@@ -39,7 +39,7 @@ The Autonomous Research Mode is Part 3 of the MOTO Math Variant system. It is a 
 ### Part 1 Aggregator Integration (Tier 1)
 The autonomous coordinator USES actual Part 1 aggregator infrastructure for brainstorm aggregation:
 - Creates separate `Coordinator` instance per brainstorm topic
-- Configures with topic-specific database path (`data/auto_brainstorms/brainstorm_{topic_id}.txt`)
+- Configures with topic-specific database path (`auto_brainstorms/brainstorm_{topic_id}.txt` under the active instance data root; default desktop path: `backend/data/auto_brainstorms/brainstorm_{topic_id}.txt`)
 - Runs configurable 1-10 submitters + 1 validator workflow (default 3 submitters)
 - Each submitter can have its own model, context window, and max output tokens for multi-model exploration
 - SINGLE validator maintains coherent Markov chain evolution (same constraint as Part 1)
@@ -200,7 +200,7 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `decision` (accept/reje
 ### Rejection Feedback
 When rejected, the validator's reasoning is added to the topic submitter's rolling feedback cache (last 5 rejections), similar to aggregator submitter rejection logs.
 
-**File**: `data/auto_research_topic_rejections.txt`
+**File**: `auto_research_topic_rejections.txt` under the active instance data root (default desktop path: `backend/data/auto_research_topic_rejections.txt`)
 
 ---
 
@@ -312,7 +312,7 @@ The autonomous brainstorm aggregator inherits batch validation from Part 1 infra
 - **Accelerated brainstorm exploration**: Batch validation increases throughput while maintaining quality through redundancy checks
 
 ### Key Differences from Part 1 Aggregator
-1. **Topic-Specific Database**: Writes to `data/auto_brainstorms/brainstorm_{topic_id}.txt` instead of `rag_shared_training.txt`
+1. **Topic-Specific Database**: Writes to `auto_brainstorms/brainstorm_{topic_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_brainstorms/brainstorm_{topic_id}.txt`) instead of `rag_shared_training.txt`
 2. **No User-Provided Topic Prompt**: Uses the AI-generated brainstorm topic prompt
 3. **Completion Tracking**: Tracks acceptance count (including removals) for completion review trigger
 4. **Hard Limit**: 30 accepted submissions (FORCE transition to paper writing, no completion review)
@@ -434,7 +434,7 @@ JSON schemas defined in `json-prompt-design.mdc`. Completion submitter: `decisio
 ### Feedback on Non-Completion
 If the decision is CONTINUE_BRAINSTORM, the `suggested_additions` field provides direction for future submissions. This feedback goes to a rolling cache (last 5) that is passed to the brainstorm aggregation submitters.
 
-**File**: `data/auto_brainstorms/completion_feedback_{topic_id}.txt`
+**File**: `auto_brainstorms/completion_feedback_{topic_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_brainstorms/completion_feedback_{topic_id}.txt`)
 
 ---
 
@@ -711,7 +711,7 @@ The autonomous RAG manager follows the same "no truncation" principle as Part 1 
 ### Rejection Feedback
 
 Compiler validator rejections are logged to:
-- `data/auto_papers/paper_{paper_id}_last_10_rejections.txt`
+- `auto_papers/paper_{paper_id}_last_10_rejections.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_last_10_rejections.txt`)
 - Follows same structure as Part 2 compiler rejection logs
 
 ---
@@ -725,23 +725,23 @@ When abstract is written and validated, the paper is considered COMPLETE. Additi
 **Actions on Completion**:
 
 1. **Save Final Paper**:
-   - File: `data/auto_papers/paper_{paper_id}.txt`
+   - File: `auto_papers/paper_{paper_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}.txt`)
    - Contains: Full paper with all sections
 
 2. **Save Outline**:
-   - File: `data/auto_papers/paper_{paper_id}_outline.txt`
+   - File: `auto_papers/paper_{paper_id}_outline.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_outline.txt`)
    - Contains: Paper outline for structural reference
 
 3. **Extract and Save Abstract**:
-   - File: `data/auto_papers/paper_{paper_id}_abstract.txt`
+   - File: `auto_papers/paper_{paper_id}_abstract.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_abstract.txt`)
    - Contains: Abstract text only
 
 4. **Cache Brainstorm Database**:
-   - File: `data/auto_papers/paper_{paper_id}_source_brainstorm.txt`
+   - File: `auto_papers/paper_{paper_id}_source_brainstorm.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_source_brainstorm.txt`)
    - Contains: Complete brainstorm database that sourced this paper
 
 5. **Update Metadata**:
-   - File: `data/auto_research_metadata.json`
+   - File: `auto_research_metadata.json` under the active instance data root (default desktop path: `backend/data/auto_research_metadata.json`)
    - Add paper entry with:
      - paper_id
      - paper_title
@@ -794,7 +794,7 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `should_remove` (bool),
    - Maximum 1 removal per review cycle
 
 5. **Execution**:
-   - If removal validated: Move paper to `data/auto_papers/archive/`
+   - If removal validated: Move paper to `auto_papers/archive/` under the active instance data root (default desktop path: `backend/data/auto_papers/archive/`)
    - Update metadata to mark as "archived"
    - Update statistics
 
@@ -975,11 +975,11 @@ The system implements **two tiers of model tracking**:
 ================================================================================
 AUTONOMOUS AI SOLUTION
 
-Disclaimer: This content is provided for informational and experimental purposes
-only. This paper was autonomously generated with the novelty-seeking MOTO
-harness without peer review or user oversight beyond the original prompt. It
-may contain incorrect, incomplete, misleading, or fabricated claims presented
-with high confidence. Use of this content is at your own risk. You are solely
+Disclaimer: This content is provided for informational purposes only. This
+paper was autonomously generated with the novelty-seeking MOTO harness without
+peer review or user oversight beyond the original prompt. It may contain
+incorrect, incomplete, misleading, or fabricated claims presented with high
+confidence. Use of this content is at your own risk. You are solely
 responsible for reviewing and independently verifying any output before relying
 on it, and the developers, operators, and contributors are not responsible for
 errors, omissions, decisions made from this content, or any resulting loss,
@@ -1072,11 +1072,11 @@ Tier 3 tracks all models used during final answer generation for author attribut
 ================================================================================
 AUTONOMOUS AI SOLUTION
 
-Disclaimer: This content is provided for informational and experimental purposes
-only. This paper was autonomously generated with the novelty-seeking MOTO
-harness without peer review or user oversight beyond the original prompt. It
-may contain incorrect, incomplete, misleading, or fabricated claims presented
-with high confidence. Use of this content is at your own risk. You are solely
+Disclaimer: This content is provided for informational purposes only. This
+paper was autonomously generated with the novelty-seeking MOTO harness without
+peer review or user oversight beyond the original prompt. It may contain
+incorrect, incomplete, misleading, or fabricated claims presented with high
+confidence. Use of this content is at your own risk. You are solely
 responsible for reviewing and independently verifying any output before relying
 on it, and the developers, operators, and contributors are not responsible for
 errors, omissions, decisions made from this content, or any resulting loss,
@@ -1116,7 +1116,7 @@ Total API Calls: 188
 
 ### Tier 3 Data Persistence
 
-**Directory**: `data/auto_final_answer/` (or `auto_sessions/{session_id}/final_answer/`)
+**Directory**: `auto_final_answer/` under the active instance data root (default desktop path: `backend/data/auto_final_answer/`) or `auto_sessions/{session_id}/final_answer/`
 
 | File | Purpose |
 |------|---------|
@@ -1241,39 +1241,94 @@ Main component for displaying Tier 3 status and content:
 
 ---
 
+## Proof Verification Stage (Optional, Part 3 Checkpoint)
+
+Runs automatically after every completed brainstorm (Tier 1) and every completed paper (Tier 2 / Tier 3 chapter), gated on `system_config.lean4_enabled`. Silent no-op when disabled.
+
+**Proof Framing Gate (one-shot, at autonomous start)**: When `lean4_enabled`, the coordinator runs `_run_proof_framing_gate()` before research begins. A single LLM call on the user prompt decides `is_proof_amenable` (`build_proof_framing_gate_prompt` → `autonomous_proof_framing_gate` role). If true, `PROOF_FRAMING_CONTEXT` is appended to every subsequent submitter prompt via `_append_proof_framing()` and persisted to workflow state for crash recovery. Decision is broadcast via `proof_framing_decided`. Silent no-op when disabled or when the prompt is not proof-amenable.
+
+**Pipeline** (`backend/autonomous/core/proof_verification_stage.py`):
+1. **Candidate identification** — `ProofIdentificationAgent` extracts theorem/lemma candidates from brainstorm or paper content
+2. **Optional Mathlib lemma search** — `MathlibLemmaSearchAgent` surfaces relevant existing lemmas into the formalization prompt
+3. **Optional SMT early-exit** — when `smt_enabled`, `SmtClient` classifies candidates conservatively; successful SMT results become Lean tactic hints (nativeDecide / omega / decide style), never stored as standalone proofs
+4. **Lean 4 formalization attempts** — two-phase retry: up to 3 full-proof attempts via `ProofFormalizationAgent.prove_candidate`, then up to 2 multi-tactic script attempts via `prove_candidate_tactic_script` (5 total per candidate). Prior `FailedProofCandidate` failure hints from `proof_database.inject_failure_hints_into_prompt()` thread into each retry.
+5. **Novelty check** — `autonomous_proof_novelty` role compares verified proof against existing proof library
+6. **Storage** — `proof_database.add_proof()` persists novel and known proofs as session-aware records (`proofs_index.json`, `proof_<id>.json`, `proof_<id>_lean.lean`) with extracted `ProofDependency` records and reverse Mathlib usage index. Verified proofs are also appended as a "Verified Proofs" section at the bottom of the source brainstorm DB and/or paper file via `append_proofs_section()`.
+
+**Parallelism (two-phase execution per stage run)**: Steps 2–4 above (the per-candidate "Phase A" Lean pipeline: lemma search → optional SMT hint → `prove_candidate` → `prove_candidate_tactic_script` → `proof_attempts_exhausted` broadcast on failure) run concurrently across *all* identified candidates inside a single `ProofVerificationStage.run()` invocation, bounded by `system_config.proof_max_parallel_candidates` (default 6, env: `MOTO_PROOF_MAX_PARALLEL_CANDIDATES` / `PROOF_MAX_PARALLEL_CANDIDATES`) via an `asyncio.Semaphore`. Completed candidates are consumed by the driver loop through `asyncio.as_completed`, and steps 5–6 (the "Phase B" post-processing: novelty assessment, `add_proof`, dependency extraction via `ProofDependencyExtractor`, `append_proofs_section`, `novel_proof_discovered` / `known_proof_verified` broadcast, `record_failed_candidate` for brainstorm failures) are performed strictly **one-at-a-time** in Phase-A completion order inside that driver loop so later candidates can observe earlier stored proofs as MOTO dependencies. Every identified candidate is attempted — no cutoff. Each Phase-A task instantiates its own `ProofIdentificationAgent` / `MathlibLemmaSearchAgent` / `ProofFormalizationAgent` so the per-agent `task_sequence` counter cannot collide across concurrent candidates. If any Phase-A task raises `FreeModelExhaustedError` (or any other exception), the driver cancels all still-running sibling tasks and re-raises so the coordinator's recovery path runs with no orphaned background API calls. `should_stop` is plumbed into each Phase-A pipeline and checked before each Phase-B pass, so a stop-request short-circuits cleanly without leaking tasks.
+
+**Rigor mode is NOT parallelized** (compiler Part 2): `submit_rigor_lean_theorem()` runs one candidate per rigor cycle by design (discovery → 5 Lean attempts → novelty → placement) and the outer `_rigor_loop` drives cycles serially so each proven theorem can land in the paper before the next discovery sees updated context. The parallel candidate pipeline lives only in `ProofVerificationStage`.
+
+**Per-Source Reservation**: `ProofVerificationStage` maintains a class-level `{source_type}:{source_id}` active set behind an asyncio lock so the same brainstorm or paper cannot be verified twice concurrently (required for autonomous + manual proof-check interleaving).
+
+**Lean 4 is authoritative**: SMT results never substitute for Lean verification. The `Lean4Result` contract is the only path to a stored proof. SMT contributes hints only.
+
+**Subprocess vs LSP**: `lean4_client` runs Lean via subprocess by default. When `lean4_lsp_enabled`, a persistent LSP-style process reduces cold-start overhead; the subprocess path remains the fallback and must keep working when LSP is disabled.
+
+**Manual proof checks** (Build 5): `POST /api/proofs/check` reuses `ProofVerificationStage.run_manual()` with the stored `ProofRuntimeConfigSnapshot` (brainstorm / paper / validator role configs captured during autonomous startup). Readiness is surfaced via `/api/proofs/status.manual_check_ready` + `manual_check_message`. Required state: `lean4_enabled=True` AND a runtime snapshot must exist (start autonomous research once to seed it).
+
+**Proof runtime config snapshot** (`research_metadata.set_proof_runtime_config`): Captures a `ProofRuntimeConfigSnapshot` with three `ProofRoleConfigSnapshot` entries — `brainstorm` (from first aggregator submitter config), `paper` (from high-context submitter config), `validator` (from validator config). Each holds provider, model_id, openrouter_provider, lm_studio_fallback_id, context_window, and max_output_tokens. Lets manual checks run without an active autonomous session.
+
+**Proof WebSocket events** (all broadcast through the standard `/api/ws` stream):
+- `proof_framing_decided`
+- `proof_check_started`, `proof_check_complete`, `proof_check_no_candidates`
+- `proof_check_candidates_found`, `mathlib_lemmas_suggested`
+- `proof_attempt_started`, `proof_verified`, `proof_attempt_failed`, `proof_attempts_exhausted`
+- `proof_retry_started`, `proof_retry_scheduled`
+- `novel_proof_discovered`, `known_proof_verified`
+- `proof_dependency_added` (Build 5 — live graph updates)
+- `smt_check_started`, `smt_check_complete`
+
+**Proof Stage Critical Invariants**:
+1. Proof stage is silent and skipped when `lean4_enabled=False` — never blocks brainstorm or paper completion
+2. Lean 4 is authoritative — SMT results are hints only, never stored as standalone proofs, `Lean4Result` contract is unchanged by SMT
+3. Subprocess checker must continue to work when `lean4_lsp_enabled=False`; LSP path must not regress subprocess behavior when enabled
+4. Proof storage is session-aware (`session_manager` → `get_proofs_dir()`) and falls back to the legacy `backend/data/proofs/` layout when no session is active
+5. Per-source reservation lock prevents concurrent proof checks on the same `{source_type}:{source_id}` (autonomous vs manual interleaving)
+6. Novel proofs become highest-priority direct-injection context for subsequent brainstorm/paper submitters (via `proof_database.inject_failure_hints_into_prompt()` and stored `ProofRecord` summaries)
+7. Proof certificates stay text-based (`.lean` source + JSON metadata) — no binary artifacts
+8. Hosted/generic mode keeps `lean4_enabled` and `smt_enabled` default false and the hosted image stays Lean-free and Z3-free (no proof binaries in the `python:3.12-slim` runtime)
+9. Proof framing gate runs once per autonomous start and only when `lean4_enabled`; the resulting `proof_framing_active` flag and `PROOF_FRAMING_CONTEXT` are persisted in workflow state for crash recovery
+10. Every identified theorem candidate must be attempted — Phase A is bounded by `proof_max_parallel_candidates` but never truncates the candidate list; Phase A runs concurrently across candidates while Phase B (novelty / `add_proof` / dependency extraction / brainstorm+paper `append_proofs_section` / novel/known broadcasts / `record_failed_candidate`) remains strictly serialized in Phase-A completion order so intra-batch MOTO dependencies and per-source proof appending stay coherent
+11. Each Phase-A task owns its own `ProofIdentificationAgent` / `MathlibLemmaSearchAgent` / `ProofFormalizationAgent` instance to keep per-agent `task_sequence` counters collision-free; any Phase-A exception (including `FreeModelExhaustedError`) must cancel all sibling tasks and re-raise so the coordinator's recovery path runs without orphaned background API calls
+12. `should_stop` propagates into Phase A and is re-checked before each Phase-B pass so stop-requests short-circuit without leaking tasks or partially-applied Phase-B writes
+13. Compiler rigor mode (`submit_rigor_lean_theorem`, `_rigor_loop`) is NOT parallelized — rigor cycles discover, verify, and place one theorem per cycle so each verified theorem lands in the paper before the next discovery; the parallel candidate pipeline lives only in `ProofVerificationStage`
+
+---
+
 ## Data Persistence
 
 ### Brainstorm Databases
 
-**File Pattern**: `data/auto_brainstorms/brainstorm_{topic_id}.txt`
+**File Pattern**: `auto_brainstorms/brainstorm_{topic_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_brainstorms/brainstorm_{topic_id}.txt`)
 
 Each brainstorm has its own database file containing accepted submissions, formatted identically to Part 1's `rag_shared_training.txt`.
 
-**Metadata File**: `data/auto_brainstorms/brainstorm_{topic_id}_metadata.json` — Fields: topic_id, topic_prompt, status, submission_count, timestamps, papers_generated.
+**Metadata File**: `auto_brainstorms/brainstorm_{topic_id}_metadata.json` under the active instance data root (default desktop path: `backend/data/auto_brainstorms/brainstorm_{topic_id}_metadata.json`) — Fields: topic_id, topic_prompt, status, submission_count, timestamps, papers_generated.
 
 ### Paper Files
 
-**File Pattern**: `data/auto_papers/paper_{paper_id}.txt`
+**File Pattern**: `auto_papers/paper_{paper_id}.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}.txt`)
 
 Contains full paper content.
 
-**Abstract File**: `data/auto_papers/paper_{paper_id}_abstract.txt`
+**Abstract File**: `auto_papers/paper_{paper_id}_abstract.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_abstract.txt`)
 
 Contains abstract only.
 
-**Source Brainstorm Cache**: `data/auto_papers/paper_{paper_id}_source_brainstorm.txt`
+**Source Brainstorm Cache**: `auto_papers/paper_{paper_id}_source_brainstorm.txt` under the active instance data root (default desktop path: `backend/data/auto_papers/paper_{paper_id}_source_brainstorm.txt`)
 
 Contains complete brainstorm database that sourced this paper.
 
 ### Research Metadata File
 
-**File**: `data/auto_research_metadata.json`
+**File**: `auto_research_metadata.json` under the active instance data root (default desktop path: `backend/data/auto_research_metadata.json`)
 
 ```
 
 ### Workflow State File (Crash Recovery / Resume)
 
-**File**: `data/auto_workflow_state.json`
+**File**: `auto_workflow_state.json` under the active instance data root (default desktop path: `backend/data/auto_workflow_state.json`)
 
 This file persists the current workflow state to enable **automatic resume** after program restart or crash. The system automatically saves this state at key checkpoints:
 
@@ -1335,6 +1390,8 @@ All memory modules (`brainstorm_memory`, `paper_library`, `final_answer_memory`,
 
 The autonomous research system maintains backward compatibility through a dual-path architecture:
 
+**Runtime root note:** The examples below are shown with the default desktop root `backend/data/`. In multi-launch or hosted environments, these same relative paths resolve under the active `MOTO_DATA_ROOT`. Per-instance isolation comes from the runtime root; session isolation happens inside that instance root.
+
 **Legacy Paths (backward compatibility):**
 ```
 backend/data/auto_brainstorms/      # Brainstorm databases
@@ -1363,9 +1420,10 @@ backend/data/auto_sessions/{session_id}/final_answer/    # Session final answers
 
 **Important for New Features:**
 - Always use memory module methods (e.g., `paper_library.get_paper_path()`) to get paths
-- Never hardcode paths like `data/auto_papers/` directly
+- Never hardcode fixed-root paths like `data/auto_papers/` or `backend/data/auto_papers/` directly
 - Pass resolved paths to any persistence layer that needs session awareness
 - Config paths (`system_config.auto_papers_dir`, etc.) are legacy-only references
+- Session-aware storage does not replace instance-aware storage; separate running MOTO instances must also keep separate `MOTO_DATA_ROOT` values
 
 ---
 
@@ -1426,8 +1484,8 @@ Paper library component:
 - Expandable to show full paper content
 - Word count, source brainstorm links
 - Download/export options:
-  - **Download PDF**: Generates PDF from rendered LaTeX content (same functionality as LivePaper and FinalAnswerView)
-  - **Download Raw**: Downloads raw text with outline
+  - **Download PDF** (default mode only): Generates PDF from rendered LaTeX content (same functionality as LivePaper and FinalAnswerView); returns 501 in generic mode
+  - **Download Raw**: Downloads raw text with outline (available in both modes)
 - Search and filter functionality
 - **Delete button**: Removes paper and all associated files (shown when paper is expanded)
   - Shows inline confirmation dialog before deletion
@@ -1552,16 +1610,17 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 
 ### Running Modes
 - **Part 1, Part 2, and Part 3 remain user-selectable modes**
-- **Only ONE workflow mode may be active at a time** — Aggregator, Compiler, and Autonomous Research are now mutually exclusive at runtime
+- **Only ONE workflow mode may be active at a time** — Aggregator, Compiler, and Autonomous Research are mutually exclusive at runtime (applies identically in both default and generic deployment)
 - **Part 3 internally controls Part 1 and Part 2 components** during autonomous execution
 - Starting any mode while another mode is running must be blocked until the active mode is stopped
+- In generic mode, all API routes and WebSocket events are identical — the only difference is provider availability (OpenRouter-only, FastEmbed embeddings, no PDF download)
 
 ---
 
 ## Prerequisites
 
-- Either an OpenRouter API key or at least one LM Studio model must be available to begin
-- LM Studio is highly recommended even with OpenRouter enabled because local embeddings/RAG are free and faster
+- Either an OpenRouter API key or at least one LM Studio model must be available to begin (default mode). Generic mode requires an OpenRouter API key only.
+- LM Studio is recommended in default mode for free local embeddings/RAG; generic mode uses in-process FastEmbed for embeddings (no LM Studio dependency)
 - User must provide high-level research prompt
 - No dependency on prior Part 1 or Part 2 usage
 - Fresh start with empty brainstorm/paper libraries
@@ -1662,6 +1721,7 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 37. **Paper title exploration runs before EVERY title selection** — Uses full Part 1 aggregator to collect 5 candidate titles before every paper creation (Tier 2 papers 1/2/3, Tier 3 short-form, Tier 3 gap/intro/conclusion chapters). No exceptions.
 38. **Title exploration uses standard aggregator (cleanup disabled)** — Same parallel submitters, batch validation, queue management. Cleanup/pruning is disabled because the phase is capped at 5 candidates and the temp DB is deleted afterwards.
 39. **Final title selection sees candidate titles** — The 6th selection can choose a candidate, synthesize, or propose new. Must justify divergence from all candidates.
+40. **Proof verification is an optional post-brainstorm and post-paper checkpoint** — Gated on `lean4_enabled`; silent when disabled. Lean 4 is authoritative; SMT (when `smt_enabled`) contributes hints only. See "Proof Verification Stage" section for the full invariant list.
 
 ---
 
@@ -1689,14 +1749,16 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 Each role in autonomous research mode supports OpenRouter model selection with host/provider choice:
 
 **Per-Role Configuration** (for each brainstorm submitter, validator, high-context, high-param, critique submitter):
-- **Provider Toggle**: "Use OpenRouter" button switches role to OpenRouter model selection
+- **Provider Toggle** (default mode): "Use OpenRouter" button switches role to OpenRouter model selection. In generic mode, all roles use OpenRouter only and provider toggle is hidden.
 - **OpenRouter Model Selector**: When OpenRouter enabled, dropdown shows available OpenRouter models
 - **Provider/Host Selector**: Specific provider selection (e.g., "Anthropic", "Google AI", "AWS Bedrock") or "Default (OpenRouter chooses)"
-- **LM Studio Fallback**: Optional fallback model if OpenRouter fails (credit exhaustion, errors)
+- **OpenRouter Auto-Fill**: Selecting an OpenRouter model auto-fills from endpoint metadata only. Context window uses the smallest relevant host `context_length`; max output tokens use `min(20% of that host context, smallest relevant host max_completion_tokens)`. If `max_prompt_tokens` is available, shrink usable context to respect it. If endpoint caps are incomplete, preserve current values (no guessing).
+- **LM Studio Fallback** (default mode only): Optional fallback model if OpenRouter fails (credit exhaustion, errors)
 
 **Fallback Behavior**:
-- If OpenRouter is selected and has a fallback configured: Automatically falls back to LM Studio on credit exhaustion
-- If no LM Studio available: OpenRouter-only operation (system works without LM Studio)
+- Default mode with fallback configured: Automatically falls back to LM Studio on credit exhaustion
+- Default mode without LM Studio: OpenRouter-only operation (system works without LM Studio)
+- Generic mode: OpenRouter-only; no LM Studio fallback available. Credit exhaustion raises RuntimeError if no alternative.
 - Fallback is per-role and resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key
 
 ## Other Notes

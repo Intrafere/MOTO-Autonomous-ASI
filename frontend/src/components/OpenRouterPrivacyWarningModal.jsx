@@ -7,8 +7,10 @@ import './settings-common.css';
  * Shows when user's OpenRouter privacy settings block access to free models.
  * Provides clear instructions on how to fix the issue.
  */
-function OpenRouterPrivacyWarningModal({ isOpen, onClose, errorData }) {
+function OpenRouterPrivacyWarningModal({ isOpen, onClose, errorData, capabilities }) {
   if (!isOpen) return null;
+
+  const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
 
   const handleOverlayClick = (e) => {
     if (e.target === e.currentTarget) {
@@ -168,9 +170,15 @@ function OpenRouterPrivacyWarningModal({ isOpen, onClose, errorData }) {
             <li style={{ marginBottom: '8px' }}>
               Use a paid OpenRouter model instead of a free model
             </li>
-            <li>
-              Configure an LM Studio fallback model in Settings
-            </li>
+            {lmStudioEnabled ? (
+              <li>
+                Configure an LM Studio fallback model in Settings
+              </li>
+            ) : (
+              <li>
+                Choose a different OpenRouter model or host provider for this role
+              </li>
+            )}
           </ul>
         </div>
 
@@ -217,7 +225,7 @@ function OpenRouterPrivacyWarningModal({ isOpen, onClose, errorData }) {
           lineHeight: '1.5'
         }}>
           <strong>Note:</strong> This is an OpenRouter account setting, not a MOTO setting. 
-          You only need to configure this once on OpenRouter's website.
+          You only need to configure this once on OpenRouter&apos;s website.
         </div>
       </div>
     </div>

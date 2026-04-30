@@ -49,7 +49,7 @@ export default function AggregatorLogs() {
 
   const fetchRecoveryStatus = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/aggregator/status/recovery');
+      const response = await fetch('/api/aggregator/status/recovery');
       if (response.ok) {
         const data = await response.json();
         setRecoveryStatus(data);
@@ -61,7 +61,7 @@ export default function AggregatorLogs() {
 
   const fetchPersistedEvents = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/aggregator/events');
+      const response = await fetch('/api/aggregator/events');
       if (response.ok) {
         const data = await response.json();
         if (data.events && data.events.length > 0) {
@@ -253,7 +253,7 @@ export default function AggregatorLogs() {
                         Failures: {count}/{recoveryStatus.corruption_threshold}
                       </div>
                       {recoveryStatus.recovery_attempts && recoveryStatus.recovery_attempts[model] > 0 && (
-                        <div style={{ color: '#2196F3' }}>
+                        <div style={{ color: '#18cc17' }}>
                           Recoveries: {recoveryStatus.recovery_attempts[model]}
                         </div>
                       )}

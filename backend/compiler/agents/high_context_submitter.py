@@ -15,6 +15,7 @@ from backend.shared.models import CompilerSubmission
 from backend.shared.config import system_config, rag_config
 from backend.shared.utils import count_tokens
 from backend.shared.json_parser import parse_json
+from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.validation.json_validator import json_validator
 from backend.compiler.prompts.outline_prompts import (
     build_outline_create_prompt,
@@ -31,14 +32,78 @@ from backend.compiler.prompts.review_prompts import build_review_prompt
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import (
     paper_memory,
-    PAPER_ANCHOR,
     ABSTRACT_PLACEHOLDER,
     INTRO_PLACEHOLDER,
-    CONCLUSION_PLACEHOLDER
+    CONCLUSION_PLACEHOLDER,
 )
 from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# WOLFRAM ALPHA TOOL (Phase 3)
+# =============================================================================
+# The main writer may invoke Wolfram Alpha as a real OpenAI-style tool during
+# construction mode. Each submission gets a budget of 20 calls; the loop
+# forces finalization once the budget is exhausted. Callers attach the full
+# audit trail to `CompilerSubmission.metadata["wolfram_calls"]`.
+
+WOLFRAM_MAX_CALLS_PER_SUBMISSION = 20
+
+WOLFRAM_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "wolfram_alpha_query",
+        "description": (
+            "Query Wolfram Alpha to verify a mathematical or computational claim "
+            "before writing it into the paper. Use for: numerical verifications, "
+            "symbolic computations, well-known mathematical facts, unit "
+            "conversions, named-constant values. Do NOT use for open research "
+            "questions or narrative prose. You may call this tool up to "
+            f"{WOLFRAM_MAX_CALLS_PER_SUBMISSION} times per submission."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language Wolfram Alpha query, e.g. 'Is pi "
+                        "algebraic?', 'integral of x^2 from 0 to 1', "
+                        "'prime factorization of 360'."
+                    ),
+                },
+                "purpose": {
+                    "type": "string",
+                    "description": (
+                        "Brief note on how the result will be used in the paper "
+                        "(for audit trail)."
+                    ),
+                },
+            },
+            "required": ["query", "purpose"],
+        },
+    },
+}
+
+
+def _wolfram_tool_available() -> bool:
+    """Return True iff Wolfram Alpha is configured AND its client is live.
+
+    Registration of the tool with the LLM is gated on this so models never
+    see a callable tool when the backend cannot actually service it.
+    """
+    if not system_config.wolfram_alpha_enabled:
+        return False
+    try:
+        from backend.shared.wolfram_alpha_client import get_wolfram_client
+    except ImportError:
+        return False
+    try:
+        return get_wolfram_client() is not None
+    except Exception:
+        return False
 
 
 def _normalize_string_field(value) -> str:
@@ -68,7 +133,7 @@ def _normalize_string_field(value) -> str:
 
 def _strip_paper_markers_for_llm(paper_content: str) -> str:
     """
-    Remove only the end-of-paper anchor from paper before sending to LLM.
+    Prepare paper text before sending it to the LLM.
     
     The section placeholders are KEPT so the LLM can see and use them
     as exact old_string values for replacement operations.
@@ -81,14 +146,15 @@ def _strip_paper_markers_for_llm(paper_content: str) -> str:
     Args:
         paper_content: Full paper content with markers
     
+    The writer must see the same editable paper text that exact-match
+    validation checks. Keep placeholders and theorem appendix bracket markers
+    visible so old_string anchors can be copied verbatim from the real paper.
+
     Returns:
-        Paper content with end-of-paper anchor removed but placeholders intact
+        Paper content with all system markers intact
     """
-    # Remove only the paper anchor marker (end-of-paper boundary)
-    # Keep placeholders intact so LLM can use them as exact old_string values
-    result = paper_content.replace(PAPER_ANCHOR, "").strip()
-    
-    return result
+    # Keep markers intact so LLM can use them as exact old_string values.
+    return paper_content.strip()
 
 
 class HighContextSubmitter:
@@ -104,7 +170,7 @@ class HighContextSubmitter:
     
     def __init__(self, model_name: str, user_prompt: str, websocket_broadcaster: Optional[Callable] = None):
         self.model_name = model_name
-        self.user_prompt = user_prompt
+        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
         self.websocket_broadcaster = websocket_broadcaster
         self._initialized = False
         
@@ -288,9 +354,9 @@ class HighContextSubmitter:
             current_paper = await paper_memory.get_paper()
             logger.info(f"State loaded: outline={len(current_outline)} chars, paper={len(current_paper)} chars")
             
-            # Strip structural markers from paper for LLM (prevents anchor text mismatch)
+            # Show the same marker-bearing paper that validation/apply will match.
             paper_for_llm = _strip_paper_markers_for_llm(current_paper)
-            logger.info(f"Paper stripped: {len(current_paper)} chars → {len(paper_for_llm)} chars (markers removed)")
+            logger.info(f"Paper prepared for LLM: {len(current_paper)} chars → {len(paper_for_llm)} chars (markers preserved)")
             
             # Retrieve aggregator database evidence
             # Exclude outline and paper (both direct-injected in outline_update mode)
@@ -456,9 +522,9 @@ class HighContextSubmitter:
             current_paper = await paper_memory.get_paper()
             logger.info(f"State loaded: outline={len(current_outline)} chars, paper={len(current_paper)} chars")
             
-            # Strip structural markers from paper for LLM (prevents anchor text mismatch)
+            # Show the same marker-bearing paper that validation/apply will match.
             paper_for_llm = _strip_paper_markers_for_llm(current_paper)
-            logger.info(f"Paper stripped: {len(current_paper)} chars → {len(paper_for_llm)} chars (markers removed)")
+            logger.info(f"Paper prepared for LLM: {len(current_paper)} chars → {len(paper_for_llm)} chars (markers preserved)")
             
             # Calculate RAG budget accounting for brainstorm content (prevents context overflow)
             max_allowed_tokens = rag_config.get_available_input_tokens(
@@ -580,27 +646,41 @@ class HighContextSubmitter:
             if self.task_tracking_callback:
                 self.task_tracking_callback("started", task_id)
             
-            # Get completion via api_client_manager (handles boost and fallback)
+            # Get completion via api_client_manager with Wolfram tool-loop.
+            # Phase 3: the main writer may invoke Wolfram Alpha up to
+            # WOLFRAM_MAX_CALLS_PER_SUBMISSION times per submission. When
+            # Wolfram is disabled this helper degrades to a single-shot call.
             logger.info(f"Generating LLM completion via api_client_manager (task_id={task_id})...")
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,  # Deterministic generation - evolving context provides diversity
-                max_tokens=system_config.compiler_high_context_max_output_tokens  # User-configurable (outline creation, update, construction, review)
+            try:
+                llm_output, wolfram_calls, _message = await self._generate_completion_with_wolfram_tool(
+                    task_id=task_id,
+                    initial_prompt=prompt,
+                )
+            except Exception as exc:
+                # Any tool-loop failure falls back to the plain single-shot
+                # path so construction still makes forward progress.
+                logger.warning(
+                    "Wolfram tool-loop failed (%s); falling back to single-shot construction call",
+                    exc,
+                )
+                fallback = await api_client_manager.generate_completion(
+                    task_id=f"{task_id}_fallback",
+                    role_id=self.role_id,
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=system_config.compiler_high_context_max_output_tokens,
+                )
+                if not fallback.get("choices") or not fallback["choices"][0].get("message"):
+                    logger.error("construction: LLM returned empty response structure")
+                    raise ValueError("LLM returned empty response")
+                fallback_msg = fallback["choices"][0]["message"]
+                llm_output = fallback_msg.get("content") or fallback_msg.get("reasoning") or ""
+                wolfram_calls = []
+            logger.info(
+                f"LLM completion received: {len(llm_output)} chars "
+                f"({len(wolfram_calls)} Wolfram tool call(s))"
             )
-            
-            # Check for empty response
-            if not response.get("choices") or not response["choices"][0].get("message"):
-                logger.error("construction: LLM returned empty response structure")
-                raise ValueError("LLM returned empty response")
-            
-            # Extract content from either 'content' or 'reasoning' field
-            # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
-            message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
-            logger.info(f"LLM completion received: {len(llm_output)} chars")
             
             # Check for empty content
             # Parse response with retry
@@ -646,7 +726,12 @@ class HighContextSubmitter:
                         new_string="",
                         reasoning=data.get("reasoning", "Section marked as complete"),
                         section_complete=True,
-                        metadata={"coverage": context_pack.coverage, "is_first": is_first_portion, "phase": section_phase}
+                        metadata={
+                            "coverage": context_pack.coverage,
+                            "is_first": is_first_portion,
+                            "phase": section_phase,
+                            "wolfram_calls": wolfram_calls,
+                        },
                     )
                     # Notify task completed successfully
                     if self.task_tracking_callback:
@@ -678,7 +763,12 @@ class HighContextSubmitter:
                 new_string=new_string_content,  # Already normalized above
                 reasoning=data.get("reasoning", ""),
                 section_complete=section_complete,
-                metadata={"coverage": context_pack.coverage, "is_first": is_first_portion, "phase": section_phase}
+                metadata={
+                    "coverage": context_pack.coverage,
+                    "is_first": is_first_portion,
+                    "phase": section_phase,
+                    "wolfram_calls": wolfram_calls,
+                },
             )
             
             # Parse optional brainstorm retroactive operation
@@ -741,9 +831,9 @@ class HighContextSubmitter:
             current_paper = await paper_memory.get_paper()
             logger.info(f"State loaded: outline={len(current_outline)} chars, paper={len(current_paper)} chars")
             
-            # Strip structural markers from paper for LLM (prevents anchor text mismatch)
+            # Show the same marker-bearing paper that validation/apply will match.
             paper_for_llm = _strip_paper_markers_for_llm(current_paper)
-            logger.info(f"Paper stripped: {len(current_paper)} chars → {len(paper_for_llm)} chars (markers removed)")
+            logger.info(f"Paper prepared for LLM: {len(current_paper)} chars → {len(paper_for_llm)} chars (markers preserved)")
             
             # Build prompt (no RAG, just direct outline + paper content)
             # CRITICAL: Outline is ALWAYS fully injected per architectural rules
@@ -878,6 +968,230 @@ class HighContextSubmitter:
                 self.task_tracking_callback("completed", task_id)
             return None  # Don't crash workflow on review failure
     
+    async def _generate_completion_with_wolfram_tool(
+        self,
+        *,
+        task_id: str,
+        initial_prompt: str,
+    ) -> tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
+        """Run the construction LLM call with the Wolfram tool attached.
+
+        Returns (final_llm_text, wolfram_calls, raw_message_dict).
+
+        Behavior:
+        - If Wolfram is disabled / unavailable, behaves like a single-shot
+          `generate_completion` (preserves pre-Phase-3 behavior).
+        - Otherwise, registers WOLFRAM_TOOL_SCHEMA on the call and loops: on
+          any `tool_calls` in the assistant response, executes each via
+          `wolfram_client.query(...)`, appends a tool-role turn with the
+          result, and re-prompts the LLM. Up to 20 tool calls per submission.
+        - On budget exhaustion, injects a user-role reminder and re-calls
+          the LLM with tools disabled so it finalizes with whatever data
+          it has gathered.
+        - If the model never emits tool_calls (or the backend returns a
+          plain completion in one shot), this function behaves identically
+          to the single-shot path.
+
+        Websocket events:
+        - `compiler_wolfram_call` broadcast per call with query + preview.
+        """
+        wolfram_enabled = _wolfram_tool_available()
+
+        messages: List[Dict[str, Any]] = [{"role": "user", "content": initial_prompt}]
+        wolfram_calls: List[Dict[str, Any]] = []
+
+        # Get the Wolfram client once per submission so we don't repeatedly
+        # re-resolve the singleton. Only resolved when tool is enabled.
+        wolfram_client = None
+        if wolfram_enabled:
+            try:
+                from backend.shared.wolfram_alpha_client import get_wolfram_client
+                wolfram_client = get_wolfram_client()
+            except Exception as exc:
+                logger.warning(f"Wolfram client init failed; disabling tool for this call: {exc}")
+                wolfram_enabled = False
+
+        # Hard cap on total LLM turns in the loop. Each tool round is 1
+        # assistant turn + 1 user/tool turn; plus one finalization turn on
+        # budget exhaustion. This bound prevents runaway if the model just
+        # keeps calling tools.
+        max_loop_iterations = WOLFRAM_MAX_CALLS_PER_SUBMISSION + 3
+
+        for iteration in range(max_loop_iterations):
+            # Attach tools when the budget is not yet exhausted
+            tools_param = (
+                [WOLFRAM_TOOL_SCHEMA]
+                if wolfram_enabled and len(wolfram_calls) < WOLFRAM_MAX_CALLS_PER_SUBMISSION
+                else None
+            )
+
+            response = await api_client_manager.generate_completion(
+                task_id=task_id,
+                role_id=self.role_id,
+                model=self.model_name,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=system_config.compiler_high_context_max_output_tokens,
+                tools=tools_param,
+            )
+
+            if not response.get("choices") or not response["choices"][0].get("message"):
+                raise ValueError("LLM returned empty response")
+            message = response["choices"][0]["message"]
+            tool_calls = message.get("tool_calls") or []
+
+            if not tool_calls:
+                # Final turn - extract content and return
+                content = message.get("content") or message.get("reasoning") or ""
+                return content, wolfram_calls, message
+
+            # Append assistant turn verbatim so tool-role replies have the
+            # right pairing ids.
+            assistant_turn: Dict[str, Any] = {
+                "role": "assistant",
+                "content": message.get("content") or "",
+                "tool_calls": tool_calls,
+            }
+            messages.append(assistant_turn)
+
+            # Execute each tool call and append tool-role replies.
+            for tool_call in tool_calls:
+                fn = tool_call.get("function") or {}
+                name = fn.get("name", "")
+                arguments_raw = fn.get("arguments") or "{}"
+                if name != "wolfram_alpha_query":
+                    # Unknown tool - return a structured error so the model
+                    # learns not to call it again, but don't hard-fail.
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id", ""),
+                        "content": f"Tool '{name}' is not available; ignore.",
+                    })
+                    continue
+
+                if not wolfram_enabled or wolfram_client is None:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id", ""),
+                        "content": "Wolfram Alpha is not enabled; continue without external verification.",
+                    })
+                    continue
+
+                if len(wolfram_calls) >= WOLFRAM_MAX_CALLS_PER_SUBMISSION:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id", ""),
+                        "content": (
+                            f"Wolfram Alpha call budget exhausted "
+                            f"({WOLFRAM_MAX_CALLS_PER_SUBMISSION} calls used). "
+                            "Do not call this tool again; finalize your JSON response."
+                        ),
+                    })
+                    continue
+
+                try:
+                    args = json.loads(arguments_raw) if isinstance(arguments_raw, str) else dict(arguments_raw)
+                except Exception as exc:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id", ""),
+                        "content": f"Tool call arguments were not valid JSON ({exc}); re-issue the call with valid JSON.",
+                    })
+                    continue
+
+                query = str(args.get("query", "") or "").strip()
+                purpose = str(args.get("purpose", "") or "").strip()
+                if not query:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.get("id", ""),
+                        "content": "Tool call missing 'query'; re-issue with a concrete query.",
+                    })
+                    continue
+
+                try:
+                    result_text = await wolfram_client.query(query)
+                except Exception as exc:
+                    logger.warning(f"Wolfram query raised: {exc}")
+                    result_text = None
+                result_text = result_text or "Wolfram Alpha returned no result."
+                wolfram_calls.append({
+                    "query": query,
+                    "purpose": purpose,
+                    "result": result_text,
+                })
+                logger.info(
+                    "Wolfram Alpha call %d/%d: %s",
+                    len(wolfram_calls),
+                    WOLFRAM_MAX_CALLS_PER_SUBMISSION,
+                    query[:120],
+                )
+                try:
+                    await self._broadcast_wolfram_event(
+                        task_id=task_id,
+                        query=query,
+                        purpose=purpose,
+                        result=result_text,
+                        calls_used=len(wolfram_calls),
+                    )
+                except Exception as exc:
+                    logger.debug(f"Wolfram websocket broadcast failed (non-fatal): {exc}")
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", ""),
+                    "content": result_text,
+                })
+
+            # After exhausting the budget, inject a one-time reminder and
+            # let the next loop iteration run without tools so the model
+            # must finalize its JSON response.
+            if wolfram_enabled and len(wolfram_calls) >= WOLFRAM_MAX_CALLS_PER_SUBMISSION:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"You have used all {WOLFRAM_MAX_CALLS_PER_SUBMISSION} "
+                        "Wolfram Alpha calls for this submission. Finalize "
+                        "your JSON response now using the information you "
+                        "have gathered. Do not attempt further tool calls."
+                    ),
+                })
+
+        # Loop cap reached without a clean finalization - surface whatever
+        # text the last assistant turn produced, or empty string.
+        for turn in reversed(messages):
+            if turn.get("role") == "assistant" and turn.get("content"):
+                return str(turn["content"]), wolfram_calls, turn
+        return "", wolfram_calls, {}
+
+    async def _broadcast_wolfram_event(
+        self,
+        *,
+        task_id: str,
+        query: str,
+        purpose: str,
+        result: str,
+        calls_used: int,
+    ) -> None:
+        """Broadcast one compiler_wolfram_call websocket event."""
+        if not self.websocket_broadcaster:
+            return
+        try:
+            await self.websocket_broadcaster(
+                "compiler_wolfram_call",
+                {
+                    "task_id": task_id,
+                    "query": query,
+                    "purpose": purpose,
+                    "result_preview": (result or "")[:200],
+                    "calls_used": calls_used,
+                    "calls_remaining": max(0, WOLFRAM_MAX_CALLS_PER_SUBMISSION - calls_used),
+                    "max_calls": WOLFRAM_MAX_CALLS_PER_SUBMISSION,
+                },
+            )
+        except Exception as exc:
+            logger.debug(f"Wolfram broadcast failed: {exc}")
+
     async def _parse_json_response_with_retry(
         self, 
         response: str, 

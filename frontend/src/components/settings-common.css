@@ -41,7 +41,7 @@
 }
 
 .provider-toggle-btn.active-or {
-  background: #6c5ce7;
+  background: #18cc17;
 }
 
 .provider-toggle-btn.active-or-orange {
@@ -148,8 +148,8 @@
 
 /* OpenRouter status banner */
 .openrouter-banner {
-  background: rgba(108, 92, 231, 0.08);
-  border: 1px solid rgba(108, 92, 231, 0.35);
+  background: rgba(24, 204, 23, 0.08);
+  border: 1px solid rgba(24, 204, 23, 0.35);
   border-radius: var(--radius-md);
   padding: 1rem;
   margin-bottom: 1.5rem;
@@ -161,7 +161,7 @@
 }
 
 .openrouter-banner__text {
-  color: #a29bfe;
+  color: #18cc17;
   margin: 0;
 }
 
@@ -185,7 +185,7 @@
 }
 
 .role-config-card--openrouter {
-  border-color: rgba(108, 92, 231, 0.35);
+  border-color: #18cc17;
   background: rgba(26, 26, 56, 0.8);
 }
 
@@ -208,7 +208,7 @@
 
 /* Card title colours */
 .card-title--green { color: var(--accent-green); }
-.card-title--purple { color: #a29bfe; }
+.card-title--purple { color: #18cc17; }
 .card-title--orange { color: #FF6700; }
 
 /* Inline provider badge */
@@ -416,7 +416,7 @@
 /* Purple accent button */
 .btn-accent-purple {
   padding: 0.5rem 1.5rem;
-  background: #9b59b6;
+  background: #18cc17;
   border: none;
   border-radius: var(--radius-sm);
   color: #fff;
@@ -573,7 +573,7 @@
 }
 
 .tag-badge--purple {
-  background: #9b59b6;
+  background: #18cc17;
   color: #fff;
 }
 
@@ -678,86 +678,6 @@
 
 .model-item--silver { border-left: 5px solid #c0c0c0; }
 .model-item--bronze { border-left: 5px solid #cd7f32; }
-
-/* Info tooltip button (? circle) */
-.info-tooltip-btn {
-  background: transparent;
-  padding: 0;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-weight: bold;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all var(--transition-fast);
-}
-
-.info-tooltip-btn--orange {
-  border: 2px solid #FF6700;
-  color: #FF6700;
-  font-size: 0.7rem;
-  width: 16px;
-  height: 16px;
-}
-
-.info-tooltip-btn--gold {
-  border: 2px solid #f4c430;
-  color: #ffd54a;
-  box-shadow: 0 0 8px rgba(255, 204, 51, 0.22);
-  font-size: 0.8rem;
-  width: 20px;
-  height: 20px;
-}
-
-.info-tooltip-btn:hover {
-  filter: brightness(1.3);
-}
-
-/* Tooltip popup */
-.tooltip-popup {
-  background: var(--surface-2);
-  border: 2px solid #FF6700;
-  border-radius: var(--radius-sm);
-  padding: 12px 16px;
-  font-size: 0.85rem;
-  color: #FF6700;
-  font-weight: 500;
-  box-shadow: var(--shadow-lg);
-  pointer-events: none;
-  z-index: 1000;
-}
-
-.tooltip-popup--absolute {
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.tooltip-popup--fixed {
-  position: fixed;
-}
-
-/*
- * sidebar-escape tooltip: uses position:fixed instead of absolute so it can
- * break out of the narrow 322px left sidebar without being clipped or squished.
- * left: 326px sits flush against the sidebar's right edge (322px wide + 4px gap).
- * top: 62px aligns it with roughly where the "?" button sits in the sidebar header.
- * Adjust top if the header height ever changes.
- */
-.tooltip-popup--sidebar-escape {
-  position: fixed;
-  left: 276px;
-  top: 112px;
-  width: 340px;
-  z-index: 9999;
-}
-
-/* Tooltip anchor wrapper */
-.tooltip-anchor {
-  position: relative;
-  display: inline-block;
-}
 
 /* Modal overlay and content (shared by inline modals) */
 .inline-modal-overlay {

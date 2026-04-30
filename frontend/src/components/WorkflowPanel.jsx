@@ -3,7 +3,14 @@ import { websocket } from '../services/websocket';
 import { boostAPI, workflowAPI } from '../services/api';
 import './WorkflowPanel.css';
 
+const HOURLY_AUTO_OPEN_INTERVAL_SECONDS = 3600;
+const WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY = 'workflow_panel_last_auto_open_hour';
+
 const formatNumber = (n) => n.toLocaleString();
+const getStoredAutoOpenHour = () => {
+  const savedHour = Number.parseInt(localStorage.getItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY) || '0', 10);
+  return Number.isFinite(savedHour) && savedHour > 0 ? savedHour : 0;
+};
 
 const formatTime = (totalSeconds) => {
   const h = Math.floor(totalSeconds / 3600);
@@ -30,6 +37,8 @@ export default function WorkflowPanel({ isRunning }) {
   const [showPerModel, setShowPerModel] = useState(false);
   const [localElapsed, setLocalElapsed] = useState(0);
   const lastSyncRef = useRef(Date.now());
+  const hasElapsedSyncRef = useRef(false);
+  const lastAutoOpenedHourRef = useRef(getStoredAutoOpenHour());
 
   const expandPanel = useCallback(() => {
     setCollapsed(false);
@@ -72,6 +81,35 @@ export default function WorkflowPanel({ isRunning }) {
       expandPanel();
     }
   }, [boostEnabled, expandPanel]);
+
+  useEffect(() => {
+    if (!hasElapsedSyncRef.current) {
+      return;
+    }
+
+    if (localElapsed < 60 && lastAutoOpenedHourRef.current !== 0) {
+      lastAutoOpenedHourRef.current = 0;
+      localStorage.setItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY, '0');
+    }
+  }, [localElapsed]);
+
+  useEffect(() => {
+    if (!isRunning || !hasElapsedSyncRef.current) {
+      return;
+    }
+
+    const elapsedHours = Math.floor(localElapsed / HOURLY_AUTO_OPEN_INTERVAL_SECONDS);
+    if (elapsedHours < 1 || elapsedHours <= lastAutoOpenedHourRef.current) {
+      return;
+    }
+
+    if (collapsed) {
+      expandPanel();
+    }
+
+    lastAutoOpenedHourRef.current = elapsedHours;
+    localStorage.setItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY, elapsedHours.toString());
+  }, [collapsed, expandPanel, isRunning, localElapsed]);
 
   useEffect(() => {
     if (!isEditingBoostNext) {
@@ -120,10 +158,13 @@ export default function WorkflowPanel({ isRunning }) {
 
   // Token stats: initial fetch on mount and when isRunning changes
   useEffect(() => {
+    hasElapsedSyncRef.current = false;
+
     const fetchTokenStats = async () => {
       try {
         const resp = await workflowAPI.getTokenStats();
         if (resp.success) {
+          hasElapsedSyncRef.current = true;
           setTokenStats(resp);
           setLocalElapsed(resp.elapsed_seconds || 0);
           lastSyncRef.current = Date.now();
@@ -136,6 +177,7 @@ export default function WorkflowPanel({ isRunning }) {
   // Token stats: listen for real-time WebSocket updates
   useEffect(() => {
     const handleTokenUpdate = (data) => {
+      hasElapsedSyncRef.current = true;
       setTokenStats(data);
       setLocalElapsed(data.elapsed_seconds || 0);
       lastSyncRef.current = Date.now();

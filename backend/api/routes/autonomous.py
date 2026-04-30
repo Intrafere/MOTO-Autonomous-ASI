@@ -1434,7 +1434,7 @@ async def force_tier3(mode: str = "complete_current"):
 @router.post("/save-current-compiler-paper")
 async def save_current_compiler_paper():
     """
-    Emergency endpoint to save current compiler paper to autonomous library.
+    Endpoint to save the current compiler paper to the autonomous library.
     Useful for recovering papers that got stuck before abstract was written.
     """
     try:
@@ -1483,7 +1483,7 @@ async def save_current_compiler_paper():
         if topic_id:
             await brainstorm_memory.add_paper_reference(topic_id, paper_id)
         
-        logger.info(f"Emergency save successful: {paper_id}")
+        logger.info(f"Paper save successful: {paper_id}")
         
         return {
             "success": True,

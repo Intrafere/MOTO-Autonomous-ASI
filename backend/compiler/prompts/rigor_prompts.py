@@ -1,19 +1,43 @@
 """
-Rigor prompts for mathematical rigor enhancement (2-step process).
+Rigor prompts for the Lean-4-verified-theorem rigor mode.
 
-Step 1: Planning - LLM decides if rigor work needed and chooses mode
-Step 2: Execution - LLM executes with self-refusal option
+The compiler's rigor loop no longer edits paper text directly. Instead it runs
+a two-stage agent:
+
+    Stage 1 - Theorem discovery (build_rigor_theorem_discovery_prompt):
+        Using the full writing context, the submitter asks itself whether the
+        paper contains a theorem worth formalizing and proving in Lean 4 that
+        has not already been verified. Output is a candidate theorem JSON (or
+        a decline).
+
+    Stage 2 - Placement (build_rigor_placement_prompt):
+        Given a Lean-4-verified theorem, the submitter proposes an inline
+        edit that introduces the theorem to the paper with an explicit
+        "verified in Lean 4" marker and a pointer to the Theorems Appendix.
+        The submitter gets up to two placement attempts; attempt 2 receives
+        the validator's rejection feedback from attempt 1.
+
+Context assembly follows the RAG offload priority documented in
+`.cursor/rules/rag-design-for-overall-program.mdc`:
+
+    Submitter: Shared Training DB -> Local Submitter DB -> Rejection Log -> User Upload Files
+
+The high-param submitter direct-injects the outline and paper when they fit
+inside the budget (mirroring HighContextSubmitter.submit_construction), then
+fills the remaining budget with RAG results that exclude `compiler_outline.txt`
+and `compiler_paper.txt`.
 """
 
+from typing import Iterable, List, Optional
+
 from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
-from backend.shared.config import system_config
 
 
 # =============================================================================
-# INTERNAL CONTENT WARNING (shared across all prompts)
+# INTERNAL CONTENT WARNING (shared across all rigor prompts)
 # =============================================================================
 
-INTERNAL_CONTENT_WARNING = """⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
+INTERNAL_CONTENT_WARNING = """WARNING - INTERNAL CONTENT WARNING
 
 ALL context provided to you (brainstorm databases, accepted submissions, papers, reference materials, outlines, previous document content) is AI-GENERATED within this research system. This content has NOT been peer-reviewed, published, or verified by external sources.
 
@@ -24,544 +48,368 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
- 
- WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
+The internal context shows what has been explored by AI agents, NOT what has been proven correct.
 
----"""
+The EXCEPTION is content inside the "LEAN 4 VERIFIED" certificate block provided with a placement request: that Lean 4 proof has been mechanically verified by the Lean 4 toolchain and is the source of truth for the mathematical statement it closes."""
 
 
 # =============================================================================
-# STEP 1: PLANNING PROMPTS
+# STAGE 1: THEOREM DISCOVERY
 # =============================================================================
 
-def get_rigor_planning_system_prompt(wolfram_enabled: bool = False) -> str:
-    """Get system prompt for Step 1: rigor planning."""
-    wolfram_mode_section = ""
-    if wolfram_enabled:
-        wolfram_mode_section = """
-3. **wolfram_verification**: Verify mathematical claim with Wolfram Alpha API
-   - Send specific computable query to Wolfram Alpha
-   - System will make the API call and pass result to Step 2
-   - Examples: "Is pi algebraic?", "Solve x^2 + 2x + 1 = 0", "Is 2^67-1 prime?"
-   - Use for computational verification of claims
-"""
-    else:
-        wolfram_mode_section = """
-3. **wolfram_verification**: NOT AVAILABLE (Wolfram Alpha not enabled)
-"""
-    
-    return f"""You are planning rigor enhancements for a mathematical document.
+_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is a theorem worth formalizing and proving in Lean 4.
 
 {INTERNAL_CONTENT_WARNING}
 
-YOUR TASK - STEP 1: PLANNING
+YOUR TASK - STAGE 1 (DISCOVERY)
 
-Review the current document and decide:
-1. Does it need rigor work?
-2. If yes, which approach is best?
-3. What section should Step 2 focus on?
+1. Read the current outline and the current paper text.
+2. Read the list of theorems that have ALREADY been verified by Lean 4 (EXISTING VERIFIED PROOFS block).
+3. Read the list of theorems that PREVIOUSLY FAILED Lean 4 verification (OPEN LEMMA TARGETS block, if present).
+4. Decide exactly one of:
+   (A) `needs_theorem_work=false` - no theorem worth trying right now. Good reasons: all interesting claims in the paper are already covered by existing verified proofs; the paper is in too early a state; there is no claim a Lean 4 proof could close usefully.
+   (B) `needs_theorem_work=true` - propose a single candidate theorem to formalize.
 
-THREE MODES AVAILABLE:
+RULES FOR PROPOSING A THEOREM:
+- The theorem must be provable in Lean 4 with Mathlib.
+- You MUST NOT re-propose a theorem that is already in EXISTING VERIFIED PROOFS. Look for theorems that are DIFFERENT - new results, missed lemmas, or sharper versions that are not yet on the list.
+- You MAY retry a theorem from OPEN LEMMA TARGETS when the paper now gives you a better angle on it. When you do, set `retry_existing_failure_id` to the failed `theorem_id`.
+- Prefer theorems whose statements are tight enough that Lean 4 can actually close them (arithmetic facts, concrete inequalities, specific algebraic identities, small group/ring/field lemmas, concrete combinatorial identities) over large open conjectures.
+- The `theorem_statement` is for a human reader. It should be precise, self-contained, and include the hypotheses.
+- The `formal_sketch` tells the formalization agent what tactics or lemmas look promising in Lean 4 / Mathlib. Keep it concrete.
+- The `source_excerpt` is 2-6 sentences of surrounding paper text that motivates why this theorem is a natural target here. It must be a direct paraphrase or quote from the current paper.
 
-1. **standard_enhancement**: Normal rigor improvements
-   - Strengthen proof arguments with additional steps
-   - Clarify assumptions and conditions
-   - Add intermediate lemmas
-   - Improve precision of notation
-   - Address counterexamples or edge cases
-
-2. **rewrite_focus**: Significant rewriting needed for rigor
-   - Identify specific section that needs substantial improvement
-   - You'll specify that section for Step 2 to work on
-   - Use when proofs are fundamentally weak or unclear
-{wolfram_mode_section}
-
-CRITICAL - SYSTEM-MANAGED MARKERS (NOT YOUR OUTPUT):
-
-The CURRENT DOCUMENT may contain system-managed markers:
-
-**SECTION PLACEHOLDERS** (show where sections will be written):
-- [HARD CODED PLACEHOLDER FOR THE ABSTRACT SECTION...]
-- [HARD CODED PLACEHOLDER FOR INTRODUCTION SECTION...]
-- [HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION...]
-
-**PAPER ANCHOR** (marks document boundary):
-- [HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]
-
-IMPORTANT: These markers are SYSTEM-MANAGED. Do NOT include them in your outputs.
-
-TARGET SECTION:
-Specify `target_section` as a text snippet (200-500 chars) that identifies which section needs work.
-This provides continuity to Step 2 - it's a reminder/label, not a context limitation.
-Step 2 will see the FULL paper (same as you do now).
-
-If the document is already rigorous enough, set needs_rigor_work=false.
-
-STEP 2 WILL HAVE THE OPTION TO REFUSE if your assessment is wrong.
-Don't overthink this - Step 2 can self-correct.
+If Stage 1 guesses wrong, Stage 2 cannot recover - 5 Lean 4 attempts will be spent on the wrong target. Prefer declining over a weak proposal.
 
 Output your response ONLY as JSON in this exact format:
-{{
-  "needs_rigor_work": true or false,
-  "mode": "standard_enhancement | rewrite_focus | wolfram_verification | null",
-  "target_section": "exact text snippet from paper (200-500 chars, empty if needs_rigor_work=false)",
-  "wolfram_query": "natural language query for Wolfram Alpha (only if mode=wolfram_verification)",
-  "preliminary_reasoning": "why this approach and this target section"
-}}"""
+{{{{
+  "needs_theorem_work": true or false,
+  "theorem_statement": "precise theorem statement with explicit hypotheses and conclusion (empty if needs_theorem_work=false)",
+  "formal_sketch": "concrete sketch: what tactics / Mathlib lemmas you expect to work (empty if needs_theorem_work=false)",
+  "source_excerpt": "2-6 sentences of surrounding paper text that motivates this theorem (empty if needs_theorem_work=false)",
+  "retry_existing_failure_id": "theorem_id from OPEN LEMMA TARGETS if retrying a prior failure, empty string otherwise",
+  "reasoning": "why this theorem is the best target right now OR why no theorem should be attempted"
+}}}}"""
 
 
-def get_rigor_planning_json_schema() -> str:
-    """Get JSON schema for Step 1: planning."""
-    return """
-REQUIRED JSON FORMAT - STEP 1 (PLANNING):
+_DISCOVERY_JSON_SCHEMA = """REQUIRED JSON FORMAT - STAGE 1 (DISCOVERY):
 {
-  "needs_rigor_work": true OR false,
-  "mode": "standard_enhancement" | "rewrite_focus" | "wolfram_verification" | null,
-  "target_section": "string - text snippet from paper (200-500 chars, identifies work area)",
-  "wolfram_query": "string - natural language query for Wolfram Alpha (only if mode=wolfram_verification)",
-  "preliminary_reasoning": "string - explanation of chosen approach and target section"
+  "needs_theorem_work": true OR false,
+  "theorem_statement": "string",
+  "formal_sketch": "string",
+  "source_excerpt": "string",
+  "retry_existing_failure_id": "string (may be empty)",
+  "reasoning": "string"
 }
 
-FIELD REQUIREMENTS:
-- needs_rigor_work: Whether any rigor work should be attempted
-- mode: Required if needs_rigor_work=true, null otherwise
-  * standard_enhancement: Normal rigor improvements
-  * rewrite_focus: Significant rewriting needed
-  * wolfram_verification: Verify claim with Wolfram Alpha (only if enabled)
-- target_section: ALWAYS required if needs_rigor_work=true
-  * Text snippet (200-500 chars) identifying which section to work on
-  * Provides continuity to Step 2 (guidance, not context limitation)
-  * Step 2 will see the FULL paper, not just this section
-- wolfram_query: Required ONLY if mode=wolfram_verification
-  * Natural language query for computational verification
-  * Examples: "Is pi algebraic?", "Solve x^2 + 2x + 1 = 0"
-- preliminary_reasoning: ALWAYS required
-
-Example (Standard Enhancement):
+Example (propose a theorem):
 {
-  "needs_rigor_work": true,
-  "mode": "standard_enhancement",
-  "target_section": "Theorem 3.2: Every constructible number is algebraic.\\nProof: Let alpha be constructible...",
-  "wolfram_query": "",
-  "preliminary_reasoning": "Theorem 3.2's proof needs more precise field-theoretic justification for the algebraicity claim"
+  "needs_theorem_work": true,
+  "theorem_statement": "For every natural number n, the sum of the first n positive integers equals n*(n+1)/2.",
+  "formal_sketch": "Induction on n. Base: n=0 both sides are 0. Step: use Finset.sum_range_succ and Nat.succ_mul; close with omega / ring. Mathlib has Finset.sum_range_id which may finish it outright.",
+  "source_excerpt": "In Section 2 we reasoned about partial sums of the form 1 + 2 + ... + n...",
+  "retry_existing_failure_id": "",
+  "reasoning": "Section 2 relies on the closed form but currently presents it without a verified proof. Lean 4 can close this cleanly; it does not duplicate any existing verified proof."
 }
 
-Example (Wolfram Verification):
+Example (decline):
 {
-  "needs_rigor_work": true,
-  "mode": "wolfram_verification",
-  "target_section": "Theorem 4.1: π is transcendental.\\nProof sketch: By Lindemann-Weierstrass...",
-  "wolfram_query": "Is pi algebraic?",
-  "preliminary_reasoning": "Computational verification would strengthen the π transcendence claim"
-}
-
-Example (No Work Needed):
-{
-  "needs_rigor_work": false,
-  "mode": null,
-  "target_section": "",
-  "wolfram_query": "",
-  "preliminary_reasoning": "Document maintains appropriate rigor for current stage. All proofs complete, definitions precise."
+  "needs_theorem_work": false,
+  "theorem_statement": "",
+  "formal_sketch": "",
+  "source_excerpt": "",
+  "retry_existing_failure_id": "",
+  "reasoning": "The paper currently contains only outline scaffolding and the one verified theorem (proof_002). Attempting another Lean 4 proof right now would either duplicate proof_002 or target claims that are too vague to formalize."
 }
 """
 
 
 # =============================================================================
-# STEP 2: EXECUTION PROMPTS
+# STAGE 2: PLACEMENT
 # =============================================================================
 
-def get_rigor_execution_system_prompt(mode: str) -> str:
-    """Get system prompt for Step 2: rigor execution."""
-    mode_specific_guidance = {
-        "standard_enhancement": """
-YOU ARE EXECUTING: Standard Rigor Enhancement
-Your prior planning indicated normal rigor improvements are needed.""",
-        "rewrite_focus": """
-YOU ARE EXECUTING: Rewrite Focus
-Your prior planning indicated significant rewriting is needed for rigor."""
-    }
-    
-    guidance = mode_specific_guidance.get(mode, "")
-    
-    return f"""You are executing a rigor enhancement based on your prior planning.
+_PLACEMENT_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. A theorem you proposed has been formally verified by the Lean 4 toolchain. Your ONLY job now is to decide where in the paper the theorem should be introduced.
 
 {INTERNAL_CONTENT_WARNING}
 
-{guidance}
+YOUR TASK - STAGE 2 (PLACEMENT)
 
-YOUR PRIOR DECISION (Step 1):
-Mode: {mode}
-Target Section: [shown below in context]
+You are given:
+- The current outline and the current paper.
+- The VERIFIED Lean 4 theorem: statement + proof ID + Lean code.
+- Optionally (on attempt 2 of 2), the validator's rejection feedback from attempt 1.
 
-STEP 2: EXECUTION - YOU CAN REFUSE
+You must produce exactly one paper edit that introduces the theorem inline. The edit uses exact-string matching: you pick `old_string` (must appear verbatim in the current paper), `operation` ("replace" or "insert_after"), and `new_string` (the replacement / insertion text).
 
-Review the full document and your target section.
-If you realize your Step 1 assessment was wrong, set proceed=false.
+HARD REQUIREMENTS ON `new_string`:
 
-Refusals are NOT validated - you won't be penalized.
-This is your chance to self-correct.
+1. Include a clear inline theorem statement (mirroring the verified statement but formatted for human readers; LaTeX math allowed).
+2. Include an explicit "verified in Lean 4" marker. Preferred wording is "(verified in Lean 4, see Appendix A, <proof_id>)" immediately after the theorem label, e.g. "Theorem 3.2 (verified in Lean 4, see Appendix A, proof_007)." .
+3. Include a short informal proof sketch or remark connecting the theorem to the surrounding prose. Keep it 1-4 sentences.
+4. DO NOT paste the Lean 4 source code into `new_string`. The full Lean proof lives in the Theorems Appendix block at the end of the paper; the system inserts it there automatically. Duplicating the Lean code inline is grounds for rejection.
+5. DO NOT emit any of the system-managed markers (ABSTRACT / INTRODUCTION / CONCLUSION placeholders, the paper anchor, or either Theorems Appendix bracket) in `new_string`. Use editable prose for `old_string`; do not include protected markers in insert_after anchors.
 
-If you proceed, propose your rigor enhancement using exact string matching:
-1. Find EXACT text in the document (must exist verbatim)
-2. Choose operation: "replace" or "insert_after"
-3. Provide enhanced version
+PLACEMENT GUIDELINES:
+- Put the theorem where it strengthens the local argument. Prefer insertion points inside a relevant body section (near the discussion it closes) over dumping it in a new section.
+- The paper has a Theorems Appendix block already; do NOT try to edit the appendix directly.
+- Keep `old_string` short but unique (3-5 lines of surrounding context is usually enough).
 
-CRITICAL - SYSTEM-MANAGED MARKERS (NOT YOUR OUTPUT):
-
-The CURRENT DOCUMENT may contain system-managed markers:
-
-**SECTION PLACEHOLDERS**:
-- [HARD CODED PLACEHOLDER FOR THE ABSTRACT SECTION...]
-- [HARD CODED PLACEHOLDER FOR INTRODUCTION SECTION...]
-- [HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION...]
-
-**PAPER ANCHOR**:
-- [HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]
-
-Do NOT include these markers in your enhancement content.
-
-EXACT STRING MATCHING FOR EDITS:
-- old_string must exist verbatim in the document
-- Must be unique (appears only once)
-- Include enough context (3-5 lines) for uniqueness
-- System will pre-validate before validator sees it
-
-OPERATIONS:
-- "replace": Find old_string exactly, replace with new_string
-- "insert_after": Find old_string (anchor), insert new_string after it
+SELF-REFUSAL:
+If, after re-reading the paper, you conclude that the theorem cannot be placed well anywhere inline (even in the appendix-only fallback), you MAY still attempt a placement - the system will route the theorem to the appendix automatically if both placement attempts are rejected, so the mathematical content is never lost. Only refuse (set `proceed=false`) if you cannot produce any legal edit at all (e.g. the paper body is empty).
 
 Output your response ONLY as JSON in this exact format:
-{{
+{{{{
   "proceed": true or false,
-  "needs_enhancement": true or false,
   "operation": "replace | insert_after",
-  "old_string": "exact text from document (empty if not proceeding or needs_enhancement=false)",
-  "new_string": "enhanced text (empty if not proceeding or needs_enhancement=false)",
-  "content": "full content for logging (typically same as new_string)",
-  "reasoning": "explanation of changes OR refusal reason"
-}}"""
+  "old_string": "exact text from the current paper (empty if proceed=false)",
+  "new_string": "the inline theorem introduction text (empty if proceed=false)",
+  "reasoning": "why this placement works, or the refusal reason"
+}}}}"""
 
 
-def get_rigor_wolfram_execution_system_prompt() -> str:
-    """Get system prompt for Step 2: Wolfram verification execution."""
-    return f"""You are executing Wolfram Alpha verification based on your prior planning.
-
-{INTERNAL_CONTENT_WARNING}
-
-YOU ARE EXECUTING: Wolfram Alpha Verification
-Your prior planning requested computational verification of a mathematical claim.
-
-YOUR PRIOR DECISION (Step 1):
-Wolfram Alpha Query: [shown below]
-Target Section: [shown below in context]
-
-WOLFRAM ALPHA RESULT:
-[shown below]
-
-STEP 2: EXECUTION - YOU CAN REFUSE
-
-Review the Wolfram Alpha result in context of the full document.
-
-You can REFUSE (proceed=false) if:
-- The query was inappropriate or malformed
-- Result doesn't help strengthen rigor
-- Target section choice was wrong
-- Step 1 made a mistake
-
-If you proceed, create a verification remark that:
-- Interprets the Wolfram Alpha result
-- Relates it to the paper's claims
-- Strengthens mathematical rigor
-- Uses "insert_after" to add the remark
-
-CRITICAL - SYSTEM-MANAGED MARKERS (NOT YOUR OUTPUT):
-
-The CURRENT DOCUMENT may contain system-managed markers. Do NOT include them in your outputs.
-
-EXACT STRING MATCHING:
-- old_string must exist verbatim in the document
-- Must be unique
-- System will pre-validate
-
-VERIFICATION REMARK FORMAT:
-Format your new_string as a mathematical remark:
-
-\\n\\n**Computational Verification (Wolfram Alpha)**\\n
-Query: [the query]\\n
-Result: [Wolfram's answer]\\n
-Interpretation: [Your analysis of what this means for the paper's claims]\\n
-
-Output your response ONLY as JSON in this exact format:
-{{
-  "proceed": true or false,
-  "verification_result_interpretation": "how you interpret the Wolfram result",
-  "needs_enhancement": true or false,
-  "operation": "insert_after",
-  "old_string": "exact text after which to insert remark (empty if not proceeding or needs_enhancement=false)",
-  "new_string": "verification remark incorporating Wolfram result (empty if not proceeding or needs_enhancement=false)",
-  "content": "full content for logging (typically same as new_string)",
-  "reasoning": "explanation OR refusal reason"
-}}"""
-
-
-def get_rigor_execution_json_schema(mode: str) -> str:
-    """Get JSON schema for Step 2: execution."""
-    if mode == "wolfram_verification":
-        return """
-REQUIRED JSON FORMAT - STEP 2 (WOLFRAM VERIFICATION):
+_PLACEMENT_JSON_SCHEMA = """REQUIRED JSON FORMAT - STAGE 2 (PLACEMENT):
 {
   "proceed": true OR false,
-  "verification_result_interpretation": "string - how you interpret the Wolfram Alpha result",
-  "needs_enhancement": true OR false,
-  "operation": "insert_after",
-  "old_string": "string - exact text after which to insert verification remark",
-  "new_string": "string - verification remark incorporating Wolfram result",
-  "content": "string - full content for logging",
-  "reasoning": "string - explanation OR refusal reason"
+  "operation": "replace" OR "insert_after",
+  "old_string": "string - exact text in the current paper (anchor point)",
+  "new_string": "string - inline theorem introduction with Lean 4 marker and appendix reference",
+  "reasoning": "string - why this placement works (or refusal reason)"
 }
-
-SELF-REFUSAL OPTION:
-If you set proceed=false:
-- System logs refusal (not counted as rejection)
-- No validation occurs
-- Workflow continues normally
-- Use when Step 1 made a mistake or query was inappropriate
-
-WOLFRAM VERIFICATION REMARKS:
-Format your new_string as:
-
-\\n\\n**Computational Verification (Wolfram Alpha)**\\n
-Query: [the query]\\n
-Result: [Wolfram's answer]\\n
-Interpretation: [Your analysis]\\n
-
-Example:
-{
-  "proceed": true,
-  "verification_result_interpretation": "Wolfram confirms π is transcendental (not algebraic)",
-  "needs_enhancement": true,
-  "operation": "insert_after",
-  "old_string": "Theorem 4.1: π is transcendental. \\\\square",
-  "new_string": "\\n\\n**Computational Verification (Wolfram Alpha)**\\nQuery: Is pi algebraic?\\nResult: No\\nInterpretation: This computational verification confirms π is transcendental, consistent with the Lindemann-Weierstrass theorem.",
-  "content": "\\n\\n**Computational Verification (Wolfram Alpha)**\\nQuery: Is pi algebraic?\\nResult: No\\nInterpretation: This computational verification confirms π is transcendental, consistent with the Lindemann-Weierstrass theorem.",
-  "reasoning": "Adding computational verification strengthens the claim by providing an independent confirmation"
-}
-"""
-    else:  # standard_enhancement or rewrite_focus
-        return """
-REQUIRED JSON FORMAT - STEP 2 (EXECUTION):
-{
-  "proceed": true OR false,
-  "needs_enhancement": true OR false,
-  "operation": "replace" | "insert_after",
-  "old_string": "string - exact text from document",
-  "new_string": "string - enhanced text",
-  "content": "string - full content for logging",
-  "reasoning": "string - explanation OR refusal reason"
-}
-
-SELF-REFUSAL OPTION:
-If you set proceed=false:
-- System logs refusal (not counted as rejection)
-- No validation occurs
-- Workflow continues normally
-- Use when Step 1 made a mistake
-
-EXACT STRING MATCHING:
-- old_string must exist verbatim in the document
-- Must be unique
-- If not found: pre-validation rejects before LLM sees it
 
 CRITICAL JSON ESCAPE RULES:
-1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
-   - Example: Write "\\\\tau" not "\\tau", write "\\\\(" not "\\("
-2. Quotes: Escape double quotes inside strings as \\"
-3. Newlines: Use \\n for newlines (NOT \\\\n)
-4. LaTeX notation: Escape backslashes - write "\\\\mathbb{Z}", "\\\\Delta", etc.
+1. Backslashes: ALWAYS double-escape any backslash - write "\\\\mathbb{Z}" not "\\mathbb{Z}".
+2. Quotes inside strings: escape as \\\\".
+3. Newlines inside strings: \\n (not \\\\n).
+4. Use editable prose for old_string anchors. Do not include protected system markers in insert_after anchors or new_string. For replace, prefer editable content only; if a marker is accidentally included as trailing context, validation may trim it.
 
-Example (Enhancement):
+Example (insert_after):
 {
   "proceed": true,
-  "needs_enhancement": true,
   "operation": "insert_after",
-  "old_string": "Theorem 2.3: A number \\\\alpha is constructible if and only if it lies in a field extension of \\\\mathbb{Q} of degree 2^n.",
-  "new_string": "\\n\\nRemark: This characterization requires the field extension to be normal and separable over \\\\mathbb{Q}. If K/\\\\mathbb{Q} contains constructible \\\\alpha, there exists a tower \\\\mathbb{Q} = K_0 \\\\subset K_1 \\\\subset \\\\ldots \\\\subset K_n = K where each K_{i+1}/K_i has degree exactly 2.",
-  "content": "\\n\\nRemark: This characterization requires the field extension to be normal and separable over \\\\mathbb{Q}. If K/\\\\mathbb{Q} contains constructible \\\\alpha, there exists a tower \\\\mathbb{Q} = K_0 \\\\subset K_1 \\\\subset \\\\ldots \\\\subset K_n = K where each K_{i+1}/K_i has degree exactly 2.",
-  "reasoning": "Adding field-theoretic precision strengthens the theorem statement"
+  "old_string": "In this section we examine partial sums of the form 1 + 2 + ... + n and look for a closed form.",
+  "new_string": "\\n\\nTheorem 2.3 (verified in Lean 4, see Appendix A, proof_007). For every n \\\\in \\\\mathbb{N}, \\\\sum_{k=1}^{n} k = n(n+1)/2.\\n\\nProof sketch. Induction on n, with Finset.sum_range_succ closing the step; the closed form follows by elementary algebra. The full Lean 4 proof appears in the Theorems Appendix under proof_007.",
+  "reasoning": "Section 2 already motivates the closed form but presents it without a proof; inserting the theorem here strengthens the argument at the exact point where the claim first appears. The Lean code itself is kept in the appendix to keep the body readable."
 }
 
-Example (Refusal):
+Example (refusal):
 {
   "proceed": false,
-  "needs_enhancement": false,
-  "operation": "replace",
+  "operation": "insert_after",
   "old_string": "",
   "new_string": "",
-  "content": "",
-  "reasoning": "Upon review, Step 1's assessment was wrong. The target section is already rigorous enough."
+  "reasoning": "The paper body is currently empty; no legal placement anchor exists. Let the system route the theorem directly to the Theorems Appendix."
 }
 """
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def _format_existing_verified_proofs(proofs: Iterable[dict]) -> str:
+    """Compact rendering of already-verified proofs for the discovery prompt.
+
+    Each entry shows just the proof_id, novelty flag, and the theorem
+    statement - enough for the LLM to recognize duplicates without blowing
+    the context budget on full Lean 4 source.
+    """
+    lines: List[str] = []
+    for index, proof in enumerate(proofs, start=1):
+        proof_id = str(proof.get("proof_id", "") or "").strip() or f"proof_{index}"
+        novel = bool(proof.get("novel", False))
+        statement = str(proof.get("theorem_statement", "") or "").strip()
+        if not statement:
+            continue
+        # One-line compact form; the discovery model only needs uniqueness signals.
+        marker = "novel" if novel else "known"
+        lines.append(f"- [{proof_id}] ({marker}) {statement}")
+    if not lines:
+        return ""
+    return (
+        "EXISTING VERIFIED PROOFS (do NOT re-propose these; pick a DIFFERENT theorem):\n"
+        + "\n".join(lines)
+    )
+
+
+def _format_recent_failure_hints(hints: Iterable) -> str:
+    """Compact rendering of recent failed candidates for the discovery prompt."""
+    entries: List[str] = []
+    for index, hint in enumerate(hints, start=1):
+        theorem_id = getattr(hint, "theorem_id", None) or f"failed_{index}"
+        statement = (getattr(hint, "theorem_statement", "") or "").strip()
+        error_summary = (getattr(hint, "error_summary", "") or "").strip()
+        targets = list(getattr(hint, "suggested_lemma_targets", []) or [])
+        if not statement:
+            continue
+        line = f"- [{theorem_id}] {statement}"
+        if error_summary:
+            line += f"\n  last Lean 4 failure: {error_summary[:240]}"
+        if targets:
+            line += f"\n  suggested targets: {', '.join(targets[:6])}"
+        entries.append(line)
+    if not entries:
+        return ""
+    return (
+        "OPEN LEMMA TARGETS LEAN 4 COULD NOT YET CLOSE (optional retry candidates):\n"
+        + "\n".join(entries)
+    )
 
 
 # =============================================================================
 # PROMPT BUILDERS
 # =============================================================================
 
-async def build_rigor_planning_prompt(
-    user_prompt: str,
-    current_outline: str,
-    current_paper: str
-) -> str:
-    """
-    Build complete prompt for Step 1: rigor planning.
-    
-    Args:
-        user_prompt: User's compiler-directing prompt
-        current_outline: Current outline (ALWAYS fully injected)
-        current_paper: Current document (RAG-retrieved if large)
-    
-    Returns:
-        Complete prompt string
-    """
-    # Check if Wolfram Alpha is enabled
-    wolfram_enabled = system_config.wolfram_alpha_enabled
-    
-    parts = [
-        get_rigor_planning_system_prompt(wolfram_enabled),
-        "\n---\n",
-        get_rigor_planning_json_schema(),
-        "\n---\n"
-    ]
-    
-    # Add rejection history (DIRECT INJECTION - almost always fits)
-    rejection_history = await compiler_rejection_log.get_rejections_text()
-    if rejection_history:
-        parts.append(f"""YOUR RECENT REJECTION HISTORY (Last 10 rejections):
-{rejection_history}
-
-LEARN FROM THESE PAST MISTAKES.
----
-""")
-    
-    parts.extend([
-        f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}",
-        "\n---\n",
-        f"CURRENT OUTLINE:\n{current_outline}",
-        "\n---\n",
-        f"CURRENT DOCUMENT:\n{current_paper}",
-        "\n---\n",
-        "Now decide if rigor work is needed and choose your approach (respond as JSON):"
-    ])
-    
-    return "\n".join(parts)
-
-
-async def build_rigor_execution_prompt(
+async def build_rigor_theorem_discovery_prompt(
     user_prompt: str,
     current_outline: str,
     current_paper: str,
-    target_section: str,
-    mode: str
+    rag_evidence: str = "",
+    existing_verified_proofs: Optional[Iterable[dict]] = None,
+    recent_failure_hints: Optional[Iterable] = None,
 ) -> str:
-    """
-    Build complete prompt for Step 2: standard/rewrite execution.
-    
+    """Build the Stage 1 (discovery) prompt.
+
     Args:
-        user_prompt: User's compiler-directing prompt
-        current_outline: Current outline (ALWAYS fully injected)
-        current_paper: Current document (RAG-retrieved, FULL paper)
-        target_section: Target section from Step 1 (guidance label)
-        mode: "standard_enhancement" or "rewrite_focus"
-    
+        user_prompt: User's compiler-directing prompt.
+        current_outline: Full outline (direct-injected).
+        current_paper: Current paper content with system markers preserved
+            for exact old_string matching.
+        rag_evidence: RAG-retrieved context per the offload priority
+            (Shared Training DB -> Local Submitter DB -> Rejection Log ->
+            User Upload Files) with outline + paper sources EXCLUDED.
+        existing_verified_proofs: Iterable of proof records (dicts from
+            `proof_database.get_all_proofs()` serialized) - shown so the
+            model does not re-propose already-verified results.
+        recent_failure_hints: Iterable of `FailedProofCandidate` objects
+            from `proof_database.get_recent_failure_hints(...)` - shown
+            as optional retry targets.
+
     Returns:
-        Complete prompt string
+        Complete prompt string.
     """
-    parts = [
-        get_rigor_execution_system_prompt(mode),
+    parts: List[str] = [
+        _DISCOVERY_SYSTEM_PROMPT,
         "\n---\n",
-        get_rigor_execution_json_schema(mode),
-        "\n---\n"
+        _DISCOVERY_JSON_SCHEMA,
+        "\n---\n",
     ]
-    
-    # Add rejection history (DIRECT INJECTION - almost always fits)
+
     rejection_history = await compiler_rejection_log.get_rejections_text()
     if rejection_history:
-        parts.append(f"""YOUR RECENT REJECTION HISTORY (Last 10 rejections):
-{rejection_history}
+        parts.append(
+            "YOUR RECENT REJECTION HISTORY (Last 10 rejections - learn from these):\n"
+            f"{rejection_history}\n---\n"
+        )
 
-LEARN FROM THESE PAST MISTAKES.
----
-""")
-    
+    verified_block = _format_existing_verified_proofs(existing_verified_proofs or [])
+    if verified_block:
+        parts.append(verified_block + "\n---\n")
+
+    failure_block = _format_recent_failure_hints(recent_failure_hints or [])
+    if failure_block:
+        parts.append(failure_block + "\n---\n")
+
     parts.extend([
         f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}",
         "\n---\n",
         f"CURRENT OUTLINE:\n{current_outline}",
         "\n---\n",
-        f"TARGET SECTION (from your Step 1 planning - guidance reminder):\n{target_section}",
+        f"CURRENT PAPER:\n{current_paper}",
         "\n---\n",
-        f"CURRENT DOCUMENT (FULL PAPER - not limited to target section):\n{current_paper}",
-        "\n---\n",
-        "Now execute your rigor enhancement or refuse if Step 1 was wrong (respond as JSON):"
     ])
-    
+
+    if rag_evidence and rag_evidence.strip():
+        parts.append(f"SUPPORTING EVIDENCE (RAG):\n{rag_evidence}\n---\n")
+
+    parts.append(
+        "Now decide whether to propose a Lean 4 theorem candidate "
+        "or to decline this rigor cycle (respond as JSON):"
+    )
+
     return "\n".join(parts)
 
 
-async def build_rigor_wolfram_execution_prompt(
+async def build_rigor_placement_prompt(
     user_prompt: str,
     current_outline: str,
     current_paper: str,
-    target_section: str,
-    wolfram_query: str,
-    wolfram_result: str
+    rag_evidence: str = "",
+    *,
+    theorem_statement: str,
+    lean_code: str,
+    proof_id: str,
+    placement_attempt: int = 1,
+    validator_rejection_feedback: str = "",
 ) -> str:
-    """
-    Build complete prompt for Step 2: Wolfram verification execution.
-    
+    """Build the Stage 2 (placement) prompt.
+
     Args:
-        user_prompt: User's compiler-directing prompt
-        current_outline: Current outline (ALWAYS fully injected)
-        current_paper: Current document (RAG-retrieved, FULL paper)
-        target_section: Target section from Step 1 (guidance label)
-        wolfram_query: The query sent to Wolfram Alpha
-        wolfram_result: The result from Wolfram Alpha API
-    
+        user_prompt: User's compiler-directing prompt.
+        current_outline: Full outline (direct-injected).
+        current_paper: Current paper content (direct-injected or RAG'd by the
+            caller per the high-context submitter budget rules).
+        rag_evidence: Optional RAG-retrieved supporting context.
+        theorem_statement: Human-readable statement of the verified theorem.
+        lean_code: Full Lean 4 source that compiled. Included so the model
+            can accurately paraphrase / cite the verified statement.
+        proof_id: Database proof ID used in the appendix reference.
+        placement_attempt: 1 or 2.
+        validator_rejection_feedback: Validator reasoning from attempt 1;
+            only populated for attempt 2.
+
     Returns:
-        Complete prompt string
+        Complete prompt string.
     """
-    parts = [
-        get_rigor_wolfram_execution_system_prompt(),
+    parts: List[str] = [
+        _PLACEMENT_SYSTEM_PROMPT,
         "\n---\n",
-        get_rigor_execution_json_schema("wolfram_verification"),
-        "\n---\n"
+        _PLACEMENT_JSON_SCHEMA,
+        "\n---\n",
     ]
-    
-    # Add rejection history
+
     rejection_history = await compiler_rejection_log.get_rejections_text()
     if rejection_history:
-        parts.append(f"""YOUR RECENT REJECTION HISTORY (Last 10 rejections):
-{rejection_history}
+        parts.append(
+            "YOUR RECENT REJECTION HISTORY (Last 10 rejections - learn from these):\n"
+            f"{rejection_history}\n---\n"
+        )
 
-LEARN FROM THESE PAST MISTAKES.
----
-""")
-    
     parts.extend([
         f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}",
         "\n---\n",
         f"CURRENT OUTLINE:\n{current_outline}",
         "\n---\n",
-        f"TARGET SECTION (from your Step 1 planning - guidance reminder):\n{target_section}",
+        f"CURRENT PAPER:\n{current_paper}",
         "\n---\n",
-        f"WOLFRAM ALPHA QUERY (from your Step 1 planning):\n{wolfram_query}",
-        "\n---\n",
-        f"WOLFRAM ALPHA RESULT:\n{wolfram_result}",
-        "\n---\n",
-        f"CURRENT DOCUMENT (FULL PAPER - not limited to target section):\n{current_paper}",
-        "\n---\n",
-        "Now interpret the Wolfram Alpha result and decide if you want to add it to the paper, or refuse if inappropriate (respond as JSON):"
     ])
-    
+
+    if rag_evidence and rag_evidence.strip():
+        parts.append(f"SUPPORTING EVIDENCE (RAG):\n{rag_evidence}\n---\n")
+
+    parts.append(
+        "LEAN 4 VERIFIED THEOREM CERTIFICATE:\n"
+        f"Proof ID: {proof_id}\n"
+        f"Theorem statement: {theorem_statement}\n"
+        "Lean 4 source (verified by the Lean 4 toolchain; do NOT paste this "
+        "into your `new_string`, it is stored in the Theorems Appendix "
+        "automatically):\n"
+        f"{lean_code}\n"
+        "\n---\n"
+    )
+
+    parts.append(f"PLACEMENT ATTEMPT: {placement_attempt} of 2\n---\n")
+
+    if placement_attempt > 1 and validator_rejection_feedback.strip():
+        parts.append(
+            "VALIDATOR REJECTION FEEDBACK FROM YOUR PREVIOUS PLACEMENT ATTEMPT:\n"
+            f"{validator_rejection_feedback.strip()}\n"
+            "The math is already verified by Lean 4 - the validator is judging "
+            "PLACEMENT and NARRATIVE only. Adjust accordingly.\n---\n"
+        )
+
+    parts.append(
+        "Now produce an inline placement edit OR refuse if no legal placement exists "
+        "(respond as JSON):"
+    )
+
     return "\n".join(parts)

@@ -9,6 +9,7 @@ import LatexRenderer from '../LatexRenderer';
 import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
+import { getRuntimeDataPath } from '../../utils/runtimeConfig';
 import './AutonomousResearch.css';
 
 const FinalAnswerView = ({ api, isRunning, status }) => {
@@ -400,7 +401,7 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
       <div className="tier3-section content-section">
         <h4>Final Answer Paper</h4>
         <div className="paper-library-file-location" style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '0.75em', lineHeight: '1.5' }}>
-          📁 For manual file retrieval, the short-form final answer is saved at: <code>backend/data/auto_sessions/[session_folder]/final_answer/final_short_form_paper.txt</code>. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
+          📁 For manual file retrieval, the short-form final answer is saved at: <code>{getRuntimeDataPath('auto_sessions/[session_folder]/final_answer/final_short_form_paper.txt')}</code>. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
         </div>
         {shortFormPaper ? (
           <div className="paper-content-container" ref={containerRef}>
@@ -435,7 +436,7 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
       <div className="tier3-section content-section">
         <h4>Volume Content</h4>
         <div className="paper-library-file-location" style={{ fontSize: '0.75em', color: '#aaa', marginBottom: '0.75em', lineHeight: '1.5' }}>
-          📁 For manual file retrieval, the long-form volume is saved at: <code>backend/data/auto_sessions/[session_folder]/final_answer/final_volume.txt</code>. Individual chapter papers are stored as <code>chapter_[index]_paper.txt</code> in the same directory. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
+          📁 For manual file retrieval, the long-form volume is saved at: <code>{getRuntimeDataPath('auto_sessions/[session_folder]/final_answer/final_volume.txt')}</code>. Individual chapter papers are stored as <code>chapter_[index]_paper.txt</code> in the same directory. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
         </div>
         {volumeContent && volumeContent.content ? (
           <div className="volume-content-container" ref={containerRef}>
@@ -611,7 +612,7 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
                         disabled={(!shortFormPaper && !volumeContent)}
                         title="Ask validator to critique this final answer"
                         style={{
-                          background: 'linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%)',
+                          background: 'linear-gradient(135deg, #18cc17 0%, #0f9110 100%)',
                           border: 'none',
                           color: '#fff',
                           padding: '0.5rem 1rem',

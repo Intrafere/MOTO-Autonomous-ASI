@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.shared.openrouter_client import OpenRouterClient
-from backend.shared.config import rag_config
+from backend.shared.config import rag_config, system_config
 
 
 async def cache_models():
@@ -58,7 +58,7 @@ async def cache_models():
                 print(f"  {display_name} -> {model_id}")
         
         # Cache to JSON
-        cache_file = Path(__file__).parent.parent / "data" / "model_cache.json"
+        cache_file = Path(system_config.data_dir) / "model_cache.json"
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         
         with open(cache_file, 'w', encoding='utf-8') as f:

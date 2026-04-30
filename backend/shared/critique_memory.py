@@ -52,7 +52,7 @@ PaperType = Literal["autonomous_paper", "final_answer", "compiler_paper"]
 
 def _get_legacy_data_dir() -> Path:
     """Return the shared legacy data directory for critique storage."""
-    return Path(__file__).resolve().parents[1] / "data"
+    return Path(system_config.data_dir)
 
 
 def _get_legacy_critiques_dir(paper_type: PaperType) -> Path:

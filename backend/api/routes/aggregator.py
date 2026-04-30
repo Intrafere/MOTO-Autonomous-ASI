@@ -161,7 +161,7 @@ async def save_results():
         results = await coordinator.get_results_formatted()
         
         # Save to downloads directory
-        output_path = Path("backend/data/aggregator_results.txt")
+        output_path = Path(system_config.data_dir) / "aggregator_results.txt"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         async with aiofiles.open(output_path, 'w', encoding='utf-8') as f:

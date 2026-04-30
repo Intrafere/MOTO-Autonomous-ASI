@@ -401,8 +401,8 @@ const LiveTier3Progress = ({ api, status }) => {
         }
 
         .tier3-status-gray { background: #4a4a4a; color: #ccc; }
-        .tier3-status-blue { background: #1e40af; color: #93c5fd; }
-        .tier3-status-purple { background: #6b21a8; color: #d8b4fe; }
+        .tier3-status-blue { background: #0f5a10; color: #7dff6f; }
+        .tier3-status-purple { background: #0f5a10; color: #7dff6f; }
         .tier3-status-green { background: #166534; color: #86efac; }
         .tier3-status-gold { background: #0f5a10; color: #7dff6f; }
 

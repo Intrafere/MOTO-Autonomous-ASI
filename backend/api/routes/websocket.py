@@ -1,12 +1,15 @@
 """
 WebSocket route for real-time updates.
 """
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from typing import List, Dict
 from datetime import datetime
 import asyncio
 import logging
 import json
+
+from backend.api.proxy_auth import ProxyAuthError, validate_proxy_headers
+from backend.shared.config import system_config
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,23 @@ manager = ConnectionManager()
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates."""
+    if system_config.generic_mode:
+        try:
+            validate_proxy_headers(
+                websocket.headers,
+                method="GET",
+                path=websocket.url.path,
+                expected_instance_id=system_config.instance_id,
+                shared_secret=system_config.internal_proxy_secret or "",
+            )
+        except ProxyAuthError as exc:
+            logger.warning("Rejected generic-mode websocket connection: %s", exc.detail)
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION,
+                reason=exc.detail,
+            )
+            return
+
     await manager.connect(websocket)
     
     try:

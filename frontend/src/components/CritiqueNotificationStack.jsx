@@ -1,15 +1,25 @@
 import React from 'react';
 
+const ALERT_SCALE = 1.4;
+
+function scalePx(value) {
+  return `${Math.round(value * ALERT_SCALE)}px`;
+}
+
+function scaleNumber(value) {
+  return Math.round(value * ALERT_SCALE);
+}
+
 // Simple inline icon components
-const IconX = ({ className }) => (
-  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+const IconX = ({ className, size = 16 }) => (
+  <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
     <line x1="18" y1="6" x2="6" y2="18"></line>
     <line x1="6" y1="6" x2="18" y2="18"></line>
   </svg>
 );
 
-const IconStar = ({ className }) => (
-  <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+const IconStar = ({ className, size = 16 }) => (
+  <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
     <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
   </svg>
 );
@@ -19,7 +29,7 @@ const IconStar = ({ className }) => (
  */
 function getRatingColor(rating) {
   if (rating >= 8) return { text: '#34d399', bg: '#10b981' };
-  if (rating >= 6.25) return { text: '#60a5fa', bg: '#3b82f6' };
+  if (rating >= 6.25) return { text: '#18cc17', bg: '#18cc17' };
   return { text: '#9ca3af', bg: '#6b7280' };
 }
 
@@ -52,7 +62,7 @@ export default function CritiqueNotificationStack({ notifications, onDismiss, on
         zIndex: 999999,
         display: 'flex',
         flexDirection: 'column',
-        gap: '8px',
+        gap: scalePx(8),
         pointerEvents: 'none', // Allow clicks through container
       }}
     >
@@ -96,12 +106,12 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       style={{
-        width: '280px',
-        minHeight: '80px',
+        width: scalePx(280),
+        minHeight: scalePx(80),
         background: `linear-gradient(135deg, ${isHovered ? 'rgba(20, 83, 45, 0.95)' : 'rgba(26, 26, 46, 0.95)'}, ${isHovered ? 'rgba(15, 60, 15, 0.95)' : 'rgba(17, 24, 39, 0.95)'})`,
         backdropFilter: 'blur(8px)',
-        borderRadius: '12px',
-        padding: '12px',
+        borderRadius: scalePx(12),
+        padding: scalePx(12),
         boxShadow: isHovered 
           ? '0 20px 40px -12px rgba(30, 255, 28, 0.5), 0 0 0 1px rgba(30, 255, 28, 0.5)'
           : '0 10px 30px -12px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(30, 255, 28, 0.3)',
@@ -109,7 +119,7 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
         cursor: 'pointer',
         transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         transform: isExiting 
-          ? 'translateX(320px) scale(0.8)' 
+          ? `translateX(${scalePx(320)}) scale(0.8)` 
           : `translateY(${index * 0}px) scale(${isHovered ? 1.02 : 1})`,
         opacity: isExiting ? 0 : 1,
         pointerEvents: 'auto', // Re-enable clicks for notification
@@ -117,25 +127,27 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
       }}
     >
       {/* Header with star icon and rating */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: scalePx(8) }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: scalePx(8) }}>
           <div
             style={{
-              padding: '6px',
+              padding: scalePx(6),
               backgroundColor: 'rgba(30, 255, 28, 0.2)',
-              borderRadius: '8px',
+              borderRadius: scalePx(8),
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
             }}
           >
-            <IconStar style={{ color: colors.text }} />
+            <div style={{ color: colors.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <IconStar size={scaleNumber(16)} />
+            </div>
           </div>
           <div>
-            <div style={{ fontSize: '10px', color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            <div style={{ fontSize: scalePx(10), color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               High Score
             </div>
-            <div style={{ color: colors.text, fontSize: '18px', fontWeight: '700', lineHeight: '1' }}>
+            <div style={{ color: colors.text, fontSize: scalePx(18), fontWeight: '700', lineHeight: '1' }}>
               {notification.average_rating.toFixed(1)}/10
             </div>
           </div>
@@ -145,10 +157,10 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
         <button
           onClick={handleDismiss}
           style={{
-            padding: '4px',
+            padding: scalePx(4),
             backgroundColor: 'transparent',
             border: 'none',
-            borderRadius: '6px',
+            borderRadius: scalePx(6),
             cursor: 'pointer',
             color: '#9ca3af',
             transition: 'all 0.2s',
@@ -165,14 +177,14 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
             e.target.style.color = '#9ca3af';
           }}
         >
-          <IconX />
+          <IconX size={scaleNumber(16)} />
         </button>
       </div>
 
       {/* Paper title */}
       <div
         style={{
-          fontSize: '13px',
+          fontSize: scalePx(13),
           fontWeight: '500',
           color: '#f3f4f6',
           lineHeight: '1.4',
@@ -190,9 +202,9 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
       {/* Click hint */}
       <div
         style={{
-          fontSize: '10px',
+          fontSize: scalePx(10),
           color: '#1eff1c',
-          marginTop: '6px',
+          marginTop: scalePx(6),
           opacity: isHovered ? 1 : 0.7,
           transition: 'opacity 0.2s',
         }}
@@ -204,7 +216,7 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
       <style>{`
         @keyframes slideIn {
           from {
-            transform: translateX(320px) scale(0.8);
+            transform: translateX(${scalePx(320)}) scale(0.8);
             opacity: 0;
           }
           to {

@@ -7,11 +7,14 @@ import LatexRenderer from '../LatexRenderer';
 import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
+import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import { getRuntimeDataPath } from '../../utils/runtimeConfig';
 
 const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   const [expandedId, setExpandedId] = useState(null);
   const [expandedContent, setExpandedContent] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [showLibraryTooltip, setShowLibraryTooltip] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
@@ -19,6 +22,13 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
   const [critiquePaper, setCritiquePaper] = useState(null);
+  const [proofActionMessage, setProofActionMessage] = useState('');
+  const {
+    getSourceState,
+    manualCheckEnabled,
+    manualCheckReason,
+    queueManualProofCheck,
+  } = useProofCheckRuntime();
 
   const handleCardClick = async (paperId) => {
     if (expandedId === paperId) {
@@ -84,6 +94,20 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
     downloadRawText(content, filename, outline);
   };
 
+  const handleProofCheck = async (e, paperId) => {
+    e.stopPropagation();
+    try {
+      setProofActionMessage('');
+      await queueManualProofCheck({
+        sourceType: 'paper',
+        sourceId: paperId,
+      });
+      setProofActionMessage(`Queued proof check for paper ${paperId}.`);
+    } catch (error) {
+      setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    }
+  };
+
   const handleDownloadPDF = async (e, paper) => {
     e.stopPropagation();
 
@@ -128,7 +152,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   // Get color for critique rating badge
   const getCritiqueColor = (rating) => {
     if (rating >= 8) return '#10b981'; // Green
-    if (rating >= 6.25) return '#3b82f6'; // Blue
+    if (rating >= 6.25) return '#18cc17'; // Green
     if (rating >= 4) return '#eab308'; // Yellow
     if (rating >= 2) return '#f97316'; // Orange
     return '#ef4444'; // Red
@@ -168,19 +192,31 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
       <div className="paper-library-header">
         <h3>
           Paper Library ({papers.length} Papers)
-          <span className="paper-library-help-icon" tabIndex={0}>
-            ?
-            <span className="paper-library-tooltip">
-              <strong>HOW THIS PAGE WORKS</strong>
-              <br /><br />
-              This paper database will continue to accumulate until the AI harness autonomously decides to generate the final answer or until the user forces final answer generation. Papers utilize their respective brainstorm topics during writing and may undergo critique-revision before final appearance on this page.
-              <br /><br />
-              Papers may start off mediocre, however will improve over time as the AI selects internal papers for future reference or removal. Paper quality greatly improves with higher parameter models.
-              <br /><br />
-              Accumulating a large amount of papers before final answer generation is normal (i.e. 10 to 20 papers with several pruned/deleted). When forcing final answer generation the AI will decide either: 1.) not enough info — brainstorm more, 2.) write answer — new short form paper, 3.) write answer, longform volume — organize select accepted papers into a longform volume with chapters, write gap papers (if applicable), conclusion chapter then introduction chapter.
-              <br /><br />
-              <span style={{ color: '#f0a' }}>📁 Manual file retrieval:</span> Paper files are saved at <code>backend/data/auto_sessions/[session_folder]/papers/</code> — each paper is stored as <code>paper_[id].txt</code> with a matching <code>paper_[id]_abstract.txt</code> and <code>paper_[id]_outline.txt</code>. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
-            </span>
+          <span className="help-tooltip-anchor help-tooltip-anchor--inline">
+            <button
+              type="button"
+              className="help-tooltip-btn"
+              aria-label="Learn how the paper library works"
+              onMouseEnter={() => setShowLibraryTooltip(true)}
+              onMouseLeave={() => setShowLibraryTooltip(false)}
+              onFocus={() => setShowLibraryTooltip(true)}
+              onBlur={() => setShowLibraryTooltip(false)}
+            >
+              ?
+            </button>
+            {showLibraryTooltip && (
+              <span className="help-tooltip-popup help-tooltip-popup--center">
+                <strong>HOW THIS PAGE WORKS</strong>
+                <br /><br />
+                This paper database will continue to accumulate until the AI harness autonomously decides to generate the final answer or until the user forces final answer generation. Papers utilize their respective brainstorm topics during writing and may undergo critique-revision before final appearance on this page.
+                <br /><br />
+                Papers may start off mediocre, however will improve over time as the AI selects internal papers for future reference or removal. Paper quality greatly improves with higher parameter models.
+                <br /><br />
+                Accumulating a large amount of papers before final answer generation is normal (i.e. 10 to 20 papers with several pruned/deleted). When forcing final answer generation the AI will decide either: 1.) not enough info — brainstorm more, 2.) write answer — new short form paper, 3.) write answer, longform volume — organize select accepted papers into a longform volume with chapters, write gap papers (if applicable), conclusion chapter then introduction chapter.
+                <br /><br />
+                <span style={{ color: '#f0a' }}>📁 Manual file retrieval:</span> Paper files are saved at <code>{getRuntimeDataPath('auto_sessions/[session_folder]/papers')}</code> — each paper is stored as <code>paper_[id].txt</code> with a matching <code>paper_[id]_abstract.txt</code> and <code>paper_[id]_outline.txt</code>. Session folders are named after your research prompt and timestamp (e.g. <code>solve_riemann_hypothesis_2026-03-20_14-30/</code>).
+              </span>
+            )}
           </span>
         </h3>
         <button onClick={onRefresh} className="btn-refresh">
@@ -193,6 +229,12 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
       <div className="paper-library-pruned-counter">
         Pruned Papers: {archivedCount}
       </div>
+
+      {proofActionMessage && (
+        <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
+          {proofActionMessage}
+        </div>
+      )}
 
       <div className="paper-grid">
         {papers.map((paper) => (
@@ -246,6 +288,28 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
             {expandedId === paper.paper_id && (
               <>
                 <div className="paper-actions">
+                  {(() => {
+                    const proofCheckState = getSourceState('paper', paper.paper_id);
+                    const proofCheckLabel = proofCheckState?.status === 'queued'
+                      ? 'Queueing Proof Check...'
+                      : proofCheckState?.status === 'running'
+                        ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
+                        : 'Try to prove with Lean 4 theorem prover';
+                    const proofCheckTitle = proofCheckState?.status === 'running'
+                      ? 'A proof verification is already running for this paper.'
+                      : manualCheckReason || 'Queue a manual proof check for this paper.';
+                    return (
+                      <button
+                        className="btn-download"
+                        onClick={(e) => handleProofCheck(e, paper.paper_id)}
+                        disabled={!manualCheckEnabled || Boolean(proofCheckState)}
+                        title={proofCheckTitle}
+                      >
+                        {proofCheckLabel}
+                      </button>
+                    );
+                  })()}
+
                   <button
                     className="btn-download"
                     onClick={(e) => handleDownloadPDF(e, paper)}

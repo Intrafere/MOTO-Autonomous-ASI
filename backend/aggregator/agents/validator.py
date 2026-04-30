@@ -13,6 +13,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
+from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.prompts.validator_prompts import (
@@ -52,7 +53,7 @@ class ValidatorAgent:
         websocket_broadcaster: Optional[Callable] = None
     ):
         self.model_name = model_name
-        self.user_prompt = user_prompt
+        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
         self.user_files_content = user_files_content
         self.chunk_size = rag_config.validator_chunk_size  # Always 512
         self.websocket_broadcaster = websocket_broadcaster

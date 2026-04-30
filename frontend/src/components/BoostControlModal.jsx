@@ -1,17 +1,22 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { boostAPI, openRouterAPI } from '../services/api';
+import {
+  computeOpenRouterAutoSettings,
+  findOpenRouterModel,
+  getProviderNames,
+} from '../utils/openRouterSelection';
 import './BoostControlModal.css';
 
 const BOOST_SETTINGS_STORAGE_KEY = 'boost_modal_settings';
 
-export default function BoostControlModal({ isOpen, onClose }) {
+export default function BoostControlModal({ isOpen, onClose, capabilities }) {
   const [apiKey, setApiKey] = useState('');
   const [boostModel, setBoostModel] = useState('');
   const [selectedProvider, setSelectedProvider] = useState('');
   const [contextWindow, setContextWindow] = useState(131072);
   const [maxOutputTokens, setMaxOutputTokens] = useState(25000);
   const [models, setModels] = useState([]);
-  const [providers, setProviders] = useState([]);
+  const [providerData, setProviderData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadingProviders, setLoadingProviders] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -25,6 +30,8 @@ export default function BoostControlModal({ isOpen, onClose }) {
   const mouseDownTargetRef = useRef(null);
 
   const hasAvailableKey = Boolean(apiKey.trim() || hasGlobalKey);
+  const providers = getProviderNames(providerData);
+  const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
   
   // Load saved settings from localStorage on mount
   useEffect(() => {
@@ -64,8 +71,8 @@ export default function BoostControlModal({ isOpen, onClose }) {
 
   const fetchProviders = async (modelId, keyOverride = undefined) => {
     if (!modelId) {
-      setProviders([]);
-      return;
+      setProviderData(null);
+      return null;
     }
 
     const effectiveKey = keyOverride === undefined ? apiKey.trim() : keyOverride;
@@ -73,17 +80,29 @@ export default function BoostControlModal({ isOpen, onClose }) {
     setLoadingProviders(true);
     try {
       const response = await boostAPI.getModelProviders(effectiveKey || null, modelId);
-      if (response.providers) {
-        setProviders(response.providers);
-      } else {
-        setProviders([]);
-      }
+      const nextProviderData = {
+        providers: response.providers || [],
+        endpoints: response.endpoints || [],
+      };
+      setProviderData(nextProviderData);
+      return nextProviderData;
     } catch (error) {
       console.error('Failed to fetch providers:', error);
-      setProviders([]);
+      setProviderData(null);
+      return null;
     } finally {
       setLoadingProviders(false);
     }
+  };
+
+  const getAutoSettingsForModel = async (modelId, selectedProvider = null, keyOverride = undefined) => {
+    const model = findOpenRouterModel(models, modelId);
+    if (!model) {
+      return null;
+    }
+
+    const nextProviderData = await fetchProviders(modelId, keyOverride);
+    return computeOpenRouterAutoSettings(model, nextProviderData, selectedProvider);
   };
 
   const fetchBoostStatus = async (keyOverride = undefined) => {
@@ -117,7 +136,7 @@ export default function BoostControlModal({ isOpen, onClose }) {
             console.error('Failed to sync boost settings to localStorage:', e);
           }
         } else {
-          setProviders([]);
+          setProviderData(null);
           // Boost not enabled - localStorage values are already loaded in useEffect
         }
       }
@@ -127,13 +146,17 @@ export default function BoostControlModal({ isOpen, onClose }) {
   };
 
   // Handle model selection change
-  const handleModelChange = (modelId) => {
+  const handleModelChange = async (modelId) => {
     setBoostModel(modelId);
     setSelectedProvider(''); // Reset provider when model changes
     if (modelId) {
-      fetchProviders(modelId);
+      const autoSettings = await getAutoSettingsForModel(modelId, null);
+      if (autoSettings) {
+        setContextWindow(autoSettings.contextWindow);
+        setMaxOutputTokens(autoSettings.maxOutputTokens);
+      }
     } else {
-      setProviders([]);
+      setProviderData(null);
     }
   };
 
@@ -156,6 +179,9 @@ export default function BoostControlModal({ isOpen, onClose }) {
           ? response.models.filter(model => model.pricing && model.pricing.prompt === '0' && model.pricing.completion === '0')
           : response.models;
         setModels(filtered);
+        if (boostModel) {
+          await fetchProviders(boostModel, effectiveKey);
+        }
         if (!silent) {
           setSuccess(`Models loaded successfully (${filtered.length} ${freeFilter ? 'free ' : ''}models)`);
         }
@@ -425,7 +451,15 @@ export default function BoostControlModal({ isOpen, onClose }) {
               <label>Provider</label>
               <select
                 value={selectedProvider}
-                onChange={(e) => setSelectedProvider(e.target.value)}
+                onChange={async (e) => {
+                  const providerName = e.target.value;
+                  setSelectedProvider(providerName);
+                  const autoSettings = await getAutoSettingsForModel(boostModel, providerName || null);
+                  if (autoSettings) {
+                    setContextWindow(autoSettings.contextWindow);
+                    setMaxOutputTokens(autoSettings.maxOutputTokens);
+                  }
+                }}
                 disabled={loading || loadingProviders}
               >
                 <option value="">Default (OpenRouter chooses)</option>
@@ -491,8 +525,12 @@ export default function BoostControlModal({ isOpen, onClose }) {
             <h4>How API Boost Works</h4>
             <ul>
               <li>Click tasks in the MOTO Workflow panel to toggle boost</li>
-              <li>Boosted tasks use your OpenRouter model instead of LM Studio</li>
-              <li>If credits run out, system falls back to LM Studio automatically</li>
+              <li>Boosted tasks use your selected OpenRouter model and optional host provider</li>
+              <li>
+                {lmStudioEnabled
+                  ? 'If boost credits or provider capacity fail, the task falls back to its primary model path for that call'
+                  : 'If boost credits or provider capacity fail, the task falls back to its primary hosted model path for that call'}
+              </li>
               <li>You can toggle which tasks use the boost at any time</li>
             </ul>
           </div>

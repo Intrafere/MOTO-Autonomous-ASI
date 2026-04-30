@@ -13,8 +13,14 @@ from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission, CompilerValidationResult
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
+from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.validation.json_validator import json_validator
-from backend.compiler.memory.paper_memory import paper_memory
+from backend.compiler.memory.paper_memory import (
+    paper_memory,
+    PAPER_ANCHOR,
+    THEOREMS_APPENDIX_END,
+    THEOREMS_APPENDIX_START,
+)
 from backend.compiler.memory.outline_memory import outline_memory
 
 logger = logging.getLogger(__name__)
@@ -356,7 +362,7 @@ class CompilerValidator:
     
     def __init__(self, model_name: str, user_prompt: str, websocket_broadcaster: Optional[Callable] = None):
         self.model_name = model_name
-        self.user_prompt = user_prompt
+        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
         self.websocket_broadcaster = websocket_broadcaster
         self._initialized = False
         
@@ -549,6 +555,76 @@ class CompilerValidator:
                 logger.error(f"CompilerValidator: Retry request failed - {retry_error}")
                 return self._fallback_parse(response)
     
+    def _handle_protected_marker_old_string(
+        self,
+        submission: CompilerSubmission,
+        document_to_check: str,
+        document_name: str,
+    ) -> Optional[CompilerValidationResult]:
+        """Prevent edit operations from removing system-managed paper boundaries.
+
+        Models may copy visible markers into old_string as context. For replace
+        operations, if the marker block is only a suffix used to anchor a section,
+        trim old_string back to the real editable content when that trimmed span
+        is unique. Delete operations remain unsafe because they would remove
+        content adjacent to a system boundary.
+        """
+        protected_markers = (
+            THEOREMS_APPENDIX_START,
+            THEOREMS_APPENDIX_END,
+            PAPER_ANCHOR,
+        )
+        marker_positions = [
+            submission.old_string.find(marker)
+            for marker in protected_markers
+            if marker in submission.old_string
+        ]
+        if not marker_positions:
+            return None
+
+        first_marker_pos = min(marker_positions)
+
+        if submission.operation == "replace":
+            trimmed_old = submission.old_string[:first_marker_pos].rstrip()
+            if trimmed_old:
+                normalized_doc = normalize_unicode_hyphens(document_to_check)
+                normalized_trimmed = normalize_unicode_hyphens(trimmed_old)
+                if normalized_doc.count(normalized_trimmed) == 1:
+                    logger.warning(
+                        "Pre-validation adjusted old_string to exclude system marker boundary "
+                        "from replace target in %s",
+                        document_name,
+                    )
+                    submission.old_string = trimmed_old
+                    return None
+
+        logger.warning(
+            "Pre-validation failed: %s operation old_string includes a protected system marker",
+            submission.operation,
+        )
+        return CompilerValidationResult(
+            submission_id=submission.submission_id,
+            decision="reject",
+            reasoning=(
+                "PROTECTED_MARKER_BOUNDARY: The old_string includes a system-managed "
+                "paper boundary marker (the Theorems Appendix bracket or end-of-paper "
+                "anchor). Replacing or deleting across that marker can corrupt the paper "
+                "structure.\n\n"
+                "FIX REQUIRED:\n"
+                f"1. Use old_string from the editable {document_name} content only.\n"
+                "2. Do not include Theorems Appendix bracket markers or the end-of-paper "
+                "anchor in replace/delete targets.\n"
+                "3. If you need marker context for placement, use a shorter unique "
+                "old_string immediately before the marker."
+            ),
+            summary=f"old_string crosses protected system marker boundary in {document_name} (pre-validation)",
+            coherence_check=True,
+            rigor_check=True,
+            placement_check=False,
+            json_valid=True,
+            validation_stage="pre-validation",
+        )
+
     def _pre_validate_exact_string_match(
         self,
         submission: CompilerSubmission,
@@ -643,6 +719,14 @@ class CompilerValidator:
                 json_valid=True,
                 validation_stage="pre-validation"
             )
+
+        protected_marker_result = self._handle_protected_marker_old_string(
+            submission,
+            document_to_check,
+            document_name,
+        )
+        if protected_marker_result is not None:
+            return protected_marker_result
         
         # Check if old_string exists in the document (with Unicode hyphen normalization)
         pos, actual_text = find_with_normalized_hyphens(submission.old_string, document_to_check)
@@ -1044,6 +1128,21 @@ class CompilerValidator:
             # So placement_check defaults to True unless LLM finds placement context issue
             placement = validation_data.get("placement_check", True)
             
+            # Lean-4-verified theorem placement submissions: Lean 4 is the source
+            # of truth for mathematical rigor. Force rigor_check=True regardless
+            # of what the LLM emitted so the criterion is never the reason for
+            # a rejection on this kind of submission.
+            if (
+                submission.mode == "rigor"
+                and (submission.metadata or {}).get("rigor_mode") == "lean_placement"
+            ):
+                if not rigor:
+                    logger.info(
+                        "Validator returned rigor_check=False for lean_placement submission; "
+                        "forcing True because Lean 4 verified the math."
+                    )
+                rigor = True
+            
             # Create summary for rejection log (max 750 chars)
             summary = reasoning[:750]
             
@@ -1292,7 +1391,9 @@ Output your decision ONLY as JSON:
             ABSTRACT_PLACEHOLDER,
             INTRO_PLACEHOLDER,
             CONCLUSION_PLACEHOLDER,
-            PAPER_ANCHOR
+            PAPER_ANCHOR,
+            THEOREMS_APPENDIX_START,
+            THEOREMS_APPENDIX_END,
         )
         
         # List of exact placeholder strings to strip
@@ -1300,7 +1401,9 @@ Output your decision ONLY as JSON:
             ABSTRACT_PLACEHOLDER,
             INTRO_PLACEHOLDER,
             CONCLUSION_PLACEHOLDER,
-            PAPER_ANCHOR
+            PAPER_ANCHOR,
+            THEOREMS_APPENDIX_START,
+            THEOREMS_APPENDIX_END,
         ]
         
         result = text
@@ -1330,7 +1433,16 @@ Output your decision ONLY as JSON:
         if submission.mode in ["outline_create", "outline_update"]:
             system_prompt = self._get_outline_validation_system_prompt(submission.mode)
         else:
-            system_prompt = self._get_paper_validation_system_prompt(submission.mode)
+            # For rigor submissions backed by a Lean 4 verified theorem, swap in
+            # the placement-only criteria. Anything else falls through to the
+            # normal paper-validation prompt for the submission's mode.
+            rigor_mode_hint = (submission.metadata or {}).get("rigor_mode")
+            effective_mode = (
+                "rigor_lean_placement"
+                if submission.mode == "rigor" and rigor_mode_hint == "lean_placement"
+                else submission.mode
+            )
+            system_prompt = self._get_paper_validation_system_prompt(effective_mode)
         
         parts = [
             system_prompt,
@@ -1345,9 +1457,31 @@ Output your decision ONLY as JSON:
             parts.append(f"CURRENT OUTLINE:\n{current_outline}\n---\n")
         
         parts.append(f"CURRENT DOCUMENT:\n{current_paper}\n---\n")
+        
+        # For Lean 4 verified theorem placement, surface the Lean certificate
+        # to the validator so it can reference what was verified.
+        metadata = submission.metadata or {}
+        if submission.mode == "rigor" and metadata.get("rigor_mode") == "lean_placement":
+            parts.append("LEAN 4 VERIFICATION CERTIFICATE (DO NOT RE-EVALUATE MATH):\n")
+            parts.append(f"Proof ID: {metadata.get('lean_proof_id', 'unknown')}\n")
+            parts.append(f"Theorem statement: {metadata.get('theorem_statement', '')}\n")
+            lean_code = str(metadata.get("lean_code", "") or "")
+            if lean_code:
+                parts.append("Lean 4 code (verified by the Lean 4 toolchain):\n")
+                parts.append(lean_code.strip() + "\n")
+            if metadata.get("placement_attempt"):
+                parts.append(f"Placement attempt: {metadata['placement_attempt']} of 2\n")
+            prior_feedback = str(metadata.get("validator_rejection_feedback", "") or "").strip()
+            if prior_feedback:
+                parts.append(
+                    "PRIOR VALIDATOR REJECTION (for this same verified theorem):\n"
+                    f"{prior_feedback}\n"
+                )
+            parts.append("\n---\n")
+        
         parts.append(f"SUBMISSION TO VALIDATE:\n")
-        if submission.metadata.get("review_focus"):
-            parts.append(f"Review Focus: {submission.metadata['review_focus']}\n")
+        if metadata.get("review_focus"):
+            parts.append(f"Review Focus: {metadata['review_focus']}\n")
         parts.append(f"Operation: {submission.operation}\n")
         if submission.old_string:
             parts.append(f"Old String (to find): {submission.old_string}\n")
@@ -1802,7 +1936,38 @@ ISSUE: [What's wrong]
 FIX: [What would be acceptable]"
 
 ACCEPT if: All general criteria + mode-specific criteria met
-REJECT if: Enhancement doesn't add rigor, reduces quality, introduces unsound mathematical claims, or placement context inappropriate"""
+REJECT if: Enhancement doesn't add rigor, reduces quality, introduces unsound mathematical claims, or placement context inappropriate""",
+
+            "rigor_lean_placement": """MODE-SPECIFIC CRITERIA (Lean 4 Verified Theorem Placement):
+
+CRITICAL: The theorem in this submission has ALREADY been formally verified by the Lean 4 toolchain. Its mathematical validity is NOT in question and you MUST NOT re-evaluate it.
+
+The LEAN 4 VERIFICATION CERTIFICATE block earlier in this prompt shows the exact theorem statement and Lean 4 proof that compiled successfully. Lean 4 is the source of truth for the mathematical content.
+
+YOUR ONLY JOB on this submission is to judge PLACEMENT and NARRATIVE INTEGRATION:
+
+1. PLACEMENT_FIT: Does the insertion location make sense given the surrounding narrative, outline structure, and mathematical progression of the paper at this point?
+2. INTRODUCTION_FORMAT: Does the inline text correctly present the theorem to the reader, including:
+   - A clear theorem statement matching the verified statement
+   - An explicit "verified in Lean 4" marker in the prose
+   - A reference pointing the reader to the Theorems Appendix (where the full Lean proof is stored)
+3. NARRATIVE_COHERENCE: Does surrounding prose remain coherent after the insertion? No dangling references, no broken sentence flow, no contradiction with established definitions.
+4. NO_DUPLICATION: The inline text must not copy the full Lean proof body into the main paper (the proof lives in the appendix only). A short informal proof sketch is fine; the Lean code itself should NOT be inlined.
+
+RULES:
+- You MUST set rigor_check=true unconditionally: Lean 4 has already verified the math. The `rigor_check` field is forced to true by the system regardless of your response.
+- You MUST NOT reject on mathematical grounds (correctness, soundness, edge cases, assumptions). That decision has been made by Lean 4.
+- You MAY reject on placement, narrative, duplication of the Lean code, or missing "verified in Lean 4" marker / appendix reference.
+- If this is placement attempt 2 of 2 and you reject again, the system will route the theorem to the Theorems Appendix only. Reserve rejection for genuine placement/narrative problems.
+
+REJECTION FEEDBACK FORMAT:
+If rejecting, use this structure:
+"REJECTION REASON: [PLACEMENT_FIT|MISSING_LEAN_MARKER|MISSING_APPENDIX_REFERENCE|NARRATIVE_COHERENCE|LEAN_CODE_DUPLICATED_INLINE|etc.]
+ISSUE: [What's wrong with the placement or prose, not the math]
+FIX: [Concrete adjustment the submitter should make on the next placement attempt]"
+
+ACCEPT if: Placement location is reasonable, introduction prose correctly cites the Lean 4 verification and appendix, narrative remains coherent, and the Lean proof body is NOT duplicated inline.
+REJECT if: Placement is clearly inappropriate, the "verified in Lean 4" / appendix reference is missing, narrative breaks, or the full Lean code is pasted into the main paper text."""
         }
         
         return base_prompt + mode_specific.get(mode, mode_specific["construction"])

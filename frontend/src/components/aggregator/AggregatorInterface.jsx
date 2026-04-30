@@ -3,10 +3,16 @@ import { api } from '../../services/api';
 import TextFileUploader from '../TextFileUploader';
 import '../settings-common.css';
 
-export default function AggregatorInterface({ config, setConfig, anyWorkflowRunning = false }) {
+export default function AggregatorInterface({
+  config,
+  setConfig,
+  capabilities,
+  anyWorkflowRunning = false,
+}) {
   const [isRunning, setIsRunning] = useState(false);
   const [status, setStatus] = useState(null);
   const [uploadedFiles, setUploadedFiles] = useState([]);
+  const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
 
   useEffect(() => {
     fetchStatus();
@@ -80,10 +86,10 @@ export default function AggregatorInterface({ config, setConfig, anyWorkflowRunn
       // Format submitter configs for backend (includes OpenRouter provider fields)
       const formattedConfigs = submitterConfigs.map(s => ({
         submitter_id: s.submitterId,
-        provider: s.provider || 'lm_studio',
+        provider: lmStudioEnabled ? (s.provider || 'lm_studio') : 'openrouter',
         model_id: s.modelId,
         openrouter_provider: s.openrouterProvider || null,
-        lm_studio_fallback_id: s.lmStudioFallbackId || null,
+        lm_studio_fallback_id: lmStudioEnabled ? (s.lmStudioFallbackId || null) : null,
         context_window: s.contextWindow,
         max_output_tokens: s.maxOutputTokens
       }));
@@ -92,10 +98,10 @@ export default function AggregatorInterface({ config, setConfig, anyWorkflowRunn
         user_prompt: config.userPrompt,
         submitter_configs: formattedConfigs,
         // Validator config with OpenRouter support
-        validator_provider: config.validatorProvider || 'lm_studio',
+        validator_provider: lmStudioEnabled ? (config.validatorProvider || 'lm_studio') : 'openrouter',
         validator_model: config.validatorModel,
         validator_openrouter_provider: config.validatorOpenrouterProvider || null,
-        validator_lm_studio_fallback: config.validatorLmStudioFallback || null,
+        validator_lm_studio_fallback: lmStudioEnabled ? (config.validatorLmStudioFallback || null) : null,
         validator_context_size: config.validatorContextSize,
         validator_max_output_tokens: config.validatorMaxOutput || 25000,
         uploaded_files: config.uploadedFiles,

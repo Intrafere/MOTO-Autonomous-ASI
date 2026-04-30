@@ -331,7 +331,7 @@ async def save_paper():
         full_content = "\n".join(full_content_parts)
         
         # Save to output directory
-        output_path = Path("backend/data/compiler_paper_saved.txt")
+        output_path = Path(system_config.data_dir) / "compiler_paper_saved.txt"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         async with aiofiles.open(output_path, 'w', encoding='utf-8') as f:
@@ -764,14 +764,19 @@ async def set_wolfram_api_key(request: dict):
         system_config.wolfram_alpha_api_key = api_key
         system_config.wolfram_alpha_enabled = True
 
-        # Persist to secure backend storage so the key survives restarts.
-        store_wolfram_api_key(api_key)
+        if system_config.generic_mode:
+            logger.info("Generic mode active - keeping Wolfram Alpha API key in runtime memory only")
+            success_message = "Wolfram Alpha API key validated and loaded into runtime memory"
+        else:
+            # Persist to secure backend storage so the key survives restarts.
+            store_wolfram_api_key(api_key)
+            success_message = "Wolfram Alpha API key validated successfully"
         
         logger.info("Wolfram Alpha API key set and validated")
         
         return {
             "success": True,
-            "message": "Wolfram Alpha API key validated successfully",
+            "message": success_message,
             "test_result": test_result
         }
         
@@ -803,13 +808,19 @@ async def clear_wolfram_api_key():
         # Clear from config
         system_config.wolfram_alpha_api_key = None
         system_config.wolfram_alpha_enabled = False
-        clear_persisted_wolfram_api_key()
+
+        if system_config.generic_mode:
+            logger.info("Generic mode active - cleared in-memory Wolfram Alpha API key")
+            success_message = "Wolfram Alpha API key cleared from runtime memory"
+        else:
+            clear_persisted_wolfram_api_key()
+            success_message = "Wolfram Alpha API key cleared"
         
         logger.info("Wolfram Alpha API key cleared")
         
         return {
             "success": True,
-            "message": "Wolfram Alpha API key cleared"
+            "message": success_message
         }
         
     except SecretStoreError as e:

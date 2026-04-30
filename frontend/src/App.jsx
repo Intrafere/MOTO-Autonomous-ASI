@@ -15,7 +15,8 @@ import {
   AutonomousResearchSettings,
   AutonomousResearchLogs,
   FinalAnswerView,
-  FinalAnswerLibrary
+  FinalAnswerLibrary,
+  MathematicalProofs
 } from './components/autonomous';
 import WorkflowPanel from './components/WorkflowPanel';
 import BoostControlModal from './components/BoostControlModal';
@@ -23,6 +24,7 @@ import StartupProviderSetupModal from './components/StartupProviderSetupModal';
 import OpenRouterApiKeyModal from './components/OpenRouterApiKeyModal';
 import OpenRouterPrivacyWarningModal from './components/OpenRouterPrivacyWarningModal';
 import CritiqueNotificationStack from './components/CritiqueNotificationStack';
+import ProofNotificationStack from './components/autonomous/ProofNotificationStack';
 import CreditExhaustionNotificationStack from './components/CreditExhaustionNotificationStack';
 import HungConnectionNotificationStack from './components/HungConnectionNotificationStack';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
@@ -44,6 +46,16 @@ const AUTONOMOUS_TAB_STORAGE_KEY = 'autonomousActiveTab';
 const MANUAL_TAB_STORAGE_KEY = 'manualActiveTab';
 const LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY = 'singlePaperWriterExpanded';
 const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'];
+const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'high_context', 'high_param', 'critique_submitter'];
+const DEFAULT_CAPABILITIES = Object.freeze({
+  genericMode: false,
+  lmStudioEnabled: true,
+  pdfDownloadAvailable: true,
+  version: '',
+  buildCommit: '',
+  updateChannel: 'main',
+  apiContractVersion: '',
+});
 
 function normalizeLoadedLmStudioModelId(modelId = '') {
   return String(modelId).replace(/:\d+$/, '');
@@ -66,6 +78,80 @@ function getUsableLoadedLmStudioChatModelId(loadedModels = []) {
   return '';
 }
 
+function normalizeFeaturesPayload(payload = {}) {
+  return {
+    genericMode: Boolean(payload.generic_mode),
+    lmStudioEnabled: payload.lm_studio_enabled !== false,
+    pdfDownloadAvailable: payload.pdf_download_available !== false,
+    version: payload.version || '',
+    buildCommit: payload.build_commit || '',
+    updateChannel: payload.update_channel || 'main',
+    apiContractVersion: payload.api_contract_version || '',
+  };
+}
+
+function normalizeRuntimeProvider(provider, lmStudioEnabled) {
+  return lmStudioEnabled ? (provider || 'lm_studio') : 'openrouter';
+}
+
+function normalizeRuntimeModelConfig(config = {}, lmStudioEnabled) {
+  const originalProvider = config.provider || 'lm_studio';
+  const shouldResetLmState = !lmStudioEnabled && originalProvider !== 'openrouter';
+
+  return {
+    ...config,
+    provider: normalizeRuntimeProvider(config.provider, lmStudioEnabled),
+    modelId: shouldResetLmState ? '' : (config.modelId || ''),
+    openrouterProvider: shouldResetLmState ? null : (config.openrouterProvider || null),
+    lmStudioFallbackId: lmStudioEnabled ? (config.lmStudioFallbackId || null) : null,
+  };
+}
+
+function normalizeAggregatorConfigForCapabilities(config, lmStudioEnabled) {
+  const originalValidatorProvider = config.validatorProvider || 'lm_studio';
+  const shouldResetValidator = !lmStudioEnabled && originalValidatorProvider !== 'openrouter';
+
+  return {
+    ...config,
+    submitterConfigs: (config.submitterConfigs || []).map((submitterConfig) =>
+      normalizeRuntimeModelConfig(submitterConfig, lmStudioEnabled)
+    ),
+    validatorProvider: normalizeRuntimeProvider(config.validatorProvider, lmStudioEnabled),
+    validatorModel: shouldResetValidator ? '' : (config.validatorModel || ''),
+    validatorOpenrouterProvider: shouldResetValidator
+      ? null
+      : (config.validatorOpenrouterProvider || null),
+    validatorLmStudioFallback: lmStudioEnabled ? (config.validatorLmStudioFallback || null) : null,
+  };
+}
+
+function normalizeAutonomousConfigForCapabilities(config, lmStudioEnabled) {
+  const nextConfig = {
+    ...config,
+    submitter_configs: (config.submitter_configs || []).map((submitterConfig) =>
+      normalizeRuntimeModelConfig(submitterConfig, lmStudioEnabled)
+    ),
+  };
+
+  AUTONOMOUS_ROLE_PREFIXES.forEach((rolePrefix) => {
+    const providerKey = `${rolePrefix}_provider`;
+    const modelKey = `${rolePrefix}_model`;
+    const openRouterProviderKey = `${rolePrefix}_openrouter_provider`;
+    const fallbackKey = `${rolePrefix}_lm_studio_fallback`;
+    const originalProvider = nextConfig[providerKey] || 'lm_studio';
+    const shouldResetRole = !lmStudioEnabled && originalProvider !== 'openrouter';
+
+    nextConfig[providerKey] = normalizeRuntimeProvider(nextConfig[providerKey], lmStudioEnabled);
+    nextConfig[modelKey] = shouldResetRole ? '' : (nextConfig[modelKey] || '');
+    nextConfig[openRouterProviderKey] = shouldResetRole
+      ? null
+      : (nextConfig[openRouterProviderKey] || null);
+    nextConfig[fallbackKey] = lmStudioEnabled ? (nextConfig[fallbackKey] || null) : null;
+  });
+
+  return nextConfig;
+}
+
 function App() {
   const [appMode, setAppMode] = useState(() => {
     const savedMode = localStorage.getItem(APP_MODE_STORAGE_KEY);
@@ -84,12 +170,8 @@ function App() {
       return 'autonomous';
     }
   });
-  const [autonomousActiveTab, setAutonomousActiveTab] = useState(
-    () => localStorage.getItem(AUTONOMOUS_TAB_STORAGE_KEY) || 'auto-interface'
-  );
-  const [manualActiveTab, setManualActiveTab] = useState(
-    () => localStorage.getItem(MANUAL_TAB_STORAGE_KEY) || 'aggregator-interface'
-  );
+  const [autonomousActiveTab, setAutonomousActiveTab] = useState('auto-interface');
+  const [manualActiveTab, setManualActiveTab] = useState('aggregator-interface');
   const activeTab = appMode === 'manual' ? manualActiveTab : autonomousActiveTab;
   const shimmerAccentsEnabled = (() => {
     const saved = localStorage.getItem('banner_shimmer_enabled');
@@ -101,6 +183,7 @@ function App() {
   
   // Boost modal state
   const [showBoostModal, setShowBoostModal] = useState(false);
+  const [showApiBoostTooltip, setShowApiBoostTooltip] = useState(false);
   
   // OpenRouter API Key modal state
   const [showOpenRouterKeyModal, setShowOpenRouterKeyModal] = useState(false);
@@ -117,7 +200,13 @@ function App() {
     usable_chat_model_id: '',
     has_usable_chat_model: false,
   });
-  const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
+  // Tri-state: null = unknown (backend unreachable / cold-start in progress),
+  // true = key stored in backend, false = confirmed no key. The UI treats
+  // "unknown" neutrally (does NOT open the startup setup modal, does NOT flash
+  // a red "Set OpenRouter Key" chip) so that a slow-to-boot backend can never
+  // make a stored key look like it "disappeared".
+  const [hasOpenRouterKey, setHasOpenRouterKey] = useState(null);
+  const [capabilities, setCapabilities] = useState(DEFAULT_CAPABILITIES);
   
   // Track if any workflow is running (for WorkflowPanel visibility)
   const [anyWorkflowRunning, setAnyWorkflowRunning] = useState(false);
@@ -127,6 +216,10 @@ function App() {
     const savedState = localStorage.getItem('workflow_panel_collapsed');
     return savedState === 'true';
   });
+
+  // Update notice banner state (dismissible per session, re-appears on restart)
+  const [updateNotice, setUpdateNotice] = useState(null);
+  const [updateNoticeDismissed, setUpdateNoticeDismissed] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(APP_MODE_STORAGE_KEY, appMode);
@@ -256,6 +349,10 @@ function App() {
   const [critiqueNotifications, setCritiqueNotifications] = useState([]);
   const [selectedCritiquePaper, setSelectedCritiquePaper] = useState(null);
   const [showCritiqueModal, setShowCritiqueModal] = useState(false);
+  const [proofNotifications, setProofNotifications] = useState([]);
+  const [selectedProofId, setSelectedProofId] = useState(null);
+  const [proofRefreshToken, setProofRefreshToken] = useState(0);
+  const [latestProofDependencyEvent, setLatestProofDependencyEvent] = useState(null);
 
   // Credit exhaustion notification state (persistent until dismissed)
   const [creditExhaustionNotifications, setCreditExhaustionNotifications] = useState([]);
@@ -321,49 +418,85 @@ function App() {
   }, [autonomousConfig]);
 
   const syncProviderAvailability = useCallback(async () => {
+    let nextCapabilities = DEFAULT_CAPABILITIES;
+    try {
+      const featuresPayload = await api.getFeatures();
+      nextCapabilities = normalizeFeaturesPayload(featuresPayload);
+    } catch (err) {
+      console.error('Failed to fetch runtime feature flags:', err);
+    }
+
+    setCapabilities(nextCapabilities);
+
     let lmResult = {
       available: false,
       has_models: false,
       model_count: 0,
       models: [],
-      error: null,
+      error: nextCapabilities.lmStudioEnabled
+        ? null
+        : (nextCapabilities.genericMode
+            ? 'LM Studio is intentionally disabled in this hosted deployment.'
+            : null),
+      generic_mode: nextCapabilities.genericMode,
     };
 
-    try {
-      lmResult = await openRouterAPI.checkLMStudioAvailability();
-    } catch (err) {
-      console.error('Failed to check LM Studio availability:', err);
-      lmResult = {
-        available: false,
-        has_models: false,
-        model_count: 0,
-        models: [],
-        error: err.message || 'Failed to check LM Studio availability.',
-      };
+    if (nextCapabilities.lmStudioEnabled) {
+      try {
+        lmResult = await openRouterAPI.checkLMStudioAvailability();
+      } catch (err) {
+        console.error('Failed to check LM Studio availability:', err);
+        lmResult = {
+          available: false,
+          has_models: false,
+          model_count: 0,
+          models: [],
+          error: err.message || 'Failed to check LM Studio availability.',
+          generic_mode: nextCapabilities.genericMode,
+        };
+      }
     }
 
     const usableLmStudioChatModelId = getUsableLoadedLmStudioChatModelId(lmResult.models || []);
     const hasUsableLmStudioChatModel = Boolean(usableLmStudioChatModelId);
-    const lmAvailable = Boolean(lmResult.available && lmResult.has_models);
-    setLmStudioStatus({
+    const nextLmStudioStatus = {
       ...lmResult,
       usable_chat_model_id: usableLmStudioChatModelId,
       has_usable_chat_model: hasUsableLmStudioChatModel,
-    });
+    };
+    const lmAvailable = nextCapabilities.lmStudioEnabled && Boolean(lmResult.available && lmResult.has_models);
+    setLmStudioStatus(nextLmStudioStatus);
     setLmStudioAvailable(lmAvailable);
 
     let keyStatus = { has_key: false };
-    try {
-      keyStatus = await openRouterAPI.getApiKeyStatus();
-    } catch (err) {
-      console.error('Failed to check OpenRouter key status:', err);
+    let keyStatusOk = false;
+    // Retry aggressively (up to ~20s) to cover backend cold-start. The
+    // `/api/openrouter/api-key-status` endpoint is trivial (memory lookup),
+    // so any failure here means the backend literally is not yet accepting
+    // HTTP — we must NOT declare "no key" to the UI on that basis, because
+    // the real state is "unknown" and declaring it false would incorrectly
+    // open the startup provider setup modal over a stored key.
+    const delays = [200, 400, 800, 1200, 1500, 2000, 2000, 2500, 2500, 3000, 3000];
+    for (let attempt = 0; attempt < delays.length; attempt += 1) {
+      try {
+        keyStatus = await openRouterAPI.getApiKeyStatus();
+        keyStatusOk = true;
+        break;
+      } catch (err) {
+        if (attempt === delays.length - 1) {
+          console.warn('OpenRouter key-status probe still unreachable after initial cold-start window; background poller will retry.', err);
+        }
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
     }
 
     const finalHasOpenRouterKey = Boolean(keyStatus.has_key);
-    setHasOpenRouterKey(finalHasOpenRouterKey);
+    if (keyStatusOk) {
+      setHasOpenRouterKey(finalHasOpenRouterKey);
+    }
 
     let availableModels = [];
-    if (lmAvailable) {
+    if (nextCapabilities.lmStudioEnabled && lmAvailable) {
       try {
         const data = await api.getModels();
         availableModels = data.models || data || [];
@@ -377,14 +510,12 @@ function App() {
     }
 
     return {
+      capabilities: nextCapabilities,
       lmAvailable,
       hasOpenRouterKey: finalHasOpenRouterKey,
+      keyStatusReachable: keyStatusOk,
       hasUsableLmStudioChatModel,
-      lmStudioStatus: {
-        ...lmResult,
-        usable_chat_model_id: usableLmStudioChatModelId,
-        has_usable_chat_model: hasUsableLmStudioChatModel,
-      },
+      lmStudioStatus: nextLmStudioStatus,
       defaultLmStudioModelId: usableLmStudioChatModelId,
     };
   }, []);
@@ -393,19 +524,99 @@ function App() {
     syncProviderAvailability();
   }, [syncProviderAvailability]);
 
-  // Periodically re-check OpenRouter key status to keep indicator in sync
+  // Fetch update notice from the backend on mount
+  useEffect(() => {
+    api.getUpdateNotice()
+      .then((notice) => {
+        if (notice && notice.update_available) {
+          setUpdateNotice(notice);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (capabilities.lmStudioEnabled) {
+      return;
+    }
+
+    setConfig((prev) => {
+      const next = normalizeAggregatorConfigForCapabilities(prev, false);
+      return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
+    });
+
+    setAutonomousConfig((prev) => {
+      const next = normalizeAutonomousConfigForCapabilities(prev, false);
+      return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
+    });
+
+    if (localStorage.getItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY) === LM_STUDIO_STARTUP_CHOICE) {
+      localStorage.removeItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY);
+    }
+  }, [capabilities.lmStudioEnabled]);
+
+  // Periodically re-check OpenRouter key status to keep indicator in sync.
+  // We poll aggressively (5s) because the state mostly flips from "unknown"
+  // to "known" shortly after backend startup, and users notice any delay as
+  // "my key didn't save."
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const keyStatus = await openRouterAPI.getApiKeyStatus();
-        setHasOpenRouterKey(keyStatus.has_key);
+        setHasOpenRouterKey(Boolean(keyStatus.has_key));
       } catch {
         // Backend unreachable, skip this cycle
       }
-    }, 30000);
+    }, 5000);
 
     return () => clearInterval(interval);
   }, []);
+
+  // Periodically re-check LM Studio availability so the header indicator
+  // recovers when LM Studio finishes starting after the initial page load
+  // (e.g. MOTO launches the browser before LM Studio's local server is
+  // ready to serve /v1/models). Without this, the first check returns
+  // unavailable and the "LM Studio Offline" badge sticks for the entire
+  // session even while nomic embedding calls are succeeding.
+  useEffect(() => {
+    if (!capabilities.lmStudioEnabled) {
+      return undefined;
+    }
+
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      syncProviderAvailability().catch(() => {
+        // Backend unreachable or transient failure, skip this cycle
+      });
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [capabilities.lmStudioEnabled, syncProviderAvailability]);
+
+  // Re-sync provider availability immediately when the tab becomes visible
+  // again. Users often switch to LM Studio to load a model and then return;
+  // waiting up to 15s for the next interval tick feels broken.
+  useEffect(() => {
+    if (!capabilities.lmStudioEnabled) {
+      return undefined;
+    }
+    if (typeof document === 'undefined') {
+      return undefined;
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        syncProviderAvailability().catch(() => {});
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [capabilities.lmStudioEnabled, syncProviderAvailability]);
 
   // Check autonomous research status on mount (handles page refresh while running)
   // CRITICAL: Always load all data (brainstorms, papers, stats) on startup,
@@ -757,6 +968,176 @@ function App() {
         event: 'paper_redundancy_review',
         timestamp: getTimestamp(data),
         message: `Redundancy review: ${data.should_remove ? 'Removing paper' : 'No removal'}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_framing_decided', (data) => {
+      addActivity({
+        event: 'proof_framing_decided',
+        timestamp: getTimestamp(data),
+        message: data.is_proof_amenable
+          ? 'Proof framing enabled for this research run'
+          : 'Proof framing not applied for this research run',
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_check_started', (data) => {
+      const prefix = data.trigger === 'manual'
+        ? 'Manual proof check started'
+        : data.trigger === 'retry'
+          ? 'Paper-stage proof retry started'
+          : 'Proof check started';
+      addActivity({
+        event: 'proof_check_started',
+        timestamp: getTimestamp(data),
+        message: `${prefix} for ${data.source_type} ${data.source_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_retry_scheduled', (data) => {
+      addActivity({
+        event: 'proof_retry_scheduled',
+        timestamp: getTimestamp(data),
+        message: `Scheduled ${data.count || 0} proof retry candidate(s) for paper ${data.source_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_retry_started', (data) => {
+      addActivity({
+        event: 'proof_retry_started',
+        timestamp: getTimestamp(data),
+        message: `Retrying ${data.count || 0} failed proof candidate(s) against paper ${data.source_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_check_no_candidates', (data) => {
+      addActivity({
+        event: 'proof_check_no_candidates',
+        timestamp: getTimestamp(data),
+        message: `No formal proof candidates found in ${data.source_type} ${data.source_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_check_candidates_found', (data) => {
+      addActivity({
+        event: 'proof_check_candidates_found',
+        timestamp: getTimestamp(data),
+        message: `Proof check found ${data.count || 0} theorem candidate(s)`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_attempt_started', (data) => {
+      addActivity({
+        event: 'proof_attempt_started',
+        timestamp: getTimestamp(data),
+        message: `Proof attempt ${data.attempt || 1} started: ${data.theorem_statement || data.theorem_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('smt_check_started', (data) => {
+      addActivity({
+        event: 'smt_check_started',
+        timestamp: getTimestamp(data),
+        message: `SMT check started: ${data.theorem_statement || data.theorem_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('smt_check_complete', (data) => {
+      addActivity({
+        event: 'smt_check_complete',
+        timestamp: getTimestamp(data),
+        message: `SMT check complete (${data.result || 'unknown'}): ${data.theorem_statement || data.theorem_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_attempt_failed', (data) => {
+      addActivity({
+        event: 'proof_attempt_failed',
+        timestamp: getTimestamp(data),
+        message: `Proof attempt ${data.attempt || '?'} failed: ${formatReason(data.error_summary, 960) || data.theorem_statement || data.theorem_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_verified', (data) => {
+      addActivity({
+        event: 'proof_verified',
+        timestamp: getTimestamp(data),
+        message: `Lean 4 verified: ${data.theorem_statement || data.theorem_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_attempts_exhausted', (data) => {
+      addActivity({
+        event: 'proof_attempts_exhausted',
+        timestamp: getTimestamp(data),
+        message: `Proof attempts exhausted: ${data.theorem_statement || data.theorem_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('novel_proof_discovered', (data) => {
+      setProofRefreshToken((prev) => prev + 1);
+      setProofNotifications((prev) => {
+        const next = [
+          ...prev,
+          {
+            id: `proof_${data.proof_id}_${Date.now()}`,
+            proof_id: data.proof_id,
+            theorem_statement: data.theorem_statement,
+            source_type: data.source_type,
+            source_id: data.source_id,
+            timestamp: getTimestamp(data),
+          }
+        ];
+        return next.length > 3 ? next.slice(-3) : next;
+      });
+      addActivity({
+        event: 'novel_proof_discovered',
+        timestamp: getTimestamp(data),
+        message: `Novel proof discovered: ${data.theorem_statement}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('known_proof_verified', (data) => {
+      setProofRefreshToken((prev) => prev + 1);
+      addActivity({
+        event: 'known_proof_verified',
+        timestamp: getTimestamp(data),
+        message: `Verified known proof recorded for ${data.source_type} ${data.source_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_dependency_added', (data) => {
+      setLatestProofDependencyEvent(data);
+      setProofRefreshToken((prev) => prev + 1);
+      addActivity({
+        event: 'proof_dependency_added',
+        timestamp: getTimestamp(data),
+        message: `Dependency graph updated for ${data.theorem_name || data.proof_id}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_check_complete', (data) => {
+      setProofRefreshToken((prev) => prev + 1);
+      addActivity({
+        event: 'proof_check_complete',
+        timestamp: getTimestamp(data),
+        message: `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`,
         data
       });
     }));
@@ -1258,13 +1639,15 @@ function App() {
   // Autonomous handlers
   const handleAutonomousStart = async (researchPrompt) => {
     try {
+      const lmStudioEnabled = capabilities.lmStudioEnabled;
+
       // Convert frontend camelCase to backend snake_case for submitter_configs (includes OpenRouter fields)
       const submitterConfigs = autonomousConfig.submitter_configs?.map(cfg => ({
         submitter_id: cfg.submitterId,
-        provider: cfg.provider || 'lm_studio',
+        provider: normalizeRuntimeProvider(cfg.provider, lmStudioEnabled),
         model_id: cfg.modelId,
         openrouter_provider: cfg.openrouterProvider || null,
-        lm_studio_fallback_id: cfg.lmStudioFallbackId || null,
+        lm_studio_fallback_id: lmStudioEnabled ? (cfg.lmStudioFallbackId || null) : null,
         context_window: cfg.contextWindow,
         max_output_tokens: cfg.maxOutputTokens
       })) || [];
@@ -1273,31 +1656,51 @@ function App() {
         user_research_prompt: researchPrompt,
         submitter_configs: submitterConfigs,
         // Validator config with OpenRouter support
-        validator_provider: autonomousConfig.validator_provider,
+        validator_provider: normalizeRuntimeProvider(
+          autonomousConfig.validator_provider,
+          lmStudioEnabled
+        ),
         validator_model: autonomousConfig.validator_model,
         validator_openrouter_provider: autonomousConfig.validator_openrouter_provider,
-        validator_lm_studio_fallback: autonomousConfig.validator_lm_studio_fallback,
+        validator_lm_studio_fallback: lmStudioEnabled
+          ? autonomousConfig.validator_lm_studio_fallback
+          : null,
         validator_context_window: autonomousConfig.validator_context_window,
         validator_max_tokens: autonomousConfig.validator_max_tokens,
         // High-context submitter config with OpenRouter support
-        high_context_provider: autonomousConfig.high_context_provider,
+        high_context_provider: normalizeRuntimeProvider(
+          autonomousConfig.high_context_provider,
+          lmStudioEnabled
+        ),
         high_context_model: autonomousConfig.high_context_model,
         high_context_openrouter_provider: autonomousConfig.high_context_openrouter_provider,
-        high_context_lm_studio_fallback: autonomousConfig.high_context_lm_studio_fallback,
+        high_context_lm_studio_fallback: lmStudioEnabled
+          ? autonomousConfig.high_context_lm_studio_fallback
+          : null,
         high_context_context_window: autonomousConfig.high_context_context_window,
         high_context_max_tokens: autonomousConfig.high_context_max_tokens,
         // High-param submitter config with OpenRouter support
-        high_param_provider: autonomousConfig.high_param_provider,
+        high_param_provider: normalizeRuntimeProvider(
+          autonomousConfig.high_param_provider,
+          lmStudioEnabled
+        ),
         high_param_model: autonomousConfig.high_param_model,
         high_param_openrouter_provider: autonomousConfig.high_param_openrouter_provider,
-        high_param_lm_studio_fallback: autonomousConfig.high_param_lm_studio_fallback,
+        high_param_lm_studio_fallback: lmStudioEnabled
+          ? autonomousConfig.high_param_lm_studio_fallback
+          : null,
         high_param_context_window: autonomousConfig.high_param_context_window,
         high_param_max_tokens: autonomousConfig.high_param_max_tokens,
         // Critique submitter config with OpenRouter support
-        critique_submitter_provider: autonomousConfig.critique_submitter_provider,
+        critique_submitter_provider: normalizeRuntimeProvider(
+          autonomousConfig.critique_submitter_provider,
+          lmStudioEnabled
+        ),
         critique_submitter_model: autonomousConfig.critique_submitter_model,
         critique_submitter_openrouter_provider: autonomousConfig.critique_submitter_openrouter_provider,
-        critique_submitter_lm_studio_fallback: autonomousConfig.critique_submitter_lm_studio_fallback,
+        critique_submitter_lm_studio_fallback: lmStudioEnabled
+          ? autonomousConfig.critique_submitter_lm_studio_fallback
+          : null,
         critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
         critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
         tier3_enabled: autonomousConfig.tier3_enabled ?? false
@@ -1388,6 +1791,15 @@ function App() {
     setSelectedCritiquePaper(null);
   };
 
+  const handleDismissProofNotification = (notificationId) => {
+    setProofNotifications(prev => prev.filter(n => n.id !== notificationId));
+  };
+
+  const handleClickProofNotification = (proofId) => {
+    setSelectedProofId(proofId);
+    handleAutonomousTabSelect('auto-proofs');
+  };
+
   const handleModeChange = (nextMode) => {
     setAppMode(nextMode);
   };
@@ -1440,15 +1852,37 @@ function App() {
     setStartupSetupMessage('');
 
     const {
+      capabilities: nextCapabilities,
       lmAvailable,
       hasOpenRouterKey: keyPresent,
+      keyStatusReachable,
       hasUsableLmStudioChatModel,
     } = await syncProviderAvailability();
     if (keyPresent) {
       return;
     }
 
+    if (!keyStatusReachable) {
+      // Backend is still booting (e.g. Lean 4 warm start on a cold Mathlib
+      // cache can push this past 20s even though uvicorn itself should be up
+      // within seconds). Avoid opening the startup provider setup modal with
+      // stale "no key" info — the periodic poller re-checks every 5s and
+      // will surface the real state without forcing the user to re-enter a
+      // key that is already persisted.
+      return;
+    }
+
     const startupChoice = localStorage.getItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY);
+    if (!nextCapabilities.lmStudioEnabled) {
+      if (startupChoice === LM_STUDIO_STARTUP_CHOICE) {
+        setStartupSetupMessage(
+          'This deployment runs in hosted web mode, so LM Studio is intentionally disabled here. Configure OpenRouter to continue.'
+        );
+      }
+      setShowStartupSetupModal(true);
+      return;
+    }
+
     if (startupChoice === LM_STUDIO_STARTUP_CHOICE && lmAvailable && hasUsableLmStudioChatModel) {
       return;
     }
@@ -1481,6 +1915,13 @@ function App() {
   };
 
   const handleStartupLmStudioChoice = async () => {
+    if (!capabilities.lmStudioEnabled) {
+      setStartupSetupMessage(
+        'LM Studio is intentionally disabled in this deployment. Configure OpenRouter to continue.'
+      );
+      return;
+    }
+
     setCheckingLmStudioStartupChoice(true);
     setStartupSetupMessage('');
 
@@ -1527,14 +1968,15 @@ function App() {
     { id: 'auto-interface', label: 'Start Here: Autonomous Deep Research Controller', group: 'autonomous-main' },
     { id: 'auto-brainstorms', label: 'Autonomous Stage 1: Brainstorms', group: 'autonomous-main' },
     { id: 'auto-papers', label: 'Autonomous Stage 2: Papers', group: 'autonomous-main' },
+    { id: 'auto-proofs', label: 'Mathematical Proofs', group: 'autonomous-main' },
     ...(autonomousConfig.tier3_enabled ? [
-      { id: 'auto-final-answer', label: getFinalAnswerLabel(), subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-main' },
+      { id: 'auto-final-answer', label: getFinalAnswerLabel(), subtext: '(In Development / Highly Hallucinatory)', group: 'autonomous-main' },
     ] : []),
   ];
 
   const autonomousSettingsTabs = [
     { id: 'auto-stage2-history', label: 'Stage 2 Final Answers History', group: 'autonomous-settings' },
-    { id: 'auto-final-answer-library', label: 'Stage 3 Final Answers History', subtext: '(Very Experimental and Hallucinatory)', group: 'autonomous-settings' },
+    { id: 'auto-final-answer-library', label: 'Stage 3 Final Answers History', subtext: '(In Development / Highly Hallucinatory)', group: 'autonomous-settings' },
     { id: 'auto-logs', label: 'API Call Logs', group: 'autonomous-settings' },
     { id: 'auto-settings', label: 'Autonomous Model Selection & Settings', group: 'autonomous-settings' },
   ];
@@ -1590,7 +2032,7 @@ function App() {
   }, []);
 
   return (
-    <div className="app">
+    <div className={`app ${workflowPanelCollapsed ? 'workflow-panel-collapsed' : 'workflow-panel-expanded'}`}>
       {/* Banner Section */}
       <div className={`app-banner ${shimmerAccentsEnabled ? '' : 'no-shimmer'}`}>
         <div className="banner-content">
@@ -1602,6 +2044,35 @@ function App() {
           <p className="banner-variant">A Prototype Artificial Superintelligence - Novelty Seeking Autonomous S.T.E.M. Researcher For Automated Theorem Generation</p>
         </div>
       </div>
+
+      {/* Update Notice Banner — dismissible per session, reappears on restart */}
+      {updateNotice && !updateNoticeDismissed && (
+        <div className="update-notice-banner">
+          <div className="update-notice-content">
+            <span className="update-notice-icon">&#9432;</span>
+            <span className="update-notice-text">
+              <strong>Update available:</strong>{' '}
+              {updateNotice.installed_version} ({updateNotice.installed_commit})
+              {' '}&rarr;{' '}
+              {updateNotice.available_version} ({updateNotice.available_commit})
+              {' '}&mdash;{' '}
+              <span className="update-notice-detail">
+                {updateNotice.can_auto_apply
+                  ? 'Restart the launcher to apply this update.'
+                  : `Install layout: ${updateNotice.install_layout}. Pull the latest from GitHub main to update.`}
+              </span>
+            </span>
+          </div>
+          <button
+            className="update-notice-dismiss"
+            onClick={() => setUpdateNoticeDismissed(true)}
+            aria-label="Dismiss update notice"
+            title="Dismiss"
+          >
+            &#10005;
+          </button>
+        </div>
+      )}
       
       {/* CRITICAL: Boost buttons are ETERNAL - they NEVER disappear */}
       {/* These buttons are fixed-position, high z-index, and unconditionally rendered */}
@@ -1622,43 +2093,73 @@ function App() {
             <option value="manual">Advanced Manual S.T.E.M. ASI</option>
           </select>
         </div>
-        <button 
-          className="boost-btn"
-          onClick={() => setShowBoostModal(true)}
-          title="Configure API Boost"
-        >
-          ⚡ API Boost
-        </button>
-        <button 
-          className="openrouter-key-btn"
+        <div className="boost-control-row">
+          <div className="help-tooltip-anchor">
+            <button
+              type="button"
+              className="help-tooltip-btn"
+              aria-label="Learn about API Boost"
+              onMouseEnter={() => setShowApiBoostTooltip(true)}
+              onMouseLeave={() => setShowApiBoostTooltip(false)}
+              onFocus={() => setShowApiBoostTooltip(true)}
+              onBlur={() => setShowApiBoostTooltip(false)}
+            >
+              ?
+            </button>
+            {showApiBoostTooltip && (
+              <div className="help-tooltip-popup">
+                Use this mode to change your model selections mid-run. It is a good way to use your free daily OpenRouter credits without interrupting your research run. For the easiest setup, select your free model and enable "Use boost as next API call when available." Some free models may be more rate-limited on OpenRouter than others.
+              </div>
+            )}
+          </div>
+          <button
+            className="boost-btn"
+            onClick={() => setShowBoostModal(true)}
+            title="Configure API Boost"
+          >
+            API Boost
+          </button>
+        </div>
+        <button
+          className={`header-status-chip ${
+            hasOpenRouterKey === true
+              ? 'header-status-chip--ready'
+              : hasOpenRouterKey === false
+                ? 'header-status-chip--inactive'
+                : 'header-status-chip--pending'
+          }`}
           onClick={() => {
             setOpenRouterKeyReason('setup');
             setShowOpenRouterKeyModal(true);
           }}
-          title="Configure OpenRouter API Key"
-          style={{
-            marginLeft: '0.5rem',
-            padding: '0.4rem 0.8rem',
-            backgroundColor: hasOpenRouterKey ? '#2d5a27' : '#153815',
-            border: hasOpenRouterKey ? '1px solid #4CAF50' : '1px solid #1eff1c',
-            borderRadius: '4px',
-            color: '#fff',
-            cursor: 'pointer',
-            fontSize: '0.85rem',
-          }}
+          title={
+            hasOpenRouterKey === true
+              ? 'OpenRouter API key is configured'
+              : hasOpenRouterKey === false
+                ? 'Configure OpenRouter API Key'
+                : 'Checking OpenRouter key status...'
+          }
         >
-          {hasOpenRouterKey ? 'OpenRouter ✓' : 'Set OpenRouter Key'}
+          {hasOpenRouterKey === true
+            ? 'OpenRouter ✓'
+            : hasOpenRouterKey === false
+              ? 'Set OpenRouter Key'
+              : 'OpenRouter…'}
         </button>
-        {!lmStudioAvailable && (
-          <span style={{ 
-            marginLeft: '0.5rem', 
-            color: '#1eff1c', 
-            fontSize: '0.8rem',
-            padding: '0.25rem 0.5rem',
-            backgroundColor: 'rgba(30, 255, 28, 0.1)',
-            borderRadius: '4px',
-          }}>
-            LM Studio Offline
+        {capabilities.lmStudioEnabled ? (
+          <span
+            className={`header-status-chip ${
+              lmStudioAvailable ? 'header-status-chip--ready' : 'header-status-chip--inactive'
+            }`}
+            title={lmStudioAvailable
+              ? `LM Studio is online (${lmStudioStatus.model_count || 0} model${(lmStudioStatus.model_count || 0) === 1 ? '' : 's'} loaded)`
+              : (lmStudioStatus.error || 'LM Studio server is not reachable at 127.0.0.1:1234')}
+          >
+            {lmStudioAvailable ? 'LM Studio ✓' : 'LM Studio Offline'}
+          </span>
+        ) : capabilities.genericMode && (
+          <span className="header-status-chip header-status-chip--hosted">
+            Hosted Web Mode
           </span>
         )}
       </div>
@@ -1798,6 +2299,14 @@ function App() {
               }}
             />
           )}
+          {activeTab === 'auto-proofs' && (
+            <MathematicalProofs
+              api={autonomousAPI}
+              refreshToken={proofRefreshToken}
+              selectedProofId={selectedProofId}
+              latestDependencyEvent={latestProofDependencyEvent}
+            />
+          )}
           {activeTab === 'auto-final-answer' && (
             <FinalAnswerView
               api={autonomousAPI}
@@ -1826,11 +2335,16 @@ function App() {
             <AggregatorInterface
               config={config}
               setConfig={setConfig}
+              capabilities={capabilities}
               anyWorkflowRunning={anyWorkflowRunning}
             />
           )}
           {activeTab === 'aggregator-settings' && (
-            <AggregatorSettings config={config} setConfig={setConfig} />
+            <AggregatorSettings
+              config={config}
+              setConfig={setConfig}
+              capabilities={capabilities}
+            />
           )}
           {activeTab === 'aggregator-logs' && <AggregatorLogs />}
           {activeTab === 'aggregator-results' && <LiveResults />}
@@ -1838,10 +2352,13 @@ function App() {
           {activeTab === 'compiler-interface' && (
             <CompilerInterface
               activeTab={activeTab}
+              capabilities={capabilities}
               anyWorkflowRunning={anyWorkflowRunning}
             />
           )}
-          {activeTab === 'compiler-settings' && <CompilerSettings />}
+          {activeTab === 'compiler-settings' && (
+            <CompilerSettings capabilities={capabilities} />
+          )}
           {activeTab === 'compiler-logs' && <CompilerLogs />}
           {activeTab === 'compiler-live-paper' && <LivePaper />}
         </div>
@@ -1853,6 +2370,7 @@ function App() {
           config={autonomousConfig}
           onConfigChange={setAutonomousConfig}
           models={models}
+          capabilities={capabilities}
           isRunning={autonomousRunning}
         />
       )}
@@ -1872,7 +2390,15 @@ function App() {
                   Disclaimer & Quickstart
               </h2>
               <p style={{ fontSize: '1.1rem', lineHeight: '1.6', marginBottom: '1.5rem', color: '#1eff1c' }}>
-                <strong>QUICKSTART:</strong> In LM Studio, load the embedding model <code>nomic-ai/nomic-embed-text-v1.5</code> by <strong>Nomic AI</strong> (optional but recommended), or use only an OpenRouter API key instead of LM Studio. You must leave your PC on and awake during runtime, the program will often run for days without interruption.
+                {capabilities.lmStudioEnabled ? (
+                  <>
+                    <strong>QUICKSTART:</strong> In LM Studio, load the embedding model <code>nomic-ai/nomic-embed-text-v1.5</code> by <strong>Nomic AI</strong> (optional but recommended), or use only an OpenRouter API key instead of LM Studio. You must leave your PC on and awake during runtime, the program will often run for days without interruption.
+                  </>
+                ) : (
+                  <>
+                    <strong>QUICKSTART:</strong> This hosted deployment uses OpenRouter-only inference. Set your OpenRouter API key, choose a profile or role models, and then begin your research run. LM Studio is intentionally disabled in this environment.
+                  </>
+                )}
               </p>
               <div
                 style={{
@@ -1896,7 +2422,7 @@ function App() {
                   Legal Disclaimer
                 </p>
                 <p style={{ fontSize: '0.95rem', lineHeight: '1.5', margin: 0 }}>
-                  MOTO is an experimental prototype system and remains under active development. It directs selected AI models to generate novel solution attempts in response to your prompt. Outputs may be incorrect, incomplete, misleading, fabricated, poorly reasoned, or otherwise unsuitable for reliance without independent review, especially for high-stakes, academic, financial, legal, medical, engineering, or operational use.
+                  MOTO is a prototype system under active development. It directs selected AI models to generate novel solution attempts in response to your prompt. Outputs may be incorrect, incomplete, misleading, fabricated, poorly reasoned, or otherwise unsuitable for reliance without independent review, especially for high-stakes, academic, financial, legal, medical, engineering, or operational use.
                   <br />
                   <br />
                   This software and all generated content are provided as-is and at your own risk. By using MOTO, you acknowledge that you are solely responsible for reviewing, validating, and deciding how to use any output, and that the developers, operators, and contributors are not responsible or liable for incorrect solutions, hallucinations, omissions, formatting issues, infinite loops, wasted API calls, model or provider failures, data loss, third-party charges, or any direct or indirect loss, damage, cost, or liability resulting from use of the program or its outputs.
@@ -1915,6 +2441,7 @@ function App() {
 
       <StartupProviderSetupModal
         isOpen={showStartupSetupModal}
+        capabilities={capabilities}
         lmStudioAvailable={lmStudioAvailable}
         hasUsableLmStudioChatModel={Boolean(lmStudioStatus.has_usable_chat_model)}
         lmStudioModelCount={lmStudioStatus.model_count || 0}
@@ -1929,6 +2456,7 @@ function App() {
       <BoostControlModal 
         isOpen={showBoostModal}
         onClose={() => setShowBoostModal(false)}
+        capabilities={capabilities}
       />
       
       {/* OpenRouter API Key Modal */}
@@ -1937,6 +2465,7 @@ function App() {
         onClose={handleCloseOpenRouterKeyModal}
         onKeySet={handleOpenRouterKeySet}
         reason={openRouterKeyReason}
+        capabilities={capabilities}
       />
       
       {/* OpenRouter Privacy Warning Modal */}
@@ -1944,6 +2473,13 @@ function App() {
         isOpen={showPrivacyWarning}
         onClose={() => setShowPrivacyWarning(false)}
         errorData={privacyWarningData}
+        capabilities={capabilities}
+      />
+
+      <ProofNotificationStack
+        notifications={proofNotifications}
+        onDismiss={handleDismissProofNotification}
+        onClickNotification={handleClickProofNotification}
       />
       
       {/* Critique Notification Stack - Persists across all screens */}
@@ -1989,31 +2525,14 @@ function App() {
           </div>
           
           <div className="footer-section footer-links">
-            <a 
-              href="https://intrafere.com/moto-autonomous-home-ai/" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="footer-link"
-            >
-              <span className="footer-icon">ℹ️</span>
-              Read More About MOTO ASI
-            </a>
             <a
               href="https://intrafere.com/structured-brainstorming-validated-feedback/"
               target="_blank"
               rel="noopener noreferrer"
-              className="footer-link"
+              className="footer-link footer-link-github"
             >
               <span className="footer-icon">ℹ️</span>
               How MOTO's Superintelligence Works
-            </a>
-            <a 
-              href="https://intrafere.com/moto-news/" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="footer-link footer-link-news"
-            >
-              MOTO News and Updates
             </a>
             <a
               href="https://intrafere.com/order-a-custom-orchestrator/"

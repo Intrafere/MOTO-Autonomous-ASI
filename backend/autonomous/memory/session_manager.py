@@ -16,6 +16,7 @@ from backend.shared.path_safety import (
     resolve_path_within_root,
     validate_single_path_component,
 )
+from backend.shared.config import system_config
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class SessionManager:
         └── {sanitized_prompt}_{timestamp}/
             ├── brainstorms/
             ├── papers/
+            ├── proofs/
             ├── final_answer/
             └── session_metadata.json
     """
@@ -120,7 +122,7 @@ class SessionManager:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         return f"{sanitized}_{timestamp}"
     
-    async def initialize(self, user_prompt: str, base_dir: str = "backend/data/auto_sessions") -> Path:
+    async def initialize(self, user_prompt: str, base_dir: Optional[str] = None) -> Path:
         """
         Initialize a new session for the given user prompt.
         
@@ -134,7 +136,7 @@ class SessionManager:
             Path to the session folder
         """
         async with self._lock:
-            self._base_dir = Path(base_dir)
+            self._base_dir = Path(base_dir or system_config.auto_sessions_base_dir)
             self._user_prompt = user_prompt
             self._session_id = self._generate_session_id(user_prompt)
             self._session_path = self._base_dir / self._session_id
@@ -143,6 +145,7 @@ class SessionManager:
             self._session_path.mkdir(parents=True, exist_ok=True)
             (self._session_path / "brainstorms").mkdir(exist_ok=True)
             (self._session_path / "papers").mkdir(exist_ok=True)
+            (self._session_path / "proofs").mkdir(exist_ok=True)
             (self._session_path / "final_answer").mkdir(exist_ok=True)
             
             # Save session metadata
@@ -162,7 +165,7 @@ class SessionManager:
             
             return self._session_path
     
-    async def resume_session(self, session_id: str, base_dir: str = "backend/data/auto_sessions") -> Optional[Path]:
+    async def resume_session(self, session_id: str, base_dir: Optional[str] = None) -> Optional[Path]:
         """
         Resume an existing session by ID.
         
@@ -174,7 +177,7 @@ class SessionManager:
             Path to the session folder, or None if not found
         """
         async with self._lock:
-            self._base_dir = Path(base_dir)
+            self._base_dir = Path(base_dir or system_config.auto_sessions_base_dir)
             try:
                 safe_session_id = validate_single_path_component(session_id, "session ID")
                 self._session_path = resolve_path_within_root(self._base_dir, safe_session_id)
@@ -223,6 +226,10 @@ class SessionManager:
         # Save
         async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
             await f.write(json.dumps(metadata, indent=2))
+
+    async def update_metadata(self, updates: Dict[str, Any]) -> None:
+        """Public wrapper for updating session metadata fields."""
+        await self._update_metadata(updates)
     
     def get_brainstorms_dir(self) -> Path:
         """Get brainstorms subdirectory for current session."""
@@ -235,6 +242,12 @@ class SessionManager:
         if not self._session_path:
             raise RuntimeError("Session not initialized. Call initialize() first.")
         return self._session_path / "papers"
+
+    def get_proofs_dir(self) -> Path:
+        """Get proofs subdirectory for current session."""
+        if not self._session_path:
+            raise RuntimeError("Session not initialized. Call initialize() first.")
+        return self._session_path / "proofs"
     
     def get_final_answer_dir(self) -> Path:
         """Get final_answer subdirectory for current session."""
@@ -264,7 +277,7 @@ class SessionManager:
             self._session_id = None
             logger.info("Session manager cleared")
     
-    async def find_interrupted_session(self, base_dir: str = "backend/data/auto_sessions") -> Optional[Dict[str, Any]]:
+    async def find_interrupted_session(self, base_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Find the most recent RESUMABLE session in its workflow_state.
         
@@ -283,7 +296,7 @@ class SessionManager:
             Session info dict with session_id, path, user_prompt, workflow_state
             Or None if no resumable session found
         """
-        base_path = Path(base_dir)
+        base_path = Path(base_dir or system_config.auto_sessions_base_dir)
         
         if not base_path.exists():
             return None
@@ -300,7 +313,10 @@ class SessionManager:
                 
             try:
                 async with aiofiles.open(workflow_state_path, 'r', encoding='utf-8') as f:
-                    workflow_state = json.loads(await f.read())
+                    raw = await f.read()
+                if not raw.strip().strip('\x00'):
+                    continue  # Empty or null-padded file — skip silently
+                workflow_state = json.loads(raw)
                 
                 # Check if this session is resumable
                 # Resumable means: has a tier AND (has a topic OR has completed papers)
@@ -326,7 +342,7 @@ class SessionManager:
                         "was_running": workflow_state.get("is_running", False)
                     })
             except Exception as e:
-                logger.warning(f"Failed to read workflow state from {session_dir}: {e}")
+                logger.debug(f"Skipping unreadable workflow state in {session_dir.name}: {e}")
                 continue
         
         if not resumable_sessions:
@@ -341,14 +357,14 @@ class SessionManager:
         
         return most_recent
 
-    async def list_all_sessions(self, base_dir: str = "backend/data/auto_sessions") -> List[Dict[str, Any]]:
+    async def list_all_sessions(self, base_dir: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         List all research sessions.
         
         Returns:
             List of session metadata dictionaries
         """
-        base_path = Path(base_dir)
+        base_path = Path(base_dir or system_config.auto_sessions_base_dir)
         sessions = []
         
         if not base_path.exists():

@@ -15,15 +15,16 @@ import httpx
 import asyncio
 import time
 import os
+from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from backend.shared.config import rag_config
+from backend.shared.config import rag_config, system_config
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Ensure logs directory exists
-os.makedirs("backend/logs", exist_ok=True)
+# Ensure instance-scoped logs directory exists
+Path(system_config.logs_dir).mkdir(parents=True, exist_ok=True)
 
 
 class LMStudioClient:
@@ -117,27 +118,31 @@ class LMStudioClient:
                 return []
             
             result_stdout = stdout.decode() if stdout else ""
+            result_stderr = stderr.decode(errors="replace").strip() if stderr else ""
             result_returncode = process.returncode
-            
-            if result_returncode == 0 and result_stdout:
-                # Parse output to extract model IDs
-                models = []
-                lines = result_stdout.strip().split('\n')
-                
-                for line in lines:
-                    # Skip headers, separators, and empty lines
-                    if not line or line.startswith('-') or line.startswith('ID') or line.startswith('Model'):
-                        continue
-                    
-                    # Extract model ID (first column)
-                    parts = line.strip().split()
-                    if parts:
-                        models.append(parts[0])
-                
+
+            if result_returncode == 0:
+                # Exit code 0 means success. Empty stdout simply means no models
+                # are loaded — that is a normal state, not an error.
+                models: List[str] = []
+                if result_stdout:
+                    for line in result_stdout.strip().split('\n'):
+                        # Skip headers, separators, and empty lines
+                        if not line or line.startswith('-') or line.startswith('ID') or line.startswith('Model'):
+                            continue
+                        # Extract model ID (first column)
+                        parts = line.strip().split()
+                        if parts:
+                            models.append(parts[0])
                 logger.debug(f"Loaded models from 'lms ps': {models}")
                 return models
             else:
-                logger.warning(f"'lms ps' returned code {result_returncode}")
+                if result_stderr:
+                    logger.warning(
+                        f"'lms ps' returned non-zero code {result_returncode}: {result_stderr}"
+                    )
+                else:
+                    logger.warning(f"'lms ps' returned non-zero code {result_returncode}")
                 return []
                 
         except FileNotFoundError:
@@ -154,19 +159,24 @@ class LMStudioClient:
         temperature: float = 0.0,  # Default to deterministic generation - evolving context provides diversity
         max_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, str]] = None,
-        skip_semaphore: bool = False
+        skip_semaphore: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Generate a completion using LM Studio API with validation and retry.
         
         Args:
             skip_semaphore: If True, skips model semaphore acquisition (for non-blocking operations)
+            tools: Optional OpenAI-compatible tool schemas (LM Studio 0.3+).
+            tool_choice: Optional tool-choice directive.
         """
         # Get model-specific semaphore (allows different models to run in parallel)
         if skip_semaphore:
             # Direct execution without semaphore
             return await self._execute_completion_request(
-                model, messages, temperature, max_tokens, response_format
+                model, messages, temperature, max_tokens, response_format,
+                tools=tools, tool_choice=tool_choice,
             )
         
         model_semaphore = await self._get_model_semaphore(model)
@@ -174,7 +184,8 @@ class LMStudioClient:
         # ACQUIRE THIS MODEL'S SEMAPHORE to prevent concurrent requests to same model
         async with model_semaphore:
             return await self._execute_completion_request(
-                model, messages, temperature, max_tokens, response_format
+                model, messages, temperature, max_tokens, response_format,
+                tools=tools, tool_choice=tool_choice,
             )
     
     async def _execute_completion_request(
@@ -183,7 +194,9 @@ class LMStudioClient:
         messages: List[Dict[str, str]],
         temperature: float,
         max_tokens: Optional[int],
-        response_format: Optional[Dict[str, str]]
+        response_format: Optional[Dict[str, str]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Execute the actual completion request (extracted for semaphore bypass)."""
         # Calculate approximate token count for logging
@@ -206,6 +219,16 @@ class LMStudioClient:
         
         if response_format:
             payload["response_format"] = response_format
+        
+        # OpenAI-compatible tool calling (LM Studio 0.3+). We pass the tool
+        # list straight through; LM Studio's OpenAI-compatible server either
+        # surfaces tool_calls on the message or simply returns a normal
+        # completion if the loaded model ignores tool schemas. Callers
+        # detect the latter and fall back to single-shot.
+        if tools:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
         
         # NOTE: Stop sequences were removed because they caused premature truncation
         # with certain models (e.g., Grok 4.1). Models will now generate until max_tokens
@@ -407,11 +430,16 @@ class LMStudioClient:
                 raise
     
     async def test_connection(self) -> bool:
-        """Test connection to LM Studio."""
+        """Test connection to LM Studio (bounded, never blocks startup)."""
         try:
-            models = await self.list_models()
+            # Hard cap the startup probe so a LM Studio process that bound the
+            # port but never responds cannot stall the FastAPI lifespan.
+            models = await asyncio.wait_for(self.list_models(), timeout=5.0)
             logger.info(f"Successfully connected to LM Studio. Found {len(models)} models.")
             return True
+        except asyncio.TimeoutError:
+            logger.warning("LM Studio startup probe timed out after 5s; treating as unavailable.")
+            return False
         except Exception as e:
             logger.error(f"Failed to connect to LM Studio: {e}")
             return False
@@ -440,17 +468,44 @@ class LMStudioClient:
             # First check if server is reachable
             response = await self.client.get(f"{self.base_url}/v1/models", timeout=5.0)
             response.raise_for_status()
-            
+
             # Server is reachable
             result["available"] = True
-            
-            # Get loaded models
-            models = await self.get_loaded_models()
+
+            # Extract models from the /v1/models response as a reliable fallback.
+            # The `lms ps` CLI is preferred (it returns instance IDs), but the CLI
+            # may be missing from PATH or slow/timing out during startup while
+            # nomic is still loading. In either case we must NOT downgrade a
+            # successful /v1/models response to "no models" — that produces a
+            # phantom "LM Studio Offline" state even though embedding calls
+            # are succeeding.
+            http_models: List[str] = []
+            try:
+                data = response.json()
+                for entry in data.get("data", []) or []:
+                    if isinstance(entry, dict):
+                        model_id = entry.get("id")
+                        if isinstance(model_id, str) and model_id:
+                            http_models.append(model_id)
+            except Exception as parse_err:
+                logger.debug(f"Could not parse /v1/models response body: {parse_err}")
+
+            cli_models = await self.get_loaded_models()
+
+            if cli_models:
+                models = cli_models
+                source = "lms ps"
+            else:
+                models = http_models
+                source = "/v1/models"
+
             result["models"] = models
             result["model_count"] = len(models)
             result["has_models"] = len(models) > 0
-            
-            logger.info(f"LM Studio availability check: {len(models)} models loaded")
+
+            logger.debug(
+                f"LM Studio availability check: {len(models)} models loaded (source: {source})"
+            )
             return result
             
         except httpx.ConnectError:

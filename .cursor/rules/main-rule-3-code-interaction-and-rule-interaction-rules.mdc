@@ -2,12 +2,22 @@
 alwaysApply: true
 ---
 
-# Three Code and Rule Interaction Rules
+# Code and Rule Interaction Rules
 
-1.) The code is a product actively in development but is LARGELY a perfectly functioning program. When making fixes, corrections, etc. DO NOT OVER BUILD, keep the code elegant, simple and optimized for future edits and readability. Always remove and cleanup old code, do not comment out code or leave broken/unused code in this program unless specifically directed by the user.
+1.) Never introduce a new wait to hault the program unless specifically directed by the user. The program is designed to run until its goal completion or the operator presses stop. Infinite loops are probabalistically avoided due to the feedback mechanics.
 
-1.) Always obey the rules in regards to how the code should work. The only time you should deviate from the rules is if there is a fix required in the code or the user is requesting an edit that should change the code and any accompanying rules. The rules should always be brought back in line with the code however the rules should guide the code development and navigation.
+2.) Always remove and cleanup old code, do not comment out code or leave broken/unused code in this program unless specifically directed by the user.
 
-2.) The rule(s) should always be updated if any code changes reflect on the rule(s).
+3.) Always obey the rules in regards to how the code should work. The only time you should deviate from the rules is if there is a fix required in the code or the user is requesting an edit that should change the code and any accompanying rules. The rules should always be brought back in line with the code however the rules should guide the code development and navigation.
 
-3.) Any rule addition(s) and rule content addition(s) should be clear, very concise, very high level overview only. The rules are extensive and we must conserve token-count to maintain efficient direct injection usage. 
+4.) The rule(s) should always be updated if any code changes reflect on the rule(s).
+
+5.) Any rule addition(s) and rule content addition(s) should be clear, very concise, very high level overview only. The rules are extensive and we must conserve token-count to maintain efficient direct injection usage. 
+
+6.) For config/preset files with repeated literal values, never patch by replacing a shared literal alone. Anchor edits to the exact object/block being changed and verify the diff only touches the intended target.
+
+7.) Any REST shape, auth contract, WebSocket event, or `/api/features` capability change that affects the web wrapper must update **code, the relevant rule(s), and `api_contract_version` in `/api/features`** in the same approved merge. The live backend's `GET /openapi.json` is the machine-readable REST schema contract.
+
+8.) Only ONE workflow mode may be active at a time (Aggregator, Compiler, or Autonomous Research). This constraint applies identically in both default mode and generic mode.
+
+9.) Lean 4 and SMT features are always gated on `lean4_enabled`, `lean4_lsp_enabled`, and `smt_enabled` runtime flags. All three default false, must stay silent and side-effect-free when disabled, and must never ship Lean or Z3 toolchains or Python wheels into `requirements-generic.txt`, `Dockerfile`, or `docker/entrypoint.sh` (hosted image stays Lean-free and Z3-free). Lean 4 is authoritative for every stored proof; SMT contributes hints only.

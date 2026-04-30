@@ -1,9 +1,11 @@
 """
 Pydantic models for the ASI Aggregator System.
 """
-from typing import List, Dict, Optional, Any, Literal
-from pydantic import BaseModel, Field
+from dataclasses import dataclass
 from datetime import datetime
+from typing import List, Dict, Optional, Any, Literal
+
+from pydantic import BaseModel, Field
 
 
 class DocumentChunk(BaseModel):
@@ -462,6 +464,161 @@ class AutonomousResearchStartRequest(BaseModel):
     critique_submitter_max_tokens: int = 25000
     # Tier 3 Final Answer settings
     tier3_enabled: bool = False  # Default OFF — system stops at Tier 2 paper library
+
+
+# ============================================================================
+# LEAN 4 PROOF INTEGRATION MODELS
+# ============================================================================
+
+
+class MathlibLemmaHint(BaseModel):
+    """A locally confirmed Mathlib declaration that may help a proof attempt."""
+    requested_name: str
+    full_name: str = ""
+    declaration: str = ""
+    file_path: str = ""
+    line_number: int = 0
+
+
+class SmtHint(BaseModel):
+    """Optional SMT-derived guidance that can seed Lean proof attempts."""
+    result: Literal["sat", "unsat", "unknown"] = "unknown"
+    suggested_tactics: List[str] = Field(default_factory=list)
+    smtlib: str = ""
+
+
+class ProofCandidate(BaseModel):
+    """A theorem candidate extracted from a brainstorm or paper."""
+    theorem_id: str
+    statement: str
+    formal_sketch: str = ""
+    source_excerpt: str = ""
+    origin_source_id: str = ""
+    relevant_lemmas: List[MathlibLemmaHint] = Field(default_factory=list)
+    smt_hint: Optional[SmtHint] = None
+
+
+class FailedProofCandidate(BaseModel):
+    """Persisted failed theorem candidate that can be retried later."""
+    source_brainstorm_id: str
+    theorem_id: str
+    theorem_statement: str
+    formal_sketch: str = ""
+    source_excerpt: str = ""
+    error_summary: str = ""
+    suggested_lemma_targets: List[str] = Field(default_factory=list)
+    retry_count: int = 0
+    last_retry_source_id: str = ""
+    resolved_proof_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class ProofRoleConfigSnapshot(BaseModel):
+    """Persisted model/runtime config for proof-related agents."""
+    provider: Literal["lm_studio", "openrouter"] = "lm_studio"
+    model_id: str = ""
+    openrouter_provider: Optional[str] = None
+    lm_studio_fallback_id: Optional[str] = None
+    context_window: int = 131072
+    max_output_tokens: int = 25000
+
+
+class ProofRuntimeConfigSnapshot(BaseModel):
+    """Persisted proof runtime config used for manual proof checks."""
+    brainstorm: ProofRoleConfigSnapshot
+    paper: ProofRoleConfigSnapshot
+    validator: ProofRoleConfigSnapshot
+
+
+class ProofDependency(BaseModel):
+    """One dependency edge for a verified proof."""
+    kind: Literal["mathlib", "moto"]
+    name: str
+    source_ref: str = ""
+
+
+@dataclass
+class SmtResult:
+    """Result of one SMT solver check."""
+    success: bool
+    result: str = ""
+    stdout: str = ""
+    stderr: str = ""
+
+
+class ProofAttemptFeedback(BaseModel):
+    """Lean 4 attempt feedback captured for one theorem attempt."""
+    attempt: int
+    theorem_id: str
+    reasoning: str = ""
+    lean_code: str = ""
+    error_output: str = ""
+    goal_states: str = ""
+    strategy: Literal["full_script", "tactic_script"] = "full_script"
+    tactic_trace: List[str] = Field(default_factory=list)
+    success: bool = False
+
+
+class ProofRecord(BaseModel):
+    """Stored proof metadata for the proof library and prompt injection."""
+    proof_id: str
+    theorem_id: str = ""
+    theorem_statement: str
+    theorem_name: str = ""
+    formal_sketch: str = ""
+    source_type: Literal["brainstorm", "paper"]
+    source_id: str
+    source_title: str = ""
+    solver: str = "Lean 4"
+    lean_code: str
+    novel: bool = False
+    novelty_reasoning: str = ""
+    verification_notes: str = ""
+    attempt_count: int = 0
+    attempts: List[ProofAttemptFeedback] = Field(default_factory=list)
+    dependencies: List[ProofDependency] = Field(default_factory=list)
+    solver_hints: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ProofAttemptResult(BaseModel):
+    """Outcome of one theorem proof-attempt loop."""
+    theorem_id: str
+    theorem_statement: str
+    lean_code: str = ""
+    success: bool = False
+    novel: bool = False
+    attempts_used: int = 0
+    proof_id: Optional[str] = None
+    error_summary: str = ""
+
+
+class ProofStageResult(BaseModel):
+    """Aggregate outcome of one proof-verification stage run."""
+    source_type: Literal["brainstorm", "paper"]
+    source_id: str
+    total_candidates: int = 0
+    verified_count: int = 0
+    novel_count: int = 0
+    results: List[ProofAttemptResult] = Field(default_factory=list)
+
+
+class ProofCheckRequest(BaseModel):
+    """Request body for manually triggering a proof check."""
+    source_type: Literal["brainstorm", "paper"]
+    source_id: str
+
+
+class ProofSettingsUpdateRequest(BaseModel):
+    """Request body for updating runtime Lean 4 proof settings."""
+    enabled: bool
+    timeout: int = Field(default=120, ge=10, le=3600)
+    lean4_lsp_enabled: Optional[bool] = None
+    lean4_lsp_idle_timeout: Optional[int] = Field(default=None, ge=60, le=7200)
+    smt_enabled: Optional[bool] = None
+    z3_path: Optional[str] = None
+    smt_timeout: Optional[int] = Field(default=None, ge=1, le=600)
 
 
 # ============================================================================

@@ -475,14 +475,14 @@
 
 /* Rating color classes (text) */
 .critique-color--emerald { color: #34d399; }
-.critique-color--blue    { color: #60a5fa; }
+.critique-color--blue    { color: #18cc17; }
 .critique-color--yellow  { color: #facc15; }
 .critique-color--orange  { color: #fb923c; }
 .critique-color--red     { color: #f87171; }
 
 /* Rating color classes (bar fill) */
 .critique-bg--emerald { background-color: #10b981; }
-.critique-bg--blue    { background-color: #3b82f6; }
+.critique-bg--blue    { background-color: #18cc17; }
 .critique-bg--yellow  { background-color: #eab308; }
 .critique-bg--orange  { background-color: #f97316; }
 .critique-bg--red     { background-color: #ef4444; }

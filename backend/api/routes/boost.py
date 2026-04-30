@@ -289,14 +289,20 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
         
         client = OpenRouterClient(_resolve_boost_api_key(api_key))
         try:
-            providers = await client.get_model_providers(model_id)
+            endpoints = await client.get_model_endpoints(model_id)
+            providers = sorted({
+                endpoint.get("provider_name")
+                for endpoint in endpoints
+                if isinstance(endpoint.get("provider_name"), str) and endpoint.get("provider_name")
+            })
         finally:
             await client.close()
         
         return {
             "success": True,
             "model_id": model_id,
-            "providers": providers
+            "providers": providers,
+            "endpoints": endpoints
         }
     except HTTPException:
         raise

@@ -486,7 +486,7 @@ class Coordinator:
         if should_pause != self.should_pause_submitters:
             self.should_pause_submitters = should_pause
             if should_pause:
-                logger.warning(f"Queue size ({queue_size}) >= threshold ({system_config.queue_overflow_threshold}). Pausing submitters.")
+                logger.info(f"Queue size ({queue_size}) >= threshold ({system_config.queue_overflow_threshold}). Pausing submitters.")
                 await self._broadcast("submitters_paused", {
                     "queue_size": queue_size,
                     "threshold": system_config.queue_overflow_threshold
@@ -496,6 +496,25 @@ class Coordinator:
                 await self._broadcast("submitters_resumed", {
                     "queue_size": queue_size
                 })
+    
+    async def should_pause_submitter(self, submitter_id: int) -> bool:
+        """
+        Per-submitter fairness gate.
+        
+        Returns True if:
+          - the global queue-overflow pause is active (queue >= queue_overflow_threshold), OR
+          - this specific submitter already has more than per_submitter_queue_threshold
+            of its own submissions waiting in the queue.
+        
+        The per-submitter cap is skipped when only one submitter is configured
+        (no one else to be fair to - the global cap alone governs throughput).
+        """
+        if self.should_pause_submitters:
+            return True
+        if len(self.submitters) <= 1:
+            return False
+        own_count = await queue_manager.count_for_submitter(submitter_id)
+        return own_count > system_config.per_submitter_queue_threshold
     
     async def start(self) -> None:
         """Start the aggregator system."""

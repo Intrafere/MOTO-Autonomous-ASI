@@ -12,7 +12,8 @@ class WebSocketService {
 
   connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const wsPath = import.meta.env.VITE_MOTO_WS_PATH || '/ws';
+    const wsUrl = `${protocol}//${window.location.host}${wsPath}`;
     
     this.ws = new WebSocket(wsUrl);
     

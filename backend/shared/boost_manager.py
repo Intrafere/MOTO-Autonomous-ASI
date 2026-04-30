@@ -22,13 +22,10 @@ import logging
 import os
 from typing import Optional, Set, Callable, Any, Dict, List
 
+from backend.shared.config import system_config
 from backend.shared.models import BoostConfig
 
 logger = logging.getLogger(__name__)
-
-# Persistence file path
-BOOST_STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'boost_state.json')
-
 
 # Category prefixes for different roles — labels match Settings panel titles exactly.
 # Autonomous Research agents share the same prefixes as their parent roles
@@ -99,12 +96,18 @@ class BoostManager:
         self._load_state()
         
         logger.info("BoostManager initialized")
+
+    @staticmethod
+    def _get_state_file() -> str:
+        """Return the instance-scoped boost state file."""
+        return str(os.path.join(system_config.data_dir, "boost_state.json"))
     
     def _load_state(self) -> None:
         """Load persisted boost state from disk."""
         try:
-            if os.path.exists(BOOST_STATE_FILE):
-                with open(BOOST_STATE_FILE, 'r', encoding='utf-8') as f:
+            state_file = self._get_state_file()
+            if os.path.exists(state_file):
+                with open(state_file, 'r', encoding='utf-8') as f:
                     state = json.load(f)
                 
                 # Restore boost config if it was enabled
@@ -134,7 +137,8 @@ class BoostManager:
         """Persist current boost state to disk."""
         try:
             # Ensure data directory exists
-            os.makedirs(os.path.dirname(BOOST_STATE_FILE), exist_ok=True)
+            state_file = self._get_state_file()
+            os.makedirs(os.path.dirname(state_file), exist_ok=True)
             
             state = {
                 'enabled': self.boost_config is not None and self.boost_config.enabled,
@@ -149,7 +153,7 @@ class BoostManager:
                 'boosted_task_ids': list(self.boosted_task_ids)
             }
             
-            with open(BOOST_STATE_FILE, 'w', encoding='utf-8') as f:
+            with open(state_file, 'w', encoding='utf-8') as f:
                 json.dump(state, f, indent=2)
             
             logger.debug("Boost state saved to disk")

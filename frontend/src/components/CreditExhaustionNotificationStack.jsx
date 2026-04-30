@@ -94,8 +94,8 @@ export default function CreditExhaustionNotificationStack({ notifications, onDis
           style={{
             width: '320px',
             padding: '10px 16px',
-            backgroundColor: resetting ? '#333' : 'rgba(108, 92, 231, 0.9)',
-            border: '1px solid rgba(108, 92, 231, 0.6)',
+            backgroundColor: resetting ? '#333' : 'rgba(24, 204, 23, 0.9)',
+            border: '1px solid rgba(24, 204, 23, 0.6)',
             borderRadius: '10px',
             color: '#fff',
             fontSize: '13px',
@@ -104,8 +104,8 @@ export default function CreditExhaustionNotificationStack({ notifications, onDis
             opacity: resetting ? 0.6 : 1,
             transition: 'all 0.2s',
           }}
-          onMouseEnter={(e) => { if (!resetting) e.currentTarget.style.backgroundColor = 'rgba(108, 92, 231, 1)'; }}
-          onMouseLeave={(e) => { if (!resetting) e.currentTarget.style.backgroundColor = 'rgba(108, 92, 231, 0.9)'; }}
+          onMouseEnter={(e) => { if (!resetting) e.currentTarget.style.backgroundColor = 'rgba(24, 204, 23, 1)'; }}
+          onMouseLeave={(e) => { if (!resetting) e.currentTarget.style.backgroundColor = 'rgba(24, 204, 23, 0.9)'; }}
         >
           {resetting ? 'Resetting...' : 'Retry OpenRouter (Credits Added)'}
         </button>

@@ -1,0 +1,39 @@
+.git
+.github
+.cursor
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+.env
+.env.*
+.venv/
+venv/
+env/
+ENV/
+
+node_modules/
+frontend/
+frontend/dist/
+
+backend/data/
+backend/logs/
+.moto_instances/
+.moto_launcher_state.json
+.moto_update_notice.json
+
+tests/
+web conversion plans/
+commits_pending.txt
+proof-integration-build*-plan.md
+
+Click To Launch MOTO.bat
+Launch MOTO.sh
+moto_launcher.py
+moto_updater.py
+
+dist/
+build/

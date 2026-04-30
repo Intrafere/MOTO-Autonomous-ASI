@@ -138,6 +138,9 @@ function CompilerLogs() {
     websocket.on('phase_transition', handleCompilerEvent);
     websocket.on('phase_completion_signal', handleCompilerEvent);
 
+    // Wolfram Alpha tool call events (Phase 3) - main writer invoked Wolfram
+    websocket.on('compiler_wolfram_call', handleCompilerEvent);
+
     return () => {
       clearInterval(interval);
       clearInterval(recoveryInterval);
@@ -173,6 +176,9 @@ function CompilerLogs() {
       // Phase transition events cleanup
       websocket.off('phase_transition', handleCompilerEvent);
       websocket.off('phase_completion_signal', handleCompilerEvent);
+
+      // Wolfram tool cleanup
+      websocket.off('compiler_wolfram_call', handleCompilerEvent);
     };
   }, []);
 
@@ -196,7 +202,7 @@ function CompilerLogs() {
 
   const loadRecoveryStatus = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/compiler/status/recovery');
+      const response = await fetch('/api/compiler/status/recovery');
       if (response.ok) {
         const data = await response.json();
         setRecoveryStatus(data);
@@ -323,6 +329,16 @@ function CompilerLogs() {
       return `Outline updated`;
     }
 
+    // Wolfram Alpha tool call (Phase 3)
+    if (type === 'compiler_wolfram_call') {
+      const n = data.calls_used ?? '?';
+      const cap = data.max_calls ?? 20;
+      const query = (data.query || '').substring(0, 80);
+      const preview = (data.result_preview || '').substring(0, 80);
+      const previewSuffix = preview ? ` - ${preview}` : '';
+      return `[Wolfram ${n}/${cap}] ${query}${previewSuffix}`;
+    }
+
     // Default: show raw JSON
     return JSON.stringify(data, null, 2);
   };
@@ -336,6 +352,9 @@ function CompilerLogs() {
       return 'event-error';
     }
     if (type?.includes('critique') || type?.includes('phase') || type?.includes('rewrite')) {
+      return 'event-info';
+    }
+    if (type === 'compiler_wolfram_call') {
       return 'event-info';
     }
     if (type?.includes('decline') || type?.includes('skipped')) {

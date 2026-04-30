@@ -23,7 +23,8 @@ from backend.shared.openrouter_client import (
 )
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
-from backend.shared.config import rag_config
+from backend.shared.config import rag_config, system_config
+from backend.shared.fastembed_provider import FASTEMBED_MODEL_NAME, FastEmbedProvider
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.models import ModelConfig
 from backend.shared.token_tracker import token_tracker
@@ -41,6 +42,7 @@ class APIClientManager:
     def __init__(self):
         self._openrouter_client: Optional[OpenRouterClient] = None
         self._openrouter_api_key: Optional[str] = None
+        self._fastembed_provider: Optional[FastEmbedProvider] = None
         
         # Track which roles have fallen back to LM Studio
         # Format: {role_id: "openrouter" | "lm_studio"}
@@ -230,6 +232,13 @@ class APIClientManager:
         else:
             self._openrouter_client = None
             logger.info("OpenRouter client disabled (no API key)")
+
+    def _get_fastembed_provider(self, model_name: Optional[str] = None) -> FastEmbedProvider:
+        """Return the hosted in-process embedding provider for generic mode."""
+        desired_model = model_name or FASTEMBED_MODEL_NAME
+        if self._fastembed_provider is None or self._fastembed_provider.model_name != desired_model:
+            self._fastembed_provider = FastEmbedProvider(model_name=desired_model)
+        return self._fastembed_provider
     
     def configure_role(self, role_id: str, config: ModelConfig) -> None:
         """
@@ -295,6 +304,8 @@ class APIClientManager:
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, str]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -361,7 +372,9 @@ class APIClientManager:
                             temperature=temperature,
                             max_tokens=max_tokens or boost_manager.boost_config.boost_max_output_tokens,
                             response_format=response_format,
-                            provider=boost_provider
+                            provider=boost_provider,
+                            tools=tools,
+                            tool_choice=tool_choice,
                         ),
                         role_id=role_id,
                         model=boost_model,
@@ -705,7 +718,9 @@ class APIClientManager:
                             temperature=temperature,
                             max_tokens=max_tokens or role_config.max_output_tokens,
                             response_format=response_format,
-                            provider=openrouter_provider
+                            provider=openrouter_provider,
+                            tools=tools,
+                            tool_choice=tool_choice,
                         ),
                         role_id=role_id,
                         model=openrouter_model,
@@ -1007,6 +1022,8 @@ class APIClientManager:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     response_format=response_format,
+                    tools=tools,
+                    tool_choice=tool_choice,
                     **kwargs
                 ),
                 role_id=role_id,
@@ -1136,6 +1153,8 @@ class APIClientManager:
                             temperature=temperature,
                             max_tokens=max_tokens,
                             response_format=response_format,
+                            tools=tools,
+                            tool_choice=tool_choice,
                         ),
                         role_id=role_id,
                         model=alt_model,
@@ -1185,6 +1204,8 @@ class APIClientManager:
                         temperature=temperature,
                         max_tokens=max_tokens,
                         response_format=response_format,
+                        tools=tools,
+                        tool_choice=tool_choice,
                     ),
                     role_id=role_id,
                     model=auto_model,
@@ -1281,6 +1302,11 @@ class APIClientManager:
         """
         if not texts:
             return []
+
+        if system_config.generic_mode:
+            provider_model = None if model in (None, rag_config.embedding_model) else model
+            logger.debug("Generic mode enabled - using FastEmbed for embeddings")
+            return await self._get_fastembed_provider(provider_model).embed(texts)
         
         # Try LM Studio first (local, free)
         try:

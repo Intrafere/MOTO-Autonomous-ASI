@@ -1,6 +1,7 @@
 ---
 alwaysApply: false
 ---
+
 # Enhance AI Role Prompts with Complete Context Assembly
 
 **VARIANT: MOTO - Math Variant V1**  
@@ -932,9 +933,9 @@ REJECT if: Update is unnecessary, harmful, breaks required section structure, or
 
 ### 3B. DOCUMENT VALIDATOR PROMPT
 
-**Function:** `_get_paper_validation_system_prompt(mode)` (modes: construction, review, rigor)
+**Function:** `_get_paper_validation_system_prompt(mode)` (modes: construction, review, rigor, rigor_lean_placement)
 
-**Base prompt for DOCUMENT modes (construction, review, rigor):**
+**Base prompt for DOCUMENT modes (construction, review, rigor, rigor_lean_placement):**
 
 ```python
 base_prompt = """You are validating a mathematical document construction submission. Your role is to decide if this submission should be ACCEPTED or REJECTED.
@@ -1968,115 +1969,193 @@ The loop continues until `more_edits_needed=false` or max iterations (20) reache
 
 ---
 
-## 9. COMPILER RIGOR PROMPTS (2-STEP PROCESS)
+## 9. COMPILER RIGOR PROMPTS (LEAN 4 THEOREM FLOW)
 
 **File:** `backend/compiler/prompts/rigor_prompts.py`
 
-**BODY-ONLY MODE**: Rigor enhancement is ONLY performed during body construction phase. Once body is complete (Conclusion exists in paper, or in autonomous mode when `autonomous_section_phase != "body"`), rigor mode is skipped entirely. The coordinator handles this check via `_is_body_complete()` before invoking the rigor loop.
+**BODY-ONLY MODE**: The rigor loop runs only during body construction. Once body is complete (Conclusion exists in paper, or autonomous mode `autonomous_section_phase != "body"`), rigor mode is skipped. Gated by `_is_body_complete()` in the coordinator.
 
-### Two-Step Architecture
+**CONFIG GATE**: When `system_config.lean4_enabled = false`, every rigor cycle declines immediately (no Lean calls, no theorem proposals). The Lean 4 toolchain + Mathlib workspace is a hard prerequisite.
 
-The rigor submitter uses a **2-step planning-then-execution process**:
+### Four-Stage Architecture
 
-**Step 1: Planning (unvalidated)**
-- LLM reviews full paper and decides if rigor work is needed
-- Chooses mode: standard_enhancement, rewrite_focus, or wolfram_verification (if enabled)
-- Specifies target_section as guidance for Step 2 (reminder label, NOT context limitation)
-- This decision is NOT validated - LLM has full autonomy
+The rigor loop no longer edits paper text. Each rigor cycle runs four stages, with the coordinator owning the validator loop and the appendix fallback:
 
-**Step 2: Execution (with self-refusal option)**
-- LLM receives FULL paper (same RAG retrieval as Step 1)
-- Receives target_section from Step 1 as guidance reminder
-- Can REFUSE if Step 1 made a mistake (refusal not validated)
-- If proceeds with changes: submission goes to validator
-- Validator checks actual paper modifications
+**Stage 1: Theorem discovery (unvalidated)** — `build_rigor_theorem_discovery_prompt`
+- High-param submitter reads the full writing context (outline direct-injected, paper direct-injected when it fits, RAG for the rest per the offload priority excluding `compiler_outline.txt` + `compiler_paper.txt`).
+- Sees `EXISTING VERIFIED PROOFS` block (from `proof_database.get_all_proofs()`) so it does not re-propose already-verified theorems.
+- Sees `OPEN LEMMA TARGETS` block (from `proof_database.get_recent_failure_hints()`) as optional retry candidates.
+- Decides whether a theorem is worth attempting. Decline ends the rigor cycle.
 
-**Wolfram Alpha Integration (Optional)**:
-- If enabled and Step 1 chooses wolfram_verification mode
-- System makes Wolfram Alpha API call between steps
-- Step 2 receives query result and decides whether to incorporate it
-- Accepted Wolfram calls tracked in model credits separately from LLM API calls
+**Stage 2: Lean 4 formalization** — reuses `ProofFormalizationAgent.prove_candidate(max_attempts=5)` from autonomous mode
+- Up to 5 Lean 4 attempts with error-feedback chaining (failing tactic + goal states + raw Lean diagnostics fed back into each retry).
+- Broadcasts `proof_attempt_started` / `proof_verified` / `proof_attempt_failed` / `proof_check_complete` events with `source_type="compiler_rigor"` so the existing autonomous-mode proof UI lights up for free.
+- All-5-fail: candidate is recorded via `proof_database.record_failed_candidate` (becomes a future open lemma target) and the cycle ends as a decline.
 
-### Step 1: Planning JSON Schema
+**Stage 3: Novelty classification + persistence** — shared `assess_proof_novelty` helper from `backend/autonomous/core/proof_novelty.py`
+- Classifies the verified proof as novel or known.
+- `proof_database.add_proof(record)` stores it with `source_type="paper"`, `source_id=f"compiler_rigor:{session}"`.
+- Novel proofs automatically enter the highest-priority direct-injection block on the next submitter instantiation (via `proof_database.inject_into_prompt`).
+- Non-novel proofs stay in the database, visible through `/api/proofs/*` for future reference-selection UI flows.
+
+**Stage 4: Placement (2 attempts + appendix fallback)** — `build_rigor_placement_prompt`
+- Submitter proposes an inline edit that introduces the theorem with an explicit "verified in Lean 4, see Appendix A, <proof_id>" marker.
+- Validator uses the new `rigor_lean_placement` mode: judges placement and narrative only; `rigor_check` is **forced to True** regardless of LLM output (Lean 4 is the source of mathematical truth).
+- Up to 2 placement attempts; attempt 2 receives the validator's rejection feedback via `validator_rejection_feedback` field.
+- On double rejection (or when attempt 1 is not produced), the theorem is appended to the **Theorems Appendix** via `paper_memory.append_to_theorems_appendix(...)`. Counts as a `rigor_acceptance` because the math is preserved.
+
+### Stage 1 JSON Schema (discovery)
 
 ```json
 {
-  "needs_rigor_work": true or false,
-  "mode": "standard_enhancement | rewrite_focus | wolfram_verification | null",
-  "target_section": "text snippet from paper (200-500 chars, guidance label for Step 2)",
-  "wolfram_query": "natural language query for Wolfram Alpha (only if mode=wolfram_verification)",
-  "preliminary_reasoning": "explanation of chosen approach"
+  "needs_theorem_work": true,
+  "theorem_statement": "precise statement with explicit hypotheses",
+  "formal_sketch": "concrete Mathlib tactics / lemmas that look promising",
+  "source_excerpt": "2-6 sentences from the paper that motivate this theorem",
+  "retry_existing_failure_id": "theorem_id from OPEN LEMMA TARGETS if retrying, empty otherwise",
+  "reasoning": "why this theorem is the best target right now OR why no theorem"
 }
 ```
 
-**Field Definitions:**
-- `needs_rigor_work`: Whether any rigor work should be attempted
-- `mode`: Approach to use (required if needs_rigor_work=true)
-  - `standard_enhancement`: Normal rigor improvements
-  - `rewrite_focus`: Significant rewriting needed
-  - `wolfram_verification`: Verify claim with Wolfram Alpha (only if enabled in system config)
-- `target_section`: Text snippet identifying which section to work on (provides continuity to Step 2, NOT a context limitation)
-- `wolfram_query`: Natural language query (e.g., "Is pi algebraic?", "Solve x^2 + 2x + 1 = 0")
-- `preliminary_reasoning`: Explanation of chosen approach
-
-**Example (Wolfram Verification)**:
+Decline form:
 ```json
 {
-  "needs_rigor_work": true,
-  "mode": "wolfram_verification",
-  "target_section": "Theorem 4.1: π is transcendental. Proof: By Lindemann-Weierstrass theorem...",
-  "wolfram_query": "Is pi algebraic?",
-  "preliminary_reasoning": "Computational verification would strengthen the π transcendence claim by providing independent confirmation"
+  "needs_theorem_work": false,
+  "theorem_statement": "",
+  "formal_sketch": "",
+  "source_excerpt": "",
+  "retry_existing_failure_id": "",
+  "reasoning": "why declining"
 }
 ```
 
-### Step 2: Execution JSON Schemas
+### Stage 4 JSON Schema (placement)
 
-**For standard_enhancement or rewrite_focus:**
 ```json
 {
-  "proceed": true or false,
-  "needs_enhancement": true or false,
+  "proceed": true,
   "operation": "replace | insert_after",
-  "old_string": "exact text from document (empty if proceed=false or needs_enhancement=false)",
-  "new_string": "enhanced text (empty if proceed=false or needs_enhancement=false)",
-  "content": "full content for logging",
-  "reasoning": "explanation OR refusal reason"
+  "old_string": "exact anchor text in current paper",
+  "new_string": "inline theorem intro with Lean 4 marker + appendix reference (NO Lean code inline)",
+  "reasoning": "why this placement"
 }
 ```
 
-**For wolfram_verification:**
+### Placement Rules (enforced by the validator prompt)
+
+The validator rejects placement submissions that:
+- Omit the "verified in Lean 4" marker or the appendix cross-reference.
+- Paste the full Lean 4 source code into the paper body (the Lean proof lives in the appendix only).
+- Place the theorem in a nonsensical location (outside the relevant section).
+- Break surrounding narrative coherence.
+
+The validator MUST NOT re-evaluate:
+- Mathematical correctness (Lean 4 already verified it).
+- Proof soundness.
+- Edge cases / hypotheses.
+
+### Theorems Appendix format
+
+Each entry written by `format_theorem_appendix_entry(...)` (helper in `backend/compiler/agents/high_param_submitter.py`):
+
+```
+Theorem (proof_XXX) [Novel | Known] - <theorem_name or proof_id>
+Status: verified by Lean 4 (<inline | appendix_fallback>)
+Statement: <natural-language theorem statement>
+Lean 4 proof:
+<full Lean 4 source>
+---
+```
+
+### Context layout
+
+- Outline: always direct-injected.
+- Paper: direct-injected when it fits; otherwise RAG'd under `mode="rigor"` excluding `compiler_outline.txt` + `compiler_paper.txt`.
+- RAG evidence: follows the offload priority (Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files).
+- EXISTING VERIFIED PROOFS block: compact `(proof_id, novel, statement)` tuples from `proof_database.get_all_proofs()`.
+- OPEN LEMMA TARGETS block: recent failure hints from `proof_database.get_recent_failure_hints(limit=5)` (`theorem_id`, statement, Lean error summary, suggested lemma names).
+
+### Websocket events surfaced by the rigor flow
+
+Autonomous-mode proof UI already handles these; the compiler rigor flow broadcasts them with `source_type="compiler_rigor"`:
+
+- `proof_check_started` - at the start of stage 2 (before the first Lean 4 call).
+- `proof_attempt_started` - one per Lean 4 attempt.
+- `proof_attempt_failed` - per failing attempt.
+- `proof_verified` - per successful attempt + a final one once the proof is stored.
+- `proof_check_complete` - on all-5-fail (as a decline).
+- `compiler_submission` / `compiler_acceptance` / `compiler_rejection` / `compiler_decline` - standard compiler stream for placement and the overall rigor cycle.
+
+---
+
+## 10. WOLFRAM ALPHA TOOL (CONSTRUCTION MODE)
+
+**File:** `backend/compiler/agents/high_context_submitter.py`
+
+Wolfram Alpha is exposed to the main writer as a real OpenAI-compatible tool only during `HighContextSubmitter.submit_construction` (body / conclusion / introduction / abstract). It is NOT available in `outline_create`, `outline_update`, `review`, or the rigor loop. When `system_config.wolfram_alpha_enabled=false` (or the Wolfram client failed to initialize), the tool is not registered on the LLM call at all and construction collapses to the pre-Build-4 single-shot call.
+
+### Tool Schema
+
+```python
+WOLFRAM_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "wolfram_alpha_query",
+        "description": "Query Wolfram Alpha to verify a mathematical or computational claim before writing it into the paper. ...",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural-language Wolfram Alpha query, e.g. 'Is pi algebraic?'"},
+                "purpose": {"type": "string", "description": "Brief note on how the result will be used in the paper (audit trail)."}
+            },
+            "required": ["query", "purpose"]
+        }
+    }
+}
+```
+
+### Budget + Loop Semantics
+
+- **20 Wolfram calls per construction submission**, defined by `WOLFRAM_MAX_CALLS_PER_SUBMISSION` in `high_context_submitter.py`.
+- The submitter loop: call LLM with tools attached → execute each `tool_calls[]` entry via `wolfram_client.query(...)` → append a `role=tool` turn per call → re-call LLM. Repeat until (a) the LLM returns a non-tool message (final JSON construction submission) or (b) the 20-call budget is exhausted.
+- On budget exhaustion, the coordinator appends a one-time user-role reminder ("You have used all 20 Wolfram Alpha calls for this submission. Finalize your JSON response now.") and re-calls the LLM with `tools=None` so the model must produce a final JSON response.
+- Fallback: if the tool-loop raises, construction falls back to a plain single-shot `generate_completion` call so forward progress is never blocked by tool-loop failures.
+
+### Audit Trail
+
+The full list of Wolfram calls is attached to the `CompilerSubmission.metadata["wolfram_calls"]` field as:
+```json
+[
+  {"query": "integral of x^2 from 0 to 1", "purpose": "verifying closed form for section 3", "result": "1/3"},
+  ...
+]
+```
+
+The validator sees the audit trail but does NOT re-query Wolfram. Its job is unchanged — it simply has more confidence in factual claims the writer made after a Wolfram check.
+
+### Websocket Event
+
+Per Wolfram call, the submitter broadcasts:
 ```json
 {
-  "proceed": true or false,
-  "verification_result_interpretation": "how to interpret Wolfram Alpha result",
-  "needs_enhancement": true or false,
-  "operation": "insert_after",
-  "old_string": "exact text after which to insert remark (empty if proceed=false or needs_enhancement=false)",
-  "new_string": "verification remark incorporating Wolfram result (empty if proceed=false or needs_enhancement=false)",
-  "content": "full content for logging",
-  "reasoning": "explanation OR refusal reason"
+  "type": "compiler_wolfram_call",
+  "data": {
+    "task_id": "comp_hc_007",
+    "query": "...",
+    "purpose": "...",
+    "result_preview": "first 200 chars of result",
+    "calls_used": 3,
+    "calls_remaining": 17,
+    "max_calls": 20
+  }
 }
 ```
 
-**Self-Refusal Mechanism:**
-- Step 2 can set `proceed=false` if Step 1 made a mistake
-- Refusals are NOT validated (no penalty)
-- Logged as declines, rigor loop ends
-- Allows LLM to self-correct without rejection feedback
+The frontend's `CompilerLogs.jsx` renders this as `[Wolfram 3/20] <query> - <preview>`.
 
-**Context:**
-- **Step 1**: Sees FULL paper (RAG retrieval), full outline, user prompt, rejection history
-- **Step 2**: Sees FULL paper (same RAG retrieval as Step 1), full outline, user prompt, rejection history, PLUS target_section as guidance label
-- For Wolfram mode Step 2: Also receives wolfram_query and wolfram_result
-- **CRITICAL**: Both steps see FULL paper via RAG - target_section is guidance only, NOT a context limitation
+### Backend Tool-Call Plumbing
 
-**Wolfram Alpha Tracking:**
-- Only ACCEPTED Wolfram calls tracked (full chain: API success → proceed=true → needs_enhancement=true → validator accept → paper updated)
-- Tracked in `PaperModelTracker._wolfram_calls` (separate from LLM API calls)
-- Displayed in MODEL CREDITS as: "Wolfram Alpha Verifications: N queries"
-
-**Note**: The outline is always fully injected for rigor mode. If outline + system prompts exceed available context, RAG budget is automatically reduced to fit. The outline provides the structural framework for document construction and validation.
+`api_client_manager.generate_completion`, `OpenRouterClient.generate_completion`, and `LMStudioClient.generate_completion` all accept OpenAI-compatible `tools=[...]` and `tool_choice` kwargs. When a model ignores the tools entirely (returns no `tool_calls`), the submitter's loop cleanly terminates on the first iteration — identical to the single-shot path.
 
 ---
 

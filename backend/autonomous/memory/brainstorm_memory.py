@@ -5,6 +5,7 @@ Handles file I/O for brainstorm databases and metadata.
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -259,6 +260,58 @@ class BrainstormMemory:
         except Exception as e:
             logger.error(f"Failed to read brainstorm database {topic_id}: {e}")
             return ""
+
+    async def append_proofs_section(self, topic_id: str, proofs_data: Any) -> bool:
+        """Append verified proofs to the bottom of a brainstorm database."""
+        async with self._lock:
+            db_path = self._get_database_path(topic_id)
+            if not db_path.exists():
+                logger.error(f"Brainstorm database not found for proof append: {topic_id}")
+                return False
+
+            proofs = proofs_data if isinstance(proofs_data, list) else [proofs_data]
+            header = "=== PROOFS GENERATED FROM THIS BRAINSTORM (Lean 4 Verified) ==="
+
+            try:
+                async with aiofiles.open(db_path, "r", encoding="utf-8") as handle:
+                    existing_content = await handle.read()
+
+                after_header = existing_content.split(header, 1)[1] if header in existing_content else ""
+                next_index = len(re.findall(r"(?m)^Proof \d+:", after_header)) + 1
+
+                lines: List[str] = []
+                if header not in existing_content:
+                    lines.extend(["", "", header, ""])
+                elif not existing_content.endswith("\n"):
+                    lines.append("")
+
+                for proof in proofs:
+                    theorem_statement = str(getattr(proof, "theorem_statement", "") or proof.get("theorem_statement", "")).strip()
+                    proof_id = str(getattr(proof, "proof_id", "") or proof.get("proof_id", "")).strip()
+                    novel = bool(getattr(proof, "novel", False) if hasattr(proof, "novel") else proof.get("novel", False))
+                    lean_code = str(getattr(proof, "lean_code", "") or proof.get("lean_code", "")).strip()
+                    status = "Verified (Novel)" if novel else "Verified (Known)"
+
+                    lines.extend(
+                        [
+                            f"Proof {next_index}: {theorem_statement}",
+                            f"Status: {status}",
+                            f"Proof ID: {proof_id or 'N/A'}",
+                            "Lean 4 Code:",
+                            lean_code or "[no Lean 4 code saved]",
+                            "---",
+                        ]
+                    )
+                    next_index += 1
+
+                async with aiofiles.open(db_path, "a", encoding="utf-8") as handle:
+                    await handle.write("\n".join(lines) + "\n")
+
+                logger.info("Appended %s proof(s) to brainstorm %s", len(proofs), topic_id)
+                return True
+            except Exception as exc:
+                logger.error(f"Failed to append proofs to brainstorm {topic_id}: {exc}")
+                return False
     
     async def get_submissions_list(self, topic_id: str) -> List[Dict[str, Any]]:
         """Get list of submissions from a brainstorm database."""

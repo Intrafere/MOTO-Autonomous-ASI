@@ -11,13 +11,21 @@ import './settings-common.css';
  * 2. LM Studio is unavailable and user needs OpenRouter as primary provider
  * 3. User explicitly wants to manage their API key
  */
-export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reason = 'setup' }) {
+export default function OpenRouterApiKeyModal({
+  isOpen,
+  onClose,
+  onKeySet,
+  reason = 'setup',
+  capabilities,
+}) {
   const [apiKey, setApiKey] = useState('');
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [error, setError] = useState('');
   const [hasStoredKey, setHasStoredKey] = useState(false);
+  const genericMode = Boolean(capabilities?.genericMode);
+  const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
 
   // Reset state when modal opens
   useEffect(() => {
@@ -118,9 +126,17 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
   const reasonMessages = {
     setup: 'Configure your OpenRouter API key to use OpenRouter models for any role.',
     startup_setup: 'Save your OpenRouter API key to unlock cloud models. MOTO will apply the recommended default profile immediately, and you can switch to your team profile or another default profile later in Settings.',
-    lm_studio_unavailable: 'LM Studio is not available. Configure OpenRouter to continue.',
+    lm_studio_unavailable: lmStudioEnabled
+      ? 'LM Studio is not available. Configure OpenRouter to continue.'
+      : 'This deployment disables LM Studio. Configure OpenRouter to continue.',
     no_key: 'An OpenRouter API key is required to use OpenRouter models.',
   };
+  const storedKeyCopy = genericMode
+    ? 'An OpenRouter API key is already loaded in this running backend instance. Enter a new key below to replace it for this session.'
+    : 'An OpenRouter API key is already stored securely on the backend for this machine. Enter a new key below to replace it.';
+  const keyStorageFooter = genericMode
+    ? 'This API key is held in backend memory for the active hosted/runtime instance and sent to the backend for OpenRouter API calls. API Boost can reuse this key automatically, or you can override it inside the boost modal.'
+    : 'This API key is stored securely through the backend keyring integration and sent to the backend for OpenRouter API calls. API Boost can reuse this key automatically, or you can override it inside the boost modal.';
 
   return (
     <div 
@@ -183,7 +199,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
               href="https://openrouter.ai/keys" 
               target="_blank" 
               rel="noopener noreferrer"
-              style={{ color: '#6c5ce7' }}
+              style={{ color: '#18cc17' }}
             >
               openrouter.ai/keys
             </a>
@@ -212,8 +228,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
           <div className="test-result-banner test-result-banner--success" style={{
             marginBottom: '1rem',
           }}>
-            An OpenRouter API key is already stored securely on the backend for this machine.
-            Enter a new key below to replace it.
+            {storedKeyCopy}
           </div>
         )}
 
@@ -243,7 +258,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
             style={{
               flex: 1,
               padding: '0.75rem 1rem',
-              backgroundColor: '#6c5ce7',
+              backgroundColor: '#18cc17',
               border: 'none',
               borderRadius: '6px',
               color: '#fff',
@@ -281,8 +296,7 @@ export default function OpenRouterApiKeyModal({ isOpen, onClose, onKeySet, reaso
           backgroundColor: '#0d0d1a',
           borderRadius: '6px',
         }}>
-          This API key is stored securely through the backend keyring integration and sent to the backend for OpenRouter API calls.
-          API Boost can reuse this key automatically, or you can override it inside the boost modal.
+          {keyStorageFooter}
         </p>
       </div>
     </div>
