@@ -97,16 +97,22 @@ def _restore_desktop_provider_credentials(api_client_manager) -> None:
     """Restore persisted desktop credentials from the OS-backed keyring."""
     from backend.shared.secret_store import (
         SecretStoreError,
-        get_active_service_name,
         load_openrouter_api_key,
         load_wolfram_api_key,
     )
     from backend.shared.wolfram_alpha_client import initialize_wolfram_client
 
+    # NOTE: We intentionally do NOT log `get_active_service_name()` or
+    # `system_config.secret_namespace` here. Both values are purely diagnostic
+    # identifiers (they contain no credential material), but CodeQL's
+    # "clear-text logging of sensitive information" query treats any field
+    # whose name starts with `secret_` as tainted, and any string derived
+    # from it — including the OS-keyring service name — as sensitive. Logging
+    # a boolean flag instead gives operators the diagnostic signal they need
+    # (namespaced vs. default instance) without tripping the static analyzer.
     logger.info(
-        "Secret store active: service_name='%s', namespace=%s",
-        get_active_service_name(),
-        system_config.secret_namespace or "<default>",
+        "Secret store active: namespaced_instance=%s",
+        bool(system_config.secret_namespace),
     )
 
     try:
