@@ -1,5 +1,5 @@
-# MOTO Autonomous ASI - Novel S.T.E.M. Solution Variant for ASI Automated Theory Generation
-# Autonomous Superintelligence Deep Research Harness
+# MOTO Autonomous ASI - Automated Theory Generation with Lean 4 Mathematics Verification
+# An Autonomous Prototype Superintelligence
 **Version: 1.0.7**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
