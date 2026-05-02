@@ -1,5 +1,5 @@
-# MOTO Autonomous ASI - Automated Theory Generation with Lean 4 Mathematics Verification
-# An Autonomous Prototype Superintelligence
+# MOTO Autonomous ASI
+## An Autonomous Prototype Superintelligence - Automated Theory Generation with Lean 4 Mathematics Verification
 **Version: 1.0.7**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
