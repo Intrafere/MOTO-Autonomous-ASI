@@ -560,6 +560,18 @@ export const autonomousAPI = {
     return `${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate.lean`;
   },
 
+  async getProofLibrary(novelOnly = true) {
+    const response = await fetch(`${API_BASE}/proofs/library?novel_only=${novelOnly}`);
+    if (!response.ok) throw new Error('Failed to get proof library');
+    return response.json();
+  },
+
+  async getLibraryProof(sessionId, proofId) {
+    const response = await fetch(`${API_BASE}/proofs/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}`);
+    if (!response.ok) throw new Error(`Failed to get library proof ${proofId}`);
+    return response.json();
+  },
+
   // Get current paper progress (in-progress paper during Tier 2)
   async getCurrentPaperProgress() {
     const response = await fetch(`${API_BASE}/auto-research/current-paper-progress`);

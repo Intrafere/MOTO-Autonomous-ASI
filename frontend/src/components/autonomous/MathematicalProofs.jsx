@@ -21,10 +21,13 @@ function truncate(text, maxLength = 220) {
 }
 
 function getLeanStatusLabel(status) {
-  if (!status?.lean4_enabled) {
+  if (!status) {
+    return 'Lean 4 Starting';
+  }
+  if (!status.lean4_enabled) {
     return 'Lean 4 Disabled';
   }
-  if (status?.lsp_active) {
+  if (status.lsp_active) {
     return status.workspace_ready ? 'Lean 4 Ready (LSP)' : 'Lean 4 LSP Starting';
   }
   if (status.workspace_ready) {
@@ -363,7 +366,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
         </div>
 
         <div className="math-proofs-status-group">
-          <span className={`math-proofs-status ${proofStatus?.workspace_ready ? 'ready' : 'pending'} ${proofStatus?.lean4_enabled ? '' : 'disabled'}`}>
+          <span className={`math-proofs-status ${proofStatus?.workspace_ready ? 'ready' : 'pending'} ${proofStatus && !proofStatus.lean4_enabled ? 'disabled' : ''}`}>
             {getLeanStatusLabel(proofStatus)}
           </span>
           <span className="math-proofs-count">
@@ -490,10 +493,13 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
 
       {!loading && !error && visibleProofs.length > 0 && viewMode === 'graph' && (
         <>
-          {!proofStatus?.lean4_enabled && (
+          {proofStatus && !proofStatus.lean4_enabled && (
             <div className="math-proofs-empty">
               Graph view is unavailable while Lean 4 proof support is disabled.
             </div>
+          )}
+          {!proofStatus && (
+            <div className="math-proofs-empty">Loading proof runtime status…</div>
           )}
           {proofStatus?.lean4_enabled && proofGraphState.loading && (
             <div className="math-proofs-empty">Loading proof dependency graph...</div>

@@ -247,16 +247,32 @@ class BrainstormMemory:
                 logger.error(f"Failed to add submission to brainstorm {topic_id}: {e}")
                 return False
     
-    async def get_database_content(self, topic_id: str) -> str:
-        """Get all content from a brainstorm database."""
+    async def get_database_content(self, topic_id: str, *, strip_proofs: bool = False) -> str:
+        """Get all content from a brainstorm database.
+
+        Args:
+            topic_id: The brainstorm topic ID.
+            strip_proofs: When True, truncate content at the proof section header.
+                Use this for compiler and RAG paths so that appended proof blocks
+                (both novel and non-novel) do not pollute LLM context.  Novel
+                proofs are available via proof_database.inject_into_prompt();
+                non-novel proofs are browsable via
+                proof_database.get_known_proofs_summary_for_browsing().
+        """
         db_path = self._get_database_path(topic_id)
-        
+
         if not db_path.exists():
             return ""
-        
+
         try:
             async with aiofiles.open(db_path, 'r', encoding='utf-8') as f:
-                return await f.read()
+                content = await f.read()
+            if strip_proofs and content:
+                marker = "=== PROOFS GENERATED FROM THIS BRAINSTORM"
+                idx = content.find(marker)
+                if idx > 0:
+                    content = content[:idx].rstrip()
+            return content
         except Exception as e:
             logger.error(f"Failed to read brainstorm database {topic_id}: {e}")
             return ""

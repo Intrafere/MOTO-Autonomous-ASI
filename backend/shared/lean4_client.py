@@ -94,6 +94,16 @@ def _output_contains_sorry_warning(output: str) -> bool:
 
 _PLACEHOLDER_REJECTION_PREFIX = "PROOF REJECTED: PLACEHOLDER USED"
 _MATHLIB_CACHE_ARCHIVE_RE = re.compile(r"\(([^()\r\n]+?\.ltar)\)")
+_LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
+_OLEAN_OBJECT_FILE_MISSING_RE = re.compile(
+    r"object file ['\"].*?\.olean['\"] of module .*? does not exist",
+    re.IGNORECASE,
+)
+_LEAN_WORKSPACE_ERROR_MARKERS: tuple[str, ...] = (
+    "imports are out of date",
+    "invalid or corrupt .olean",
+    "invalid or corrupt olean",
+)
 
 # Markdown fence markers the LLM occasionally emits inside the `lean_code`
 # JSON field even when instructed to return raw code. Strip them defensively so
@@ -188,11 +198,20 @@ def _format_placeholder_rejection(token_name: str, *, from_lean_diagnostic: bool
 class Lean4Client:
     """Subprocess wrapper around the Lean 4 toolchain."""
 
+    _lean_execution_lock: Optional[asyncio.Lock] = None
+
     def __init__(self, lean_path: str, workspace_dir: str) -> None:
         self.lean_path = str(lean_path or "").strip()
         self.workspace_dir = Path(workspace_dir).resolve()
         self._workspace_ready = False
+        self._workspace_unhealthy_error = ""
         self._workspace_lock = asyncio.Lock()
+
+    @classmethod
+    def _get_lean_execution_lock(cls) -> asyncio.Lock:
+        if Lean4Client._lean_execution_lock is None:
+            Lean4Client._lean_execution_lock = asyncio.Lock()
+        return Lean4Client._lean_execution_lock
 
     def _resolve_executable(self, name: str) -> str:
         if self.lean_path:
@@ -312,6 +331,83 @@ class Lean4Client:
         stderr = stderr_bytes.decode("utf-8", errors="replace")
         return process.returncode, stdout, stderr
 
+    async def _run_lean_file_once(
+        self,
+        *,
+        temp_filename: str,
+        prepared_code: str,
+        timeout: int,
+    ) -> tuple[int, str, str]:
+        temp_path = self.workspace_dir / temp_filename
+        try:
+            temp_path.write_text(prepared_code, encoding="utf-8")
+            return await self._run_process(
+                [self.lake_path, "env", self.lean_path or self._resolve_executable("lean"), temp_filename],
+                cwd=self.workspace_dir,
+                timeout=timeout,
+            )
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                logger.debug("Could not remove temporary Lean file %s", temp_path)
+
+    @staticmethod
+    def _combined_process_output(stdout: str, stderr: str) -> str:
+        return "\n".join(part for part in [stdout.strip(), stderr.strip()] if part).strip()
+
+    @staticmethod
+    def _is_workspace_infrastructure_error(output: str) -> bool:
+        text = output or ""
+        lowered = text.lower()
+        return bool(_OLEAN_OBJECT_FILE_MISSING_RE.search(text)) or any(
+            marker in lowered for marker in _LEAN_WORKSPACE_ERROR_MARKERS
+        )
+
+    @staticmethod
+    def _format_workspace_infrastructure_error(output: str) -> str:
+        detail = " ".join((output or "").split())
+        if len(detail) > 2000:
+            detail = detail[:2000] + "..."
+        return (
+            f"{_LEAN_WORKSPACE_ERROR_PREFIX}: Mathlib cache/workspace repair failed. "
+            "This is an infrastructure problem, not a proof error. "
+            "Lean reported missing or invalid compiled Mathlib artifacts. "
+            f"Original diagnostic: {detail or '[none]'}"
+        )
+
+    def _mark_workspace_unhealthy(self, output: str) -> None:
+        self._workspace_ready = False
+        self._workspace_unhealthy_error = self._format_workspace_infrastructure_error(output)
+
+    def _workspace_unavailable_result(self, *, tactic_script: bool = False) -> Lean4Result:
+        error_output = self._workspace_unhealthy_error or (
+            f"{_LEAN_WORKSPACE_ERROR_PREFIX}: Lean 4 workspace is not ready. "
+            "This is an infrastructure problem, not a proof error."
+        )
+        if tactic_script:
+            return Lean4Result(
+                success=False,
+                error_output=error_output,
+                tactic_error_slice=error_output,
+                failing_tactic_index=-1,
+            )
+        return Lean4Result(success=False, error_output=error_output)
+
+    async def _repair_workspace_after_infrastructure_error(self, output: str) -> bool:
+        logger.warning(
+            "Lean 4 workspace infrastructure error detected; invalidating workspace cache and refetching Mathlib artifacts. Diagnostic: %s",
+            self._format_workspace_infrastructure_error(output),
+        )
+        async with self._workspace_lock:
+            self._workspace_unhealthy_error = ""
+            self._workspace_ready = False
+            repaired = await self._ensure_workspace_locked()
+            if not repaired:
+                self._mark_workspace_unhealthy(output)
+            return repaired
+
     async def get_version(self) -> str:
         """Return the Lean 4 version string when available."""
         lean_cmd = self.lean_path or self._resolve_executable("lean")
@@ -377,6 +473,7 @@ class Lean4Client:
                 timeout=max(system_config.lean4_proof_timeout, 120),
             )
             if update_rc != 0:
+                self._mark_workspace_unhealthy(update_stderr or update_stdout)
                 logger.warning(
                     "Lean 4 workspace update failed: %s",
                     (update_stderr or update_stdout).strip(),
@@ -401,6 +498,7 @@ class Lean4Client:
                     timeout=max(system_config.lean4_proof_timeout, 120),
                 )
                 if update_rc != 0:
+                    self._mark_workspace_unhealthy(update_stderr or update_stdout)
                     logger.warning(
                         "Lean 4 workspace update after toolchain alignment failed: %s",
                         (update_stderr or update_stdout).strip(),
@@ -412,6 +510,7 @@ class Lean4Client:
                 cwd=self.workspace_dir,
             )
             if cache_rc != 0:
+                self._mark_workspace_unhealthy(cache_stderr or cache_stdout)
                 logger.error(
                     "Lean 4 Mathlib cache fetch failed; proof checking would hit "
                     "'object file' errors. Details: %s",
@@ -420,6 +519,7 @@ class Lean4Client:
                 return False
 
         self._workspace_ready = True
+        self._workspace_unhealthy_error = ""
         return True
 
     async def _fetch_mathlib_cache(
@@ -732,66 +832,78 @@ class Lean4Client:
 
         workspace_ready = await self.ensure_workspace()
         if not workspace_ready:
-            return Lean4Result(success=False, error_output="Lean 4 workspace is not ready.")
+            return self._workspace_unavailable_result()
 
         temp_filename = f"MOTOProofCheck_{uuid.uuid4().hex}.lean"
-        temp_path = self.workspace_dir / temp_filename
-        try:
-            temp_path.write_text(prepared_code, encoding="utf-8")
-            returncode, stdout, stderr = await self._run_process(
-                [self.lake_path, "env", self.lean_path or self._resolve_executable("lean"), temp_filename],
-                cwd=self.workspace_dir,
+        async with self._get_lean_execution_lock():
+            workspace_ready = await self.ensure_workspace()
+            if not workspace_ready:
+                return self._workspace_unavailable_result()
+            returncode, stdout, stderr = await self._run_lean_file_once(
+                temp_filename=temp_filename,
+                prepared_code=prepared_code,
                 timeout=timeout,
             )
+            combined_output = self._combined_process_output(stdout, stderr)
+            if self._is_workspace_infrastructure_error(combined_output):
+                repaired = await self._repair_workspace_after_infrastructure_error(combined_output)
+                if repaired:
+                    returncode, stdout, stderr = await self._run_lean_file_once(
+                        temp_filename=temp_filename,
+                        prepared_code=prepared_code,
+                        timeout=timeout,
+                    )
+                    combined_output = self._combined_process_output(stdout, stderr)
+                if self._is_workspace_infrastructure_error(combined_output):
+                    self._mark_workspace_unhealthy(combined_output)
+                    return Lean4Result(
+                        success=False,
+                        error_output=self._workspace_unhealthy_error,
+                        goal_states=self._extract_goal_states(combined_output),
+                        raw_stderr=stderr.strip(),
+                    )
 
-            combined_output = "\n".join(part for part in [stdout.strip(), stderr.strip()] if part).strip()
-            goal_states = self._extract_goal_states(combined_output)
+        goal_states = self._extract_goal_states(combined_output)
 
-            # Positive pass: Lean must exit cleanly AND the diagnostics must
-            # not contain an `error:` line AND must not contain Lean's own
-            # "declaration uses 'sorry'" warning. We treat the sorry warning
-            # as a proof-level failure so vacuous proofs cannot slip through.
-            lowered = combined_output.lower()
-            has_error_diagnostic = "error:" in lowered
-            has_sorry_warning = _output_contains_sorry_warning(combined_output)
-            lean_exited_cleanly = returncode == 0
-            positive_pass = (
-                lean_exited_cleanly
-                and not has_error_diagnostic
-                and not has_sorry_warning
-            )
+        # Positive pass: Lean must exit cleanly AND the diagnostics must
+        # not contain an `error:` line AND must not contain Lean's own
+        # "declaration uses 'sorry'" warning. We treat the sorry warning
+        # as a proof-level failure so vacuous proofs cannot slip through.
+        lowered = combined_output.lower()
+        has_error_diagnostic = "error:" in lowered
+        has_sorry_warning = _output_contains_sorry_warning(combined_output)
+        lean_exited_cleanly = returncode == 0
+        positive_pass = (
+            lean_exited_cleanly
+            and not has_error_diagnostic
+            and not has_sorry_warning
+        )
 
-            if positive_pass:
-                return Lean4Result(
-                    success=True,
-                    error_output="",
-                    goal_states=goal_states,
-                    raw_stderr=stderr.strip(),
-                )
-
-            if has_sorry_warning and not has_error_diagnostic and lean_exited_cleanly:
-                rejection = _format_placeholder_rejection("sorry", from_lean_diagnostic=True)
-                detail = f"{rejection}\n\nOriginal Lean 4 diagnostics:\n{combined_output}".strip()
-                return Lean4Result(
-                    success=False,
-                    error_output=detail,
-                    goal_states=goal_states,
-                    raw_stderr=stderr.strip(),
-                )
-
-            error_output = combined_output or "Lean 4 rejected the proof without additional diagnostics."
+        if positive_pass:
             return Lean4Result(
-                success=False,
-                error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+                success=True,
+                error_output="",
                 goal_states=goal_states,
                 raw_stderr=stderr.strip(),
             )
-        finally:
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except OSError:
-                logger.debug("Could not remove temporary Lean file %s", temp_path)
+
+        if has_sorry_warning and not has_error_diagnostic and lean_exited_cleanly:
+            rejection = _format_placeholder_rejection("sorry", from_lean_diagnostic=True)
+            detail = f"{rejection}\n\nOriginal Lean 4 diagnostics:\n{combined_output}".strip()
+            return Lean4Result(
+                success=False,
+                error_output=detail,
+                goal_states=goal_states,
+                raw_stderr=stderr.strip(),
+            )
+
+        error_output = combined_output or "Lean 4 rejected the proof without additional diagnostics."
+        return Lean4Result(
+            success=False,
+            error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+            goal_states=goal_states,
+            raw_stderr=stderr.strip(),
+        )
 
     async def check_tactic_script(
         self,
@@ -876,72 +988,87 @@ class Lean4Client:
 
         workspace_ready = await self.ensure_workspace()
         if not workspace_ready:
-            return Lean4Result(success=False, error_output="Lean 4 workspace is not ready.")
+            return self._workspace_unavailable_result(tactic_script=True)
 
         temp_filename = f"MOTOProofTacticCheck_{uuid.uuid4().hex}.lean"
-        temp_path = self.workspace_dir / temp_filename
-        try:
-            temp_path.write_text(prepared_code, encoding="utf-8")
-            returncode, stdout, stderr = await self._run_process(
-                [self.lake_path, "env", self.lean_path or self._resolve_executable("lean"), temp_filename],
-                cwd=self.workspace_dir,
+        async with self._get_lean_execution_lock():
+            workspace_ready = await self.ensure_workspace()
+            if not workspace_ready:
+                return self._workspace_unavailable_result(tactic_script=True)
+            returncode, stdout, stderr = await self._run_lean_file_once(
+                temp_filename=temp_filename,
+                prepared_code=prepared_code,
                 timeout=timeout,
             )
+            combined_output = self._combined_process_output(stdout, stderr)
+            if self._is_workspace_infrastructure_error(combined_output):
+                repaired = await self._repair_workspace_after_infrastructure_error(combined_output)
+                if repaired:
+                    returncode, stdout, stderr = await self._run_lean_file_once(
+                        temp_filename=temp_filename,
+                        prepared_code=prepared_code,
+                        timeout=timeout,
+                    )
+                    combined_output = self._combined_process_output(stdout, stderr)
+                if self._is_workspace_infrastructure_error(combined_output):
+                    self._mark_workspace_unhealthy(combined_output)
+                    error_output = self._workspace_unhealthy_error
+                    return Lean4Result(
+                        success=False,
+                        error_output=error_output,
+                        goal_states=self._extract_goal_states(combined_output),
+                        raw_stderr=stderr.strip(),
+                        tactic_error_slice=error_output,
+                        failing_tactic_index=-1,
+                    )
 
-            combined_output = "\n".join(part for part in [stdout.strip(), stderr.strip()] if part).strip()
-            goal_states = self._extract_goal_states(combined_output)
-            lowered = combined_output.lower()
-            has_error_diagnostic = "error:" in lowered
-            has_sorry_warning = _output_contains_sorry_warning(combined_output)
-            lean_exited_cleanly = returncode == 0
-            positive_pass = (
-                lean_exited_cleanly
-                and not has_error_diagnostic
-                and not has_sorry_warning
-            )
-            tactic_error_slice, failing_tactic_index = self._extract_tactic_error_slice(
-                combined_output,
-                temp_filename,
-                tactic_ranges,
-            )
+        goal_states = self._extract_goal_states(combined_output)
+        lowered = combined_output.lower()
+        has_error_diagnostic = "error:" in lowered
+        has_sorry_warning = _output_contains_sorry_warning(combined_output)
+        lean_exited_cleanly = returncode == 0
+        positive_pass = (
+            lean_exited_cleanly
+            and not has_error_diagnostic
+            and not has_sorry_warning
+        )
+        tactic_error_slice, failing_tactic_index = self._extract_tactic_error_slice(
+            combined_output,
+            temp_filename,
+            tactic_ranges,
+        )
 
-            if positive_pass:
-                return Lean4Result(
-                    success=True,
-                    error_output="",
-                    goal_states=goal_states,
-                    raw_stderr=stderr.strip(),
-                    tactic_error_slice="",
-                    failing_tactic_index=-1,
-                )
-
-            if has_sorry_warning and not has_error_diagnostic and lean_exited_cleanly:
-                rejection = _format_placeholder_rejection("sorry", from_lean_diagnostic=True)
-                detail = f"{rejection}\n\nOriginal Lean 4 diagnostics:\n{combined_output}".strip()
-                return Lean4Result(
-                    success=False,
-                    error_output=detail,
-                    goal_states=goal_states,
-                    raw_stderr=stderr.strip(),
-                    tactic_error_slice=rejection,
-                    failing_tactic_index=failing_tactic_index,
-                )
-
-            error_output = tactic_error_slice or combined_output or "Lean 4 rejected the tactic script without additional diagnostics."
+        if positive_pass:
             return Lean4Result(
-                success=False,
-                error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+                success=True,
+                error_output="",
                 goal_states=goal_states,
                 raw_stderr=stderr.strip(),
-                tactic_error_slice=self._annotate_no_goals_hint(tactic_error_slice),
+                tactic_error_slice="",
+                failing_tactic_index=-1,
+            )
+
+        if has_sorry_warning and not has_error_diagnostic and lean_exited_cleanly:
+            rejection = _format_placeholder_rejection("sorry", from_lean_diagnostic=True)
+            detail = f"{rejection}\n\nOriginal Lean 4 diagnostics:\n{combined_output}".strip()
+            return Lean4Result(
+                success=False,
+                error_output=detail,
+                goal_states=goal_states,
+                raw_stderr=stderr.strip(),
+                tactic_error_slice=rejection,
                 failing_tactic_index=failing_tactic_index,
             )
-        finally:
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except OSError:
-                logger.debug("Could not remove temporary Lean file %s", temp_path)
+
+        error_output = tactic_error_slice or combined_output or "Lean 4 rejected the tactic script without additional diagnostics."
+        return Lean4Result(
+            success=False,
+            error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+            goal_states=goal_states,
+            raw_stderr=stderr.strip(),
+            tactic_error_slice=self._annotate_no_goals_hint(tactic_error_slice),
+            failing_tactic_index=failing_tactic_index,
+        )
 
 
 class Lean4LspClient(Lean4Client):
@@ -1451,7 +1578,7 @@ class Lean4LspClient(Lean4Client):
 
         workspace_ready = await self.ensure_workspace()
         if not workspace_ready:
-            return Lean4Result(success=False, error_output="Lean 4 workspace is not ready.")
+            return self._workspace_unavailable_result()
 
         if not self._lsp_healthy:
             return await self._subprocess_fallback.check_proof(lean_code, timeout=timeout)
@@ -1464,6 +1591,9 @@ class Lean4LspClient(Lean4Client):
                     temp_filename=f"MOTOProofCheck_{uuid.uuid4().hex}.lean",
                     timeout=timeout,
                 )
+                if self._is_workspace_infrastructure_error(result.error_output):
+                    await self._mark_unhealthy(result.error_output)
+                    return await self._subprocess_fallback.check_proof(lean_code, timeout=timeout)
                 return result
             except Exception as exc:
                 await self._mark_unhealthy(str(exc))
@@ -1554,7 +1684,7 @@ class Lean4LspClient(Lean4Client):
 
         workspace_ready = await self.ensure_workspace()
         if not workspace_ready:
-            return Lean4Result(success=False, error_output="Lean 4 workspace is not ready.")
+            return self._workspace_unavailable_result(tactic_script=True)
 
         if not self._lsp_healthy:
             return await self._subprocess_fallback._run_tactic_script_once(
@@ -1572,6 +1702,13 @@ class Lean4LspClient(Lean4Client):
                     timeout=timeout,
                     tactic_ranges=tactic_ranges,
                 )
+                if self._is_workspace_infrastructure_error(result.error_output):
+                    await self._mark_unhealthy(result.error_output)
+                    return await self._subprocess_fallback._run_tactic_script_once(
+                        theorem_header=theorem_header,
+                        tactic_list=tactic_list,
+                        timeout=timeout,
+                    )
                 return result
             except Exception as exc:
                 await self._mark_unhealthy(str(exc))

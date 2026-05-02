@@ -393,11 +393,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const getAutoSettingsForModel = async (modelId, selectedProvider = null) => {
     const model = findOpenRouterModel(openRouterModels, modelId);
     if (!model) {
+      console.debug('[CompilerAutoFill] model not in loaded list, skipping auto-fill', { modelId });
       return null;
     }
 
     const providerData = await fetchProvidersForModel(modelId);
-    return computeOpenRouterAutoSettings(model, providerData, selectedProvider);
+    const autoSettings = computeOpenRouterAutoSettings(model, providerData, selectedProvider);
+    if (autoSettings) {
+      console.debug('[CompilerAutoFill] computed auto-settings', {
+        modelId,
+        selectedProvider,
+        source: autoSettings.source,
+        contextWindow: autoSettings.contextWindow,
+        maxOutputTokens: autoSettings.maxOutputTokens,
+        warnings: autoSettings.warnings,
+      });
+      if (autoSettings.warnings && autoSettings.warnings.length > 0) {
+        console.warn('[CompilerAutoFill] auto-settings fallback used:', autoSettings.warnings);
+      }
+    }
+    return autoSettings;
   };
 
   // Critique prompt handlers
@@ -585,8 +600,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               if (effectiveProvider === 'openrouter' && m) {
                 const autoSettings = await getAutoSettingsForModel(m, null);
                 if (autoSettings) {
-                  setContextSize(autoSettings.contextWindow);
-                  setMaxOutput(autoSettings.maxOutputTokens);
+                  if (autoSettings.contextWindowKnown) {
+                    setContextSize(autoSettings.contextWindow);
+                  }
+                  if (autoSettings.outputCapKnown) {
+                    setMaxOutput(autoSettings.maxOutputTokens);
+                  }
                 }
               }
             }}
@@ -619,8 +638,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 setOpenrouterProv(providerName);
                 const autoSettings = await getAutoSettingsForModel(model, providerName);
                 if (autoSettings) {
-                  setContextSize(autoSettings.contextWindow);
-                  setMaxOutput(autoSettings.maxOutputTokens);
+                  if (autoSettings.contextWindowKnown) {
+                    setContextSize(autoSettings.contextWindow);
+                  }
+                  if (autoSettings.outputCapKnown) {
+                    setMaxOutput(autoSettings.maxOutputTokens);
+                  }
                 }
               }}
             >
@@ -660,7 +683,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 setContextSize(isNaN(parsed) ? 131072 : parsed);
               }}
               min={4096}
-              max={999999}
+              max={50000000}
               step={1024}
             />
           </div>
@@ -675,7 +698,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 setMaxOutput(isNaN(parsed) ? 25000 : parsed);
               }}
               min={1000}
-              max={100000}
+              max={50000000}
               step={1000}
             />
           </div>
@@ -737,7 +760,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <RoleConfig
           title="High-Parameter Model"
           description="Rigor enhancement mode: adds citations, strengthens methodology, and clarifies assumptions."
-          borderColor="#1eff1c"
+          borderColor="#2a2a2a"
           provider={highParamProvider} setProvider={setHighParamProvider}
           model={highParamModel} setModel={setHighParamModel}
           openrouterProv={highParamOpenrouterProvider} setOpenrouterProv={setHighParamOpenrouterProvider}

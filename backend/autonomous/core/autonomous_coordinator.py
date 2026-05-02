@@ -207,10 +207,22 @@ class AutonomousCoordinator:
     async def _get_effective_brainstorm_prompt(self, topic_prompt: str) -> str:
         """Return the brainstorm prompt with proof context applied."""
         effective_prompt = self._apply_proof_context(topic_prompt)
-        return await proof_database.inject_failure_hints_into_prompt(
+        effective_prompt = await proof_database.inject_failure_hints_into_prompt(
             effective_prompt,
             self._current_topic_id or "",
         )
+        # Append a compact summary of known (non-novel) proofs scoped to this
+        # brainstorm topic so the system can avoid re-proving standard results.
+        # Theorem statements only — no Lean code — to keep token cost low.
+        counts = proof_database.count_proofs()
+        if counts["known"] > 0:
+            known_summary = proof_database.get_known_proofs_summary_for_browsing(
+                source_id=self._current_topic_id or None,
+                limit=15,
+            )
+            if known_summary:
+                effective_prompt = f"{effective_prompt}\n\n{known_summary}"
+        return effective_prompt
 
     def _get_effective_compiler_prompt(self, paper_title: str) -> str:
         """Return the compiler prompt with proof context applied."""
@@ -4064,16 +4076,25 @@ class AutonomousCoordinator:
             
             # Load brainstorm database into compiler RAG
             # This is now the ONLY aggregator content loaded (no Part 1 pollution)
-            # IMPORTANT: Use brainstorm_memory.get_database_path() for session-aware path resolution
+            # Proof sections (both novel and non-novel) are stripped before indexing
+            # so that RAG chunks contain only mathematical submission content.
+            # Novel proofs reach the compiler via proof_database.inject_into_prompt().
             brainstorm_db_path = brainstorm_memory.get_database_path(self._current_topic_id)
             if os.path.exists(brainstorm_db_path):
                 logger.info(f"Loading brainstorm database into compiler RAG: {brainstorm_db_path}")
-                await rag_manager.add_document(
-                    brainstorm_db_path,
-                    chunk_sizes=[512],  # Use standard chunk size for brainstorm
-                    is_user_file=True  # High priority, permanent
+                brainstorm_content_for_rag = await brainstorm_memory.get_database_content(
+                    self._current_topic_id, strip_proofs=True
                 )
-                logger.info("Brainstorm database loaded into compiler RAG")
+                if brainstorm_content_for_rag:
+                    await rag_manager.add_text(
+                        brainstorm_content_for_rag,
+                        f"brainstorm_{self._current_topic_id}.txt",
+                        chunk_sizes=[512],
+                        is_permanent=True
+                    )
+                    logger.info("Brainstorm database loaded into compiler RAG (proof sections stripped)")
+                else:
+                    logger.warning("Brainstorm database was empty after proof stripping")
             else:
                 logger.warning(f"Brainstorm database not found: {brainstorm_db_path}")
             
@@ -4084,12 +4105,17 @@ class AutonomousCoordinator:
                     # IMPORTANT: Use paper_library.get_paper_path() for session-aware path resolution
                     paper_path = paper_library.get_paper_path(ref_paper_id)
                     if os.path.exists(paper_path):
-                        await rag_manager.add_document(
-                            paper_path,
-                            chunk_sizes=[512],
-                            is_user_file=False  # Lower priority than brainstorm
-                        )
-                        logger.info(f"Reference paper loaded: {ref_paper_id}")
+                        ref_content = await paper_library.get_paper_content(ref_paper_id, strip_proofs=True)
+                        if ref_content:
+                            await rag_manager.add_text(
+                                ref_content,
+                                f"reference_paper_{ref_paper_id}.txt",
+                                chunk_sizes=[512],
+                                is_permanent=False
+                            )
+                            logger.info(f"Reference paper loaded: {ref_paper_id}")
+                        else:
+                            logger.warning(f"Reference paper was empty after proof stripping: {ref_paper_id}")
                     else:
                         logger.warning(f"Reference paper not found: {paper_path}")
                 logger.info("All reference papers loaded into compiler RAG")
@@ -4100,12 +4126,17 @@ class AutonomousCoordinator:
                 for bp_id in self._current_brainstorm_paper_ids:
                     bp_path = paper_library.get_paper_path(bp_id)
                     if os.path.exists(bp_path):
-                        await rag_manager.add_document(
-                            bp_path,
-                            chunk_sizes=[512],
-                            is_user_file=True
-                        )
-                        logger.info(f"Prior brainstorm paper loaded as auto-reference: {bp_id}")
+                        bp_content = await paper_library.get_paper_content(bp_id, strip_proofs=True)
+                        if bp_content:
+                            await rag_manager.add_text(
+                                bp_content,
+                                f"prior_paper_{bp_id}.txt",
+                                chunk_sizes=[512],
+                                is_permanent=True
+                            )
+                            logger.info(f"Prior brainstorm paper loaded as auto-reference: {bp_id}")
+                        else:
+                            logger.warning(f"Prior brainstorm paper was empty after proof stripping: {bp_id}")
                     else:
                         logger.warning(f"Prior brainstorm paper not found: {bp_path}")
             

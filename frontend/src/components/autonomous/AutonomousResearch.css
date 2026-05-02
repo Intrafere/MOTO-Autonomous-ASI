@@ -1013,6 +1013,65 @@
   font-style: italic;
 }
 
+/* Open Source tag */
+.model-item--os {
+  position: relative;
+}
+
+.os-tag {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  color: #fff;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.35rem;
+  border-radius: 3px;
+  line-height: 1;
+  user-select: none;
+  cursor: default;
+  z-index: 2;
+  box-shadow: 0 1px 4px rgba(79, 70, 229, 0.45);
+  transition: opacity 0.15s;
+}
+
+.os-tag-tooltip-anchor {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  z-index: 2;
+  display: inline-block;
+}
+
+.os-tag-tooltip-anchor .os-tag {
+  position: static;
+}
+
+.os-tag-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 210px;
+  background: #1a1a2e;
+  border: 1px solid rgba(99, 102, 241, 0.5);
+  border-radius: 6px;
+  padding: 0.55rem 0.75rem;
+  color: #c4c4ff;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 200;
+  white-space: normal;
+}
+
+.os-tag-tooltip-anchor:hover .os-tag-tooltip {
+  display: block;
+}
+
 /* Main settings content area */
 .autonomous-settings {
   flex: 1;
@@ -1044,7 +1103,7 @@
 
 .settings-group {
   background: var(--bg-secondary, #1e1e1e);
-  border: 1px solid #18cc17;
+  border: 1px solid #2a2a2a;
   border-radius: 8px;
   padding: 1rem;
   width: 100%;
@@ -1165,7 +1224,7 @@
 /* Per-submitter config section */
 .submitter-config-section {
   background: var(--bg-tertiary, #252525);
-  border: 1px solid #18cc17;
+  border: 1px solid #2a2a2a;
   border-radius: 6px;
   padding: 1rem;
   margin-bottom: 1rem;

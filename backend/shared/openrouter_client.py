@@ -6,6 +6,7 @@ The system's evolving context provides sufficient diversity through growing data
 """
 import httpx
 import asyncio
+import json
 import logging
 import time
 from typing import List, Dict, Any, Optional
@@ -484,7 +485,35 @@ class OpenRouterClient:
                     )
                 
                 response.raise_for_status()
-                return response.json()
+                try:
+                    return response.json()
+                except (json.JSONDecodeError, ValueError) as json_err:
+                    # OpenRouter returned 2xx but body is not valid JSON.
+                    # This is typically a gateway/CDN error page, truncated stream,
+                    # or other transport-level failure — NOT a context-size problem.
+                    body_text = ""
+                    try:
+                        body_text = response.text or ""
+                    except Exception:
+                        body_text = ""
+                    body_preview = body_text[:500]
+                    content_type = response.headers.get("content-type", "") if hasattr(response, "headers") else ""
+                    logger.error(
+                        f"OpenRouter returned non-JSON body (status={response.status_code}, "
+                        f"content_type={content_type!r}, body_len={len(body_text)}, "
+                        f"parse_error={json_err}). Body preview: {body_preview!r}"
+                    )
+                    # Retry on transient malformed responses
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                        continue
+                    raise OpenRouterInvalidResponseError(
+                        f"OpenRouter returned non-JSON body after {self.MAX_RETRIES} attempts "
+                        f"(status={response.status_code}, content_type={content_type!r}): {json_err}",
+                        status_code=response.status_code,
+                        content_type=content_type,
+                        body_preview=body_preview,
+                    )
                 
             except CreditExhaustionError:
                 # Don't retry credit exhaustion - propagate immediately
@@ -492,6 +521,11 @@ class OpenRouterClient:
             
             except OpenRouterPrivacyPolicyError:
                 # Don't retry privacy policy errors - propagate immediately
+                raise
+
+            except OpenRouterInvalidResponseError:
+                # Already handled/retried above; propagate cleanly so callers can
+                # distinguish transport failures from real context overflows.
                 raise
                 
             except httpx.HTTPStatusError as e:
@@ -638,7 +672,28 @@ class OpenRouterClient:
                 raise CreditExhaustionError("OpenRouter credits exhausted for embeddings")
             
             response.raise_for_status()
-            data = response.json()
+            try:
+                data = response.json()
+            except (json.JSONDecodeError, ValueError) as json_err:
+                body_text = ""
+                try:
+                    body_text = response.text or ""
+                except Exception:
+                    body_text = ""
+                body_preview = body_text[:500]
+                content_type = response.headers.get("content-type", "") if hasattr(response, "headers") else ""
+                logger.error(
+                    f"OpenRouter embeddings returned non-JSON body (status={response.status_code}, "
+                    f"content_type={content_type!r}, body_len={len(body_text)}, "
+                    f"parse_error={json_err}). Body preview: {body_preview!r}"
+                )
+                raise OpenRouterInvalidResponseError(
+                    f"OpenRouter embeddings returned non-JSON body "
+                    f"(status={response.status_code}, content_type={content_type!r}): {json_err}",
+                    status_code=response.status_code,
+                    content_type=content_type,
+                    body_preview=body_preview,
+                )
             
             # Extract embeddings in order
             embeddings = [
@@ -749,6 +804,30 @@ class OpenRouterClient:
             logger.info("OpenRouter client closed successfully")
         except Exception as e:
             logger.error(f"Error closing OpenRouter client: {e}")
+
+
+class OpenRouterInvalidResponseError(ValueError):
+    """
+    Raised when OpenRouter returns a non-JSON (or otherwise malformed) response body
+    on a 2xx status. This typically indicates an upstream proxy/CDN error page,
+    a truncated stream, or a transient gateway failure rather than a real
+    context-window / prompt-size problem.
+
+    Inherits from ValueError so that existing ``except ValueError`` handlers in
+    the submitter chain continue to propagate transport failures correctly
+    (rather than accidentally swallowing them via a broad ``except Exception:
+    return None`` further up the call stack).
+
+    Attributes:
+        status_code: HTTP status code returned by OpenRouter
+        content_type: Content-Type header (if any)
+        body_preview: First ~500 chars of the response body, for diagnostics
+    """
+    def __init__(self, message: str, status_code: int, content_type: str, body_preview: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.content_type = content_type
+        self.body_preview = body_preview
 
 
 class CreditExhaustionError(Exception):

@@ -156,7 +156,7 @@ project-root/
 │   │       ├── topic_exploration_memory.py # In-memory candidate DB for topic exploration phase
 │   │       ├── paper_model_tracker.py   # Per-paper model usage tracking and author attribution
 │   │       ├── autonomous_api_logger.py # Autonomous API call logger singleton
-│   │       ├── proof_database.py        # Session-aware Lean 4 verified-proof storage (records, Lean sources, novelty index, reverse Mathlib index)
+│   │       ├── proof_database.py        # Session-aware Lean 4 verified-proof storage (records, Lean sources, novelty index, reverse Mathlib index); cross-session library access via `list_proof_library()` and `get_library_proof()`
 │   │       ├── final_answer_memory.py   # TIER 3 - Final answer state & volume management
 │   │       └── session_manager.py       # Prompt-based session folder organization
 │   │
@@ -261,12 +261,14 @@ project-root/
 │   │   │       ├── FinalAnswerLibrary.css   # Final answer library styles
 │   │   │       ├── ArchiveViewerModal.jsx   # Research lineage archive viewer (papers + brainstorms)
 │   │   │       ├── ArchiveViewerModal.css   # Archive viewer styles
-│   │   │       ├── MathematicalProofs.jsx   # Proof library tab (lists verified novel/non-novel proofs from `/api/proofs`)
+│   │   │       ├── MathematicalProofs.jsx   # Live-session proof tab (lists verified novel/non-novel proofs from current session via `/api/proofs`)
 │   │   │       ├── MathematicalProofs.css   # Proof library styles
 │   │   │       ├── ProofGraph.jsx           # Proof dependency graph view (hand-rolled SVG; Build 4, may escalate to reactflow in Build 5 if needed)
 │   │   │       ├── ProofGraph.css           # Proof graph styles
 │   │   │       ├── ProofNotificationStack.jsx # Persistent popup notifications for novel proof discoveries
-│   │   │       ├── Stage2PaperHistory.jsx   # Tier 2 paper history list (grouped per research run; used inside FinalAnswerLibrary)
+│   │   │       ├── ProofLibrary.jsx         # Cross-session novel proof library viewer (all sessions, grouped by research run; sub-tab inside CompletedWorksLibrary; fetches via `/api/proofs/library`)
+│   │   │       ├── ProofLibrary.css         # Proof library viewer styles
+│   │   │       ├── Stage2PaperHistory.jsx   # Tier 2 paper history list (grouped per research run; sub-tab inside CompletedWorksLibrary)
 │   │   │       └── Stage2PaperHistory.css   # Tier 2 paper history styles
 │   │   │
 │   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for OpenRouter vs LM Studio setup (OpenRouter-only in generic mode)
@@ -287,7 +289,7 @@ project-root/
 │   │   ├── critique-modal.css           # Paper critique modal styles
 │   │   │
 │   │   ├── services/
-│   │   │   ├── api.js                   # Backend API calls (includes openRouterAPI, `/api/features` capability bootstrap helper, and proof routes under `/api/proofs/*`)
+│   │   │   ├── api.js                   # Backend API calls (includes openRouterAPI, `/api/features` capability bootstrap helper, proof routes under `/api/proofs/*`, and cross-session proof library routes `getProofLibrary` / `getLibraryProof` under `/api/proofs/library`)
 │   │   │   └── websocket.js             # WebSocket connection 
 │   │   │
 │   │   ├── hooks/
@@ -385,20 +387,20 @@ project-root/
 - Tier 3 Agents: `certainty_assessor.py`, `answer_format_selector.py`, `volume_organizer.py`
 - `paper_redundancy_checker.py`: Library quality maintenance (every 3 papers)
 - Prompts: `topic_prompts.py`, `topic_exploration_prompts.py`, `completion_prompts.py`, `paper_reference_prompts.py`, `paper_title_exploration_prompts.py`, `paper_title_prompts.py`, `paper_redundancy_prompts.py`, `paper_continuation_prompts.py`, `proof_prompts.py`, `final_answer_prompts.py`
-- Memory: `brainstorm_memory.py`, `paper_library.py`, `research_metadata.py` (also stores the proof runtime config snapshot), `session_manager.py`, `autonomous_rejection_logs.py`, `topic_exploration_memory.py` (in-memory candidate DB), `paper_model_tracker.py` (per-paper model usage tracking and author attribution), `autonomous_api_logger.py` (API call logging singleton), `proof_database.py` (session-aware Lean 4 proof storage + novelty index + reverse Mathlib index), `final_answer_memory.py` (model tracking, archival)
+- Memory: `brainstorm_memory.py`, `paper_library.py`, `research_metadata.py` (also stores the proof runtime config snapshot), `session_manager.py`, `autonomous_rejection_logs.py`, `topic_exploration_memory.py` (in-memory candidate DB), `paper_model_tracker.py` (per-paper model usage tracking and author attribution), `autonomous_api_logger.py` (API call logging singleton), `proof_database.py` (session-aware Lean 4 proof storage + novelty index + reverse Mathlib index + cross-session library access), `final_answer_memory.py` (model tracking, archival)
 
 ### API Routes
 
 - `compiler.py`: Compiler control (start/stop/status), paper/outline access, critique management
 - `autonomous.py`: Autonomous research control (start/stop/clear/status), brainstorm/paper access, Tier 3 endpoints
-- `proofs.py`: Proof database listing, `/status` runtime readiness, `POST /settings` runtime flag updates, `POST /check` manual proof check, `/{id}/certificate[.lean]` certificate export, `/{id}/dependencies` + `/graph` + `/mathlib/{lemma}/dependents` graph/lineage queries. All routes gated on `lean4_enabled`.
+- `proofs.py`: Proof database listing, `/status` runtime readiness, `POST /settings` runtime flag updates, `POST /check` manual proof check, `/{id}/certificate[.lean]` certificate export, `/{id}/dependencies` + `/graph` + `/mathlib/{lemma}/dependents` graph/lineage queries (all above gated on `lean4_enabled`); `GET /library` + `GET /library/{session_id}/{proof_id}` cross-session proof library endpoints (NOT gated — read-only file access, always available).
 
 ### Frontend Components
 
-- `App.jsx`: Top-level GUI shell. Default mode is `Autonomous ASI S.T.E.M.` for Part 3 screens; `Advanced Manual ASI S.T.E.M.` contains the manual Part 1 Aggregator + Part 2 Compiler workspace. Shared utility controls (Boost, OpenRouter, WorkflowPanel) remain global, and Build 3C bootstraps `/api/features` here so hosted mode can hide LM Studio-only UI and copy.
+- `App.jsx`: Top-level GUI shell. Default mode is `Autonomous ASI S.T.E.M.` for Part 3 screens; `Advanced Manual ASI S.T.E.M.` contains the manual Part 1 Aggregator + Part 2 Compiler workspace. Shared utility controls (Boost, OpenRouter, WorkflowPanel) remain global, and Build 3C bootstraps `/api/features` here so hosted mode can hide LM Studio-only UI and copy. **Tab persistence**: `autonomousActiveTab` → `localStorage['autonomousActiveTab']`; `completedWorksSubTab` → `localStorage['completedWorksSubTab']`; `manualActiveTab` → `localStorage['manualActiveTab']`. **Autonomous tab groups**: main tabs (interface, brainstorms, papers, proofs, optional final-answer) + settings group (Your Completed Works Library, API Call Logs, Settings). The "Your Completed Works Library" tab hosts three sub-tabs rendered inside its content area: Stage 2 Papers History, Stage 3 Final Answers History, and Proof Library.
 - **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
 - **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`
-- **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx`, `ArchiveViewerModal.jsx`, `MathematicalProofs.jsx` (proof library), `ProofGraph.jsx` (dependency graph), `ProofNotificationStack.jsx` (novel-proof popups)
+- **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx` (Stage 3 history sub-tab), `ArchiveViewerModal.jsx`, `MathematicalProofs.jsx` (live-session proof tab), `ProofGraph.jsx` (dependency graph), `ProofNotificationStack.jsx` (novel-proof popups), `ProofLibrary.jsx` (cross-session proof library sub-tab), `Stage2PaperHistory.jsx` (Stage 2 history sub-tab)
 - **Shared**: `StartupProviderSetupModal.jsx`, `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `HungConnectionNotificationStack.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
 - **Hooks**: `useProofCheckRuntime.js` (reads `/api/proofs/status` + runtime config so UI can enable/disable manual proof-check controls)
 - **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `openRouterSelection.js` (shared OpenRouter selector auto-fill helpers using model context and provider endpoint caps), `autonomousProfiles.js` (shared recommended-profile definitions + persistence helpers; when editing a preset, anchor to the exact profile block and exact nested role such as `validator` or `highContext`, never to a shared literal alone, then verify the diff only touched that intended profile/role), `disclaimerHelper.js` (frontend-only disclaimer injection), `api.js`, `websocket.js`

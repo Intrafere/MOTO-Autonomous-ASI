@@ -2739,6 +2739,193 @@ LaTeX notation IS ALLOWED and EXPECTED - you must escape it properly in JSON:
 - `backend/autonomous/prompts/paper_reference_prompts.py`
 - `backend/autonomous/prompts/paper_title_prompts.py`
 - `backend/autonomous/prompts/paper_redundancy_prompts.py`
+- `backend/autonomous/prompts/proof_prompts.py`
+
+---
+
+### 10. PROOF PROMPTS (Lean 4 Formal Verification)
+
+**File:** `backend/autonomous/prompts/proof_prompts.py`
+
+All proof prompts use `_json_only_footer(example)` which appends:
+`"Respond with ONLY valid JSON. Do not use markdown fences. Escape backslashes correctly for JSON."`
+All proof prompts pass `temperature=0.0`.
+
+---
+
+#### 10a. PROOF FRAMING GATE
+
+**Function:** `build_proof_framing_gate_prompt(user_prompt)`
+
+**Purpose:** One-shot decision at autonomous start — decides whether the research program should activate the full proof pipeline. Errs on the side of `true` whenever there is meaningful mathematical substance.
+
+```json
+{
+  "is_proof_amenable": true,
+  "reasoning": "brief explanation"
+}
+```
+
+**Field requirements:**
+- `is_proof_amenable`: Boolean. `true` enables `PROOF_FRAMING_CONTEXT` injection into all subsequent submitter prompts and activates the `ProofVerificationStage` after each brainstorm/paper. `false` disables the proof pipeline for this session.
+- `reasoning`: Always required.
+
+---
+
+#### 10b. PROOF IDENTIFICATION (Theorem Discovery)
+
+**Function:** `build_proof_identification_prompt(user_prompt, source_type, source_id, source_content)`
+
+**Purpose:** Novelty-seeking gate that extracts the most promising non-trivial theorem candidates from a brainstorm or paper. Rejects trivial identities and textbook restatements. Returns at most 5 candidates ranked by novelty potential.
+
+```json
+{
+  "has_provable_theorems": true,
+  "theorems": [
+    {
+      "theorem_id": "thm_1",
+      "statement": "natural-language theorem statement",
+      "formal_sketch": "optional note about assumptions, notation, or likely Lean formalization strategy",
+      "novelty_rationale": "why this theorem is non-trivial and worth formalizing"
+    }
+  ]
+}
+```
+
+**Field requirements:**
+- `has_provable_theorems`: Boolean. `true` when at least one non-trivial novel-potential theorem is present.
+- `theorems`: Array of candidates, ranked by novelty potential. **Maximum 5 entries.** Empty array when `has_provable_theorems` is `false`.
+- `theorem_id`: Stable string identifier such as `"thm_1"`, `"thm_2"`, etc.
+- `statement`: Natural-language theorem statement. Required.
+- `formal_sketch`: Optional Lean formalization hints, assumptions, or notation notes.
+- `novelty_rationale`: Brief explanation of why this theorem is non-trivial and worth the cost of Lean verification. Required for each candidate.
+
+**What to extract:** Novel theorems, bold conjectures that can be sharpened, non-obvious connections/bounds/structural results, ambitious claims (the formalization agent narrows if needed).
+
+**What to reject:** Trivial identities (e.g. `n + 0 = n`), standard Mathlib restatements, results closable by a single tactic (`simp`, `omega`, `norm_num`, `decide`, `rfl`), tautologies, definitional equalities.
+
+---
+
+#### 10c. MATHLIB LEMMA SEARCH
+
+**Function:** `build_lemma_search_prompt(user_prompt, source_type, theorem_statement, formal_sketch, source_excerpt)`
+
+**Purpose:** Suggests existing Mathlib declaration names likely useful for proving the target theorem. Output is injected into the formalization prompt as `RELEVANT MATHLIB LEMMAS`.
+
+```json
+{
+  "lemma_names": [
+    "Nat.add_comm",
+    "Nat.add_assoc"
+  ],
+  "reasoning": "brief explanation"
+}
+```
+
+**Field requirements:**
+- `lemma_names`: Array of 5–10 Mathlib declaration name strings when possible. Empty array if none are evident or theorem is too vague.
+- `reasoning`: Always required.
+
+---
+
+#### 10d. SMT TRANSLATION
+
+**Function:** `build_smt_translation_prompt(user_prompt, source_type, theorem_statement, formal_sketch, source_excerpt)`
+
+**Purpose:** Translates an arithmetic/SMT-amenable theorem into SMT-LIB v2 for Z3 pre-check. Only called when `smt_enabled` and the candidate passes the SMT-amenability heuristic. Result feeds tactic hints into Lean 4 formalization — never substitutes for Lean verification.
+
+```json
+{
+  "smtlib": "(set-logic QF_LIA)\n(declare-const n Int)\n(assert (not (= (+ n 0) n)))\n(check-sat)",
+  "reasoning": "Negate the target theorem so unsat means the theorem is valid."
+}
+```
+
+**Field requirements:**
+- `smtlib`: SMT-LIB v2 text encoding the **negation** of the theorem (so `unsat` = theorem is valid). Empty string `""` if a faithful SMT translation cannot be produced.
+- `reasoning`: Always required.
+
+**Constraints:** Quantifier-free arithmetic fragments preferred. Do not invent assumptions not strongly implied by the theorem statement.
+
+---
+
+#### 10e. PROOF FORMALIZATION (Full Script)
+
+**Function:** `build_proof_formalization_prompt(user_prompt, source_type, theorem_statement, formal_sketch, source_excerpt, prior_attempts, relevant_lemmas, smt_hint)`
+
+**Purpose:** Primary formalization path — generates complete Lean 4 source ready to compile. Up to 3 attempts per candidate, with the full error-feedback chain from prior attempts injected on each retry. Preserves the theorem's non-trivial content; never weakens the statement just to compile.
+
+```json
+{
+  "theorem_name": "optional_lean_identifier",
+  "lean_code": "import Mathlib\n\n theorem ... := by ...",
+  "reasoning": "brief note about the formalization strategy"
+}
+```
+
+**Field requirements:**
+- `theorem_name`: Optional Lean identifier string (e.g. `"myTheorem"`). Can be empty.
+- `lean_code`: Complete, runnable Lean 4 source including all needed imports. Must close every goal without `sorry` or `admit`. Required.
+- `reasoning`: Brief note on formalization strategy. Always required.
+
+**Critical constraints:**
+- `sorry` / `admit` anywhere → proof rejected, counts as a failed attempt.
+- Axiomatizing the theorem's own concepts to make the goal trivial → rejected.
+- If the full claim cannot be proved, return a narrower concrete lemma rather than a `sorry`-closed stub.
+- PRESERVE the theorem's non-trivial content — do not simplify into a trivial identity to make it compile.
+
+---
+
+#### 10f. PROOF FORMALIZATION (Tactic Script)
+
+**Function:** `build_proof_tactic_script_prompt(user_prompt, source_type, theorem_statement, formal_sketch, source_excerpt, prior_attempts, relevant_lemmas, smt_hint)`
+
+**Purpose:** Fallback formalization path after full-script attempts fail — returns a theorem header plus a decomposed tactic list. Up to 2 attempts. Prior attempts from the full-script phase are passed in so the tactic path sees the full failure history.
+
+```json
+{
+  "theorem_name": "optional_lean_identifier",
+  "theorem_header": "theorem optional_lean_identifier (n : Nat) : n + 0 = n",
+  "tactics": [
+    {
+      "tactic": "simpa using Nat.add_zero n",
+      "reasoning": "Close the goal with the standard right-identity lemma."
+    }
+  ],
+  "reasoning": "brief note about the tactic strategy"
+}
+```
+
+**Field requirements:**
+- `theorem_name`: Optional Lean identifier. Can be empty.
+- `theorem_header`: Lean 4 theorem signature without proof body (no `:= by`). Required.
+- `tactics`: Ordered array of tactic objects. Each entry must include `tactic` (Lean tactic string) and `reasoning` (short note). `sorry` / `admit` never allowed.
+- `reasoning`: Overall strategy note. Always required.
+
+**Fallback behavior:** If the model returns a malformed tactic response (missing header or empty tactics), the agent falls back to one additional `_run_full_script_attempt` call.
+
+---
+
+#### 10g. PROOF NOVELTY ASSESSMENT
+
+**Function:** `build_proof_novelty_prompt(user_prompt, theorem_statement, lean_code, existing_novel_proofs)`
+
+**Purpose:** Post-verification novelty gate — classifies a Lean-4-verified theorem as novel or known. Does NOT re-check validity. Errs on the side of recognizing novelty for results that required multi-step reasoning or non-trivial formalization work.
+
+```json
+{
+  "is_novel": true,
+  "reasoning": "brief explanation"
+}
+```
+
+**Field requirements:**
+- `is_novel`: Boolean. `true` → proof enters the highest-priority direct-injection block for all subsequent brainstorm/paper submitters via `proof_database.get_novel_proofs_for_injection()`. `false` → stored in the database but not injected.
+- `reasoning`: Always required.
+
+**Novel criteria (any one sufficient):** Result not in Mathlib or standard textbooks; new connection/bound/structural insight; formalizes a previously unverified conjecture; non-trivial composition of known results yielding something new; original relative to the existing stored proofs.
+
+**Not novel:** Direct Mathlib restatement; trivial identity or tautology; closable by a single standard tactic (`simp`, `omega`, `norm_num`, `decide`, `rfl`); duplicates an already-stored novel proof.
 
 ---
 

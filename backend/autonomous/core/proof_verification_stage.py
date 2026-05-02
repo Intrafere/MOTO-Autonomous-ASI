@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 BroadcastFn = Optional[Callable[[str, dict[str, Any]], Awaitable[None]]]
 ShouldStopFn = Optional[Callable[[], bool]]
+LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
 
 
 @dataclass
@@ -279,10 +280,12 @@ class ProofVerificationStage:
             )
             result_name = smt_result.result if smt_result.result in {"sat", "unsat", "unknown"} else "unknown"
             suggestions = self._build_smt_tactic_suggestions(candidate) if result_name == "unsat" else []
+            z3_raw = "\n".join(part for part in [smt_result.stdout.strip(), smt_result.stderr.strip()] if part).strip()
             return SmtHint(
                 result=result_name,
                 suggested_tactics=suggestions,
                 smtlib=smtlib,
+                z3_output=z3_raw[:2000],
             )
         except Exception as exc:
             logger.debug("SMT check failed for theorem %s in %s %s: %s", candidate.theorem_id, source_type, source_id, exc)
@@ -704,6 +707,14 @@ class ProofVerificationStage:
 
                     if is_novel:
                         result.novel_count += 1
+                        # Novel proofs are appended to their source document so the
+                        # paper/brainstorm they came from retains a record of them.
+                        # They are also stored in ProofDatabase and direct-injected
+                        # into all prompts via inject_into_prompt().
+                        if source_type == "brainstorm":
+                            await brainstorm_memory.append_proofs_section(source_id, stored_record)
+                        elif ":" not in source_id:
+                            await paper_library.append_proofs_section(source_id, stored_record)
                         await self._broadcast(
                             broadcast_fn,
                             "novel_proof_discovered",
@@ -716,11 +727,10 @@ class ProofVerificationStage:
                             },
                         )
                     else:
-                        if source_type == "brainstorm":
-                            await brainstorm_memory.append_proofs_section(source_id, stored_record)
-                        elif ":" not in source_id:
-                            await paper_library.append_proofs_section(source_id, stored_record)
-
+                        # Non-novel (known) proofs are stored in ProofDatabase only.
+                        # They are NOT appended to brainstorm/paper files to avoid
+                        # polluting compiler and RAG context with standard Lean 4 code.
+                        # They remain browsable via proof_database.get_known_proofs_summary_for_browsing().
                         await self._broadcast(
                             broadcast_fn,
                             "known_proof_verified",
@@ -918,7 +928,11 @@ class ProofVerificationStage:
             smt_hint=candidate.smt_hint,
             should_stop=should_stop,
         )
-        if not success and not (should_stop and should_stop()):
+        workspace_error = bool(
+            attempts
+            and (attempts[-1].error_output or "").startswith(LEAN_WORKSPACE_ERROR_PREFIX)
+        )
+        if not success and not workspace_error and not (should_stop and should_stop()):
             tactic_success, tactic_theorem_name, lean_code, attempts = await formalization_agent.prove_candidate_tactic_script(
                 user_research_prompt=user_prompt,
                 source_type=source_type,
@@ -936,7 +950,7 @@ class ProofVerificationStage:
                 theorem_name = tactic_theorem_name
             success = tactic_success
 
-        if not success and not (should_stop and should_stop()):
+        if not success and not workspace_error and not (should_stop and should_stop()):
             await self._broadcast(
                 broadcast_fn,
                 "proof_attempts_exhausted",

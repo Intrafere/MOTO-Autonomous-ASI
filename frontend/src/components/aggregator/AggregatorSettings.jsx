@@ -232,11 +232,26 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
   const getAutoSettingsForModel = async (modelId, selectedProvider = null) => {
     const model = findOpenRouterModel(openRouterModels, modelId);
     if (!model) {
+      console.debug('[AggregatorAutoFill] model not in loaded list, skipping auto-fill', { modelId });
       return null;
     }
 
     const providerData = await fetchProvidersForModel(modelId);
-    return computeOpenRouterAutoSettings(model, providerData, selectedProvider);
+    const autoSettings = computeOpenRouterAutoSettings(model, providerData, selectedProvider);
+    if (autoSettings) {
+      console.debug('[AggregatorAutoFill] computed auto-settings', {
+        modelId,
+        selectedProvider,
+        source: autoSettings.source,
+        contextWindow: autoSettings.contextWindow,
+        maxOutputTokens: autoSettings.maxOutputTokens,
+        warnings: autoSettings.warnings,
+      });
+      if (autoSettings.warnings && autoSettings.warnings.length > 0) {
+        console.warn('[AggregatorAutoFill] auto-settings fallback used:', autoSettings.warnings);
+      }
+    }
+    return autoSettings;
   };
 
   const handleSubmitterModelChange = async (submitterId, modelId) => {
@@ -262,8 +277,8 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       c.submitterId === submitterId
         ? {
             ...c,
-            contextWindow: autoSettings.contextWindow,
-            maxOutputTokens: autoSettings.maxOutputTokens,
+            ...(autoSettings.contextWindowKnown ? { contextWindow: autoSettings.contextWindow } : {}),
+            ...(autoSettings.outputCapKnown ? { maxOutputTokens: autoSettings.maxOutputTokens } : {}),
           }
         : c
     );
@@ -294,8 +309,8 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       c.submitterId === submitterId
         ? {
             ...c,
-            contextWindow: autoSettings.contextWindow,
-            maxOutputTokens: autoSettings.maxOutputTokens,
+            ...(autoSettings.contextWindowKnown ? { contextWindow: autoSettings.contextWindow } : {}),
+            ...(autoSettings.outputCapKnown ? { maxOutputTokens: autoSettings.maxOutputTokens } : {}),
           }
         : c
     );
@@ -320,13 +335,15 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       return;
     }
 
-    setValidatorMaxOutput(autoSettings.maxOutputTokens);
+    if (autoSettings.outputCapKnown) {
+      setValidatorMaxOutput(autoSettings.maxOutputTokens);
+    }
     setConfig(prev => ({
       ...prev,
       validatorModel: modelId,
       validatorOpenrouterProvider: null,
-      validatorContextSize: autoSettings.contextWindow,
-      validatorMaxOutput: autoSettings.maxOutputTokens,
+      ...(autoSettings.contextWindowKnown ? { validatorContextSize: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { validatorMaxOutput: autoSettings.maxOutputTokens } : {}),
     }));
   };
 
@@ -346,12 +363,14 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       return;
     }
 
-    setValidatorMaxOutput(autoSettings.maxOutputTokens);
+    if (autoSettings.outputCapKnown) {
+      setValidatorMaxOutput(autoSettings.maxOutputTokens);
+    }
     setConfig(prev => ({
       ...prev,
       validatorOpenrouterProvider: providerName,
-      validatorContextSize: autoSettings.contextWindow,
-      validatorMaxOutput: autoSettings.maxOutputTokens,
+      ...(autoSettings.contextWindowKnown ? { validatorContextSize: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { validatorMaxOutput: autoSettings.maxOutputTokens } : {}),
     }));
   };
 
@@ -700,7 +719,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                       value={cfg.contextWindow}
                       onChange={(e) => updateSubmitterConfig(cfg.submitterId, 'contextWindow', parseInt(e.target.value))}
                       min="4096"
-                      max="999999"
+                      max="50000000"
                       step="1024"
                       className="input--sm"
                     />
@@ -713,7 +732,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                       value={cfg.maxOutputTokens}
                       onChange={(e) => updateSubmitterConfig(cfg.submitterId, 'maxOutputTokens', parseInt(e.target.value))}
                       min="1000"
-                      max="100000"
+                      max="50000000"
                       step="1000"
                       className="input--sm"
                     />
@@ -760,7 +779,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                   setConfig({ ...config, validatorContextSize: isNaN(parsed) ? 131072 : parsed });
                 }}
                 min="4096"
-                max="999999"
+                max="50000000"
                 step="1024"
               />
               <small className="hint-text">
@@ -792,7 +811,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                   setConfig({ ...config, validatorMaxOutput: value });
                 }}
                 min="1000"
-                max="100000"
+                max="50000000"
                 step="1000"
               />
             </div>

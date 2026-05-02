@@ -16,7 +16,7 @@ from backend.shared.config import system_config, rag_config
 from backend.shared.models import CompilerState, CompilerSubmission, CompilerValidationResult, WorkflowTask, SubmitterConfig, ValidationResult, ModelConfig
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
-from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
@@ -38,6 +38,37 @@ from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
 from backend.autonomous.memory.paper_model_tracker import PaperModelTracker
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_submitter_error(err: BaseException) -> tuple[str, str]:
+    """
+    Classify an exception raised by a HighContextSubmitter.submit_* call.
+
+    Distinguishes true context / prompt-size overflows (which are meaningful
+    "decline to submit" signals) from upstream transport / API failures
+    (non-JSON responses, connection errors, generic API errors) which are NOT
+    context overflows and should not be reported to the user as such.
+
+    Returns:
+        (label, reason_prefix) where:
+            - label is a short human-readable classification used in logs
+              and UI messages (e.g. "Context overflow", "API transport error")
+            - reason_prefix is the leading text used when building the
+              full reason/reasoning string (e.g. "Context overflow: ...")
+    """
+    msg = str(err) if err is not None else ""
+    msg_lower = msg.lower()
+
+    if isinstance(err, OpenRouterInvalidResponseError):
+        return ("API transport error", "API transport error")
+
+    if "prompt too large" in msg_lower or "tokens > " in msg_lower:
+        return ("Context overflow", "Context overflow")
+
+    if msg_lower.startswith("openrouter api error") or msg_lower.startswith("openrouter connection failed") or msg_lower.startswith("openrouter rate limit"):
+        return ("API transport error", "API transport error")
+
+    return ("Submitter error", "Submitter error")
 
 
 class CompilerCoordinator:
@@ -957,7 +988,7 @@ INVALID:
                 if self.autonomous_mode and self._current_topic_id:
                     try:
                         from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
-                        first_brainstorm_content = await brainstorm_memory.get_database_content(self._current_topic_id)
+                        first_brainstorm_content = await brainstorm_memory.get_database_content(self._current_topic_id, strip_proofs=True)
                         first_brainstorm_source = f"brainstorm_{self._current_topic_id}.txt"
                     except Exception:
                         pass
@@ -988,11 +1019,12 @@ INVALID:
                     
             except FreeModelExhaustedError:
                 raise
-            except ValueError as e:
-                logger.error(f"Construction context overflow in initial loop (attempt {attempt}): {e}")
+            except (ValueError, OpenRouterInvalidResponseError) as e:
+                label, reason_prefix = _classify_submitter_error(e)
+                logger.error(f"Construction {label.lower()} in initial loop (attempt {attempt}): {e}")
                 await self._broadcast("compiler_rejection", {
                     "mode": "construction",
-                    "reasoning": f"Context overflow: {e}"
+                    "reasoning": f"{reason_prefix}: {e}"
                 })
                 await compiler_rejection_log.add_rejection(
                     CompilerValidationResult(
@@ -1227,7 +1259,7 @@ INVALID:
         if self.autonomous_mode and self._current_topic_id:
             try:
                 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
-                brainstorm_content_for_submitter = await brainstorm_memory.get_database_content(self._current_topic_id)
+                brainstorm_content_for_submitter = await brainstorm_memory.get_database_content(self._current_topic_id, strip_proofs=True)
                 brainstorm_source_for_submitter = f"brainstorm_{self._current_topic_id}.txt"
                 if brainstorm_content_for_submitter:
                     logger.info(f"Loaded brainstorm content for retroactive corrections: {len(brainstorm_content_for_submitter)} chars")
@@ -1245,10 +1277,11 @@ INVALID:
                 brainstorm_content=brainstorm_content_for_submitter,
                 brainstorm_source_name=brainstorm_source_for_submitter
             )
-        except ValueError as e:
-            logger.error(f"Construction context overflow: {e}")
+        except (ValueError, OpenRouterInvalidResponseError) as e:
+            label, reason_prefix = _classify_submitter_error(e)
+            logger.error(f"Construction {label.lower()}: {e}")
             self.construction_rejections += 1
-            overflow_reason = f"Context overflow: {e}"
+            overflow_reason = f"{reason_prefix}: {e}"
             await compiler_rejection_log.add_rejection(
                 CompilerValidationResult(
                     submission_id=str(uuid.uuid4()),
@@ -1647,7 +1680,7 @@ INVALID:
         logger.info(f"Processing retroactive brainstorm {brainstorm_op.action} for topic {topic_id}")
         
         try:
-            brainstorm_content = await brainstorm_memory.get_database_content(topic_id)
+            brainstorm_content = await brainstorm_memory.get_database_content(topic_id, strip_proofs=True)
             if not brainstorm_content:
                 logger.warning(f"Brainstorm {topic_id} is empty, skipping retroactive operation")
                 return
@@ -1820,14 +1853,15 @@ INVALID:
         submission = None
         try:
             submission = await self.high_context_submitter.submit_review(review_focus=review_focus)
-        except ValueError as e:
-            logger.error(f"{review_label.capitalize()} context overflow: {e}")
+        except (ValueError, OpenRouterInvalidResponseError) as e:
+            label, reason_prefix = _classify_submitter_error(e)
+            logger.error(f"{review_label.capitalize()} {label.lower()}: {e}")
             self.review_declines += 1
-            await compiler_rejection_log.add_decline("review", f"Context overflow: {e}")
+            await compiler_rejection_log.add_decline("review", f"{reason_prefix}: {e}")
             await self._broadcast("compiler_decline", {
                 "mode": "review",
                 "review_focus": review_focus,
-                "reasoning": f"Context overflow: {e}"
+                "reasoning": f"{reason_prefix}: {e}"
             })
             return False
         

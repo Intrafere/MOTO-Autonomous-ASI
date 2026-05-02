@@ -566,16 +566,31 @@ class PaperLibrary:
             logger.info(f"Saved paper {paper_id}: '{title}' ({word_count} words, {model_count} models tracked)")
             return metadata
     
-    async def get_paper_content(self, paper_id: str) -> str:
-        """Get full paper content."""
+    async def get_paper_content(self, paper_id: str, *, strip_proofs: bool = False) -> str:
+        """Get full paper content.
+
+        Args:
+            paper_id: The paper ID.
+            strip_proofs: When True, truncate content at the proof section header.
+                Use this for compiler and RAG paths so that appended proof blocks
+                do not pollute LLM context.  Novel proofs are available via
+                proof_database.inject_into_prompt(); non-novel proofs are browsable
+                via proof_database.get_known_proofs_summary_for_browsing().
+        """
         paper_path = self._get_paper_path(paper_id)
-        
+
         if not paper_path.exists():
             return ""
-        
+
         try:
             async with aiofiles.open(paper_path, 'r', encoding='utf-8') as f:
-                return await f.read()
+                content = await f.read()
+            if strip_proofs and content:
+                marker = "=== PROOFS GENERATED FROM THIS PAPER"
+                idx = content.find(marker)
+                if idx > 0:
+                    content = content[:idx].rstrip()
+            return content
         except Exception as e:
             logger.error(f"Failed to read paper {paper_id}: {e}")
             return ""

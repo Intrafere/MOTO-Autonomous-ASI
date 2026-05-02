@@ -76,7 +76,7 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
                   fontWeight: 700,
                 }}
               >
-                Congratulations! Novel Mathematical Proof Discovered
+                Congratulations! Novel Proof or Novel Formulation Discovered
               </div>
               <div
                 style={{

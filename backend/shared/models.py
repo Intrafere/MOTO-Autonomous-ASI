@@ -485,6 +485,7 @@ class SmtHint(BaseModel):
     result: Literal["sat", "unsat", "unknown"] = "unknown"
     suggested_tactics: List[str] = Field(default_factory=list)
     smtlib: str = ""
+    z3_output: str = ""
 
 
 class ProofCandidate(BaseModel):

@@ -98,11 +98,23 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
   const getAutoSettingsForModel = async (modelId, selectedProvider = null, keyOverride = undefined) => {
     const model = findOpenRouterModel(models, modelId);
     if (!model) {
+      console.debug('[BoostAutoFill] model not in loaded models list, skipping auto-fill', { modelId });
       return null;
     }
 
     const nextProviderData = await fetchProviders(modelId, keyOverride);
-    return computeOpenRouterAutoSettings(model, nextProviderData, selectedProvider);
+    const autoSettings = computeOpenRouterAutoSettings(model, nextProviderData, selectedProvider);
+    if (autoSettings) {
+      console.debug('[BoostAutoFill] computed auto-settings', {
+        modelId,
+        selectedProvider,
+        source: autoSettings.source,
+        contextWindow: autoSettings.contextWindow,
+        maxOutputTokens: autoSettings.maxOutputTokens,
+        warnings: autoSettings.warnings,
+      });
+    }
+    return autoSettings;
   };
 
   const fetchBoostStatus = async (keyOverride = undefined) => {
@@ -152,8 +164,15 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
     if (modelId) {
       const autoSettings = await getAutoSettingsForModel(modelId, null);
       if (autoSettings) {
-        setContextWindow(autoSettings.contextWindow);
-        setMaxOutputTokens(autoSettings.maxOutputTokens);
+        if (autoSettings.contextWindowKnown) {
+          setContextWindow(autoSettings.contextWindow);
+        }
+        if (autoSettings.outputCapKnown) {
+          setMaxOutputTokens(autoSettings.maxOutputTokens);
+        }
+        if (autoSettings.warnings && autoSettings.warnings.length > 0) {
+          console.warn('[BoostAutoFill] auto-settings fallback used:', autoSettings.warnings);
+        }
       }
     } else {
       setProviderData(null);
@@ -456,8 +475,12 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
                   setSelectedProvider(providerName);
                   const autoSettings = await getAutoSettingsForModel(boostModel, providerName || null);
                   if (autoSettings) {
-                    setContextWindow(autoSettings.contextWindow);
-                    setMaxOutputTokens(autoSettings.maxOutputTokens);
+                    if (autoSettings.contextWindowKnown) {
+                      setContextWindow(autoSettings.contextWindow);
+                    }
+                    if (autoSettings.outputCapKnown) {
+                      setMaxOutputTokens(autoSettings.maxOutputTokens);
+                    }
                   }
                 }}
                 disabled={loading || loadingProviders}
@@ -487,9 +510,14 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
               <input
                 type="number"
                 value={contextWindow}
-                onChange={(e) => setContextWindow(parseInt(e.target.value) || 131072)}
+                onChange={(e) => {
+                  const parsed = parseInt(e.target.value, 10);
+                  if (Number.isFinite(parsed) && parsed > 0) {
+                    setContextWindow(parsed);
+                  }
+                }}
                 min="4096"
-                max="999999"
+                max="50000000"
                 step="1024"
                 disabled={loading}
               />
@@ -500,9 +528,14 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
               <input
                 type="number"
                 value={maxOutputTokens}
-                onChange={(e) => setMaxOutputTokens(parseInt(e.target.value) || 25000)}
+                onChange={(e) => {
+                  const parsed = parseInt(e.target.value, 10);
+                  if (Number.isFinite(parsed) && parsed > 0) {
+                    setMaxOutputTokens(parsed);
+                  }
+                }}
                 min="1000"
-                max="100000"
+                max="50000000"
                 step="1000"
                 disabled={loading}
               />

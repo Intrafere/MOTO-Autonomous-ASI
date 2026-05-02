@@ -34,6 +34,15 @@ const DEFAULT_SUBMITTER_CONFIG = {
   maxOutputTokens: 25000
 };
 
+const OsTag = () => (
+  <span className="os-tag-tooltip-anchor">
+    <span className="os-tag">OS</span>
+    <span className="os-tag-tooltip">
+      Open source — weights available on Hugging Face for local use with LM Studio.
+    </span>
+  </span>
+);
+
 // ModelSelector component - extracted outside to prevent recreation on every render
 const ModelSelector = ({
   provider,
@@ -214,7 +223,7 @@ const RoleConfig = ({
           onBlur={(e) => handleNumericBlur(`${rolePrefix}_context_window`, e.target.value)}
           disabled={isRunning}
           min={4096}
-          max={999999}
+          max={50000000}
           step={1024}
         />
       </div>
@@ -228,7 +237,7 @@ const RoleConfig = ({
           onBlur={(e) => handleNumericBlur(`${rolePrefix}_max_tokens`, e.target.value)}
           disabled={isRunning}
           min={1000}
-          max={100000}
+          max={50000000}
           step={1000}
         />
       </div>
@@ -719,11 +728,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const getAutoSettingsForModel = async (modelId, selectedProvider = null) => {
     const model = findOpenRouterModel(openRouterModels, modelId);
     if (!model) {
+      console.debug('[AutonomousAutoFill] model not in loaded list, skipping auto-fill', { modelId });
       return null;
     }
 
     const providerData = await fetchProvidersForModel(modelId);
-    return computeOpenRouterAutoSettings(model, providerData, selectedProvider);
+    const autoSettings = computeOpenRouterAutoSettings(model, providerData, selectedProvider);
+    if (autoSettings) {
+      console.debug('[AutonomousAutoFill] computed auto-settings', {
+        modelId,
+        selectedProvider,
+        source: autoSettings.source,
+        contextWindow: autoSettings.contextWindow,
+        maxOutputTokens: autoSettings.maxOutputTokens,
+        warnings: autoSettings.warnings,
+      });
+      if (autoSettings.warnings && autoSettings.warnings.length > 0) {
+        console.warn('[AutonomousAutoFill] auto-settings fallback used:', autoSettings.warnings);
+      }
+    }
+    return autoSettings;
   };
 
   const markProfileAsCustom = () => {
@@ -813,8 +837,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
     const autofilledConfig = {
       ...newConfig,
-      [`${rolePrefix}_context_window`]: autoSettings.contextWindow,
-      [`${rolePrefix}_max_tokens`]: autoSettings.maxOutputTokens,
+      ...(autoSettings.contextWindowKnown ? { [`${rolePrefix}_context_window`]: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { [`${rolePrefix}_max_tokens`]: autoSettings.maxOutputTokens } : {}),
     };
     setLocalConfig(autofilledConfig);
     onConfigChange({ ...autofilledConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
@@ -841,8 +865,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
     const autofilledConfig = {
       ...newConfig,
-      [`${rolePrefix}_context_window`]: autoSettings.contextWindow,
-      [`${rolePrefix}_max_tokens`]: autoSettings.maxOutputTokens,
+      ...(autoSettings.contextWindowKnown ? { [`${rolePrefix}_context_window`]: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { [`${rolePrefix}_max_tokens`]: autoSettings.maxOutputTokens } : {}),
     };
     setLocalConfig(autofilledConfig);
     onConfigChange({ ...autofilledConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
@@ -949,8 +973,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const autofilledConfigs = [...newConfigs];
     autofilledConfigs[index] = {
       ...autofilledConfigs[index],
-      contextWindow: autoSettings.contextWindow,
-      maxOutputTokens: autoSettings.maxOutputTokens,
+      ...(autoSettings.contextWindowKnown ? { contextWindow: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { maxOutputTokens: autoSettings.maxOutputTokens } : {}),
     };
 
     setSubmitterConfigs(autofilledConfigs);
@@ -981,8 +1005,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const autofilledConfigs = [...newConfigs];
     autofilledConfigs[index] = {
       ...autofilledConfigs[index],
-      contextWindow: autoSettings.contextWindow,
-      maxOutputTokens: autoSettings.maxOutputTokens,
+      ...(autoSettings.contextWindowKnown ? { contextWindow: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { maxOutputTokens: autoSettings.maxOutputTokens } : {}),
     };
 
     setSubmitterConfigs(autofilledConfigs);
@@ -1271,7 +1295,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             {/* Podium - Top 3 */}
             <div className="models-podium">
               <div className="models-podium-label">Leaderboard</div>
-              <div className="model-item model-item--ranked model-item--gold">
+              <div className="model-item model-item--ranked model-item--gold model-item--os">
+                <OsTag />
                 <div className="flex-row-center">
                   <div className="model-item-name">Kimi K2.6</div>
                   <div className="ranking-badge ranking-badge--gold">👑 KING OF THE HILL</div>
@@ -1308,7 +1333,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 <div className="model-item-badge">Fast validator</div>
               </div>
 
-              <div className="model-item model-item--ranked model-item--bronze">
+              <div className="model-item model-item--ranked model-item--bronze model-item--os">
+                <OsTag />
                 <div className="flex-row-center">
                   <div className="model-item-name">GPT OSS 120B</div>
                   <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
@@ -1334,7 +1360,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">DeepSeek</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
@@ -1349,17 +1376,20 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Google's Gemma</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">GLM</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">GLM Turbo</div>
               <div className="model-item-badge">Fast validator</div>
             </div>
@@ -1369,7 +1399,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Computer science</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">OpenAI's GPT OSS</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
             </div>
@@ -1389,12 +1420,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Rapid knowledge</div>
             </div>
 
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Nemotron Super</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
             </div>
 
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Nous Hermes</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
@@ -1404,7 +1437,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Native internet search capability</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Microsoft's Phi</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
             </div>
@@ -1414,12 +1448,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Qwen Coder</div>
               <div className="model-item-badge">Computer science</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Qwen</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
@@ -1696,7 +1732,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 onBlur={(e) => handleSubmitterNumericBlur(idx, 'contextWindow', e.target.value)}
                 disabled={isRunning}
                 min={4096}
-                max={999999}
+                max={50000000}
                 step={1024}
               />
             </div>
@@ -1710,7 +1746,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 onBlur={(e) => handleSubmitterNumericBlur(idx, 'maxOutputTokens', e.target.value)}
                 disabled={isRunning}
                 min={1000}
-                max={100000}
+                max={50000000}
                 step={1000}
               />
             </div>
@@ -1776,7 +1812,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           title="High-Parameter Submitter"
           hint="Handles mathematical rigor enhancement."
           rolePrefix="high_param"
-          borderColor="#1eff1c"
+          borderColor="#2a2a2a"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
@@ -1858,9 +1894,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   <div className="settings-row">
                     <label>Lean 4 Status</label>
                     <div>
-                      <strong>{proofStatus?.lean4_enabled ? 'Enabled' : 'Disabled'}</strong>
+                      <strong>{proofStatus ? (proofStatus.lean4_enabled ? 'Enabled' : 'Disabled') : 'Starting…'}</strong>
                       <small className="settings-hint" style={{ display: 'block', marginTop: '0.35rem' }}>
-                        Workspace: {proofStatus?.workspace_ready ? 'Ready' : 'Not ready yet'}
+                        Workspace: {proofStatus ? (proofStatus.workspace_ready ? 'Ready' : 'Not ready yet') : 'Starting…'}
                       </small>
                     </div>
                   </div>

@@ -181,6 +181,124 @@ async def list_novel_proofs():
     }
 
 
+@router.get("/known")
+async def list_known_proofs():
+    """Return only known (non-novel) verified proofs."""
+    proofs = await proof_database.get_all_proofs(novel_only=False)
+    return {
+        "proofs": [proof.model_dump(mode="json") for proof in proofs],
+        "counts": proof_database.count_proofs(),
+    }
+
+
+async def _strip_known_proofs_from_files() -> dict:
+    """Utility: strip non-novel proof entries from brainstorm and paper files on disk.
+
+    Iterates all brainstorm and paper files in the current session and removes
+    entries marked ``Status: Verified (Known)`` from their proof sections while
+    preserving entries marked ``Status: Verified (Novel)``.  Returns a summary
+    dict with counts of files modified and proof entries removed.
+
+    This is safe to run mid-session; the proof data is not lost — every proof
+    (novel or known) remains in ProofDatabase (the JSON index files).
+    """
+    import re as _re
+    import asyncio as _asyncio
+
+    files_checked = 0
+    files_modified = 0
+    entries_removed = 0
+
+    def _clean_content(content: str, proof_header: str) -> tuple[str, int]:
+        """Return (cleaned_content, removed_count).  Removes Known entries only."""
+        if proof_header not in content:
+            return content, 0
+
+        before, _, after = content.partition(proof_header)
+        # Split the proof section into individual proof blocks
+        # Each block starts with "Proof N:" and ends before the next "Proof N:" or EOF
+        block_pattern = _re.compile(r'(?=^Proof \d+:)', _re.MULTILINE)
+        blocks = _re.split(block_pattern, after)
+
+        kept = []
+        removed = 0
+        for block in blocks:
+            stripped = block.strip()
+            if not stripped:
+                continue
+            # Remove blocks that are explicitly marked as Known
+            if 'Status: Verified (Known)' in block:
+                removed += 1
+            else:
+                kept.append(block)
+
+        if removed == 0:
+            return content, 0
+
+        if kept:
+            new_after = "\n".join(kept)
+            new_content = before + proof_header + "\n\n" + new_after
+        else:
+            # All proofs in this section were Known — remove the header too
+            new_content = before.rstrip()
+
+        return new_content, removed
+
+    # Clean brainstorm files
+    brainstorm_paths = list(brainstorm_memory._base_dir.rglob("brainstorm_*.txt")) if hasattr(brainstorm_memory, '_base_dir') else []
+    for path in brainstorm_paths:
+        try:
+            files_checked += 1
+            text = path.read_text(encoding="utf-8")
+            cleaned, removed = _clean_content(text, "=== PROOFS GENERATED FROM THIS BRAINSTORM (Lean 4 Verified) ===")
+            if removed > 0:
+                path.write_text(cleaned, encoding="utf-8")
+                files_modified += 1
+                entries_removed += removed
+                logger.info(f"Stripped {removed} known proof(s) from brainstorm file: {path.name}")
+        except Exception as exc:
+            logger.warning(f"Skipped brainstorm file {path}: {exc}")
+
+    # Clean paper files
+    paper_paths = list(paper_library._base_dir.rglob("paper_*.txt")) if hasattr(paper_library, '_base_dir') else []
+    for path in paper_paths:
+        try:
+            files_checked += 1
+            text = path.read_text(encoding="utf-8")
+            cleaned, removed = _clean_content(text, "=== PROOFS GENERATED FROM THIS PAPER (Lean 4 Verified) ===")
+            if removed > 0:
+                path.write_text(cleaned, encoding="utf-8")
+                files_modified += 1
+                entries_removed += removed
+                logger.info(f"Stripped {removed} known proof(s) from paper file: {path.name}")
+        except Exception as exc:
+            logger.warning(f"Skipped paper file {path}: {exc}")
+
+    return {
+        "files_checked": files_checked,
+        "files_modified": files_modified,
+        "entries_removed": entries_removed,
+        "message": (
+            f"Removed {entries_removed} non-novel proof entries from {files_modified} file(s). "
+            "Proof data is retained in ProofDatabase."
+        ),
+    }
+
+
+@router.post("/cleanup-known-from-files")
+async def cleanup_known_proofs_from_files():
+    """One-time cleanup: strip non-novel proof entries from brainstorm/paper files.
+
+    Non-novel proofs are stored in ProofDatabase (no data loss).  This endpoint
+    removes their raw Lean 4 code from brainstorm and paper .txt files so that
+    compiler and RAG context is no longer polluted by standard known results.
+
+    Safe to call on a running session.  Novel proof entries are preserved.
+    """
+    result = await _strip_known_proofs_from_files()
+    return result
+
+
 @router.get("/status")
 async def get_proofs_status():
     """Return Lean 4 availability and proof-database status."""
@@ -320,6 +438,30 @@ async def run_manual_proof_check(request: ProofCheckRequest, background_tasks: B
         "source_type": request.source_type,
         "source_id": request.source_id,
     }
+
+
+@router.get("/library")
+async def get_proof_library(novel_only: bool = True):
+    """Return all proofs across all sessions for the proof library browser."""
+    proofs = await proof_database.list_proof_library(novel_only=novel_only)
+    novel_count = sum(1 for p in proofs if p.get("novel"))
+    return {
+        "proofs": proofs,
+        "counts": {
+            "total": len(proofs) if not novel_only else None,
+            "listed": len(proofs),
+            "novel": novel_count,
+        },
+    }
+
+
+@router.get("/library/{session_id}/{proof_id}")
+async def get_library_proof(session_id: str, proof_id: str):
+    """Return a single proof from a specific session with full Lean code."""
+    proof = await proof_database.get_library_proof(session_id, proof_id)
+    if proof is None:
+        raise HTTPException(status_code=404, detail="Proof not found")
+    return proof
 
 
 @router.get("/{proof_id}/certificate")

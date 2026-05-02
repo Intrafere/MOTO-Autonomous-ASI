@@ -8,11 +8,12 @@ from typing import Iterable, Any
 from backend.shared.models import MathlibLemmaHint, ProofAttemptFeedback, SmtHint
 
 
-PROOF_FRAMING_CONTEXT = """[PROOF FRAMING CONTEXT -- This research prompt is amenable to formal mathematical proof.
-All submissions should work toward producing formally testable theorems where possible.
-The validator should additionally assess whether submissions contribute toward results
-that can be verified by the Lean 4 proof assistant. This framing does not exclude
-non-proof explorations but provides a directional objective.]"""
+PROOF_FRAMING_CONTEXT = """[PROOF FRAMING CONTEXT -- This research prompt targets formal mathematical proof.
+Submissions should aggressively pursue NOVEL, NON-TRIVIAL theorems that push the
+boundaries of what is known. The Lean 4 proof assistant is available for formal
+verification. Prioritize ambitious conjectures, original results, and theorems that
+would represent genuine mathematical contributions over safe restatements of textbook
+facts. Standard identities and well-known Mathlib lemmas are NOT valuable targets.]"""
 
 
 def _json_only_footer(example: str) -> str:
@@ -30,6 +31,12 @@ def _format_attempt_history(prior_attempts: Iterable[ProofAttemptFeedback]) -> s
 
     lines = []
     for attempt in attempts:
+        if (
+            not attempt.lean_code
+            and not attempt.error_output
+            and "malformed output" in (attempt.reasoning or "").lower()
+        ):
+            continue
         tactic_trace = "\n".join(
             f"  - {step}"
             for step in (attempt.tactic_trace or [])
@@ -59,6 +66,8 @@ def _format_attempt_history(prior_attempts: Iterable[ProofAttemptFeedback]) -> s
             block.append(rejection_banner)
         block.append("---")
         lines.extend(block)
+    if not lines:
+        return "No prior Lean-checked attempts."
     return "\n".join(lines)
 
 
@@ -90,12 +99,15 @@ def _format_smt_hint(smt_hint: SmtHint | None) -> str:
         return "[No SMT guidance available.]"
 
     tactics = ", ".join(smt_hint.suggested_tactics or []) or "[none]"
-    return "\n".join(
-        [
-            f"SMT result: {smt_hint.result}",
-            f"Suggested Lean tactics: {tactics}",
-        ]
-    )
+    sections = [
+        f"SMT result: {smt_hint.result}",
+        f"Suggested Lean tactics: {tactics}",
+    ]
+    if smt_hint.smtlib.strip():
+        sections.append(f"SMT-LIB encoding sent to Z3:\n{_truncate_text(smt_hint.smtlib, 1500)}")
+    if smt_hint.z3_output.strip():
+        sections.append(f"Z3 solver output:\n{_truncate_text(smt_hint.z3_output, 1000)}")
+    return "\n".join(sections)
 
 
 LEAN4_COMMON_PITFALLS = """COMMON LEAN 4 PITFALLS TO AVOID:
@@ -194,18 +206,20 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
 
 def build_proof_framing_gate_prompt(user_prompt: str) -> str:
     """Ask whether the research goal should be framed toward formal proof."""
-    return f"""You are deciding whether a research program should be explicitly framed toward formal mathematical proof.
+    return f"""You are deciding whether a research program should be explicitly framed toward formal mathematical proof and novel theorem discovery.
 
 USER RESEARCH PROMPT:
 {user_prompt}
 
-Return TRUE only if the prompt is meaningfully served by working toward formally provable theorems in a proof assistant such as Lean 4.
-Return FALSE if the prompt is primarily empirical, engineering-focused, descriptive, or only tangentially mathematical.
+Return TRUE if the prompt would benefit from working toward formally provable theorems in Lean 4, especially novel or non-trivial ones.
+Return FALSE only if the prompt is purely empirical, engineering-focused, descriptive, or has no meaningful mathematical content.
 
 Consider:
-- Is the core task mathematical rather than experimental?
-- Are theorem statements or proof obligations likely to be central?
-- Would proof-oriented framing materially improve the research direction?
+- Does the research involve mathematical structures, proofs, bounds, or formal reasoning?
+- Could novel theorems or formalizations emerge from this research direction?
+- Would formal verification add rigor or uncover new results?
+
+Err on the side of TRUE -- if there is any mathematical substance worth formalizing, enable the proof pipeline.
 
 {_json_only_footer('{"is_proof_amenable": true, "reasoning": "brief explanation"}')}
 """
@@ -217,26 +231,42 @@ def build_proof_identification_prompt(
     source_id: str,
     source_content: str,
 ) -> str:
-    """Identify complete, testable theorem candidates from a brainstorm or paper."""
+    """Identify novel, non-trivial theorem candidates from a brainstorm or paper."""
     example_json = """{
   "has_provable_theorems": true,
   "theorems": [
     {
       "theorem_id": "thm_1",
       "statement": "natural-language theorem statement",
-      "formal_sketch": "optional note about assumptions, notation, or likely Lean formalization strategy"
+      "formal_sketch": "optional note about assumptions, notation, or likely Lean formalization strategy",
+      "novelty_rationale": "why this theorem is non-trivial and worth formalizing"
     }
   ]
 }"""
-    return f"""You are a theorem-identification agent for MOTO. Lean 4 is available as an external proof checker.
+    return f"""You are a theorem-discovery agent for MOTO. Your mission is to find NOVEL, NON-TRIVIAL mathematical claims in the source below that deserve formal verification in Lean 4.
 
-Your job is NOT to prove anything yet. Your job is only to decide whether the source below contains any COMPLETE, TESTABLE mathematical theorem statements that should be submitted to Lean 4.
+MOTO's goal is to push the frontier of mathematical knowledge. You are the gatekeeper that decides which theorems are worth the cost of formal verification. Be ambitious -- seek out the most original, surprising, or substantive results the source offers.
+
+WHAT TO EXTRACT (prioritize these):
+- Novel theorems, lemmas, or propositions that represent genuine mathematical insight
+- Bold conjectures that can be sharpened into provable statements
+- Non-obvious connections, bounds, inequalities, or structural results
+- Original formalizations of results not yet in Mathlib
+- Ambitious claims even if they need narrowing -- the formalization agent can refine them
+
+WHAT TO REJECT (never extract these):
+- Trivial identities (e.g. n + 0 = n, a * 1 = a, commutativity of addition)
+- Direct restatements of well-known Mathlib lemmas or standard textbook results
+- Results closable by a single tactic like `simp`, `omega`, `norm_num`, `decide`, or `rfl`
+- Tautologies, definitional equalities, or purely notational rewrites
+- Routine algebraic manipulations with no conceptual content
 
 Rules:
-- Return FALSE if the content only contains conjectures, loose ideas, heuristics, empirical claims, or incomplete proof sketches.
-- Return TRUE only for theorem candidates that are stated clearly enough to attempt formalization now.
-- Include ALL viable candidate theorems, not just the best one.
-- Prefer exact theorem statements over vague summaries.
+- Return TRUE when at least one non-trivial, novel-potential theorem is found.
+- Return FALSE only if the source genuinely contains nothing beyond trivial or well-known results.
+- Rank candidates by novelty potential. Return at most 5 of the most promising theorems.
+- For each candidate, include a brief novelty_rationale explaining why it is worth formalizing.
+- Welcome bold or speculative claims -- if the source proposes something ambitious that might be provable with the right formalization, extract it. The downstream formalization agent will handle narrowing if needed.
 - Use theorem IDs that are stable strings such as "thm_1", "thm_2", etc.
 
 USER RESEARCH PROMPT:
@@ -367,6 +397,9 @@ Requirements:
 - Include needed imports.
 - State assumptions explicitly.
 - Prefer correct, minimal, compilable code over stylistic elegance.
+- PRESERVE the theorem's non-trivial content. Do not simplify or weaken the
+  statement into a trivial identity just to make it compile. The goal is to
+  formalize the ACTUAL claim, not a watered-down version of it.
 - Your proof MUST close every goal without `sorry` or `admit`. Vacuous
   proofs (e.g. axiomatizing the theorem's own concepts and then closing
   with `sorry`) will be rejected even if Lean compiles them with only a
@@ -441,6 +474,8 @@ Requirements:
 - Return a short, ordered list of tactics that can be appended under a `by` block.
 - Each tactic entry must include the Lean tactic string and one short reasoning note.
 - Prefer small, composable tactics over a single opaque script.
+- PRESERVE the theorem's non-trivial content. Do not simplify or weaken the
+  statement into a trivial identity just to make it compile.
 - NEVER include `sorry` or `admit` in the tactic list. A script that uses
   `sorry`/`admit` will be rejected even if Lean compiles it.
 - Include needed assumptions in the theorem header. Do NOT axiomatize the
@@ -491,13 +526,25 @@ def build_proof_novelty_prompt(
     existing_proofs_block = existing_novel_proofs or "[No previously stored novel proofs.]"
     return f"""This proof has been FORMALLY VERIFIED by Lean 4. It is mathematically valid.
 
-Your ONLY task: decide whether the verified result appears NOVEL in the context of this research program.
+Your ONLY task: decide whether the verified result is NOVEL in the context of this research program.
+
+A proof is NOVEL if it meets ANY of these criteria:
+- It proves a result not already present in Mathlib or standard textbooks
+- It establishes a new connection, bound, or structural insight
+- It formalizes a conjecture or claim that was previously unverified
+- It is a non-trivial composition of known results yielding something new
+- It represents original work relative to the existing stored proofs below
+
+A proof is NOT novel if:
+- It is a direct restatement of a well-known Mathlib lemma or textbook theorem
+- It is a trivial identity, tautology, or definitional equality
+- It is closable by a single standard tactic (simp, omega, norm_num, decide, rfl)
+- It duplicates a result already in the stored novel proofs below
 
 Rules:
 - Do NOT re-check validity. Lean 4 already verified it.
-- Focus only on novelty/originality relative to known mathematics and the currently stored novel proofs.
-- If the theorem appears standard, classical, or already well known, mark it as not novel.
-- If you are uncertain, prefer FALSE unless there is a strong reason to believe the result is genuinely new.
+- When uncertain, consider the research prompt context -- a result that is textbook-standard in one field may be a novel formalization contribution in the context of this specific research program.
+- Err on the side of recognizing novelty for results that required multi-step reasoning or non-trivial formalization work.
 
 USER RESEARCH PROMPT:
 {user_prompt}
@@ -511,5 +558,5 @@ LEAN 4 CODE:
 EXISTING STORED NOVEL PROOFS:
 {existing_proofs_block}
 
-{_json_only_footer('{"is_novel": false, "reasoning": "brief explanation"}')}
+{_json_only_footer('{"is_novel": true, "reasoning": "brief explanation"}')}
 """

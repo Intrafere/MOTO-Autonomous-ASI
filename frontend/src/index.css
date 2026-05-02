@@ -1543,6 +1543,79 @@ button.danger:hover {
   50% { opacity: 0.7; }
 }
 
+/* ============================================================================
+   Your Completed Works Library - Parent Tab with Sub-Tabs
+   ============================================================================ */
+
+.completed-works-library {
+  min-height: calc(100vh - 160px);
+}
+
+.completed-works-header {
+  text-align: center;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(30, 255, 28, 0.12);
+}
+
+.completed-works-title {
+  color: #1eff1c;
+  font-size: 2rem;
+  font-weight: 700;
+  margin: 0 0 8px 0;
+}
+
+.completed-works-subtitle {
+  color: #b9b9c6;
+  font-size: 1rem;
+  margin: 0;
+}
+
+.completed-works-sub-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  padding: 4px;
+  background: var(--surface-2, #1a1a22);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.completed-works-sub-tab {
+  flex: 1;
+  padding: 12px 20px;
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  color: #888;
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  white-space: nowrap;
+}
+
+.completed-works-sub-tab:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #ccc;
+}
+
+.completed-works-sub-tab.active {
+  background: linear-gradient(135deg, rgba(30, 255, 28, 0.12) 0%, rgba(30, 255, 28, 0.05) 100%);
+  border-color: rgba(30, 255, 28, 0.35);
+  color: #1eff1c;
+}
+
+.completed-works-content {
+  min-height: 400px;
+}
+
+@media (max-width: 768px) {
+  .completed-works-sub-tabs {
+    flex-direction: column;
+  }
+}
+
 /* Autonomous Research Styles */
 .autonomous-research {
   padding: 1rem;

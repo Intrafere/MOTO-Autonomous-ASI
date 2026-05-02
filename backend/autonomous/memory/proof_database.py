@@ -560,6 +560,60 @@ class ProofDatabase:
             "known": len(proofs) - novel_count,
         }
 
+    def get_known_proofs_summary_for_browsing(
+        self,
+        source_id: Optional[str] = None,
+        limit: int = 15,
+    ) -> str:
+        """Return a compact summary of known (non-novel) proofs for optional prompt injection.
+
+        Unlike novel proof injection this is NOT automatically prepended to prompts.
+        It is called on-demand so the system can review what standard results have
+        already been Lean 4-verified before brainstorming, avoiding redundant work.
+
+        Args:
+            source_id: When provided, only proofs whose source_id matches are
+                included (e.g. a brainstorm topic ID or paper ID).  Pass None to
+                include all known proofs across the session.
+            limit: Maximum number of proof entries to include.  The most recent
+                entries are selected.  Lean 4 code is intentionally omitted to
+                keep the block compact.
+
+        Returns:
+            A formatted string block, or an empty string when no known proofs exist.
+        """
+        self._ensure_index_loaded_sync()
+        proofs = self._index_data.get("proofs", []) if self._index_data else []
+        known_proofs = [p for p in proofs if not p.get("novel")]
+
+        if source_id:
+            known_proofs = [p for p in known_proofs if p.get("source_id") == source_id]
+
+        if not known_proofs:
+            return ""
+
+        total = len(known_proofs)
+        # Most-recent first (index is already sorted newest-first by add_proof)
+        shown = known_proofs[:limit]
+
+        lines = [
+            f"=== KNOWN VERIFIED PROOFS ({len(shown)} of {total} shown, Lean 4 Verified) ===",
+            "[Standard/known results already formally verified. For reference to avoid re-proving.]",
+            "",
+        ]
+        for index, proof in enumerate(shown, start=1):
+            statement = proof.get("theorem_statement", "").strip()
+            src_type = proof.get("source_type", "")
+            src_id = proof.get("source_id", "")
+            proof_id = proof.get("proof_id", "")
+            lines.append(
+                f"KNOWN {index}: {statement}"
+                f"  (source: {src_type} {src_id}, id: {proof_id})".rstrip()
+            )
+        lines.append("")
+        lines.append("=== END KNOWN PROOFS ===")
+        return "\n".join(lines)
+
     def get_novel_proofs_for_injection(self) -> str:
         """Format the novel proofs block for highest-priority prompt injection."""
         self._ensure_index_loaded_sync()
@@ -618,6 +672,128 @@ class ProofDatabase:
         if not prompt:
             return hints_block
         return f"{hints_block}\n\n{prompt}"
+
+    async def list_proof_library(self, novel_only: bool = True) -> List[Dict[str, Any]]:
+        """List all proofs across all sessions (legacy + session-based) for the proof library.
+
+        Mirrors the cross-session listing pattern used by PaperLibrary.list_history_papers().
+        """
+        all_proofs: List[Dict[str, Any]] = []
+
+        legacy_proofs_dir = Path(system_config.data_dir) / "proofs"
+        if legacy_proofs_dir.exists():
+            all_proofs.extend(
+                await self._list_proofs_from_directory(legacy_proofs_dir, "legacy", novel_only)
+            )
+
+        sessions_dir = Path(system_config.auto_sessions_base_dir)
+        if sessions_dir.exists():
+            for session_dir in sorted(
+                (p for p in sessions_dir.iterdir() if p.is_dir()), reverse=True
+            ):
+                proofs_dir = session_dir / "proofs"
+                if not proofs_dir.exists():
+                    continue
+                all_proofs.extend(
+                    await self._list_proofs_from_directory(proofs_dir, session_dir.name, novel_only)
+                )
+
+        all_proofs.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+        return all_proofs
+
+    async def _list_proofs_from_directory(
+        self, proofs_dir: Path, session_id: str, novel_only: bool
+    ) -> List[Dict[str, Any]]:
+        """Read the proofs index from a specific directory and return library entries."""
+        index_path = proofs_dir / "proofs_index.json"
+        if not index_path.exists():
+            return []
+
+        try:
+            async with aiofiles.open(index_path, "r", encoding="utf-8") as handle:
+                index_data = json.loads(await handle.read())
+        except Exception as exc:
+            logger.warning("Failed to read proofs index at %s: %s", index_path, exc)
+            return []
+
+        session_metadata_path = proofs_dir.parent / "session_metadata.json"
+        user_prompt = ""
+        if session_metadata_path.exists():
+            try:
+                async with aiofiles.open(session_metadata_path, "r", encoding="utf-8") as handle:
+                    meta = json.loads(await handle.read())
+                    user_prompt = meta.get("user_prompt", "")
+            except Exception:
+                pass
+
+        results: List[Dict[str, Any]] = []
+        for proof_data in index_data.get("proofs", []):
+            is_novel = proof_data.get("novel", False)
+            if novel_only and not is_novel:
+                continue
+
+            results.append({
+                "library_id": f"{session_id}:{proof_data.get('proof_id', '')}",
+                "session_id": session_id,
+                "proof_id": proof_data.get("proof_id", ""),
+                "theorem_name": proof_data.get("theorem_name", ""),
+                "theorem_statement": proof_data.get("theorem_statement", ""),
+                "formal_sketch": proof_data.get("formal_sketch", ""),
+                "source_type": proof_data.get("source_type", ""),
+                "source_id": proof_data.get("source_id", ""),
+                "source_title": proof_data.get("source_title", ""),
+                "solver": proof_data.get("solver", "Lean 4"),
+                "novel": is_novel,
+                "novelty_reasoning": proof_data.get("novelty_reasoning", ""),
+                "verification_notes": proof_data.get("verification_notes", ""),
+                "attempt_count": proof_data.get("attempt_count", 0),
+                "created_at": proof_data.get("created_at", ""),
+                "user_prompt": user_prompt,
+                "dependencies": proof_data.get("dependencies", []),
+            })
+
+        return results
+
+    async def get_library_proof(self, session_id: str, proof_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single proof from a specific session for the proof library viewer."""
+        if session_id == "legacy":
+            proofs_dir = Path(system_config.data_dir) / "proofs"
+        else:
+            proofs_dir = Path(system_config.auto_sessions_base_dir) / validate_single_path_component(session_id, "session ID") / "proofs"
+
+        if not proofs_dir.exists():
+            return None
+
+        safe_id = validate_single_path_component(proof_id, "proof ID")
+        record_path = proofs_dir / f"proof_{safe_id}.json"
+        lean_path = proofs_dir / f"proof_{safe_id}_lean.lean"
+
+        if not record_path.exists():
+            return None
+
+        try:
+            async with aiofiles.open(record_path, "r", encoding="utf-8") as handle:
+                proof_data = json.loads(await handle.read())
+        except Exception as exc:
+            logger.error("Failed to read proof %s from session %s: %s", proof_id, session_id, exc)
+            return None
+
+        lean_code = ""
+        if lean_path.exists():
+            try:
+                async with aiofiles.open(lean_path, "r", encoding="utf-8") as handle:
+                    lean_code = await handle.read()
+            except Exception:
+                lean_code = str(proof_data.get("lean_code", "") or "")
+        else:
+            lean_code = str(proof_data.get("lean_code", "") or "")
+
+        return {
+            "library_id": f"{session_id}:{proof_id}",
+            "session_id": session_id,
+            **proof_data,
+            "lean_code": lean_code,
+        }
 
     async def clear_all(self) -> None:
         """Remove all proof files and reset the index."""

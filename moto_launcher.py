@@ -14,7 +14,7 @@ from random import randint
 import re
 import socket
 import shlex
-from shutil import which
+from shutil import rmtree, which
 import subprocess
 import sys
 import tarfile
@@ -885,15 +885,29 @@ def _write_lean_workspace_files(workspace_dir: Path) -> None:
 
 
 def _download_file(url: str, destination: Path) -> None:
-    """Download a remote file to disk using the standard library."""
+    """Download a remote file to disk using the standard library.
+
+    Writes to a sibling temp file first, then atomically renames on success so
+    a partial download caused by a timeout or interruption never leaves a
+    corrupt file at the destination path.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = Request(url, headers={"User-Agent": "MOTO Launcher"})
-    with urlopen(request, timeout=120) as response, destination.open("wb") as handle:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            handle.write(chunk)
+    tmp = destination.with_suffix(destination.suffix + ".tmp")
+    try:
+        request = Request(url, headers={"User-Agent": "MOTO Launcher"})
+        with urlopen(request) as response, tmp.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+        tmp.replace(destination)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _extract_archive(archive_path: Path, destination: Path) -> None:
@@ -909,6 +923,19 @@ def _extract_archive(archive_path: Path, destination: Path) -> None:
             archive.extractall(destination)
         return
     raise RuntimeError(f"Unsupported archive format: {archive_path.name}")
+
+
+def _is_valid_archive(archive_path: Path) -> bool:
+    """Return True when the file at archive_path is a readable zip or tarball."""
+    try:
+        name = archive_path.name.lower()
+        if name.endswith(".zip"):
+            return zipfile.is_zipfile(archive_path)
+        if name.endswith(".tar.gz") or name.endswith(".tgz"):
+            return tarfile.is_tarfile(archive_path)
+        return False
+    except OSError:
+        return False
 
 
 def _detect_z3_asset_name() -> tuple[str, tuple[str, ...]]:
@@ -1040,15 +1067,21 @@ def _set_smt_env_flags(
     env["MOTO_SMT_TIMEOUT"] = env.get("MOTO_SMT_TIMEOUT", "").strip() or "30"
 
 
-def install_lean4(runtime: InstanceRuntime, env: dict[str, str]) -> None:
+def install_lean4(
+    runtime: InstanceRuntime,
+    env: dict[str, str],
+    *,
+    _is_repair: bool = False,
+) -> None:
     """
     Ensure Lean 4 / elan is available for proof verification.
 
     This step is intentionally non-fatal: if installation fails, MOTO still
     launches and simply skips automated proof verification.
     """
-    cprint("[4c/8] Checking Lean 4 / elan for proof verification...", YELLOW)
-    print()
+    if not _is_repair:
+        cprint("[4c/8] Checking Lean 4 / elan for proof verification...", YELLOW)
+        print()
 
     elan_bin_dir = Path.home() / ".elan" / "bin"
     lean_cmd = get_lean_command()
@@ -1075,6 +1108,10 @@ def install_lean4(runtime: InstanceRuntime, env: dict[str, str]) -> None:
                 asset = _select_elan_windows_asset(list(release_payload.get("assets") or []))
                 archive_path = managed_root / "downloads" / asset["name"]
                 install_root = managed_root / "current"
+
+                if archive_path.exists() and not _is_valid_archive(archive_path):
+                    cprint("Cached elan archive appears corrupt — re-downloading...", YELLOW)
+                    archive_path.unlink(missing_ok=True)
 
                 if not archive_path.exists():
                     _download_file(asset["browser_download_url"], archive_path)
@@ -1127,7 +1164,26 @@ def install_lean4(runtime: InstanceRuntime, env: dict[str, str]) -> None:
     lean_cmd = get_lean_command()
     lake_cmd = get_lake_command()
     if not lean_cmd or not lake_cmd:
-        cprint("WARNING: Lean 4 tooling is incomplete -- proof verification will be skipped.", YELLOW)
+        # Tooling is incomplete (e.g. lake missing after a partial elan update).
+        # Attempt the same wipe-and-retry repair before giving up.
+        cprint("Lean 4 tooling is incomplete (lean or lake not found after install).", YELLOW)
+        if env.get("_MOTO_LEAN4_REPAIR_ATTEMPTED") != "1":
+            cprint("Attempting to repair by wiping elan and reinstalling...", YELLOW)
+            print()
+            try:
+                if elan_bin_dir.parent.exists():
+                    rmtree(str(elan_bin_dir.parent), ignore_errors=True)
+                managed_elan_root = Path(runtime.data_root) / "elan"
+                if managed_elan_root.exists():
+                    rmtree(str(managed_elan_root), ignore_errors=True)
+                env["_MOTO_LEAN4_REPAIR_ATTEMPTED"] = "1"
+                install_lean4(runtime, env, _is_repair=True)
+                return
+            except Exception as repair_exc:
+                cprint("WARNING: Lean 4 repair failed -- proof verification will be skipped.", YELLOW)
+                cprint(str(repair_exc), YELLOW)
+        else:
+            cprint("WARNING: Lean 4 tooling still incomplete after repair -- proof verification will be skipped.", YELLOW)
         _set_lean_env_flags(env, enabled=False)
         print()
         return
@@ -1136,8 +1192,37 @@ def install_lean4(runtime: InstanceRuntime, env: dict[str, str]) -> None:
         lean_version = subprocess.check_output([lean_cmd, "--version"], text=True).strip()
         cprint(f"Lean 4 ready: {lean_version}", GREEN)
     except Exception as exc:
-        cprint("WARNING: Lean 4 verification failed during version check -- proof verification will be skipped.", YELLOW)
+        # The lean binary exists but is broken (corrupted toolchain, bad elan state,
+        # incomplete update, etc.).  Wipe the elan directory and retry installation
+        # once rather than giving up — this is the same non-fatal install path used
+        # when Lean is missing entirely.
+        cprint("Lean 4 version check failed — installation may be corrupt.", YELLOW)
         cprint(str(exc), YELLOW)
+        if env.get("_MOTO_LEAN4_REPAIR_ATTEMPTED") != "1":
+            cprint("Attempting to repair by wiping elan and reinstalling...", YELLOW)
+            print()
+            try:
+                if elan_bin_dir.parent.exists():
+                    rmtree(str(elan_bin_dir.parent), ignore_errors=True)
+                managed_elan_root = Path(runtime.data_root) / "elan"
+                if managed_elan_root.exists():
+                    rmtree(str(managed_elan_root), ignore_errors=True)
+                # Verify the wipe actually removed the binary — on Windows, file
+                # locks from the just-invoked lean process can cause rmtree to
+                # silently skip files when ignore_errors=True.
+                if get_lean_command() is not None:
+                    raise RuntimeError(
+                        "Could not remove corrupt Lean binary (file may be locked). "
+                        "Try closing any running Lean processes and relaunching MOTO."
+                    )
+                env["_MOTO_LEAN4_REPAIR_ATTEMPTED"] = "1"
+                install_lean4(runtime, env, _is_repair=True)
+                return
+            except Exception as repair_exc:
+                cprint("WARNING: Lean 4 repair failed -- proof verification will be skipped.", YELLOW)
+                cprint(str(repair_exc), YELLOW)
+        else:
+            cprint("WARNING: Lean 4 still broken after repair -- proof verification will be skipped.", YELLOW)
         _set_lean_env_flags(env, enabled=False)
         print()
         return
@@ -1194,6 +1279,10 @@ def install_z3(runtime: InstanceRuntime, env: dict[str, str]) -> None:
             asset = _select_z3_asset(list(release_payload.get("assets") or []))
             archive_path = managed_root / "downloads" / asset["name"]
             install_root = managed_root / "current"
+
+            if archive_path.exists() and not _is_valid_archive(archive_path):
+                cprint("Cached Z3 archive appears corrupt — re-downloading...", YELLOW)
+                archive_path.unlink(missing_ok=True)
 
             if not archive_path.exists():
                 _download_file(asset["browser_download_url"], archive_path)

@@ -16,7 +16,8 @@ import {
   AutonomousResearchLogs,
   FinalAnswerView,
   FinalAnswerLibrary,
-  MathematicalProofs
+  MathematicalProofs,
+  ProofLibrary
 } from './components/autonomous';
 import WorkflowPanel from './components/WorkflowPanel';
 import BoostControlModal from './components/BoostControlModal';
@@ -44,6 +45,7 @@ import {
 const APP_MODE_STORAGE_KEY = 'appMode';
 const AUTONOMOUS_TAB_STORAGE_KEY = 'autonomousActiveTab';
 const MANUAL_TAB_STORAGE_KEY = 'manualActiveTab';
+const COMPLETED_WORKS_SUB_TAB_STORAGE_KEY = 'completedWorksSubTab';
 const LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY = 'singlePaperWriterExpanded';
 const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'];
 const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'high_context', 'high_param', 'critique_submitter'];
@@ -170,8 +172,22 @@ function App() {
       return 'autonomous';
     }
   });
-  const [autonomousActiveTab, setAutonomousActiveTab] = useState('auto-interface');
+  const [autonomousActiveTab, setAutonomousActiveTab] = useState(() => {
+    const saved = localStorage.getItem(AUTONOMOUS_TAB_STORAGE_KEY);
+    if (saved === 'auto-stage2-history' || saved === 'auto-final-answer-library') {
+      return 'auto-completed-works';
+    }
+    return saved || 'auto-interface';
+  });
   const [manualActiveTab, setManualActiveTab] = useState('aggregator-interface');
+  const [completedWorksSubTab, setCompletedWorksSubTab] = useState(() => {
+    const savedSubTab = localStorage.getItem(COMPLETED_WORKS_SUB_TAB_STORAGE_KEY);
+    if (savedSubTab) return savedSubTab;
+    const savedTab = localStorage.getItem(AUTONOMOUS_TAB_STORAGE_KEY);
+    if (savedTab === 'auto-stage2-history') return 'stage2-history';
+    if (savedTab === 'auto-final-answer-library') return 'stage3-history';
+    return 'stage2-history';
+  });
   const activeTab = appMode === 'manual' ? manualActiveTab : autonomousActiveTab;
   const shimmerAccentsEnabled = (() => {
     const saved = localStorage.getItem('banner_shimmer_enabled');
@@ -236,6 +252,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(MANUAL_TAB_STORAGE_KEY, manualActiveTab);
   }, [manualActiveTab]);
+
+  useEffect(() => {
+    localStorage.setItem(COMPLETED_WORKS_SUB_TAB_STORAGE_KEY, completedWorksSubTab);
+  }, [completedWorksSubTab]);
   
   // Initialize config from localStorage or use defaults
   // CRITICAL: Read from 'aggregator_settings' (used by AggregatorSettings component)
@@ -1975,8 +1995,7 @@ function App() {
   ];
 
   const autonomousSettingsTabs = [
-    { id: 'auto-stage2-history', label: 'Stage 2 Final Answers History', group: 'autonomous-settings' },
-    { id: 'auto-final-answer-library', label: 'Stage 3 Final Answers History', subtext: '(In Development / Highly Hallucinatory)', group: 'autonomous-settings' },
+    { id: 'auto-completed-works', label: 'Your Completed Works Library', group: 'autonomous-settings' },
     { id: 'auto-logs', label: 'API Call Logs', group: 'autonomous-settings' },
     { id: 'auto-settings', label: 'Autonomous Model Selection & Settings', group: 'autonomous-settings' },
   ];
@@ -2314,15 +2333,50 @@ function App() {
               status={autonomousStatus}
             />
           )}
-          {activeTab === 'auto-stage2-history' && (
-            <Stage2PaperHistory
-              onCurrentSessionDataChanged={async () => {
-                await Promise.all([refreshPapers(), refreshBrainstorms()]);
-              }}
-            />
-          )}
-          {activeTab === 'auto-final-answer-library' && (
-            <FinalAnswerLibrary />
+          {activeTab === 'auto-completed-works' && (
+            <div className="completed-works-library">
+              <div className="completed-works-header">
+                <h2 className="completed-works-title">Your Completed Works Library</h2>
+                <p className="completed-works-subtitle">
+                  Browse all research outputs across every session — papers, final answers, and verified proofs.
+                </p>
+              </div>
+              <div className="completed-works-sub-tabs">
+                <button
+                  className={`completed-works-sub-tab ${completedWorksSubTab === 'stage2-history' ? 'active' : ''}`}
+                  onClick={() => setCompletedWorksSubTab('stage2-history')}
+                >
+                  Stage 2 Papers History
+                </button>
+                <button
+                  className={`completed-works-sub-tab ${completedWorksSubTab === 'stage3-history' ? 'active' : ''}`}
+                  onClick={() => setCompletedWorksSubTab('stage3-history')}
+                >
+                  Stage 3 Final Answers History
+                </button>
+                <button
+                  className={`completed-works-sub-tab ${completedWorksSubTab === 'proof-library' ? 'active' : ''}`}
+                  onClick={() => setCompletedWorksSubTab('proof-library')}
+                >
+                  Proof Library
+                </button>
+              </div>
+              <div className="completed-works-content">
+                {completedWorksSubTab === 'stage2-history' && (
+                  <Stage2PaperHistory
+                    onCurrentSessionDataChanged={async () => {
+                      await Promise.all([refreshPapers(), refreshBrainstorms()]);
+                    }}
+                  />
+                )}
+                {completedWorksSubTab === 'stage3-history' && (
+                  <FinalAnswerLibrary />
+                )}
+                {completedWorksSubTab === 'proof-library' && (
+                  <ProofLibrary />
+                )}
+              </div>
+            </div>
           )}
           {activeTab === 'auto-logs' && (
             <AutonomousResearchLogs

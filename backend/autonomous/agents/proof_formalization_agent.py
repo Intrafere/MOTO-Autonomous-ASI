@@ -3,6 +3,7 @@ Lean 4 formalization agent with iterative retry loop.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Awaitable, Callable, List, Optional, Tuple
 
@@ -24,6 +25,28 @@ AttemptCallback = Callable[[ProofAttemptFeedback], Awaitable[None]]
 AttemptStartCallback = Callable[[int, str], Awaitable[None]]
 ShouldStopFn = Optional[Callable[[], bool]]
 
+_JSON_PARSE_ERROR_MARKERS = (
+    "empty or whitespace-only response",
+    "empty response from formalization model",
+    "empty response from tactic formalization model",
+    "expecting property name",
+    "expecting value",
+    "extra data",
+    "invalid control character",
+    "json response truncated",
+    "no content in formalization model response",
+    "no content in tactic formalization model response",
+    "no json found",
+    "openrouter connection failed",
+    "openrouter response missing 'choices'",
+    "openrouter returned non-json body",
+    "response too short",
+    "unterminated string",
+    "upstream provider timeout",
+)
+_MALFORMED_MODEL_OUTPUT_REASON = "Model returned malformed output (not valid JSON); retrying with clean context."
+_LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
+
 
 def _is_stop_requested(should_stop: ShouldStopFn) -> bool:
     if should_stop is None:
@@ -32,6 +55,32 @@ def _is_stop_requested(should_stop: ShouldStopFn) -> bool:
         return bool(should_stop())
     except Exception:
         return False
+
+
+def _is_json_parse_error(exc: Exception) -> bool:
+    if isinstance(exc, json.JSONDecodeError):
+        return True
+    if not isinstance(exc, ValueError):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _JSON_PARSE_ERROR_MARKERS)
+
+
+def _is_malformed_model_output_feedback(feedback: ProofAttemptFeedback) -> bool:
+    return (
+        not feedback.success
+        and not feedback.lean_code
+        and not feedback.error_output
+        and feedback.reasoning == _MALFORMED_MODEL_OUTPUT_REASON
+    )
+
+
+def _is_lean_workspace_error_feedback(feedback: ProofAttemptFeedback) -> bool:
+    error_output = feedback.error_output or ""
+    return (
+        not feedback.success
+        and error_output.startswith(_LEAN_WORKSPACE_ERROR_PREFIX)
+    )
 
 
 class ProofFormalizationAgent:
@@ -217,12 +266,17 @@ class ProofFormalizationAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as exc:
+            is_parse_error = _is_json_parse_error(exc)
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
                 theorem_id=theorem_candidate.theorem_id,
-                reasoning="Formalization attempt failed before Lean 4 verification.",
+                reasoning=(
+                    _MALFORMED_MODEL_OUTPUT_REASON
+                    if is_parse_error
+                    else "Formalization attempt failed before Lean 4 verification."
+                ),
                 lean_code="",
-                error_output=str(exc),
+                error_output="" if is_parse_error else str(exc),
                 goal_states="",
                 strategy="full_script",
                 success=False,
@@ -264,7 +318,11 @@ class ProofFormalizationAgent:
             else (attempts[-1].attempt + 1 if attempts else 1)
         )
 
-        for attempt_offset in range(max_attempts):
+        attempt_offset = 0
+        malformed_output_retries = 0
+        max_malformed_output_retries = max(1, max_attempts)
+
+        while attempt_offset < max_attempts:
             if _is_stop_requested(should_stop):
                 logger.info(
                     "ProofFormalizationAgent.prove_candidate: stop requested, aborting before attempt %s for %s.",
@@ -273,7 +331,7 @@ class ProofFormalizationAgent:
                 )
                 break
             attempt_number = next_attempt_number + attempt_offset
-            if attempt_start_callback:
+            if attempt_start_callback and malformed_output_retries == 0:
                 await attempt_start_callback(attempt_number, "full_script")
 
             current_theorem_name, source_excerpt, feedback = await self._run_full_script_attempt(
@@ -285,6 +343,22 @@ class ProofFormalizationAgent:
                 attempt_number=attempt_number,
                 smt_hint=smt_hint,
             )
+
+            terminal_malformed_output = False
+            if _is_malformed_model_output_feedback(feedback):
+                malformed_output_retries += 1
+                logger.warning(
+                    "ProofFormalizationAgent full-script attempt %s for %s produced malformed model output; retrying without consuming Lean attempt budget (%s/%s).",
+                    attempt_number,
+                    theorem_candidate.theorem_id,
+                    malformed_output_retries,
+                    max_malformed_output_retries,
+                )
+                if malformed_output_retries < max_malformed_output_retries:
+                    continue
+                terminal_malformed_output = True
+            else:
+                malformed_output_retries = 0
             if current_theorem_name:
                 theorem_name = current_theorem_name
 
@@ -294,6 +368,11 @@ class ProofFormalizationAgent:
 
             if feedback.success:
                 return True, theorem_name, feedback.lean_code, attempts
+            if _is_lean_workspace_error_feedback(feedback):
+                break
+            if terminal_malformed_output:
+                break
+            attempt_offset += 1
 
         final_code = attempts[-1].lean_code if attempts else ""
         return False, theorem_name, final_code, attempts
@@ -327,7 +406,11 @@ class ProofFormalizationAgent:
             else (attempts[-1].attempt + 1 if attempts else 1)
         )
 
-        for attempt_offset in range(max_attempts):
+        attempt_offset = 0
+        malformed_output_retries = 0
+        max_malformed_output_retries = max(1, max_attempts)
+
+        while attempt_offset < max_attempts:
             if _is_stop_requested(should_stop):
                 logger.info(
                     "ProofFormalizationAgent.prove_candidate_tactic_script: stop requested, aborting before attempt %s for %s.",
@@ -336,7 +419,7 @@ class ProofFormalizationAgent:
                 )
                 break
             attempt_number = next_attempt_number + attempt_offset
-            if attempt_start_callback:
+            if attempt_start_callback and malformed_output_retries == 0:
                 await attempt_start_callback(attempt_number, "tactic_script")
 
             prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
@@ -353,6 +436,7 @@ class ProofFormalizationAgent:
             )
 
             if prompt_tokens > max_input_tokens:
+                malformed_output_retries = 0
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,
                     theorem_id=theorem_candidate.theorem_id,
@@ -364,6 +448,7 @@ class ProofFormalizationAgent:
                 attempts.append(feedback)
                 if attempt_callback:
                     await attempt_callback(feedback)
+                attempt_offset += 1
                 continue
 
             task_id = self.get_current_task_id()
@@ -416,11 +501,31 @@ class ProofFormalizationAgent:
                     )
                     if current_theorem_name:
                         theorem_name = current_theorem_name
+                    terminal_malformed_output = False
+                    if _is_malformed_model_output_feedback(feedback):
+                        malformed_output_retries += 1
+                        logger.warning(
+                            "ProofFormalizationAgent fallback full-script attempt %s for %s produced malformed model output; retrying without consuming Lean attempt budget (%s/%s).",
+                            attempt_number,
+                            theorem_candidate.theorem_id,
+                            malformed_output_retries,
+                            max_malformed_output_retries,
+                        )
+                        if malformed_output_retries < max_malformed_output_retries:
+                            continue
+                        terminal_malformed_output = True
+                    else:
+                        malformed_output_retries = 0
                     attempts.append(feedback)
                     if attempt_callback:
                         await attempt_callback(feedback)
                     if feedback.success:
                         return True, theorem_name, feedback.lean_code, attempts
+                    if _is_lean_workspace_error_feedback(feedback):
+                        break
+                    if terminal_malformed_output:
+                        break
+                    attempt_offset += 1
                     continue
 
                 lean_code = self._compose_tactic_script_code(theorem_header, tactic_commands)
@@ -440,34 +545,61 @@ class ProofFormalizationAgent:
                     tactic_trace=tactic_trace,
                     success=lean_result.success,
                 )
+                malformed_output_retries = 0
                 attempts.append(feedback)
                 if attempt_callback:
                     await attempt_callback(feedback)
 
                 if lean_result.success:
                     return True, theorem_name, lean_code, attempts
+                if _is_lean_workspace_error_feedback(feedback):
+                    break
+                attempt_offset += 1
             except FreeModelExhaustedError:
                 raise
             except Exception as exc:
+                is_parse_error = _is_json_parse_error(exc)
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,
                     theorem_id=theorem_candidate.theorem_id,
-                    reasoning="Tactic-script formalization attempt failed before Lean 4 verification.",
+                    reasoning=(
+                        _MALFORMED_MODEL_OUTPUT_REASON
+                        if is_parse_error
+                        else "Tactic-script formalization attempt failed before Lean 4 verification."
+                    ),
                     lean_code="",
-                    error_output=str(exc),
+                    error_output="" if is_parse_error else str(exc),
                     goal_states="",
                     strategy="tactic_script",
                     success=False,
                 )
-                attempts.append(feedback)
-                if attempt_callback:
-                    await attempt_callback(feedback)
                 logger.warning(
                     "ProofFormalizationAgent tactic-script attempt %s failed for %s: %s",
                     attempt_number,
                     theorem_candidate.theorem_id,
                     exc,
                 )
+                terminal_malformed_output = False
+                if _is_malformed_model_output_feedback(feedback):
+                    malformed_output_retries += 1
+                    logger.warning(
+                        "ProofFormalizationAgent tactic-script attempt %s for %s produced malformed model output; retrying without consuming Lean attempt budget (%s/%s).",
+                        attempt_number,
+                        theorem_candidate.theorem_id,
+                        malformed_output_retries,
+                        max_malformed_output_retries,
+                    )
+                    if malformed_output_retries < max_malformed_output_retries:
+                        continue
+                    terminal_malformed_output = True
+                else:
+                    malformed_output_retries = 0
+                attempts.append(feedback)
+                if attempt_callback:
+                    await attempt_callback(feedback)
+                if terminal_malformed_output:
+                    break
+                attempt_offset += 1
 
         final_code = attempts[-1].lean_code if attempts else ""
         return False, theorem_name, final_code, attempts
