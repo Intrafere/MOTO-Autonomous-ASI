@@ -122,4 +122,5 @@ htmlcov/
 .moto_instances/
 final_volume.txt
 RANDOM LOG.txt
+randomlog.txt
 commits_pending.txt
