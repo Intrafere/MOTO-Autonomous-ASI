@@ -87,17 +87,30 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
       setError(null);
       setProofGraphState(createEmptyGraphState());
 
-      const [proofsResponse, statusResponse, brainstormsResponse, papersResponse] = await Promise.all([
+      const [proofsResult, statusResult, brainstormsResult, papersResult] = await Promise.allSettled([
         api.getProofs(),
         api.getProofStatus(),
         api.getBrainstorms(),
         api.getPapers(),
       ]);
 
-      setProofs(proofsResponse.proofs || []);
-      setProofStatus(statusResponse);
-      setBrainstorms(brainstormsResponse.brainstorms || []);
-      setPapers(papersResponse.papers || []);
+      if (proofsResult.status === 'fulfilled') {
+        setProofs(proofsResult.value.proofs || []);
+      } else {
+        setError(`Failed to load proofs: ${proofsResult.reason?.message || 'Unknown error'}`);
+      }
+
+      if (statusResult.status === 'fulfilled') {
+        setProofStatus(statusResult.value);
+      }
+
+      if (brainstormsResult.status === 'fulfilled') {
+        setBrainstorms(brainstormsResult.value.brainstorms || []);
+      }
+
+      if (papersResult.status === 'fulfilled') {
+        setPapers(papersResult.value.papers || []);
+      }
     } catch (err) {
       setError(`Failed to load proofs: ${err.message}`);
     } finally {

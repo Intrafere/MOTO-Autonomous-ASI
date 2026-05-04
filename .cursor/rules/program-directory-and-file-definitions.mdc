@@ -179,7 +179,7 @@ project-root/
 │   │       ├── openrouter.py            # OpenRouter API endpoints (global key, models, providers + endpoint metadata, LM Studio availability, **GET /api/model-cache** for model ID caching, **POST /api/openrouter/reset-exhaustion** to reset credit exhaustion mid-session)
 │   │       ├── websocket.py             # WebSocket for real-time updates (proxy auth validation in generic mode before accept)
 │   │       ├── features.py              # GET /api/features — shared build identity plus stable capability flags (`generic_mode`, `lm_studio_enabled`, `pdf_download_available`)
-│   │       ├── proofs.py                # Proof database + Lean 4/SMT runtime + manual proof-check + certificate export + dependency graph routes (all gated on `lean4_enabled`)
+│   │       ├── proofs.py                # Proof database + Lean 4/SMT runtime + manual proof-check + certificate export + dependency graph routes; listing proofs (`GET /`, `/novel`, `/known`, `/library*`) and certificate/lean downloads (`/{id}/certificate`, `/{id}/certificate.lean`) are always available regardless of `lean4_enabled`; dependency/graph routes and `/check` are gated on `lean4_enabled`; `/status` uses short timeouts so it never blocks the UI
 │   │       └── health.py                # GET /api/health — readiness/liveness probe with instance/build metadata
 │   │
 │   ├── data/                            # Persistent data storage
@@ -393,7 +393,7 @@ project-root/
 
 - `compiler.py`: Compiler control (start/stop/status), paper/outline access, critique management
 - `autonomous.py`: Autonomous research control (start/stop/clear/status), brainstorm/paper access, Tier 3 endpoints
-- `proofs.py`: Proof database listing, `/status` runtime readiness, `POST /settings` runtime flag updates, `POST /check` manual proof check, `/{id}/certificate[.lean]` certificate export, `/{id}/dependencies` + `/graph` + `/mathlib/{lemma}/dependents` graph/lineage queries (all above gated on `lean4_enabled`); `GET /library` + `GET /library/{session_id}/{proof_id}` cross-session proof library endpoints (NOT gated — read-only file access, always available).
+- `proofs.py`: Proof database listing (`GET /`, `/novel`, `/known`) and `/status` runtime readiness — always available, never gated. `/{id}/certificate` and `/{id}/certificate.lean` — always available (data is stored on disk; Lean version info populated only when Lean is enabled). `/status` uses `asyncio.wait_for` timeouts (5s Lean, 3s Z3) so the endpoint never hangs. `POST /settings` runtime flag updates. `POST /check` manual proof check, `/{id}/dependencies`, `/graph`, `/mathlib/{lemma}/dependents` graph/lineage queries — gated on `lean4_enabled`. `GET /library` + `GET /library/{session_id}/{proof_id}` cross-session proof library endpoints — always available.
 
 ### Frontend Components
 

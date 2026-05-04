@@ -3,6 +3,7 @@ Proof database, Lean 4 status, manual proof checks, and certificate export route
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional, Tuple
 
@@ -301,7 +302,11 @@ async def cleanup_known_proofs_from_files():
 
 @router.get("/status")
 async def get_proofs_status():
-    """Return Lean 4 availability and proof-database status."""
+    """Return Lean 4 availability and proof-database status.
+
+    Non-blocking: Lean workspace checks use a short timeout so the
+    endpoint always returns quickly even when Lean is unavailable.
+    """
     version = ""
     workspace_ready = False
     mathlib_commit = ""
@@ -310,15 +315,18 @@ async def get_proofs_status():
     smt_available = False
     manual_check_ready, manual_check_message = await _get_manual_check_status()
     if system_config.lean4_enabled:
-        client = get_lean4_client()
-        version = await client.get_version()
-        workspace_ready = await client.ensure_workspace()
-        mathlib_commit = client.get_mathlib_commit()
-        lsp_active = client.is_server_active()
+        try:
+            client = get_lean4_client()
+            version = await asyncio.wait_for(client.get_version(), timeout=5.0)
+            workspace_ready = await asyncio.wait_for(client.ensure_workspace(), timeout=5.0)
+            mathlib_commit = client.get_mathlib_commit()
+            lsp_active = client.is_server_active()
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.warning("Lean 4 status check timed out or failed: %s", exc)
 
     if system_config.smt_enabled:
         try:
-            z3_version = await get_smt_client().get_version()
+            z3_version = await asyncio.wait_for(get_smt_client().get_version(), timeout=3.0)
             lowered_version = z3_version.lower()
             smt_available = bool(z3_version) and "not found" not in lowered_version and "no such file" not in lowered_version
         except Exception as exc:
@@ -467,16 +475,20 @@ async def get_library_proof(session_id: str, proof_id: str):
 @router.get("/{proof_id}/certificate")
 async def get_proof_certificate(proof_id: str):
     """Return a machine-readable proof certificate JSON payload."""
-    if not system_config.lean4_enabled:
-        raise HTTPException(status_code=501, detail={"lean4_enabled": False, "message": "Proof certificates are unavailable while Lean 4 is disabled."})
-
     proof = await proof_database.get_proof(proof_id)
     if proof is None:
         raise HTTPException(status_code=404, detail="Proof not found")
 
-    client = get_lean4_client()
-    lean_version = await client.get_version() if system_config.lean4_enabled else ""
-    mathlib_commit = client.get_mathlib_commit()
+    lean_version = ""
+    mathlib_commit = ""
+    if system_config.lean4_enabled:
+        try:
+            client = get_lean4_client()
+            lean_version = await client.get_version()
+            mathlib_commit = client.get_mathlib_commit()
+        except Exception:
+            pass
+
     lean_code = await proof_database.get_lean_code(proof_id)
     payload = {
         "proof_id": proof.proof_id,
@@ -507,9 +519,6 @@ async def get_proof_certificate(proof_id: str):
 @router.get("/{proof_id}/certificate.lean")
 async def get_proof_certificate_lean(proof_id: str):
     """Return the raw saved Lean file for a proof."""
-    if not system_config.lean4_enabled:
-        raise HTTPException(status_code=501, detail={"lean4_enabled": False, "message": "Proof certificates are unavailable while Lean 4 is disabled."})
-
     proof = await proof_database.get_proof(proof_id)
     if proof is None:
         raise HTTPException(status_code=404, detail="Proof not found")
