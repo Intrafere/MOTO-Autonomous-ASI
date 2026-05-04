@@ -8,9 +8,11 @@ export const RECOMMENDED_PROFILE_KEY = 'recommended_slower_affordable_higher_kno
 export const RECOMMENDED_ALTERNATE_PROFILE_KEY = 'recommended_fast_affordable_mid';
 export const RECOMMENDED_LAB_FAST_PROFILE_KEY = 'recommended_lab_fast_costly_extra_high';
 export const RECOMMENDED_LAB_MAX_PROFILE_KEY = 'recommended_lab_slow_costly_max';
+export const RECOMMENDED_ENTRY_LAB_PROFILE_KEY = 'recommended_entry_lab_fast_less_affordable';
 export const RECOMMENDED_PROFILE_KEYS = [
   RECOMMENDED_PROFILE_KEY,
   RECOMMENDED_ALTERNATE_PROFILE_KEY,
+  RECOMMENDED_ENTRY_LAB_PROFILE_KEY,
   RECOMMENDED_LAB_FAST_PROFILE_KEY,
   RECOMMENDED_LAB_MAX_PROFILE_KEY,
 ];
@@ -188,6 +190,68 @@ export const RECOMMENDED_PROFILES = {
       lmStudioFallbackId: null,
       contextWindow: 1048576,
       maxOutputTokens: 65500,
+    },
+    critique: {
+      modelId: 'google/gemini-3.1-pro-preview',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500,
+    },
+  },
+  [RECOMMENDED_ENTRY_LAB_PROFILE_KEY]: {
+    name: 'Fast, less affordable, higher knowledge',
+    numSubmitters: 3,
+    submitters: [
+      {
+        modelId: 'x-ai/grok-4.3',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1000000,
+        maxOutputTokens: 128000,
+      },
+      {
+        modelId: 'moonshotai/kimi-k2.6',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 262000,
+        maxOutputTokens: 40000,
+      },
+      {
+        modelId: 'x-ai/grok-4.3',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1000000,
+        maxOutputTokens: 128000,
+      },
+    ],
+    validator: {
+      modelId: 'x-ai/grok-4.1-fast',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 2000000,
+      maxOutputTokens: 30000,
+    },
+    highContext: {
+      modelId: 'x-ai/grok-4.3',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1000000,
+      maxOutputTokens: 128000,
+    },
+    highParam: {
+      modelId: 'x-ai/grok-4.3',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1000000,
+      maxOutputTokens: 128000,
     },
     critique: {
       modelId: 'google/gemini-3.1-pro-preview',
