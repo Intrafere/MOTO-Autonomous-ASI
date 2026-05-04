@@ -499,6 +499,7 @@ class ProofDatabase:
                 "source_title": proof.source_title,
                 "solver": proof.solver,
                 "is_novel": proof.novel,
+                "novelty_tier": proof.novelty_tier,
                 "created_at": proof.created_at.isoformat() if proof.created_at else None,
             }
             for proof in proofs
@@ -625,13 +626,20 @@ class ProofDatabase:
 
         lines = [
             "=== VERIFIED NOVEL MATHEMATICAL PROOFS (Lean 4 Verified) ===",
-            "[These proofs have been formally verified. They represent proven mathematical truths.]",
+            "[These proofs have been formally verified. They represent proven mathematical truths.",
+            "Novelty tiers: Mathematical Discovery (highest — new result), Novel Reformulation (novel reformulation of known proof), Novel Formalization (first Lean 4 formalization of known result).]",
             "",
         ]
         for index, proof in enumerate(novel_proofs, start=1):
+            tier = proof.get("novelty_tier", "")
+            tier_label = {
+                "mathematical_discovery": "Mathematical Discovery",
+                "novel_variant": "Novel Reformulation",
+                "novel_formulation": "Novel Formalization",
+            }.get(tier, "Novel")
             lines.extend(
                 [
-                    f"PROOF {index}: {proof.get('theorem_statement', '').strip()}",
+                    f"PROOF {index} [{tier_label}]: {proof.get('theorem_statement', '').strip()}",
                     f"Source: {proof.get('source_type', '')} {proof.get('source_id', '')}".strip(),
                     "Lean 4 Code:",
                     proof.get("lean_code", "").strip(),
@@ -744,6 +752,7 @@ class ProofDatabase:
                 "source_title": proof_data.get("source_title", ""),
                 "solver": proof_data.get("solver", "Lean 4"),
                 "novel": is_novel,
+                "novelty_tier": proof_data.get("novelty_tier", "not_novel"),
                 "novelty_reasoning": proof_data.get("novelty_reasoning", ""),
                 "verification_notes": proof_data.get("verification_notes", ""),
                 "attempt_count": proof_data.get("attempt_count", 0),

@@ -163,6 +163,9 @@ When choosing between new / continue / combine:
 - **Continue Existing**: When an incomplete brainstorm has more value to explore before starting something new
 - **Combine Topics**: When multiple existing brainstorms are related and would benefit from unified exploration
 
+### Hard Code Guard: continue_existing on Completed Brainstorms
+The coordinator enforces a **hard code guard** in `_execute_topic_selection`: if the LLM selects `continue_existing` on a brainstorm whose status is `"complete"`, the action is **rejected** and the topic selection loop retries. This prevents runaway re-brainstorming on already-completed topics regardless of LLM judgment. The LLM prompt and validator prompt both instruct against this, but the code guard is the authoritative enforcement.
+
 JSON schema and examples defined in `json-prompt-design.mdc`. Fields: `action` (new_topic/continue_existing/combine_topics), `topic_id`, `topic_ids`, `topic_prompt`, `reasoning`.
 
 ---
@@ -320,6 +323,7 @@ The autonomous brainstorm aggregator inherits batch validation from Part 1 infra
    - Trigger: After each acceptance, check if count >= 30
    - Behavior: Immediately transition to paper writing, skip completion review
    - WebSocket event: `brainstorm_hard_limit_reached`
+   - **TOTAL across all rounds**: When `continue_existing` resumes an incomplete brainstorm, the 30-cap applies to the TOTAL acceptance count (prior + new). The aggregator loop tracks a `resume_acceptance_base` offset so `_acceptance_count` always reflects the true total. If a topic already has >= 30 acceptances on entry, aggregation is skipped entirely and paper writing is forced immediately.
 5. **Rejection Hard Limit**: 10 consecutive rejections (with minimum 5 acceptances) FORCE transition to paper writing
    - Purpose: Prevents infinite rejection loops when brainstorm is exhausted
    - Trigger: After rejection, check if consecutive rejections >= 10 AND acceptances >= 5
@@ -1652,6 +1656,7 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 ### Paper Compilation Failure
 - Paper compilation is retried indefinitely until success or user stops - no skipping allowed
 - A completed brainstorm ALWAYS produces a paper; the system never abandons a brainstorm without writing its paper
+- If the referenced brainstorm database was deleted, clear stale Tier 2 paper-writing state and restart the normal topic exploration → reference selection → brainstorm cycle
 - Title selection retries indefinitely with rejection feedback threaded into each attempt
 
 ---
@@ -1722,6 +1727,8 @@ Tier 3 Final Answer display component (separate tab for completed/overall final 
 38. **Title exploration uses standard aggregator (cleanup disabled)** — Same parallel submitters, batch validation, queue management. Cleanup/pruning is disabled because the phase is capped at 5 candidates and the temp DB is deleted afterwards.
 39. **Final title selection sees candidate titles** — The 6th selection can choose a candidate, synthesize, or propose new. Must justify divergence from all candidates.
 40. **Proof verification is an optional post-brainstorm and post-paper checkpoint** — Gated on `lean4_enabled`; silent when disabled. Lean 4 is authoritative; SMT (when `smt_enabled`) contributes hints only. See "Proof Verification Stage" section for the full invariant list.
+41. **Hard code guard: continue_existing on completed brainstorms is REJECTED** — `_execute_topic_selection` checks `metadata.status == "complete"` and returns `None`, forcing topic re-selection. LLM prompts instruct against this but the code guard is authoritative.
+42. **30-cap is TOTAL across all brainstorm rounds for a topic** — When `continue_existing` resumes an incomplete brainstorm, the aggregator loop tracks a `resume_acceptance_base` offset. `_acceptance_count` always equals `base + fresh_aggregator_count`. If the topic already has >= 30 acceptances on entry, aggregation is skipped and paper writing is forced immediately.
 
 ---
 

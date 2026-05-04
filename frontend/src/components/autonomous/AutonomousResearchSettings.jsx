@@ -1299,19 +1299,17 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 <OsTag />
                 <div className="flex-row-center">
                   <div className="model-item-name">Kimi K2.6</div>
-                  <div className="ranking-badge ranking-badge--gold">👑 KING OF THE HILL</div>
-                  <div className="help-tooltip-anchor" style={{ zIndex: 100 }}>
-                    <button
-                      type="button"
-                      className="help-tooltip-btn"
-                      aria-label="Learn about the King of the Hill ranking"
-                      onMouseEnter={() => setShowKothTooltip(true)}
-                      onMouseLeave={() => setShowKothTooltip(false)}
-                      onFocus={() => setShowKothTooltip(true)}
-                      onBlur={() => setShowKothTooltip(false)}
-                    >
-                      ?
-                    </button>
+                  <div
+                    className="help-tooltip-anchor"
+                    style={{ zIndex: 100 }}
+                    aria-label="Learn about the King of the Hill ranking"
+                    onMouseEnter={() => setShowKothTooltip(true)}
+                    onMouseLeave={() => setShowKothTooltip(false)}
+                    onFocus={() => setShowKothTooltip(true)}
+                    onBlur={() => setShowKothTooltip(false)}
+                    tabIndex={0}
+                  >
+                    <div className="ranking-badge ranking-badge--gold">👑 KING OF THE HILL</div>
                     {showKothTooltip && (
                       <div
                         className="help-tooltip-popup"

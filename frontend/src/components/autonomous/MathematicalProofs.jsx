@@ -47,6 +47,23 @@ function createEmptyGraphState() {
   };
 }
 
+function getTierBadge(proof) {
+  const tier = proof.novelty_tier;
+  if (tier === 'mathematical_discovery') {
+    return { cardClass: 'gold', badgeClass: 'gold', label: 'Mathematical Discovery' };
+  }
+  if (tier === 'novel_variant') {
+    return { cardClass: 'silver', badgeClass: 'silver', label: 'Novel Reformulation' };
+  }
+  if (tier === 'novel_formulation') {
+    return { cardClass: 'bronze', badgeClass: 'bronze', label: 'Novel Formalization' };
+  }
+  if (proof.novel) {
+    return { cardClass: 'gold', badgeClass: 'gold', label: 'Novel Proof' };
+  }
+  return { cardClass: 'known', badgeClass: 'known', label: 'Known Proof' };
+}
+
 function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, latestDependencyEvent = null }) {
   const [proofs, setProofs] = useState([]);
   const [proofStatus, setProofStatus] = useState(null);
@@ -297,20 +314,34 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
   }, [availableSources, manualSourceId, manualSourceType]);
 
   const counts = useMemo(() => {
-    if (proofStatus?.proof_counts) {
-      return proofStatus.proof_counts;
-    }
     const novel = proofs.filter((proof) => proof.novel).length;
+    const discovery = proofs.filter((proof) => proof.novelty_tier === 'mathematical_discovery').length;
+    const variant = proofs.filter((proof) => proof.novelty_tier === 'novel_variant').length;
+    const formulation = proofs.filter((proof) => proof.novelty_tier === 'novel_formulation').length;
+    const legacyNovel = novel - discovery - variant - formulation;
     return {
       total: proofs.length,
       novel,
       known: proofs.length - novel,
+      discovery,
+      variant,
+      formulation,
+      legacyNovel,
     };
-  }, [proofStatus, proofs]);
+  }, [proofs]);
 
   const visibleProofs = useMemo(() => {
     if (filter === 'novel') {
       return proofs.filter((proof) => proof.novel);
+    }
+    if (filter === 'mathematical_discovery') {
+      return proofs.filter((proof) => proof.novelty_tier === 'mathematical_discovery');
+    }
+    if (filter === 'novel_variant') {
+      return proofs.filter((proof) => proof.novelty_tier === 'novel_variant');
+    }
+    if (filter === 'novel_formulation') {
+      return proofs.filter((proof) => proof.novelty_tier === 'novel_formulation');
     }
     return proofs;
   }, [proofs, filter]);
@@ -385,13 +416,31 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
               className={`math-proofs-filter ${filter === 'novel' ? 'active' : ''}`}
               onClick={() => setFilter('novel')}
             >
-              Novel Proofs
+              All Novel ({counts.novel || 0})
+            </button>
+            <button
+              className={`math-proofs-filter math-proofs-filter--gold ${filter === 'mathematical_discovery' ? 'active' : ''}`}
+              onClick={() => setFilter('mathematical_discovery')}
+            >
+              Discovery ({counts.discovery || 0})
+            </button>
+            <button
+              className={`math-proofs-filter math-proofs-filter--silver ${filter === 'novel_variant' ? 'active' : ''}`}
+              onClick={() => setFilter('novel_variant')}
+            >
+              Reformulation ({counts.variant || 0})
+            </button>
+            <button
+              className={`math-proofs-filter math-proofs-filter--bronze ${filter === 'novel_formulation' ? 'active' : ''}`}
+              onClick={() => setFilter('novel_formulation')}
+            >
+              Formalization ({counts.formulation || 0})
             </button>
             <button
               className={`math-proofs-filter ${filter === 'all' ? 'active' : ''}`}
               onClick={() => setFilter('all')}
             >
-              All Verified Proofs
+              All Verified ({counts.total || 0})
             </button>
           </div>
 
@@ -535,13 +584,13 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
             return (
               <article
                 key={proof.proof_id}
-                className={`math-proof-card ${proof.novel ? 'novel' : 'known'}`}
+                className={`math-proof-card ${getTierBadge(proof).cardClass}`}
               >
                 <div className="math-proof-card-header">
                   <div>
                     <div className="math-proof-card-topline">
-                      <span className={`math-proof-badge ${proof.novel ? 'novel' : 'known'}`}>
-                        {proof.novel ? 'Novel Proof' : 'Known Proof'}
+                      <span className={`math-proof-badge ${getTierBadge(proof).badgeClass}`}>
+                        {getTierBadge(proof).label}
                       </span>
                       <span className="math-proof-source">
                         {proof.source_type} {proof.source_id}

@@ -173,6 +173,21 @@
   color: #86efac;
 }
 
+.math-proofs-filter--gold.active {
+  background: rgba(255, 214, 92, 0.14);
+  color: #ffd65c;
+}
+
+.math-proofs-filter--silver.active {
+  background: rgba(192, 192, 192, 0.14);
+  color: #d8d8d8;
+}
+
+.math-proofs-filter--bronze.active {
+  background: rgba(205, 127, 50, 0.14);
+  color: #e8a060;
+}
+
 .math-proofs-filter:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -214,6 +229,18 @@
   border-color: rgba(96, 165, 250, 0.28);
 }
 
+.math-proof-card.gold {
+  border-color: rgba(255, 214, 92, 0.45);
+}
+
+.math-proof-card.silver {
+  border-color: rgba(192, 192, 192, 0.45);
+}
+
+.math-proof-card.bronze {
+  border-color: rgba(205, 127, 50, 0.45);
+}
+
 .math-proof-card-header {
   display: flex;
   justify-content: space-between;
@@ -247,6 +274,24 @@
 .math-proof-badge.known {
   color: #18cc17;
   border-color: rgba(96, 165, 250, 0.35);
+}
+
+.math-proof-badge.gold {
+  color: #ffd65c;
+  border-color: rgba(255, 214, 92, 0.5);
+  background: rgba(255, 214, 92, 0.08);
+}
+
+.math-proof-badge.silver {
+  color: #d8d8d8;
+  border-color: rgba(192, 192, 192, 0.45);
+  background: rgba(192, 192, 192, 0.08);
+}
+
+.math-proof-badge.bronze {
+  color: #e8a060;
+  border-color: rgba(205, 127, 50, 0.45);
+  background: rgba(205, 127, 50, 0.08);
 }
 
 .math-proof-source {

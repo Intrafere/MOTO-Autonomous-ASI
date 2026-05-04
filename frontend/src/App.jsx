@@ -346,6 +346,7 @@ function App() {
 
   // Autonomous mode state
   const [autonomousRunning, setAutonomousRunning] = useState(false);
+  const [autonomousStopping, setAutonomousStopping] = useState(false);
   const [autonomousStatus, setAutonomousStatus] = useState(null);
   const [autonomousActivity, setAutonomousActivity] = useState([]);
   const [brainstorms, setBrainstorms] = useState([]);
@@ -1118,6 +1119,7 @@ function App() {
             theorem_statement: data.theorem_statement,
             source_type: data.source_type,
             source_id: data.source_id,
+            novelty_tier: data.novelty_tier || 'mathematical_discovery',
             timestamp: getTimestamp(data),
           }
         ];
@@ -1165,12 +1167,14 @@ function App() {
     unsubscribers.push(websocket.on('auto_research_started', () => {
       setAutonomousActivity([]);
       setAutonomousRunning(true);
+      setAutonomousStopping(false);
     }));
     
     unsubscribers.push(websocket.on('auto_research_resumed', (data) => {
       // Handle resume after crash/restart - sync running state
       console.log('Autonomous research resumed:', data);
       setAutonomousRunning(true);
+      setAutonomousStopping(false);
       if (data?.tier) {
         autonomousTierRef.current = data.tier;
       }
@@ -1188,6 +1192,8 @@ function App() {
     
     unsubscribers.push(websocket.on('auto_research_stopped', () => {
       setAutonomousRunning(false);
+      setAutonomousStopping(false);
+      setAnyWorkflowRunning(false);
       autonomousTierRef.current = null;
       setHungConnectionNotifications([]);
     }));
@@ -1726,6 +1732,7 @@ function App() {
         tier3_enabled: autonomousConfig.tier3_enabled ?? false
       });
       setAutonomousRunning(true);
+      setAutonomousStopping(false);
       setAutonomousActivity([]);
     } catch (error) {
       alert(`Failed to start autonomous research: ${error.details || error.message}`);
@@ -1733,11 +1740,21 @@ function App() {
   };
 
   const handleAutonomousStop = async () => {
+    if (autonomousStopping) {
+      return;
+    }
+
+    setAutonomousStopping(true);
     try {
       await autonomousAPI.stop();
       setAutonomousRunning(false);
+      setAnyWorkflowRunning(false);
+      const status = await autonomousAPI.getStatus();
+      setAutonomousStatus(status);
     } catch (error) {
       alert(`Failed to stop autonomous research: ${error.message}`);
+    } finally {
+      setAutonomousStopping(false);
     }
   };
 
@@ -2287,6 +2304,7 @@ function App() {
           {activeTab === 'auto-interface' && (
             <AutonomousResearchInterface
               isRunning={autonomousRunning}
+              isStopping={autonomousStopping}
               anyWorkflowRunning={anyWorkflowRunning}
               status={autonomousStatus}
               activity={autonomousActivity}

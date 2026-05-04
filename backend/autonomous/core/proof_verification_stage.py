@@ -314,7 +314,7 @@ class ProofVerificationStage:
         validator_context: int,
         validator_max_tokens: int,
         existing_novel_proofs: str,
-    ) -> tuple[bool, str]:
+    ) -> tuple[str, str]:
         from .proof_novelty import assess_proof_novelty
 
         task_id = f"proof_novelty_{self._novelty_task_sequence:03d}"
@@ -616,7 +616,7 @@ class ProofVerificationStage:
 
                     result.verified_count += 1
                     existing_novel_proofs = novel_proofs_db.get_novel_proofs_for_injection()
-                    is_novel, novelty_reasoning = await self._assess_novelty(
+                    novelty_tier, novelty_reasoning = await self._assess_novelty(
                         user_prompt=user_prompt,
                         theorem_statement=candidate.statement,
                         lean_code=lean_code,
@@ -625,6 +625,7 @@ class ProofVerificationStage:
                         validator_max_tokens=validator_max_tokens,
                         existing_novel_proofs=existing_novel_proofs,
                     )
+                    is_novel = novelty_tier != "not_novel"
 
                     solver_hints = []
                     if self._first_attempt_used_smt_hint(attempts, candidate.smt_hint):
@@ -642,6 +643,7 @@ class ProofVerificationStage:
                         solver="Lean 4",
                         lean_code=lean_code,
                         novel=is_novel,
+                        novelty_tier=novelty_tier,
                         novelty_reasoning=novelty_reasoning,
                         verification_notes="Lean 4 accepted the submitted proof.",
                         attempt_count=len(attempts),
@@ -713,7 +715,7 @@ class ProofVerificationStage:
                         # into all prompts via inject_into_prompt().
                         if source_type == "brainstorm":
                             await brainstorm_memory.append_proofs_section(source_id, stored_record)
-                        elif ":" not in source_id:
+                        elif source_type == "paper":
                             await paper_library.append_proofs_section(source_id, stored_record)
                         await self._broadcast(
                             broadcast_fn,
@@ -723,6 +725,7 @@ class ProofVerificationStage:
                                 "proof_id": stored_record.proof_id,
                                 "theorem_statement": stored_record.theorem_statement,
                                 "solver": "Lean 4",
+                                "novelty_tier": novelty_tier,
                                 "retry_origin_source_id": candidate.origin_source_id,
                             },
                         )

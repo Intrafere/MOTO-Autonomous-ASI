@@ -19,6 +19,32 @@ function truncate(text, maxLength = 220) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
+function getTierBadge(proof) {
+  const tier = proof.novelty_tier;
+  if (tier === 'mathematical_discovery') {
+    return { cssClass: 'proof-badge--gold', label: 'Mathematical Discovery' };
+  }
+  if (tier === 'novel_variant') {
+    return { cssClass: 'proof-badge--silver', label: 'Novel Reformulation' };
+  }
+  if (tier === 'novel_formulation') {
+    return { cssClass: 'proof-badge--bronze', label: 'Novel Formalization' };
+  }
+  if (proof.novel) {
+    return { cssClass: 'proof-badge--gold', label: 'Novel' };
+  }
+  return { cssClass: 'proof-badge--known', label: 'Known' };
+}
+
+function getCardClass(proof) {
+  const tier = proof.novelty_tier;
+  if (tier === 'mathematical_discovery') return 'proof-card--gold';
+  if (tier === 'novel_variant') return 'proof-card--silver';
+  if (tier === 'novel_formulation') return 'proof-card--bronze';
+  if (proof.novel) return 'proof-card--novel';
+  return 'proof-card--known';
+}
+
 export default function ProofLibrary() {
   const [proofs, setProofs] = useState([]);
   const [sessionsResponse, setSessionsResponse] = useState(null);
@@ -252,9 +278,7 @@ export default function ProofLibrary() {
                       return (
                         <div
                           key={id}
-                          className={`answer-card proof-card ${isExpanded ? 'expanded' : ''} ${
-                            proof.novel ? 'proof-card--novel' : 'proof-card--known'
-                          }`}
+                          className={`answer-card proof-card ${isExpanded ? 'expanded' : ''} ${getCardClass(proof)}`}
                         >
                           <div
                             className="answer-header"
@@ -271,11 +295,9 @@ export default function ProofLibrary() {
 
                             <div className="answer-metadata">
                               <span
-                                className={`format-badge ${
-                                  proof.novel ? 'proof-badge--novel' : 'proof-badge--known'
-                                }`}
+                                className={`format-badge ${getTierBadge(proof).cssClass}`}
                               >
-                                {proof.novel ? 'Novel' : 'Known'}
+                                {getTierBadge(proof).label}
                               </span>
                               <span className="word-count">
                                 {proof.solver || 'Lean 4'}

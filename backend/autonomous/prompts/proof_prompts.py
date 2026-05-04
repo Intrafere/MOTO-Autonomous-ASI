@@ -522,29 +522,44 @@ def build_proof_novelty_prompt(
     lean_code: str,
     existing_novel_proofs: str,
 ) -> str:
-    """Ask the validator whether a Lean-verified theorem is novel."""
+    """Ask the validator to classify a Lean-verified theorem into one of four novelty tiers."""
     existing_proofs_block = existing_novel_proofs or "[No previously stored novel proofs.]"
     return f"""This proof has been FORMALLY VERIFIED by Lean 4. It is mathematically valid.
 
-Your ONLY task: decide whether the verified result is NOVEL in the context of this research program.
+Your ONLY task: assign a novelty tier to the verified result based on the criteria below.
 
-A proof is NOVEL if it meets ANY of these criteria:
-- It proves a result not already present in Mathlib or standard textbooks
-- It establishes a new connection, bound, or structural insight
-- It formalizes a conjecture or claim that was previously unverified
-- It is a non-trivial composition of known results yielding something new
-- It represents original work relative to the existing stored proofs below
+NOVELTY TIERS (choose exactly one):
 
-A proof is NOT novel if:
-- It is a direct restatement of a well-known Mathlib lemma or textbook theorem
-- It is a trivial identity, tautology, or definitional equality
-- It is closable by a single standard tactic (simp, omega, norm_num, decide, rfl)
-- It duplicates a result already in the stored novel proofs below
+"not_novel"
+- The result is a direct restatement of a well-known Mathlib lemma or standard textbook theorem.
+- It is a trivial identity, tautology, or definitional equality.
+- It is closable by a single standard tactic (simp, omega, norm_num, decide, rfl).
+- It duplicates a result already present in the stored proofs below.
+- Assign this tier when there is no meaningful original contribution.
+
+"novel_formulation"
+- The underlying mathematical result is historically known (it exists in textbooks or the literature).
+- However, this specific Lean 4 formalization or mechanized proof is the first of its kind for this result in the context of this research program.
+- The formalization itself required non-trivial effort, even though the mathematics is not new.
+- Assign this tier when the contribution is the act of formal verification, not a new mathematical idea.
+
+"novel_variant"
+- The proof idea is rooted in a known theorem or technique, but this proof meaningfully reformulates, restructures, or generalizes it in a non-trivial way.
+- It introduces a different proof strategy, weaker hypotheses, a stronger conclusion, or an original compositional approach that goes beyond a direct restatement.
+- The reformulation has independent mathematical interest beyond simply formalizing an existing result.
+- Assign this tier when the proof is a genuine but incremental advance on known material.
+
+"mathematical_discovery"
+- The result is a new mathematical finding: a new theorem, bound, connection, or structural insight not present in standard references or Mathlib.
+- It formalizes a previously unverified conjecture or establishes a result with independent mathematical value.
+- It constitutes a novel alternative proof of an existing result whose existence changes mathematical understanding (e.g., a constructive proof where only non-constructive proofs were known).
+- Assign this tier when the proof would be a publishable or citable contribution in its own right.
 
 Rules:
 - Do NOT re-check validity. Lean 4 already verified it.
-- When uncertain, consider the research prompt context -- a result that is textbook-standard in one field may be a novel formalization contribution in the context of this specific research program.
-- Err on the side of recognizing novelty for results that required multi-step reasoning or non-trivial formalization work.
+- Choose the single best-fitting tier. When a proof could fit multiple tiers, choose the highest applicable one.
+- Consider the research prompt context. A result textbook-standard in one field may qualify as "novel_formulation" if it is the first mechanized Lean 4 proof of that result for this research program.
+- Err toward recognizing higher tiers for results that required multi-step reasoning, non-trivial formalization work, or original proof strategy.
 
 USER RESEARCH PROMPT:
 {user_prompt}
@@ -558,5 +573,5 @@ LEAN 4 CODE:
 EXISTING STORED NOVEL PROOFS:
 {existing_proofs_block}
 
-{_json_only_footer('{"is_novel": true, "reasoning": "brief explanation"}')}
+{_json_only_footer('{"novelty_tier": "mathematical_discovery", "reasoning": "brief explanation"}')}
 """

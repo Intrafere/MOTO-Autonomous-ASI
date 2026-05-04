@@ -5,6 +5,7 @@ import { autonomousAPI } from '../../services/api';
 import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 import { buildResearchRunGroups } from '../../utils/researchRunHistory';
 import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import { websocket } from '../../services/websocket';
 import './FinalAnswerLibrary.css';
 import './AutonomousResearch.css';
 import './Stage2PaperHistory.css';
@@ -53,6 +54,34 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
   useEffect(() => {
     loadPaperHistory();
   }, []);
+
+  useEffect(() => {
+    const unsubscribeNovelProof = websocket.on('novel_proof_discovered', async (data) => {
+      if (!expandedContent || data.source_type !== 'paper') {
+        return;
+      }
+
+      const matchesExpandedPaper = (
+        data.source_id === expandedId ||
+        data.source_id === expandedContent.paper_id
+      );
+      if (!matchesExpandedPaper) {
+        return;
+      }
+
+      try {
+        const refreshed = await autonomousAPI.getHistoryPaper(
+          expandedContent.session_id,
+          expandedContent.paper_id,
+        );
+        setExpandedContent(refreshed);
+      } catch (error) {
+        console.error('Failed to refresh history paper after proof append:', error);
+      }
+    });
+
+    return () => unsubscribeNovelProof();
+  }, [expandedId, expandedContent]);
 
   const loadPaperHistory = async () => {
     try {

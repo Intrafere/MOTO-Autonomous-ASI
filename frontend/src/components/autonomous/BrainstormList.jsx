@@ -58,18 +58,37 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
 
   // Subscribe to WebSocket events for immediate updates
   useEffect(() => {
-    const handleSubmissionAccepted = async (data) => {
-      if (expandedId && data.topic_id === expandedId) {
-        try {
-          const refreshedData = await api.getBrainstorm(expandedId);
-          setFileContent(refreshedData.content || 'No content yet...');
-        } catch (error) {
-          console.error('Failed to refresh submissions:', error);
-        }
+    const refreshExpandedBrainstorm = async () => {
+      try {
+        const refreshedData = await api.getBrainstorm(expandedId);
+        setFileContent(refreshedData.content || 'No content yet...');
+      } catch (error) {
+        console.error('Failed to refresh brainstorm content:', error);
       }
     };
 
-    unsubscribeRef.current = websocket.on('brainstorm_submission_accepted', handleSubmissionAccepted);
+    const handleSubmissionAccepted = async (data) => {
+      if (expandedId && data.topic_id === expandedId) {
+        await refreshExpandedBrainstorm();
+      }
+    };
+
+    const handleNovelProofDiscovered = async (data) => {
+      if (
+        expandedId &&
+        data.source_type === 'brainstorm' &&
+        data.source_id === expandedId
+      ) {
+        await refreshExpandedBrainstorm();
+      }
+    };
+
+    const unsubscribeSubmission = websocket.on('brainstorm_submission_accepted', handleSubmissionAccepted);
+    const unsubscribeNovelProof = websocket.on('novel_proof_discovered', handleNovelProofDiscovered);
+    unsubscribeRef.current = () => {
+      unsubscribeSubmission();
+      unsubscribeNovelProof();
+    };
     return () => {
       if (unsubscribeRef.current) {
         unsubscribeRef.current();

@@ -4,22 +4,53 @@
   color: #1eff1c;
 }
 
+/* Legacy fallback — keeps old records styled correctly */
 .proof-card--novel {
-  border-left: 3px solid #1eff1c;
+  border-left: 3px solid #ffd65c;
 }
 
 .proof-card--known {
   border-left: 3px solid #666;
 }
 
+/* Tier-specific card accents */
+.proof-card--gold {
+  border-left: 3px solid #ffd65c;
+}
+
+.proof-card--silver {
+  border-left: 3px solid #c0c0c0;
+}
+
+.proof-card--bronze {
+  border-left: 3px solid #cd7f32;
+}
+
+/* Legacy fallback badge */
 .proof-badge--novel {
-  background: linear-gradient(135deg, #1eff1c 0%, #7dff6f 100%);
-  color: #000;
+  background: linear-gradient(135deg, #ffd65c 0%, #ffe99a 100%);
+  color: #1a1a00;
 }
 
 .proof-badge--known {
   background: #555;
   color: #ccc;
+}
+
+/* Tier-specific badges */
+.proof-badge--gold {
+  background: linear-gradient(135deg, #ffd65c 0%, #ffe99a 100%);
+  color: #1a1a00;
+}
+
+.proof-badge--silver {
+  background: linear-gradient(135deg, #c0c0c0 0%, #e8e8e8 100%);
+  color: #1a1a1a;
+}
+
+.proof-badge--bronze {
+  background: linear-gradient(135deg, #cd7f32 0%, #e8a060 100%);
+  color: #1a0a00;
 }
 
 .proof-title {

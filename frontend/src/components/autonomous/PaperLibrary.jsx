@@ -1,7 +1,7 @@
 /**
  * PaperLibrary - Displays grid of completed papers.
  */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import './AutonomousResearch.css';
 import LatexRenderer from '../LatexRenderer';
 import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
@@ -9,6 +9,7 @@ import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
+import { websocket } from '../../services/websocket';
 
 const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   const [expandedId, setExpandedId] = useState(null);
@@ -29,6 +30,31 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
     manualCheckReason,
     queueManualProofCheck,
   } = useProofCheckRuntime();
+
+  useEffect(() => {
+    const unsubscribeNovelProof = websocket.on('novel_proof_discovered', async (data) => {
+      if (
+        !expandedId ||
+        data.source_type !== 'paper' ||
+        data.source_id !== expandedId
+      ) {
+        return;
+      }
+
+      try {
+        const refreshed = await api.getAutonomousPaper(expandedId);
+        setExpandedContent({
+          content: refreshed.content,
+          outline: refreshed.outline,
+          title: refreshed.title,
+        });
+      } catch (error) {
+        console.error('Failed to refresh paper after proof append:', error);
+      }
+    });
+
+    return () => unsubscribeNovelProof();
+  }, [expandedId, api]);
 
   const handleCardClick = async (paperId) => {
     if (expandedId === paperId) {

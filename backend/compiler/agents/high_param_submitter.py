@@ -85,6 +85,7 @@ def format_theorem_appendix_entry(
     lean_code: str,
     is_novel: bool,
     theorem_name: str = "",
+    novelty_tier: str = "",
     placement_outcome: str = "appendix_fallback",
 ) -> str:
     """Format a verified-theorem entry for the Theorems Appendix.
@@ -94,7 +95,12 @@ def format_theorem_appendix_entry(
     fallback). Caller selects via `placement_outcome`.
     """
     header_name = theorem_name.strip() or proof_id
-    novelty_label = "Novel" if is_novel else "Known"
+    tier_labels = {
+        "mathematical_discovery": "Mathematical Discovery",
+        "novel_variant": "Novel Reformulation",
+        "novel_formulation": "Novel Formalization",
+    }
+    novelty_label = tier_labels.get(novelty_tier, "Novel" if is_novel else "Known")
     status_suffix = {
         "appendix_fallback": "inline placement rejected; preserved here because Lean 4 verified the math",
         "inline": "also placed inline in the body",
@@ -124,6 +130,7 @@ class RigorTheoremResult:
     theorem_name: str
     lean_code: str
     is_novel: bool
+    novelty_tier: str
     novelty_reasoning: str
     attempts: List[ProofAttemptFeedback]
     source_id: str
@@ -363,6 +370,7 @@ class HighParamSubmitter:
             theorem_name=theorem_name,
             lean_code=lean_code,
             is_novel=is_novel,
+            novelty_tier=novelty_tier,
             novelty_reasoning=novelty_reasoning,
             attempts=attempts,
             source_id=self._compiler_source_id(),
@@ -593,7 +601,7 @@ class HighParamSubmitter:
         self.task_sequence += 1
 
         try:
-            is_novel, novelty_reasoning = await assess_proof_novelty(
+            novelty_tier, novelty_reasoning = await assess_proof_novelty(
                 user_prompt=self.raw_user_prompt,
                 theorem_statement=theorem_statement,
                 lean_code=lean_code,
@@ -604,9 +612,10 @@ class HighParamSubmitter:
                 task_id=task_id,
                 role_id="compiler_rigor_novelty",
             )
+            is_novel = novelty_tier != "not_novel"
         except Exception as exc:
             logger.warning("Novelty assessment failed (%s); defaulting to non-novel", exc)
-            is_novel, novelty_reasoning = False, f"Novelty assessment error: {exc}"
+            novelty_tier, novelty_reasoning, is_novel = "not_novel", f"Novelty assessment error: {exc}", False
 
         record = ProofRecord(
             proof_id="",  # proof_database assigns proof_XXX on add_proof
@@ -620,6 +629,7 @@ class HighParamSubmitter:
             solver="Lean 4",
             lean_code=lean_code,
             novel=is_novel,
+            novelty_tier=novelty_tier,
             novelty_reasoning=novelty_reasoning,
             verification_notes="Produced by compiler rigor loop (HighParamSubmitter).",
             attempt_count=len(attempts),

@@ -2184,6 +2184,7 @@ INVALID:
                     lean_code=lean_result.lean_code,
                     is_novel=lean_result.is_novel,
                     theorem_name=lean_result.theorem_name,
+                    novelty_tier=lean_result.novelty_tier,
                     placement_outcome="inline",
                 )
                 try:
@@ -2260,6 +2261,7 @@ INVALID:
             lean_code=lean_result.lean_code,
             is_novel=lean_result.is_novel,
             theorem_name=lean_result.theorem_name,
+            novelty_tier=lean_result.novelty_tier,
             placement_outcome="appendix_fallback",
         )
         appended = await paper_memory.append_to_theorems_appendix(appendix_entry)

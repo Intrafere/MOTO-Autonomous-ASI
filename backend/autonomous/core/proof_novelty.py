@@ -20,6 +20,11 @@ from backend.shared.utils import count_tokens
 logger = logging.getLogger(__name__)
 
 
+VALID_NOVELTY_TIERS = frozenset(
+    {"not_novel", "novel_formulation", "novel_variant", "mathematical_discovery"}
+)
+
+
 async def assess_proof_novelty(
     *,
     user_prompt: str,
@@ -31,8 +36,8 @@ async def assess_proof_novelty(
     existing_novel_proofs: str,
     task_id: str,
     role_id: str = "autonomous_proof_novelty",
-) -> Tuple[bool, str]:
-    """Classify a Lean-4-verified theorem as novel or known.
+) -> Tuple[str, str]:
+    """Classify a Lean-4-verified theorem into one of four novelty tiers.
 
     Args:
         user_prompt: Top-level research prompt for context.
@@ -49,8 +54,10 @@ async def assess_proof_novelty(
             compiler-specific role for correct logging.
 
     Returns:
-        Tuple of (is_novel, reasoning). Falls back to (False, <message>) when
-        the novelty validator returns no usable response.
+        Tuple of (novelty_tier, reasoning) where novelty_tier is one of:
+        "not_novel", "novel_formulation", "novel_variant", "mathematical_discovery".
+        Falls back to ("not_novel", <message>) when the validator returns no
+        usable response or an unrecognised tier string.
     """
     prompt = build_proof_novelty_prompt(
         user_prompt=user_prompt,
@@ -80,20 +87,27 @@ async def assess_proof_novelty(
         temperature=0.0,
     )
     if not response or not response.get("choices"):
-        return False, "Novelty validator returned no response."
+        return "not_novel", "Novelty validator returned no response."
 
     message = response["choices"][0].get("message", {})
     content = message.get("content") or message.get("reasoning") or ""
     if not content:
-        return False, "Novelty validator returned empty content."
+        return "not_novel", "Novelty validator returned empty content."
 
     try:
         data = parse_json(content)
     except Exception as exc:
         logger.warning("Novelty validator JSON parse failed: %s", exc)
-        return False, f"Novelty validator JSON parse error: {exc}"
+        return "not_novel", f"Novelty validator JSON parse error: {exc}"
 
     if isinstance(data, list):
         data = data[0] if data else {}
 
-    return bool(data.get("is_novel", False)), str(data.get("reasoning", "")).strip()
+    raw_tier = str(data.get("novelty_tier", "not_novel")).strip().lower()
+    if raw_tier not in VALID_NOVELTY_TIERS:
+        logger.warning(
+            "Novelty validator returned unrecognised tier %r; falling back to not_novel", raw_tier
+        )
+        raw_tier = "not_novel"
+
+    return raw_tier, str(data.get("reasoning", "")).strip()

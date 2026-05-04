@@ -56,6 +56,59 @@ function getRatingBgColor(rating) {
   return 'critique-bg--red';
 }
 
+const AUTONOMOUS_SETTINGS_STORAGE_KEY = 'autonomous_research_settings';
+const COMPILER_SETTINGS_STORAGE_KEY = 'compiler_settings';
+
+function readStoredValidatorConfig(paperType) {
+  try {
+    if (paperType === 'compiler_paper') {
+      const raw = localStorage.getItem(COMPILER_SETTINGS_STORAGE_KEY);
+      if (!raw) {
+        return null;
+      }
+
+      // compiler_settings uses camelCase keys written by CompilerSettings.jsx
+      const config = JSON.parse(raw);
+      if (!config?.validatorModel) {
+        return null;
+      }
+
+      return {
+        validator_model: config.validatorModel,
+        validator_context_window: config.validatorContextSize,
+        validator_max_tokens: config.validatorMaxOutput,
+        validator_provider: config.validatorProvider,
+        validator_openrouter_provider: config.validatorOpenrouterProvider,
+      };
+    }
+
+    // Only read the actively maintained autonomous settings key. A legacy
+    // `autonomousConfig` blob can go stale and silently override the user's
+    // current validator choice during manual critique generation.
+    const raw = localStorage.getItem(AUTONOMOUS_SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const settings = JSON.parse(raw);
+    const localConfig = settings?.localConfig;
+    if (!localConfig?.validator_model) {
+      return null;
+    }
+
+    return {
+      validator_model: localConfig.validator_model,
+      validator_context_window: localConfig.validator_context_window,
+      validator_max_tokens: localConfig.validator_max_tokens,
+      validator_provider: localConfig.validator_provider,
+      validator_openrouter_provider: localConfig.validator_openrouter_provider,
+    };
+  } catch (error) {
+    console.warn('Could not read validator config from localStorage:', error);
+    return null;
+  }
+}
+
 /**
  * Modal for displaying paper critiques from the validator model.
  * 
@@ -123,27 +176,8 @@ export default function PaperCritiqueModal({
         ? 'compiler_critique_custom_prompt'
         : 'autonomous_critique_custom_prompt';
       const customPrompt = localStorage.getItem(storageKey);
-      
-      // Get validator config from localStorage (allows critiques without starting research)
-      let validatorConfig = null;
-      try {
-        const configKey = paperType === 'compiler_paper' ? 'compiler_settings' : 'autonomousConfig';
-        const configStr = localStorage.getItem(configKey);
-        if (configStr) {
-          const config = JSON.parse(configStr);
-          // Extract validator config fields
-          validatorConfig = {
-            validator_model: config.validator_model,
-            validator_context_window: config.validator_context_window,
-            validator_max_tokens: config.validator_max_tokens,
-            validator_provider: config.validator_provider,
-            validator_openrouter_provider: config.validator_openrouter_provider,
-          };
-        }
-      } catch (e) {
-        console.warn('Could not read validator config from localStorage:', e);
-      }
-      
+
+      const validatorConfig = readStoredValidatorConfig(paperType);
       const result = await onGenerateCritique(customPrompt, validatorConfig);
       
       // Reload critiques to get the updated list

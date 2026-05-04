@@ -574,6 +574,7 @@ class ProofRecord(BaseModel):
     solver: str = "Lean 4"
     lean_code: str
     novel: bool = False
+    novelty_tier: str = "not_novel"
     novelty_reasoning: str = ""
     verification_notes: str = ""
     attempt_count: int = 0

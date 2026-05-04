@@ -10,6 +10,7 @@ import TextFileUploader from '../TextFileUploader';
 
 const AutonomousResearchInterface = ({
   isRunning,
+  isStopping = false,
   anyWorkflowRunning,
   status,
   activity,
@@ -417,7 +418,7 @@ const AutonomousResearchInterface = ({
       <div className="autonomous-header">
         <h2>Autonomous Research</h2>
         <div className="autonomous-controls">
-          {!isRunning ? (
+          {!isRunning && !isStopping ? (
             <button 
               className="btn-start"
               onClick={handleStart}
@@ -434,20 +435,20 @@ const AutonomousResearchInterface = ({
                 className="runtime-indicator"
                 role="status"
                 aria-live="polite"
-                title="Autonomous research is currently running"
+                title={isStopping ? "Autonomous research is stopping" : "Autonomous research is currently running"}
               >
                 <span className="runtime-indicator-dot" aria-hidden="true"></span>
-                <span className="runtime-indicator-label">Running</span>
+                <span className="runtime-indicator-label">{isStopping ? 'Stopping' : 'Running'}</span>
               </span>
-              <button className="btn-stop" onClick={onStop}>
-                Stop Research
+              <button className="btn-stop" onClick={onStop} disabled={isStopping}>
+                {isStopping ? 'Stopping...' : 'Stop Research'}
               </button>
             </>
           )}
           <button 
             className={`btn-clear ${showClearConfirm ? 'btn-confirm' : ''}`}
             onClick={handleClear}
-            disabled={isRunning || isClearing}
+            disabled={isRunning || isStopping || isClearing}
           >
             {isClearing ? 'Clearing...' : (showClearConfirm ? 'Confirm Clear' : 'Clear All')}
           </button>

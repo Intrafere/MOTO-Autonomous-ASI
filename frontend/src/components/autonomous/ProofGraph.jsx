@@ -1,6 +1,15 @@
 import React, { useMemo, useState } from 'react';
 import './ProofGraph.css';
 
+function getGraphNodeTierClass(node) {
+  const tier = node.novelty_tier;
+  if (tier === 'mathematical_discovery') return 'gold';
+  if (tier === 'novel_variant') return 'silver';
+  if (tier === 'novel_formulation') return 'bronze';
+  if (node.is_novel) return 'novel';
+  return 'known';
+}
+
 const NODE_WIDTH = 236;
 const NODE_HEIGHT = 110;
 const X_GAP = 72;
@@ -308,7 +317,7 @@ function ProofGraph({
             return (
               <g
                 key={node.proof_id}
-                className={`proof-graph-node-group ${node.is_novel ? 'novel' : 'known'} ${isSelected ? 'selected' : ''}`}
+                className={`proof-graph-node-group ${getGraphNodeTierClass(node)} ${isSelected ? 'selected' : ''}`}
                 transform={`translate(${position.x}, ${position.y})`}
                 onClick={handleActivate}
                 onKeyDown={handleKeyDown}

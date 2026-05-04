@@ -96,6 +96,8 @@ class AutonomousCoordinator:
         self._running = False
         self._state = AutonomousResearchState()
         self._stop_event = asyncio.Event()
+        self._main_task: Optional[asyncio.Task] = None
+        self._stop_broadcast_sent = False
         
         # Configuration (set during initialize)
         self._user_research_prompt: str = ""
@@ -150,6 +152,7 @@ class AutonomousCoordinator:
         self._last_completion_review_at: int = 0  # Acceptance count at last completion review
         self._manual_paper_writing_triggered: bool = False
         self._resume_paper_phase: Optional[str] = None  # Saved phase for resume (body/conclusion/intro/abstract)
+        self._brainstorm_missing_during_paper: bool = False
         
         # Brainstorm multi-paper continuation tracking
         self._brainstorm_paper_count: int = 0  # Papers written from current brainstorm (max 3)
@@ -1019,33 +1022,52 @@ class AutonomousCoordinator:
         
         In this case, we set up the resume state to continue writing the incomplete paper.
         """
-        incomplete_paper = await paper_library.get_most_recent_incomplete_paper()
-        
-        if incomplete_paper:
+        while True:
+            incomplete_paper = await paper_library.get_most_recent_incomplete_paper()
+            if not incomplete_paper:
+                return
+
             logger.info(f"Found incomplete paper: {incomplete_paper.paper_id} "
                        f"(title: {incomplete_paper.title}, "
                        f"from brainstorm: {incomplete_paper.source_brainstorm_ids})")
-            
+
+            topic_id = incomplete_paper.source_brainstorm_ids[0] if incomplete_paper.source_brainstorm_ids else None
+            if not topic_id:
+                await self._delete_stale_incomplete_paper(
+                    incomplete_paper.paper_id,
+                    topic_id,
+                    "missing source brainstorm id for incomplete paper resume"
+                )
+                continue
+
+            metadata = await brainstorm_memory.get_metadata(topic_id)
+            brainstorm_db_path = brainstorm_memory.get_database_path(topic_id)
+            if metadata is None or not os.path.exists(brainstorm_db_path):
+                await self._delete_stale_incomplete_paper(
+                    incomplete_paper.paper_id,
+                    topic_id,
+                    f"source brainstorm not found at {brainstorm_db_path}"
+                )
+                continue
+
             # Set up resume state for the incomplete paper
             self._current_paper_id = incomplete_paper.paper_id
             self._current_paper_title = incomplete_paper.title
-            
-            # Get source brainstorm (use first one if multiple)
-            if incomplete_paper.source_brainstorm_ids:
-                self._current_topic_id = incomplete_paper.source_brainstorm_ids[0]
-            
+            self._current_topic_id = topic_id
+
             # Restore reference papers
             self._current_reference_papers = incomplete_paper.referenced_papers or []
-            
+
             # Detect which phase the paper needs to resume from based on content
             paper_content = await self._get_paper_content_for_resume(incomplete_paper.paper_id)
             self._resume_paper_phase = self._detect_paper_phase(paper_content)
-            
+
             logger.info(f"Will resume incomplete paper {incomplete_paper.paper_id} "
                        f"from phase: {self._resume_paper_phase}")
-            
+
             # Save workflow state so the resume logic kicks in
             await self._save_workflow_state(tier="tier2_paper_writing", phase=self._resume_paper_phase)
+            return
     
     async def _get_paper_content_for_resume(self, paper_id: str) -> str:
         """Get paper content for detecting resume phase."""
@@ -1202,6 +1224,84 @@ class AutonomousCoordinator:
         except Exception as e:
             logger.error(f"Failed to load saved paper {paper_id} to compiler: {e}")
 
+    async def _delete_stale_incomplete_paper(
+        self,
+        paper_id: Optional[str],
+        topic_id: Optional[str],
+        reason: str
+    ) -> None:
+        """Delete an orphaned incomplete paper so it cannot be resurrected on restart."""
+        if not paper_id:
+            return
+
+        logger.warning(
+            f"Deleting stale incomplete paper {paper_id} for brainstorm {topic_id}: {reason}"
+        )
+
+        paper_metadata = await paper_library.get_metadata(paper_id)
+        if paper_metadata and paper_metadata.status == "complete":
+            logger.warning(
+                f"Skipping stale-paper deletion for {paper_id}: paper is already complete"
+            )
+            return
+
+        await paper_library.delete_paper(paper_id)
+        await research_metadata.delete_paper(paper_id)
+        if topic_id:
+            await brainstorm_memory.remove_paper_reference(topic_id, paper_id)
+
+    async def _clear_stale_paper_writing_state(
+        self,
+        topic_id: Optional[str],
+        reason: str,
+        paper_id: Optional[str] = None,
+        mark_missing: bool = True
+    ) -> None:
+        """Clear a paper-writing resume point when its source brainstorm no longer exists.
+
+        IMPORTANT: We save (not delete) the workflow state so that the session remains
+        visible to find_interrupted_session(). The session finder requires a
+        workflow_state.json with a current_tier + papers_completed_count to detect
+        the session as resumable. Deleting the file hides the session.
+        """
+        logger.warning(
+            f"Clearing stale paper-writing state for brainstorm {topic_id}: {reason}"
+        )
+        stale_paper_id = paper_id if paper_id is not None else self._current_paper_id
+        await self._delete_stale_incomplete_paper(stale_paper_id, topic_id, reason)
+        self._current_topic_id = None
+        self._current_paper_id = None
+        self._current_paper_title = None
+        self._current_reference_papers = []
+        self._resume_paper_phase = None
+        self._brainstorm_paper_count = 0
+        self._current_brainstorm_paper_ids = []
+        self._last_completed_paper_id = None
+        self._brainstorm_missing_during_paper = mark_missing
+        # Save workflow state at tier1 with no topic/paper so the session stays
+        # discoverable for resume while the stale Tier 2 pointer is gone.
+        await self._save_workflow_state(tier="tier1_aggregation")
+
+    async def _current_brainstorm_available_for_paper(self) -> bool:
+        """Return False and clear paper-writing state if the current brainstorm was deleted."""
+        if not self._current_topic_id:
+            await self._clear_stale_paper_writing_state(
+                self._current_topic_id,
+                "no current brainstorm id is set"
+            )
+            return False
+
+        metadata = await brainstorm_memory.get_metadata(self._current_topic_id)
+        brainstorm_db_path = brainstorm_memory.get_database_path(self._current_topic_id)
+        if metadata is None or not os.path.exists(brainstorm_db_path):
+            await self._clear_stale_paper_writing_state(
+                self._current_topic_id,
+                f"brainstorm database not found at {brainstorm_db_path}"
+            )
+            return False
+
+        return True
+
     async def _preserve_failed_paper_state(self, paper_id: str, paper_title: str) -> None:
         """
         Preserve in-progress paper state after a compiler failure so retries resume.
@@ -1295,6 +1395,52 @@ class AutonomousCoordinator:
         }
         await research_metadata.save_workflow_state(state)
     
+    @property
+    def is_active(self) -> bool:
+        """Return True when autonomous research is running or its task is still alive."""
+        return (
+            self._running
+            or self._state.is_running
+            or (self._main_task is not None and not self._main_task.done())
+        )
+
+    def start_in_background(self) -> bool:
+        """Launch the autonomous loop and retain a task handle for cancellation."""
+        if self._main_task and not self._main_task.done():
+            logger.warning("AutonomousCoordinator task already running")
+            return False
+
+        self._main_task = asyncio.create_task(self.start())
+        self._main_task.add_done_callback(self._on_main_task_done)
+        return True
+
+    def _on_main_task_done(self, task: asyncio.Task) -> None:
+        """Log background task failures and clear the retained task handle."""
+        try:
+            if task.cancelled():
+                logger.info("AutonomousCoordinator background task cancelled")
+            else:
+                exc = task.exception()
+                if exc:
+                    logger.error(
+                        "AutonomousCoordinator background task failed",
+                        exc_info=(type(exc), exc, exc.__traceback__)
+                    )
+        finally:
+            if self._main_task is task:
+                self._main_task = None
+
+    async def _broadcast_stopped_once(self) -> None:
+        """Notify clients once that autonomous research is stopped."""
+        if self._stop_broadcast_sent:
+            return
+
+        self._stop_broadcast_sent = True
+        stats = await research_metadata.get_stats()
+        await self._broadcast("auto_research_stopped", {
+            "final_stats": stats
+        })
+
     async def start(self) -> None:
         """Start the autonomous research loop."""
         if self._running:
@@ -1304,6 +1450,7 @@ class AutonomousCoordinator:
         self._running = True
         self._stop_event.clear()
         self._state.is_running = True
+        self._stop_broadcast_sent = False
         
         # Reset free model manager state for fresh start
         free_model_manager.reset()
@@ -1378,6 +1525,20 @@ class AutonomousCoordinator:
                         resume_tier = "tier3_final_answer"
                     
                     if resume_tier == "tier2_paper_writing" and resume_topic:
+                        # If the user deleted the brainstorm while a paper was paused,
+                        # the saved paper-writing resume point is no longer valid.
+                        metadata = await brainstorm_memory.get_metadata(resume_topic)
+                        brainstorm_db_path = brainstorm_memory.get_database_path(resume_topic)
+                        if metadata is None or not os.path.exists(brainstorm_db_path):
+                            await self._clear_stale_paper_writing_state(
+                                resume_topic,
+                                "saved Tier 2 resume references a deleted brainstorm",
+                                paper_id=resume_paper,
+                                mark_missing=False
+                            )
+                            resume_state = None
+                            continue
+
                         # Resume paper writing - skip to compilation
                         # CRITICAL: Restore paper_id so compilation workflow knows to resume
                         self._current_topic_id = resume_topic
@@ -1398,6 +1559,12 @@ class AutonomousCoordinator:
                                 emit_resume_event=(_resume_paper_attempt == 1)
                             ):
                                 break
+                            if self._brainstorm_missing_during_paper:
+                                break
+
+                        if self._brainstorm_missing_during_paper:
+                            self._brainstorm_missing_during_paper = False
+                            continue
 
                         if not self._stop_event.is_set():
                             self._brainstorm_paper_count += 1
@@ -1419,9 +1586,11 @@ class AutonomousCoordinator:
                                 next_ok = False
                                 while not self._stop_event.is_set():
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
-                                    if next_ok or self._stop_event.is_set():
+                                    if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
                                     await asyncio.sleep(5)
+                                if self._brainstorm_missing_during_paper:
+                                    break
                                 if not next_ok or self._stop_event.is_set():
                                     break
                                 self._brainstorm_paper_count += 1
@@ -1429,6 +1598,10 @@ class AutonomousCoordinator:
                                     self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                                 await self._check_paper_redundancy()
                             
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
+
                             self._brainstorm_paper_count = 0
                             self._current_brainstorm_paper_ids = []
                             self._last_completed_paper_id = None
@@ -1467,10 +1640,16 @@ class AutonomousCoordinator:
                             while not self._stop_event.is_set():
                                 if await self._paper_compilation_workflow():
                                     break
+                                if self._brainstorm_missing_during_paper:
+                                    break
                                 await asyncio.sleep(5)
                             
                             if self._stop_event.is_set():
                                 break
+
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
                             
                             self._brainstorm_paper_count += 1
                             if self._last_completed_paper_id:
@@ -1489,9 +1668,11 @@ class AutonomousCoordinator:
                                 next_ok = False
                                 while not self._stop_event.is_set():
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
-                                    if next_ok or self._stop_event.is_set():
+                                    if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
                                     await asyncio.sleep(5)
+                                if self._brainstorm_missing_during_paper:
+                                    break
                                 if not next_ok or self._stop_event.is_set():
                                     break
                                 self._brainstorm_paper_count += 1
@@ -1499,6 +1680,10 @@ class AutonomousCoordinator:
                                     self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                                 await self._check_paper_redundancy()
                             
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
+
                             self._brainstorm_paper_count = 0
                             self._current_brainstorm_paper_ids = []
                             self._last_completed_paper_id = None
@@ -1512,7 +1697,8 @@ class AutonomousCoordinator:
                         metadata = await brainstorm_memory.get_metadata(resume_topic)
                         if metadata is None:
                             logger.warning(f"Resume state references missing brainstorm {resume_topic}; clearing resume state")
-                            await research_metadata.clear_workflow_state()
+                            self._current_topic_id = None
+                            await self._save_workflow_state(tier="tier1_aggregation")
                             resume_state = None
                             continue
                         
@@ -1535,9 +1721,15 @@ class AutonomousCoordinator:
                                     await asyncio.sleep(5)
                                 if await self._paper_compilation_workflow():
                                     break
+                                if self._brainstorm_missing_during_paper:
+                                    break
 
                             if self._stop_event.is_set():
                                 break
+
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
 
                             self._brainstorm_paper_count += 1
                             if self._last_completed_paper_id:
@@ -1558,9 +1750,11 @@ class AutonomousCoordinator:
                                 next_ok = False
                                 while not self._stop_event.is_set():
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
-                                    if next_ok or self._stop_event.is_set():
+                                    if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
                                     await asyncio.sleep(5)
+                                if self._brainstorm_missing_during_paper:
+                                    break
                                 if not next_ok or self._stop_event.is_set():
                                     break
                                 self._brainstorm_paper_count += 1
@@ -1568,6 +1762,10 @@ class AutonomousCoordinator:
                                     self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                                 await self._check_paper_redundancy()
                             
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
+
                             self._brainstorm_paper_count = 0
                             self._current_brainstorm_paper_ids = []
                             self._last_completed_paper_id = None
@@ -1706,11 +1904,15 @@ class AutonomousCoordinator:
 
                     paper_success = await self._paper_compilation_workflow()
 
-                    if paper_success or self._stop_event.is_set():
+                    if paper_success or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                         break
 
                 if self._stop_event.is_set():
                     break
+
+                if self._brainstorm_missing_during_paper:
+                    self._brainstorm_missing_during_paper = False
+                    continue
 
                 # Only check redundancy and log completion if paper was successful
                 if paper_success:
@@ -1741,9 +1943,12 @@ class AutonomousCoordinator:
                             next_paper_success = await self._paper_compilation_workflow(
                                 skip_reference_selection=True
                             )
-                            if next_paper_success or self._stop_event.is_set():
+                            if next_paper_success or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                 break
                         
+                        if self._brainstorm_missing_during_paper:
+                            break
+
                         if not next_paper_success or self._stop_event.is_set():
                             break
                         
@@ -1752,6 +1957,10 @@ class AutonomousCoordinator:
                             self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                         await self._check_paper_redundancy()
                     
+                    if self._brainstorm_missing_during_paper:
+                        self._brainstorm_missing_during_paper = False
+                        continue
+
                     if self._brainstorm_paper_count >= 3:
                         logger.info("Brainstorm paper limit reached (3/3)")
                         await self._broadcast("brainstorm_paper_limit_reached", {
@@ -1799,11 +2008,7 @@ class AutonomousCoordinator:
             self._running = False
             self._state.is_running = False
             token_tracker.stop_timer()
-            
-            stats = await research_metadata.get_stats()
-            await self._broadcast("auto_research_stopped", {
-                "final_stats": stats
-            })
+            await self._broadcast_stopped_once()
             logger.info("AutonomousCoordinator stopped")
     
     async def _get_resume_point(self) -> Optional[Dict[str, Any]]:
@@ -1822,19 +2027,37 @@ class AutonomousCoordinator:
         logger.info("Stopping AutonomousCoordinator...")
         self._stop_event.set()
         self._running = False
+        self._state.is_running = False
+        await self._broadcast_stopped_once()
+
+        async def _run_shutdown_step(label: str, awaitable, timeout: float = 5.0) -> bool:
+            task = asyncio.create_task(awaitable)
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+            if task in done:
+                await task
+                return True
+
+            task.cancel()
+            task.add_done_callback(
+                lambda done_task: None
+                if done_task.cancelled()
+                else done_task.exception()
+            )
+            logger.warning("Timed out stopping %s; continuing shutdown", label)
+            return False
         
         # Stop any running aggregator or compiler to prevent orphan tasks
         if self._brainstorm_aggregator:
             try:
-                await self._brainstorm_aggregator.stop()
-                logger.info("Stopped brainstorm aggregator")
+                if await _run_shutdown_step("brainstorm aggregator", self._brainstorm_aggregator.stop()):
+                    logger.info("Stopped brainstorm aggregator")
             except Exception as e:
                 logger.warning(f"Error stopping aggregator: {e}")
         
         if self._paper_compiler:
             try:
-                await self._paper_compiler.stop()
-                logger.info("Stopped paper compiler")
+                if await _run_shutdown_step("paper compiler", self._paper_compiler.stop()):
+                    logger.info("Stopped paper compiler")
             except Exception as e:
                 logger.warning(f"Error stopping compiler: {e}")
         
@@ -1857,6 +2080,13 @@ class AutonomousCoordinator:
             logger.info(f"Workflow state saved for resume (tier={current_tier}, topic={self._current_topic_id})")
         except Exception as e:
             logger.warning(f"Could not save workflow state on stop: {e}")
+
+        main_task = self._main_task
+        if main_task and not main_task.done() and main_task is not asyncio.current_task():
+            main_task.cancel()
+            done, _ = await asyncio.wait({main_task}, timeout=5)
+            if main_task not in done:
+                logger.warning("AutonomousCoordinator background task is still cancelling")
         
         logger.info("Autonomous research stopped - press Start to resume from last state")
     
@@ -2077,11 +2307,15 @@ class AutonomousCoordinator:
 
                     paper_success = await self._paper_compilation_workflow()
 
-                    if paper_success or self._stop_event.is_set():
+                    if paper_success or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                         break
 
                 if self._stop_event.is_set():
                     break
+
+                if self._brainstorm_missing_during_paper:
+                    self._brainstorm_missing_during_paper = False
+                    continue
 
                 # Only check redundancy and log completion if paper was successful
                 if paper_success:
@@ -2112,9 +2346,12 @@ class AutonomousCoordinator:
                             next_paper_success = await self._paper_compilation_workflow(
                                 skip_reference_selection=True
                             )
-                            if next_paper_success or self._stop_event.is_set():
+                            if next_paper_success or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                 break
                         
+                        if self._brainstorm_missing_during_paper:
+                            break
+
                         if not next_paper_success or self._stop_event.is_set():
                             break
                         
@@ -2123,6 +2360,10 @@ class AutonomousCoordinator:
                             self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                         await self._check_paper_redundancy()
                     
+                    if self._brainstorm_missing_during_paper:
+                        self._brainstorm_missing_during_paper = False
+                        continue
+
                     if self._brainstorm_paper_count >= 3:
                         logger.info("Brainstorm paper limit reached (3/3)")
                         await self._broadcast("brainstorm_paper_limit_reached", {
@@ -2521,6 +2762,21 @@ class AutonomousCoordinator:
                 
                 if metadata is None:
                     logger.error(f"Brainstorm not found: {topic_id}")
+                    return None
+                
+                # HARD GUARD: Completed brainstorms cannot be re-opened.
+                # The spec says continue_existing is for INCOMPLETE brainstorms only.
+                # LLMs sometimes ignore the "complete" status in the prompt context.
+                if metadata.status == "complete":
+                    logger.warning(
+                        f"Rejected continue_existing for {topic_id}: brainstorm is already complete "
+                        f"({metadata.submission_count} submissions, papers: {metadata.papers_generated}). "
+                        f"Forcing re-selection."
+                    )
+                    await self._broadcast("topic_selection_rejected", {
+                        "reasoning": f"Cannot continue brainstorm {topic_id} — it is already marked complete. "
+                                     f"Select a new topic or continue an incomplete brainstorm."
+                    })
                     return None
                 
                 self._current_topic_id = topic_id
@@ -2948,17 +3204,26 @@ class AutonomousCoordinator:
             last_acceptances = status.total_acceptances  # Should be 0 for new brainstorm
             last_rejections = status.total_rejections  # Track rejections for stat increments
             
+            # Base offset for continue_existing: fresh aggregator counts from 0 but topic
+            # already has prior submissions.  The 30-cap must apply to the TOTAL across
+            # all rounds, so we track the offset and add it to every aggregator reading.
+            resume_acceptance_base = 0
+            
             # CRITICAL BUG FIX: Don't reset counters if resuming from workflow state
             # Check if counters were already restored (non-zero means we're resuming)
             is_resuming = self._acceptance_count > 0 or self._rejection_count > 0
             
             if is_resuming:
-                # Resuming: Use the restored counters from workflow state, don't reset
-                logger.info(f"Resuming brainstorm with {self._acceptance_count} acceptances, "
+                # Resuming / continue_existing: The aggregator starts at 0 but the topic
+                # already has self._acceptance_count prior acceptances.  We store that as
+                # the base so every comparison uses total = base + aggregator_count.
+                resume_acceptance_base = self._acceptance_count
+                logger.info(f"Resuming brainstorm with {self._acceptance_count} prior acceptances "
+                           f"(base offset={resume_acceptance_base}), "
                            f"{self._rejection_count} rejections from workflow state")
-                # Set last_* to current values so we can track NEW acceptances/rejections from here
-                last_acceptances = self._acceptance_count
-                last_rejections = self._rejection_count
+                # Reset last_* to 0 so we track the fresh aggregator's output correctly
+                last_acceptances = 0
+                last_rejections = 0
             else:
                 # Fresh brainstorm: Initialize counters from aggregator stats (should be 0)
                 self._acceptance_count = last_acceptances
@@ -2968,6 +3233,20 @@ class AutonomousCoordinator:
                 self._exhaustion_signals = 0
                 self._last_completion_review_at = 0  # Reset completion review checkpoint
                 logger.info(f"Starting fresh brainstorm with {last_acceptances} acceptances")
+            
+            # Safety check: if topic already at or past hard cap (e.g. resume of
+            # already-complete brainstorm that slipped past the code guard), skip
+            # aggregation entirely and go straight to paper writing.
+            if self._acceptance_count >= 30:
+                logger.info(
+                    f"Topic {self._current_topic_id} already at {self._acceptance_count} "
+                    f"acceptances (>= 30 cap). Skipping aggregation, forcing paper writing."
+                )
+                await brainstorm_memory.mark_complete(self._current_topic_id)
+                await research_metadata.mark_brainstorm_complete(self._current_topic_id)
+                await self._brainstorm_aggregator.stop()
+                await self._run_brainstorm_completion_proofs()
+                return True
             
             while self._running and not self._stop_event.is_set():
                 # Get current aggregator stats
@@ -2988,7 +3267,7 @@ class AutonomousCoordinator:
                 # Track new acceptances/rejections
                 if current_acceptances > last_acceptances:
                     new_acceptances = current_acceptances - last_acceptances
-                    self._acceptance_count = current_acceptances
+                    self._acceptance_count = resume_acceptance_base + current_acceptances
                     self._consecutive_rejections = 0
                     last_acceptances = current_acceptances
                     
@@ -3469,6 +3748,10 @@ class AutonomousCoordinator:
         api_client_manager.set_autonomous_phase("paper_compilation")
         
         logger.info(f"Starting paper compilation for brainstorm {self._current_topic_id}")
+
+        if not await self._current_brainstorm_available_for_paper():
+            logger.info("Paper compilation skipped because the source brainstorm is unavailable")
+            return False
         
         # Check if we're resuming an in-progress paper
         # This flag tracks whether we're resuming (for passing to _compile_paper)
@@ -3588,6 +3871,9 @@ class AutonomousCoordinator:
         
         if paper_content is None:
             logger.error("Paper compilation failed")
+            if self._brainstorm_missing_during_paper:
+                logger.info("Not preserving failed paper state because the source brainstorm was deleted")
+                return False
             await self._preserve_failed_paper_state(paper_id, paper_title)
             return False
 
@@ -4097,6 +4383,16 @@ class AutonomousCoordinator:
                     logger.warning("Brainstorm database was empty after proof stripping")
             else:
                 logger.warning(f"Brainstorm database not found: {brainstorm_db_path}")
+                logger.error("Aborting paper compilation: brainstorm database is required")
+                try:
+                    await self._paper_compiler.stop()
+                except Exception as stop_exc:
+                    logger.warning(f"Failed to stop compiler after missing brainstorm abort: {stop_exc}")
+                await self._clear_stale_paper_writing_state(
+                    self._current_topic_id,
+                    f"brainstorm database not found at {brainstorm_db_path}"
+                )
+                return None
             
             # Load reference papers into compiler RAG (if any)
             if reference_paper_ids:
@@ -4313,6 +4609,32 @@ class AutonomousCoordinator:
                 final_content = final_content + "\n" + model_credits
             
             logger.info("Added author attribution and model credits to paper")
+
+        if mark_complete and self._current_topic_id:
+            try:
+                novel_source_proofs = [
+                    proof
+                    for proof in await proof_database.get_all_proofs(novel_only=True)
+                    if proof.source_type == "brainstorm"
+                    and proof.source_id == self._current_topic_id
+                ]
+                if novel_source_proofs:
+                    final_content = paper_library.attach_verified_proofs_to_content(
+                        final_content,
+                        novel_source_proofs,
+                        f"source brainstorm {self._current_topic_id}",
+                    )
+                    logger.info(
+                        "Attached %s novel source-brainstorm proof(s) to paper %s",
+                        len(novel_source_proofs),
+                        paper_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to attach source-brainstorm proofs to paper %s: %s",
+                    paper_id,
+                    exc,
+                )
         
         # Save paper with appropriate status
         paper_metadata = await paper_library.save_paper(

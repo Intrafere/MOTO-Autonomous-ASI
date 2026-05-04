@@ -2,12 +2,11 @@
 Autonomous Research API Routes - REST endpoints for autonomous research mode.
 Includes Tier 1 (Brainstorm), Tier 2 (Paper Writing), and Tier 3 (Final Answer) endpoints.
 """
-import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any, Dict, List
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 
 from backend.shared.models import AutonomousResearchStartRequest, CritiqueRequest
 from backend.shared.path_safety import (
@@ -242,7 +241,7 @@ async def _get_combined_api_logs(limit: int = 100) -> Dict[str, Any]:
 def _get_start_conflict() -> Optional[str]:
     """Return a user-facing conflict message if another workflow is active."""
     autonomous_state = autonomous_coordinator.get_state()
-    if autonomous_state.is_running:
+    if autonomous_state.is_running or autonomous_coordinator.is_active:
         return "Autonomous research is already running"
 
     if coordinator.is_running:
@@ -607,10 +606,7 @@ async def _delete_autonomous_paper_from_scope(
 
 
 @router.post("/start")
-async def start_autonomous_research(
-    request: AutonomousResearchStartRequest,
-    background_tasks: BackgroundTasks
-):
+async def start_autonomous_research(request: AutonomousResearchStartRequest):
     """Start autonomous research mode."""
     try:
         from backend.shared.config import system_config
@@ -671,8 +667,9 @@ async def start_autonomous_research(
             tier3_enabled=request.tier3_enabled
         )
         
-        # Start in background
-        background_tasks.add_task(autonomous_coordinator.start)
+        # Start in background with a retained task handle so Stop can cancel it.
+        if not autonomous_coordinator.start_in_background():
+            raise HTTPException(status_code=400, detail="Autonomous research is already running")
         
         return {
             "success": True,
@@ -694,7 +691,7 @@ async def stop_autonomous_research():
     """Stop autonomous research mode gracefully."""
     try:
         state = autonomous_coordinator.get_state()
-        if not state.is_running:
+        if not state.is_running and not autonomous_coordinator.is_active:
             return {
                 "success": True,
                 "message": "Autonomous research was not running"
@@ -1443,6 +1440,7 @@ async def save_current_compiler_paper():
         from backend.compiler.memory.outline_memory import outline_memory as compiler_outline_memory
         from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
         from backend.autonomous.memory.research_metadata import research_metadata
+        from backend.autonomous.memory.proof_database import proof_database
         
         # Get current paper from compiler memory
         current_paper = await compiler_paper_memory.get_paper()
@@ -1463,6 +1461,18 @@ async def save_current_compiler_paper():
         brainstorm_content = ""
         if topic_id:
             brainstorm_content = await brainstorm_memory.get_database_content(topic_id)
+
+            novel_source_proofs = [
+                proof
+                for proof in await proof_database.get_all_proofs(novel_only=True)
+                if proof.source_type == "brainstorm" and proof.source_id == topic_id
+            ]
+            if novel_source_proofs:
+                current_paper = paper_library.attach_verified_proofs_to_content(
+                    current_paper,
+                    novel_source_proofs,
+                    f"source brainstorm {topic_id}",
+                )
         
         # Save paper
         metadata = await paper_library.save_paper(
