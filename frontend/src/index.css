@@ -2235,7 +2235,6 @@ button.danger:hover {
 .update-notice-banner {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 1rem;
   padding: 0.6rem 1.2rem;
   background: linear-gradient(135deg, rgba(30, 255, 28, 0.12) 0%, rgba(30, 200, 28, 0.08) 100%);
@@ -2244,6 +2243,25 @@ button.danger:hover {
   font-size: 0.88rem;
   line-height: 1.45;
   z-index: 50;
+  flex-wrap: wrap;
+}
+
+.update-notice-banner.update-notice-pulling {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.12) 0%, rgba(59, 130, 246, 0.06) 100%);
+  border-bottom-color: rgba(59, 130, 246, 0.4);
+  color: #bfdbfe;
+}
+
+.update-notice-banner.update-notice-success {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.14) 0%, rgba(34, 197, 94, 0.07) 100%);
+  border-bottom-color: rgba(34, 197, 94, 0.5);
+  color: #bbf7d0;
+}
+
+.update-notice-banner.update-notice-error {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.12) 0%, rgba(239, 68, 68, 0.06) 100%);
+  border-bottom-color: rgba(239, 68, 68, 0.4);
+  color: #fecaca;
 }
 
 .update-notice-content {
@@ -2260,23 +2278,80 @@ button.danger:hover {
   flex-shrink: 0;
 }
 
+.update-notice-icon-success {
+  color: #22c55e;
+}
+
+.update-notice-icon-error {
+  color: #ef4444;
+}
+
 .update-notice-text strong {
   color: #1eff1c;
+}
+
+.update-notice-pulling .update-notice-text strong {
+  color: #93c5fd;
+}
+
+.update-notice-success .update-notice-text strong {
+  color: #4ade80;
+}
+
+.update-notice-error .update-notice-text strong {
+  color: #f87171;
 }
 
 .update-notice-detail {
   color: #a0d89e;
 }
 
+.update-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.update-notice-pull-btn {
+  background: rgba(30, 255, 28, 0.2);
+  border: 1px solid rgba(30, 255, 28, 0.5);
+  border-radius: 4px;
+  color: #1eff1c;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.3rem 0.75rem;
+  line-height: 1;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.update-notice-pull-btn:hover {
+  background: rgba(30, 255, 28, 0.35);
+  border-color: rgba(30, 255, 28, 0.8);
+}
+
+.update-notice-error .update-notice-pull-btn {
+  background: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #f87171;
+}
+
+.update-notice-error .update-notice-pull-btn:hover {
+  background: rgba(239, 68, 68, 0.35);
+  border-color: rgba(239, 68, 68, 0.8);
+}
+
 .update-notice-dismiss {
   flex-shrink: 0;
+  margin-left: 20px;
   background: none;
   border: 1px solid rgba(30, 255, 28, 0.3);
   border-radius: 4px;
   color: #1eff1c;
-  font-size: 0.95rem;
+  font-size: 0.82rem;
   cursor: pointer;
-  padding: 0.2rem 0.55rem;
+  padding: 0.25rem 0.6rem;
   line-height: 1;
   transition: background 0.15s, border-color 0.15s;
 }
@@ -2284,6 +2359,38 @@ button.danger:hover {
 .update-notice-dismiss:hover {
   background: rgba(30, 255, 28, 0.15);
   border-color: rgba(30, 255, 28, 0.6);
+}
+
+.update-notice-log {
+  width: 100%;
+  max-height: 120px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 0.5rem 0.7rem;
+  margin-top: 0.4rem;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: #d1d5db;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.update-notice-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(147, 197, 253, 0.3);
+  border-top-color: #93c5fd;
+  border-radius: 50%;
+  animation: update-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes update-spin {
+  to { transform: rotate(360deg); }
 }
 
 .disclaimer-modal {

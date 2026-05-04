@@ -47,7 +47,7 @@ function getTierStyle(tier) {
   return TIER_STYLES[tier] || TIER_STYLES.mathematical_discovery;
 }
 
-export default function ProofNotificationStack({ notifications, onDismiss, onClickNotification }) {
+export default function ProofNotificationStack({ notifications, onDismiss, onClickNotification, panelCollapsed }) {
   if (!notifications || notifications.length === 0) {
     return null;
   }
@@ -57,12 +57,13 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
       style={{
         position: 'fixed',
         bottom: scalePx(116),
-        right: '20px',
+        right: panelCollapsed ? '20px' : '340px',
         zIndex: 999998,
         display: 'flex',
         flexDirection: 'column',
         gap: scalePx(8),
         pointerEvents: 'none',
+        transition: 'right 0.15s ease',
       }}
     >
       {notifications.map((notification) => {

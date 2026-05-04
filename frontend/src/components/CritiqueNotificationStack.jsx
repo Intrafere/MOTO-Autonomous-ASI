@@ -48,7 +48,7 @@ function getRatingColor(rating) {
  * - onDismiss: (id) => void - callback when notification is dismissed
  * - onClickNotification: (paper_id, paper_title) => void - callback when notification is clicked
  */
-export default function CritiqueNotificationStack({ notifications, onDismiss, onClickNotification }) {
+export default function CritiqueNotificationStack({ notifications, onDismiss, onClickNotification, panelCollapsed }) {
   if (!notifications || notifications.length === 0) {
     return null;
   }
@@ -58,12 +58,13 @@ export default function CritiqueNotificationStack({ notifications, onDismiss, on
       style={{
         position: 'fixed',
         bottom: '20px',
-        right: '20px',
+        right: panelCollapsed ? '20px' : '340px',
         zIndex: 999999,
         display: 'flex',
         flexDirection: 'column',
         gap: scalePx(8),
-        pointerEvents: 'none', // Allow clicks through container
+        pointerEvents: 'none',
+        transition: 'right 0.15s ease',
       }}
     >
       {notifications.map((notification, index) => (

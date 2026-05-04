@@ -28,6 +28,7 @@ import CritiqueNotificationStack from './components/CritiqueNotificationStack';
 import ProofNotificationStack from './components/autonomous/ProofNotificationStack';
 import CreditExhaustionNotificationStack from './components/CreditExhaustionNotificationStack';
 import HungConnectionNotificationStack from './components/HungConnectionNotificationStack';
+import UpdateNotificationBanner from './components/UpdateNotificationBanner';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import { websocket } from './services/websocket';
 import { api, autonomousAPI, openRouterAPI } from './services/api';
@@ -2083,31 +2084,10 @@ function App() {
 
       {/* Update Notice Banner — dismissible per session, reappears on restart */}
       {updateNotice && !updateNoticeDismissed && (
-        <div className="update-notice-banner">
-          <div className="update-notice-content">
-            <span className="update-notice-icon">&#9432;</span>
-            <span className="update-notice-text">
-              <strong>Update available:</strong>{' '}
-              {updateNotice.installed_version} ({updateNotice.installed_commit})
-              {' '}&rarr;{' '}
-              {updateNotice.available_version} ({updateNotice.available_commit})
-              {' '}&mdash;{' '}
-              <span className="update-notice-detail">
-                {updateNotice.can_auto_apply
-                  ? 'Restart the launcher to apply this update.'
-                  : `Install layout: ${updateNotice.install_layout}. Pull the latest from GitHub main to update.`}
-              </span>
-            </span>
-          </div>
-          <button
-            className="update-notice-dismiss"
-            onClick={() => setUpdateNoticeDismissed(true)}
-            aria-label="Dismiss update notice"
-            title="Dismiss"
-          >
-            &#10005;
-          </button>
-        </div>
+        <UpdateNotificationBanner
+          notice={updateNotice}
+          onDismiss={() => setUpdateNoticeDismissed(true)}
+        />
       )}
       
       {/* CRITICAL: Boost buttons are ETERNAL - they NEVER disappear */}
@@ -2552,6 +2532,7 @@ function App() {
         notifications={proofNotifications}
         onDismiss={handleDismissProofNotification}
         onClickNotification={handleClickProofNotification}
+        panelCollapsed={workflowPanelCollapsed}
       />
       
       {/* Critique Notification Stack - Persists across all screens */}
@@ -2559,6 +2540,7 @@ function App() {
         notifications={critiqueNotifications}
         onDismiss={handleDismissNotification}
         onClickNotification={handleClickNotification}
+        panelCollapsed={workflowPanelCollapsed}
       />
       
       {/* Credit Exhaustion Notification Stack - Persists until user dismisses */}

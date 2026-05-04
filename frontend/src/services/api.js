@@ -94,6 +94,18 @@ export const api = {
     return response.json();
   },
 
+  async startPull() {
+    const response = await fetch(`${API_BASE}/update/pull`, { method: 'POST' });
+    if (!response.ok) throw new Error('Failed to start pull');
+    return response.json();
+  },
+
+  async getPullStatus() {
+    const response = await fetch(`${API_BASE}/update/pull-status`);
+    if (!response.ok) throw new Error('Failed to get pull status');
+    return response.json();
+  },
+
   // Start aggregator
   async startAggregator(config) {
     const response = await fetch(`${API_BASE}/aggregator/start`, {

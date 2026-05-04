@@ -22,6 +22,7 @@ from backend.api.routes import (
     features,
     health,
     proofs,
+    update,
 )
 from backend.shared.build_info import get_build_info
 from backend.shared.lm_studio_client import lm_studio_client
@@ -291,6 +292,7 @@ app.include_router(health.router)
 app.include_router(proofs.router)
 app.include_router(openrouter.router)
 app.include_router(download.router)
+app.include_router(update.router)
 app.include_router(websocket.router)
 
 
