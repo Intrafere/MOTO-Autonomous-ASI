@@ -74,14 +74,7 @@ export default function UpdateNotificationBanner({ notice, onDismiss }) {
     return (
       <div className="update-notice-banner">
         <div className="update-notice-content">
-          <span className="update-notice-icon">&#9432;</span>
-          <span className="update-notice-text">
-            <strong>Update available:</strong>{' '}
-            {notice.installed_version} ({notice.installed_commit})
-            {' '}&rarr;{' '}
-            {notice.available_version} ({notice.available_commit})
-          </span>
-          <div className="update-notice-actions">
+          <div className="update-notice-actions" style={{ gap: '0.75rem' }}>
             <button
               className="update-notice-pull-btn"
               onClick={handlePull}
@@ -97,6 +90,12 @@ export default function UpdateNotificationBanner({ notice, onDismiss }) {
               Dismiss
             </button>
           </div>
+          <span className="update-notice-text">
+            <strong>Update available:</strong>{' '}
+            {notice.installed_version} ({notice.installed_commit})
+            {' '}&rarr;{' '}
+            {notice.available_version} ({notice.available_commit})
+          </span>
         </div>
       </div>
     );
@@ -108,7 +107,7 @@ export default function UpdateNotificationBanner({ notice, onDismiss }) {
         <div className="update-notice-content">
           <span className="update-notice-spinner" />
           <span className="update-notice-text">
-            <strong>Pulling update...</strong>
+            <strong>Applying update...</strong>
           </span>
         </div>
         <pre className="update-notice-log" ref={logRef}>
@@ -127,7 +126,7 @@ export default function UpdateNotificationBanner({ notice, onDismiss }) {
           <span className="update-notice-icon update-notice-icon-success">&#10003;</span>
           <span className="update-notice-text">
             <strong>Update applied!</strong>{' '}
-            Restart the backend server to take effect.
+            Restart MOTO to use the new version.
           </span>
           <button
             className="update-notice-dismiss"
