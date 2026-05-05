@@ -113,6 +113,25 @@ _LEAN_WORKSPACE_COMBINED_MARKERS: tuple[tuple[str, ...], ...] = (
     ("no such file or directory", ".lake"),
 )
 
+# Lean emits "bad import" when an `import` statement references a module whose
+# .lean source doesn't exist. This is NOT an infrastructure error — it means the
+# proof code has a wrong/stale module path (e.g. Mathlib reorganised its tree).
+# We must NOT let this trigger the expensive workspace-repair loop.
+_BAD_IMPORT_RE = re.compile(
+    r"(?:bad import|unknown module|could not find module)[^\n]*",
+    re.IGNORECASE,
+)
+_BAD_IMPORT_HINT = (
+    "HINT: One or more `import` statements reference Mathlib modules that do not "
+    "exist in the current Mathlib version. Mathlib4 frequently reorganises its "
+    "module tree. Common renames include:\n"
+    "  • Mathlib.Analysis.NormedSpace.Banach → Mathlib.Analysis.Normed.Operator.Banach\n"
+    "  • Mathlib.Analysis.NormedSpace.OperatorNorm → Mathlib.Analysis.Normed.Operator.NormedSpace\n"
+    "  • Mathlib.Topology.MetricSpace.BanachFixedPoint → Mathlib.Topology.MetricSpace.Contracting\n"
+    "Use `import Mathlib` (imports everything) or check the current Mathlib4 source tree "
+    "for the correct module path."
+)
+
 # Markdown fence markers the LLM occasionally emits inside the `lean_code`
 # JSON field even when instructed to return raw code. Strip them defensively so
 # Lean 4 does not fail to parse the generated file on a stray ```lean line.
@@ -372,6 +391,12 @@ class Lean4Client:
     def _is_workspace_infrastructure_error(output: str) -> bool:
         text = output or ""
         lowered = text.lower()
+
+        # A "bad import" is a proof-level error (stale/renamed Mathlib module),
+        # not infrastructure failure. Short-circuit to avoid the repair loop.
+        if _BAD_IMPORT_RE.search(text):
+            return False
+
         if bool(_OLEAN_OBJECT_FILE_MISSING_RE.search(text)):
             return True
         if any(marker in lowered for marker in _LEAN_WORKSPACE_ERROR_MARKERS):
@@ -813,6 +838,21 @@ class Lean4Client:
         return f"{_NO_GOALS_HINT}\n\n{error_output}"
 
     @staticmethod
+    def _annotate_bad_import_hint(error_output: str) -> str:
+        """Prepend a hint when Lean reports a bad/unknown import.
+
+        This tells the LLM that module paths have been renamed and suggests
+        alternatives, preventing it from assuming the workspace is broken.
+        """
+        if not error_output:
+            return error_output
+        if not _BAD_IMPORT_RE.search(error_output):
+            return error_output
+        if _BAD_IMPORT_HINT in error_output:
+            return error_output
+        return f"{_BAD_IMPORT_HINT}\n\n{error_output}"
+
+    @staticmethod
     def _format_tactic_lines(tactic_list: list[str]) -> list[str]:
         lines: list[str] = []
         for tactic in tactic_list:
@@ -989,7 +1029,9 @@ class Lean4Client:
         error_output = combined_output or "Lean 4 rejected the proof without additional diagnostics."
         return Lean4Result(
             success=False,
-            error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+            error_output=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output))
+            ),
             goal_states=goal_states,
             raw_stderr=stderr.strip(),
         )
@@ -1152,10 +1194,14 @@ class Lean4Client:
         error_output = tactic_error_slice or combined_output or "Lean 4 rejected the tactic script without additional diagnostics."
         return Lean4Result(
             success=False,
-            error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+            error_output=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output))
+            ),
             goal_states=goal_states,
             raw_stderr=stderr.strip(),
-            tactic_error_slice=self._annotate_no_goals_hint(tactic_error_slice),
+            tactic_error_slice=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(tactic_error_slice)
+            ),
             failing_tactic_index=failing_tactic_index,
         )
 
@@ -1573,10 +1619,14 @@ class Lean4LspClient(Lean4Client):
 
         return Lean4Result(
             success=False,
-            error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+            error_output=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output))
+            ),
             goal_states=goal_states,
             raw_stderr=raw_stderr,
-            tactic_error_slice=self._annotate_no_goals_hint(tactic_error_slice),
+            tactic_error_slice=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(tactic_error_slice)
+            ),
             failing_tactic_index=failing_tactic_index,
         )
 
