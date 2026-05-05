@@ -22,14 +22,16 @@ Aggregator/brainstorm database material is high-priority optional source context
 - `[HARD CODED PLACEHOLDER FOR INTRODUCTION SECTION - TO BE WRITTEN AFTER THE CONCLUSION SECTION IS COMPLETE]`
 - `[HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION - TO BE WRITTEN AFTER THE BODY SECTION IS COMPLETE]`
 
-Placeholders are STRUCTURAL MARKERS ONLY. Submissions must never include them — any that appear will be silently stripped before validation.
+Placeholders and theorem appendix brackets are STRUCTURAL MARKERS ONLY. The compiler prompt must show the same marker-bearing paper that validation/apply uses. Models should use editable prose for `old_string` anchors; protected markers must not appear in insert/delete anchors. Replace targets may be trimmed if a protected marker is accidentally included as trailing context. Generated content (`new_string`/`content`) must not include markers — any that appear are stripped before validation.
 
 **Marker Integrity System (Automatic Repair)**:
 Before every `_pre_validate_exact_string_match()`, system calls `paper_memory.ensure_markers_intact()` (or `outline_memory.ensure_anchor_intact()` for outline_update). If markers were missing, they are added and document is re-fetched before validation. Mode-aware: paper operations check placeholders + anchor; outline operations check outline anchor only.
 
 **Outline is ALWAYS fully injected (never RAGed)** into all compiler mode prompts.
 
-**Provider Selection**: Each compiler role (validator, high-context, high-param, critique submitter) can independently use LM Studio or OpenRouter with optional host provider and LM Studio fallback.
+**Provider Selection**: Each compiler role (validator, high-context, high-param, critique submitter) can independently use LM Studio or OpenRouter with optional host provider and LM Studio fallback (default mode). In generic mode, all roles use OpenRouter only; LM Studio options are hidden in the frontend.
+
+**Export Behavior**: Raw text export available in both modes. PDF export (`POST /api/download/pdf`) is desktop-only — generic mode returns `501` (Playwright/Chromium not installed in hosted image).
 
 **Aggregator RAG refresh**: Every 10 accepted aggregator submissions (not immediate like aggregator).
 
@@ -97,17 +99,23 @@ Body content is ALWAYS inserted BEFORE CONCLUSION_PLACEHOLDER. `_apply_edit()` a
 - 2× HC review → validator
 - 1× HP rigor → validator *(skipped if body complete)*
 
-**Rigor Mode (2-Step):**
-- Step 1 (unvalidated): HP model chooses mode (standard_enhancement, rewrite_focus, wolfram_verification) and target_section
-- Step 2 (with self-refusal): sees full paper + target_section reminder, can set `proceed=false` to refuse
-- Wolfram mode: system makes API call between steps, passes result to Step 2. Accepted Wolfram calls tracked in model credits separately.
-- Loop 2 ends on first rigor rejection/decline → return to Loop 1
+**Rigor Mode (Lean 4 verified theorems, 4-stage)**:
+The rigor loop no longer rewrites prose. Each rigor cycle:
+- Stage 1 (HP, unvalidated): theorem discovery - using the full writing context, decide if a theorem worth formalizing exists that is not already verified; return `needs_theorem_work=false` to decline and end the rigor loop.
+- Stage 2: `ProofFormalizationAgent.prove_candidate(max_attempts=5)` - up to 5 Lean 4 attempts with error-feedback chaining. On 5 failures: record the candidate via `proof_database.record_failed_candidate` so future cycles see it as an open lemma target; end the rigor cycle as a decline.
+- Stage 3: novelty classification via the shared `assess_proof_novelty` helper; `proof_database.add_proof` persists the verified proof. Novel proofs automatically enter the highest-priority direct-injection block (`proof_database.inject_into_prompt`) on the next submitter instantiation. Non-novel proofs remain available through `/api/proofs` for future user-driven reference selection.
+- Stage 4: placement - HP model proposes an inline edit that introduces the theorem with an explicit "verified in Lean 4" marker and an appendix cross-reference. Validator uses the new `rigor_lean_placement` mode which forces `rigor_check=True` (Lean 4 is the source of mathematical truth) and judges placement/narrative only. Up to 2 placement attempts (attempt 2 gets validator rejection feedback).
+- Appendix fallback: if both placement attempts fail, the verified theorem is appended to the **Theorems Appendix** block (`THEOREMS_APPENDIX_START` / `THEOREMS_APPENDIX_END` bracket markers in `paper_memory.py`). Still counts as a `rigor_acceptance` because the math is preserved.
+- Loop 2 ends on first **decline** (no theorem found OR 5 Lean attempts failed OR Lean 4 disabled). Every verified theorem lands somewhere so there is no "rejection" outcome at the loop level.
+- Config gate: `system_config.lean4_enabled=false` → every rigor cycle declines immediately.
 
+**Decline Mechanisms:**
+- `outline_update`: `needs_update: boolean`
 **Decline Mechanisms:**
 - `outline_update`: `needs_update: boolean`
 - `construction`: `needs_construction: boolean`
 - `review`: `needs_edit: boolean`
-- `rigor`: `needs_enhancement: boolean`
+- `rigor`: `needs_theorem_work: boolean` (Stage 1 decline) OR all 5 Lean 4 formalization attempts fail (Stage 2 decline)
 
 Declines logged to `compiler_last_10_declines.txt`.
 
@@ -115,7 +123,7 @@ Declines logged to `compiler_last_10_declines.txt`.
 
 ## Body-Only Modes
 
-Outline updates and rigor enhancements are skipped once body is complete:
+Outline updates and Lean 4 theorem-search rigor cycles run only while the body is still under construction. Once the body is complete, the compiler advances to conclusion / introduction / abstract drafting and skips these body-only loops:
 - **Autonomous mode**: `autonomous_section_phase == "body"`
 - **Manual mode**: Conclusion section exists in paper
 
@@ -200,8 +208,10 @@ Prevents models' fake placeholder text (e.g., "XI. Conclusion\n*placeholder*") f
 Per-role context windows (all user-configurable, default 131072):
 - Validator, High-Context Submitter, High-Parameter Submitter: 131072 tokens each
 - **Settings flow**: All compiler modules read from `system_config.compiler_*` at runtime. The caller that creates `CompilerCoordinator` MUST write settings to `system_config` before init (manual mode: `/api/compiler/start`; autonomous mode: `autonomous_coordinator.py` before `CompilerCoordinator()` creation).
+- **OpenRouter auto-fill**: Selecting an OpenRouter model auto-fills from endpoint metadata only. Context window uses the smallest relevant host `context_length`; max output tokens use `min(20% of that host context, smallest relevant host max_completion_tokens)`. If `max_prompt_tokens` is available, shrink usable context to respect it. If endpoint caps are incomplete, preserve current values (no guessing).
 - Rigor mode dynamically adjusts RAG budget if outline + system prompts exceed available context
-- Construction mode (autonomous) dynamically adjusts RAG budget when brainstorm content is present: `rag_budget = max(5000, max_allowed - outline_tokens - paper_tokens - brainstorm_tokens - 5000_overhead)`. Brainstorm always direct-injected at full fidelity; RAG evidence scales to fit remaining budget.
+- Construction mode dynamically adjusts RAG budget when brainstorm content is present: `rag_budget = max(5000, max_allowed - outline_tokens - paper_tokens - brainstorm_tokens - 5000_overhead)`. Brainstorm always direct-injected at full fidelity; RAG evidence scales to fit remaining budget.
+- **Wolfram Alpha as a construction tool**: During `HighContextSubmitter.submit_construction` (body / conclusion / introduction / abstract), when `system_config.wolfram_alpha_enabled=true`, the writer may invoke the `wolfram_alpha_query` OpenAI-compatible tool up to **20 times per submission** to verify factual / computational claims before writing them. On budget exhaustion, the loop forces finalization with tools disabled. Tool audit trail lives in `CompilerSubmission.metadata["wolfram_calls"]`. The validator is not re-invoking Wolfram; it just sees the audit trail. Wolfram tool is NOT available in `outline_create`, `outline_update`, `review`, or the rigor loop.
 
 **Context rules:** User prompt ALWAYS direct injected. Direct injection first; RAG only when doesn't fit. ~85% RAG retrieval, ~15% direct injections. Halt with error if user prompt exceeds context_window - minimum_RAG_allocation.
 
@@ -209,7 +219,7 @@ Per-role context windows (all user-configurable, default 131072):
 - `outline_create`, `outline_update`, `rigor`, `construction`, `review`: raises ValueError if exceeds
 - `validator`: rejects submission if exceeds
 
-**Rigor Mode context**: no aggregator database; outline fully injected; paper content RAG-retrieved. RAG excludes `compiler_outline.txt` (already direct-injected).
+**Rigor Mode context**: no aggregator database; outline fully injected; paper content RAG-retrieved. RAG excludes `compiler_outline.txt` AND `compiler_paper.txt` (both direct-injected where they fit, otherwise RAG'd per the offload priority). Rigor prompts live in `backend/compiler/prompts/rigor_prompts.py` - the pre-Build-4 `standard_enhancement` / `rewrite_focus` / `wolfram_verification` prompts were replaced by `build_rigor_theorem_discovery_prompt` (Stage 1) and `build_rigor_placement_prompt` (Stage 2).
 
 **RAG source exclusion (anti-duplication)**: All compiler RAG calls pass `exclude_sources` to skip chunks from content already direct-injected. Construction excludes outline + paper + brainstorm sources; outline_update excludes outline + paper; rigor excludes outline. See `rag-design-for-overall-program.mdc` for full table.
 

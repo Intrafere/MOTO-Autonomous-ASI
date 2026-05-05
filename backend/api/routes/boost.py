@@ -92,7 +92,7 @@ async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"Failed to enable boost: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to enable boost: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to enable boost")
 
 
 @router.post("/api/boost/update-model")
@@ -171,7 +171,7 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"Failed to update boost model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update model: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to update model")
 
 
 @router.post("/api/boost/disable")
@@ -192,7 +192,7 @@ async def disable_boost() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to disable boost: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to disable boost: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to disable boost")
 
 
 @router.get("/api/boost/status")
@@ -211,7 +211,7 @@ async def get_boost_status() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get boost status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get boost status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get boost status")
 
 
 @router.post("/api/boost/toggle-task/{task_id}")
@@ -235,7 +235,7 @@ async def toggle_task_boost(task_id: str) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to toggle task boost: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to toggle task boost: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to toggle task boost")
 
 
 @router.get("/api/boost/openrouter-models")
@@ -266,7 +266,7 @@ async def get_openrouter_models(authorization: Optional[str] = Header(None)) -> 
         raise
     except Exception as e:
         logger.error(f"Failed to fetch OpenRouter models: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch models: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch models")
 
 
 @router.get("/api/boost/model-providers")
@@ -289,20 +289,26 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
         
         client = OpenRouterClient(_resolve_boost_api_key(api_key))
         try:
-            providers = await client.get_model_providers(model_id)
+            endpoints = await client.get_model_endpoints(model_id)
+            providers = sorted({
+                endpoint.get("provider_name")
+                for endpoint in endpoints
+                if isinstance(endpoint.get("provider_name"), str) and endpoint.get("provider_name")
+            })
         finally:
             await client.close()
         
         return {
             "success": True,
             "model_id": model_id,
-            "providers": providers
+            "providers": providers,
+            "endpoints": endpoints
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to fetch providers for model {model_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch providers: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch providers")
 
 
 # ============================================================
@@ -340,7 +346,7 @@ async def set_boost_always_prefer(request: BoostAlwaysPreferRequest) -> Dict[str
         raise
     except Exception as e:
         logger.error(f"Failed to set always-prefer boost: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to set always-prefer: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to set always-prefer")
 
 
 @router.post("/api/boost/set-next-count")
@@ -377,7 +383,7 @@ async def set_boost_next_count(request: BoostNextCountRequest) -> Dict[str, Any]
         raise
     except Exception as e:
         logger.error(f"Failed to set boost next count: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to set count: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to set count")
 
 
 @router.post("/api/boost/toggle-category/{category}")
@@ -414,7 +420,7 @@ async def toggle_category_boost(category: str) -> Dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"Failed to toggle category boost: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to toggle category: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to toggle category")
 
 
 @router.get("/api/boost/categories")
@@ -442,7 +448,7 @@ async def get_boost_categories(mode: Optional[str] = "all") -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get boost categories: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get categories: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get categories")
 
 
 # ============================================================
@@ -472,7 +478,7 @@ async def get_boost_logs(limit: int = 100) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get boost logs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get logs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get logs")
 
 
 @router.get("/api/boost/logs/{index}")
@@ -500,7 +506,7 @@ async def get_boost_log_entry(index: int) -> Dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"Failed to get boost log entry: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get entry: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get entry")
 
 
 @router.post("/api/boost/clear-logs")
@@ -522,5 +528,5 @@ async def clear_boost_logs() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to clear boost logs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to clear logs: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to clear logs")
 

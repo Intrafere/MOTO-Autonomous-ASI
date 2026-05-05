@@ -6,9 +6,15 @@ export const STARTUP_PROVIDER_CHOICE_STORAGE_KEY = 'startup_provider_choice';
 export const LM_STUDIO_STARTUP_CHOICE = 'lm_studio';
 export const RECOMMENDED_PROFILE_KEY = 'recommended_slower_affordable_higher_knowledge';
 export const RECOMMENDED_ALTERNATE_PROFILE_KEY = 'recommended_fast_affordable_mid';
+export const RECOMMENDED_LAB_FAST_PROFILE_KEY = 'recommended_lab_fast_costly_extra_high';
+export const RECOMMENDED_LAB_MAX_PROFILE_KEY = 'recommended_lab_slow_costly_max';
+export const RECOMMENDED_ENTRY_LAB_PROFILE_KEY = 'recommended_entry_lab_fast_less_affordable';
 export const RECOMMENDED_PROFILE_KEYS = [
   RECOMMENDED_PROFILE_KEY,
   RECOMMENDED_ALTERNATE_PROFILE_KEY,
+  RECOMMENDED_ENTRY_LAB_PROFILE_KEY,
+  RECOMMENDED_LAB_FAST_PROFILE_KEY,
+  RECOMMENDED_LAB_MAX_PROFILE_KEY,
 ];
 
 const DEFAULT_SUBMITTER_CONFIG = {
@@ -21,62 +27,10 @@ const DEFAULT_SUBMITTER_CONFIG = {
   maxOutputTokens: 25000,
 };
 
-const DEFAULT_OPENROUTER_SUBMITTER_CONFIGS = [
-  {
-    submitterId: 1,
-    provider: 'openrouter',
-    modelId: 'openai/gpt-oss-120b',
-    openrouterProvider: 'Google',
-    lmStudioFallbackId: null,
-    contextWindow: 131072,
-    maxOutputTokens: 25000,
-  },
-  {
-    submitterId: 2,
-    provider: 'openrouter',
-    modelId: 'openai/gpt-oss-20b',
-    openrouterProvider: 'Groq',
-    lmStudioFallbackId: null,
-    contextWindow: 131072,
-    maxOutputTokens: 25000,
-  },
-  {
-    submitterId: 3,
-    provider: 'openrouter',
-    modelId: 'openai/gpt-oss-120b',
-    openrouterProvider: 'Google',
-    lmStudioFallbackId: null,
-    contextWindow: 131072,
-    maxOutputTokens: 25000,
-  },
-];
-
-const DEFAULT_LOCAL_CONFIG = {
-  validator_provider: 'openrouter',
-  validator_model: 'openai/gpt-oss-120b',
-  validator_openrouter_provider: 'Google',
-  validator_lm_studio_fallback: null,
-  validator_context_window: 131072,
-  validator_max_tokens: 25000,
-  high_context_provider: 'openrouter',
-  high_context_model: 'openai/gpt-oss-120b',
-  high_context_openrouter_provider: 'Google',
-  high_context_lm_studio_fallback: null,
-  high_context_context_window: 131072,
-  high_context_max_tokens: 25000,
-  high_param_provider: 'openrouter',
-  high_param_model: 'openai/gpt-oss-120b',
-  high_param_openrouter_provider: 'Google',
-  high_param_lm_studio_fallback: null,
-  high_param_context_window: 131072,
-  high_param_max_tokens: 25000,
-  critique_submitter_provider: 'openrouter',
-  critique_submitter_model: 'openai/gpt-oss-120b',
-  critique_submitter_openrouter_provider: 'Google',
-  critique_submitter_lm_studio_fallback: null,
-  critique_submitter_context_window: 131072,
-  critique_submitter_max_tokens: 25000,
-};
+// NOTE: DEFAULT_OPENROUTER_SUBMITTER_CONFIGS and DEFAULT_LOCAL_CONFIG are derived
+// from RECOMMENDED_PROFILES[RECOMMENDED_PROFILE_KEY] further below so the "default"
+// startup configuration and the selectable recommended profile stay in sync.
+// Update the recommended profile below to change what a fresh install runs with.
 
 const DEFAULT_LM_LOCAL_CONFIG = {
   validator_provider: 'lm_studio',
@@ -113,21 +67,9 @@ const createDefaultSubmitterConfigs = (modelId = '') => (
   }))
 );
 
-const DEFAULT_AUTONOMOUS_SETTINGS = {
-  numSubmitters: 3,
-  submitterConfigs: DEFAULT_OPENROUTER_SUBMITTER_CONFIGS,
-  localConfig: DEFAULT_LOCAL_CONFIG,
-  freeOnly: false,
-  freeModelLooping: true,
-  freeModelAutoSelector: true,
-  tier3Enabled: false,
-  modelProviders: {},
-  selectedProfile: '',
-};
-
 export const RECOMMENDED_PROFILES = {
   [RECOMMENDED_PROFILE_KEY]: {
-    name: 'Slower, less affordable, higher knowledge',
+    name: 'Slow, less affordable, higher knowledge',
     numSubmitters: 3,
     submitters: [
       {
@@ -139,7 +81,7 @@ export const RECOMMENDED_PROFILES = {
         maxOutputTokens: 65500,
       },
       {
-        modelId: 'moonshotai/kimi-k2.5',
+        modelId: 'moonshotai/kimi-k2.6',
         provider: 'openrouter',
         openrouterProvider: null,
         lmStudioFallbackId: null,
@@ -147,16 +89,16 @@ export const RECOMMENDED_PROFILES = {
         maxOutputTokens: 40000,
       },
       {
-        modelId: 'deepseek/deepseek-v3.2',
+        modelId: 'deepseek/deepseek-v4-pro',
         provider: 'openrouter',
-        openrouterProvider: 'AtlasCloud',
+        openrouterProvider: null,
         lmStudioFallbackId: null,
-        contextWindow: 163800,
-        maxOutputTokens: 30000,
+        contextWindow: 1048576,
+        maxOutputTokens: 65500,
       },
     ],
     validator: {
-      modelId: 'moonshotai/kimi-k2.5',
+      modelId: 'moonshotai/kimi-k2.6',
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,
@@ -190,12 +132,12 @@ export const RECOMMENDED_PROFILES = {
   },
   [RECOMMENDED_ALTERNATE_PROFILE_KEY]: {
     name: 'Fast, affordable, mid-tier knowledge',
-    numSubmitters: 3,
+    numSubmitters: 4,
     submitters: [
       {
-        modelId: 'moonshotai/kimi-k2.5',
+        modelId: 'moonshotai/kimi-k2.6',
         provider: 'openrouter',
-        openrouterProvider: 'SiliconFlow',
+        openrouterProvider: null,
         lmStudioFallbackId: null,
         contextWindow: 262000,
         maxOutputTokens: 40000,
@@ -209,12 +151,20 @@ export const RECOMMENDED_PROFILES = {
         maxOutputTokens: 25000,
       },
       {
-        modelId: 'deepseek/deepseek-v3.2',
+        modelId: 'deepseek/deepseek-v4-pro',
         provider: 'openrouter',
-        openrouterProvider: 'AtlasCloud',
+        openrouterProvider: null,
         lmStudioFallbackId: null,
-        contextWindow: 163800,
-        maxOutputTokens: 30000,
+        contextWindow: 1048576,
+        maxOutputTokens: 65500,
+      },
+      {
+        modelId: 'inception/mercury-2',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 128000,
+        maxOutputTokens: 25000,
       },
     ],
     validator: {
@@ -226,9 +176,9 @@ export const RECOMMENDED_PROFILES = {
       maxOutputTokens: 65500,
     },
     highContext: {
-      modelId: 'moonshotai/kimi-k2.5',
+      modelId: 'moonshotai/kimi-k2.6',
       provider: 'openrouter',
-      openrouterProvider: 'SiliconFlow',
+      openrouterProvider: null,
       lmStudioFallbackId: null,
       contextWindow: 262000,
       maxOutputTokens: 40000,
@@ -250,6 +200,259 @@ export const RECOMMENDED_PROFILES = {
       maxOutputTokens: 65500,
     },
   },
+  [RECOMMENDED_ENTRY_LAB_PROFILE_KEY]: {
+    name: 'Fast, less affordable, higher knowledge',
+    numSubmitters: 3,
+    submitters: [
+      {
+        modelId: 'x-ai/grok-4.3',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1000000,
+        maxOutputTokens: 128000,
+      },
+      {
+        modelId: 'moonshotai/kimi-k2.6',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 262000,
+        maxOutputTokens: 40000,
+      },
+      {
+        modelId: 'x-ai/grok-4.3',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1000000,
+        maxOutputTokens: 128000,
+      },
+    ],
+    validator: {
+      modelId: 'x-ai/grok-4.1-fast',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 2000000,
+      maxOutputTokens: 30000,
+    },
+    highContext: {
+      modelId: 'x-ai/grok-4.3',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1000000,
+      maxOutputTokens: 128000,
+    },
+    highParam: {
+      modelId: 'x-ai/grok-4.3',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1000000,
+      maxOutputTokens: 128000,
+    },
+    critique: {
+      modelId: 'google/gemini-3.1-pro-preview',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500,
+    },
+  },
+  [RECOMMENDED_LAB_FAST_PROFILE_KEY]: {
+    name: 'Lab grade, fast, costly (starts at ~$10 per hour), extra-high knowledge',
+    numSubmitters: 3,
+    submitters: [
+      {
+        modelId: 'openai/gpt-5.5',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1050000,
+        maxOutputTokens: 128000,
+      },
+      {
+        modelId: 'moonshotai/kimi-k2.6',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 262000,
+        maxOutputTokens: 40000,
+      },
+      {
+        modelId: 'deepseek/deepseek-v4-pro',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1048576,
+        maxOutputTokens: 65500,
+      },
+    ],
+    validator: {
+      modelId: 'x-ai/grok-4.1-fast',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 2000000,
+      maxOutputTokens: 30000,
+    },
+    highContext: {
+      modelId: 'openai/gpt-5.5',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1050000,
+      maxOutputTokens: 128000,
+    },
+    highParam: {
+      modelId: 'anthropic/claude-opus-4.7',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1000000,
+      maxOutputTokens: 128000,
+    },
+    critique: {
+      modelId: 'google/gemini-3.1-pro-preview',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500,
+    },
+  },
+  [RECOMMENDED_LAB_MAX_PROFILE_KEY]: {
+    name: 'Lab grade, SOTA models, slower, costly (starts at ~$20 per hour), max knowledge',
+    numSubmitters: 4,
+    submitters: [
+      {
+        modelId: 'anthropic/claude-opus-4.7',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1000000,
+        maxOutputTokens: 128000,
+      },
+      {
+        modelId: 'openai/gpt-5.5-pro',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 1050000,
+        maxOutputTokens: 128000,
+      },
+      {
+        modelId: 'x-ai/grok-4.20-multi-agent',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 2000000,
+        maxOutputTokens: 65500,
+      },
+      {
+        modelId: 'moonshotai/kimi-k2.6',
+        provider: 'openrouter',
+        openrouterProvider: null,
+        lmStudioFallbackId: null,
+        contextWindow: 262000,
+        maxOutputTokens: 40000,
+      },
+    ],
+    validator: {
+      modelId: 'openai/gpt-5.5-pro',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1050000,
+      maxOutputTokens: 128000,
+    },
+    highContext: {
+      modelId: 'anthropic/claude-opus-4.7',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1000000,
+      maxOutputTokens: 128000,
+    },
+    highParam: {
+      modelId: 'anthropic/claude-opus-4.7',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 1000000,
+      maxOutputTokens: 128000,
+    },
+    critique: {
+      modelId: 'x-ai/grok-4.20-multi-agent',
+      provider: 'openrouter',
+      openrouterProvider: null,
+      lmStudioFallbackId: null,
+      contextWindow: 2000000,
+      maxOutputTokens: 65500,
+    },
+  },
+};
+
+// Derive the startup/fallback OpenRouter defaults directly from the default
+// recommended profile so there is a single source of truth. Changing the
+// RECOMMENDED_PROFILE_KEY profile above automatically updates what a fresh
+// install (or any settings reset) runs with.
+const DEFAULT_RECOMMENDED_PROFILE = RECOMMENDED_PROFILES[RECOMMENDED_PROFILE_KEY];
+
+const submitterFromRecommended = (submitter, submitterId) => ({
+  submitterId,
+  provider: submitter.provider || 'openrouter',
+  modelId: submitter.modelId || '',
+  openrouterProvider: submitter.openrouterProvider || null,
+  lmStudioFallbackId: submitter.lmStudioFallbackId || null,
+  contextWindow: submitter.contextWindow,
+  maxOutputTokens: submitter.maxOutputTokens,
+});
+
+const DEFAULT_OPENROUTER_SUBMITTER_CONFIGS = DEFAULT_RECOMMENDED_PROFILE.submitters.map(
+  (submitter, index) => submitterFromRecommended(submitter, index + 1)
+);
+
+const DEFAULT_LOCAL_CONFIG = {
+  validator_provider: DEFAULT_RECOMMENDED_PROFILE.validator.provider || 'openrouter',
+  validator_model: DEFAULT_RECOMMENDED_PROFILE.validator.modelId || '',
+  validator_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.validator.openrouterProvider || null,
+  validator_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.validator.lmStudioFallbackId || null,
+  validator_context_window: DEFAULT_RECOMMENDED_PROFILE.validator.contextWindow,
+  validator_max_tokens: DEFAULT_RECOMMENDED_PROFILE.validator.maxOutputTokens,
+  high_context_provider: DEFAULT_RECOMMENDED_PROFILE.highContext.provider || 'openrouter',
+  high_context_model: DEFAULT_RECOMMENDED_PROFILE.highContext.modelId || '',
+  high_context_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.highContext.openrouterProvider || null,
+  high_context_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.highContext.lmStudioFallbackId || null,
+  high_context_context_window: DEFAULT_RECOMMENDED_PROFILE.highContext.contextWindow,
+  high_context_max_tokens: DEFAULT_RECOMMENDED_PROFILE.highContext.maxOutputTokens,
+  high_param_provider: DEFAULT_RECOMMENDED_PROFILE.highParam.provider || 'openrouter',
+  high_param_model: DEFAULT_RECOMMENDED_PROFILE.highParam.modelId || '',
+  high_param_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.highParam.openrouterProvider || null,
+  high_param_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.highParam.lmStudioFallbackId || null,
+  high_param_context_window: DEFAULT_RECOMMENDED_PROFILE.highParam.contextWindow,
+  high_param_max_tokens: DEFAULT_RECOMMENDED_PROFILE.highParam.maxOutputTokens,
+  critique_submitter_provider: DEFAULT_RECOMMENDED_PROFILE.critique.provider || 'openrouter',
+  critique_submitter_model: DEFAULT_RECOMMENDED_PROFILE.critique.modelId || '',
+  critique_submitter_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.critique.openrouterProvider || null,
+  critique_submitter_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.critique.lmStudioFallbackId || null,
+  critique_submitter_context_window: DEFAULT_RECOMMENDED_PROFILE.critique.contextWindow,
+  critique_submitter_max_tokens: DEFAULT_RECOMMENDED_PROFILE.critique.maxOutputTokens,
+};
+
+const DEFAULT_AUTONOMOUS_SETTINGS = {
+  numSubmitters: DEFAULT_RECOMMENDED_PROFILE.numSubmitters || DEFAULT_OPENROUTER_SUBMITTER_CONFIGS.length,
+  submitterConfigs: DEFAULT_OPENROUTER_SUBMITTER_CONFIGS,
+  localConfig: DEFAULT_LOCAL_CONFIG,
+  freeOnly: false,
+  freeModelLooping: true,
+  freeModelAutoSelector: true,
+  tier3Enabled: false,
+  modelProviders: {},
+  selectedProfile: RECOMMENDED_PROFILE_KEY,
 };
 
 function normalizeStoredSettings(settings = {}) {
@@ -275,7 +478,7 @@ function normalizeStoredSettings(settings = {}) {
     freeModelAutoSelector: settings.freeModelAutoSelector ?? DEFAULT_AUTONOMOUS_SETTINGS.freeModelAutoSelector,
     tier3Enabled: settings.tier3Enabled ?? DEFAULT_AUTONOMOUS_SETTINGS.tier3Enabled,
     modelProviders: settings.modelProviders || DEFAULT_AUTONOMOUS_SETTINGS.modelProviders,
-    selectedProfile: settings.selectedProfile || '',
+    selectedProfile: settings.selectedProfile ?? DEFAULT_AUTONOMOUS_SETTINGS.selectedProfile,
   };
 }
 

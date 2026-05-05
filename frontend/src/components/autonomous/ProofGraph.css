@@ -1,0 +1,167 @@
+.proof-graph-panel {
+  display: grid;
+  gap: 0.9rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 1rem;
+}
+
+.proof-graph-topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.proof-graph-copy {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.proof-graph-copy strong {
+  color: var(--text-primary, #f3f4f6);
+}
+
+.proof-graph-copy span,
+.proof-graph-hover-subtitle {
+  color: var(--text-secondary, #9ca3af);
+  line-height: 1.45;
+}
+
+.proof-graph-hover-card {
+  min-width: min(28rem, 100%);
+  max-width: 34rem;
+  display: grid;
+  gap: 0.45rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.9rem;
+  background: rgba(2, 6, 23, 0.55);
+  padding: 0.85rem 0.95rem;
+}
+
+.proof-graph-hover-title {
+  color: var(--text-primary, #f3f4f6);
+  font-weight: 600;
+}
+
+.proof-graph-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.proof-graph-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  background: rgba(96, 165, 250, 0.08);
+  color: #bfdbfe;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.76rem;
+  line-height: 1.2;
+}
+
+.proof-graph-badge.muted {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text-secondary, #9ca3af);
+}
+
+.proof-graph-canvas {
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background:
+    radial-gradient(circle at top, rgba(34, 197, 94, 0.07), transparent 42%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(2, 6, 23, 0.98));
+}
+
+.proof-graph-svg {
+  display: block;
+  min-width: 100%;
+}
+
+.proof-graph-edge {
+  fill: none;
+  stroke: rgba(96, 165, 250, 0.55);
+  stroke-width: 2;
+}
+
+.proof-graph-arrowhead {
+  fill: rgba(96, 165, 250, 0.75);
+}
+
+.proof-graph-node-group {
+  cursor: pointer;
+  outline: none;
+}
+
+.proof-graph-node-group:focus .proof-graph-node-frame,
+.proof-graph-node-group:hover .proof-graph-node-frame {
+  stroke-width: 2.5;
+}
+
+.proof-graph-node-frame {
+  fill: rgba(17, 24, 39, 0.95);
+  stroke: rgba(148, 163, 184, 0.24);
+  stroke-width: 1.5;
+  transition: stroke 0.2s ease, transform 0.2s ease;
+}
+
+.proof-graph-node-group.novel .proof-graph-node-frame {
+  stroke: rgba(34, 197, 94, 0.45);
+}
+
+.proof-graph-node-group.known .proof-graph-node-frame {
+  stroke: rgba(96, 165, 250, 0.32);
+}
+
+.proof-graph-node-group.gold .proof-graph-node-frame {
+  stroke: rgba(255, 214, 92, 0.55);
+}
+
+.proof-graph-node-group.silver .proof-graph-node-frame {
+  stroke: rgba(192, 192, 192, 0.5);
+}
+
+.proof-graph-node-group.bronze .proof-graph-node-frame {
+  stroke: rgba(205, 127, 50, 0.5);
+}
+
+.proof-graph-node-group.selected .proof-graph-node-frame {
+  stroke: rgba(250, 204, 21, 0.9);
+}
+
+.proof-graph-node-proof-id,
+.proof-graph-node-mathlib {
+  fill: #18cc17;
+  font-size: 12px;
+}
+
+.proof-graph-node-title {
+  fill: #f8fafc;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.proof-graph-node-source {
+  fill: #94a3b8;
+  font-size: 12px;
+}
+
+.proof-graph-empty {
+  padding: 0.95rem 1rem;
+  border-radius: 0.85rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-secondary, #9ca3af);
+}
+
+@media (max-width: 900px) {
+  .proof-graph-hover-card {
+    min-width: 100%;
+  }
+}

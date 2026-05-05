@@ -212,39 +212,42 @@ class RAGManager:
             return
         
         texts = [chunk.text for chunk in chunks]
-        
-        # ACQUIRE GLOBAL LOCK FOR EMBEDDINGS
-        await rag_operation_lock.acquire(f"RAGManager add_chunks (size={chunk_size})")
-        try:
+
+        if system_config.generic_mode:
             embeddings = await api_client_manager.get_embeddings(texts)
+            await rag_operation_lock.acquire(f"RAGManager add_chunks write (size={chunk_size})")
+        else:
+            await rag_operation_lock.acquire(f"RAGManager add_chunks (size={chunk_size})")
+            embeddings = await api_client_manager.get_embeddings(texts)
+
+        try:
+            # Update chunks with embeddings and tokens
+            for chunk, embedding in zip(chunks, embeddings):
+                chunk.embedding = embedding
+                chunk.tokens = chunk.text.lower().split()
+
+            # ChromaDB writes stay under the global RAG lock in both modes.
+            collection = self.collections[chunk_size]
+            try:
+                collection.add(
+                    ids=[chunk.chunk_id for chunk in chunks],
+                    embeddings=embeddings,
+                    documents=texts,
+                    metadatas=[chunk.metadata for chunk in chunks]
+                )
+                logger.debug(f"Added {len(chunks)} chunks to ChromaDB collection (size={chunk_size})")
+            except Exception as e:
+                logger.error(f"CRITICAL: ChromaDB add failed for chunk_size={chunk_size}: {type(e).__name__}: {e}")
+                logger.error(f"Attempting to add {len(chunks)} chunks with IDs: {[c.chunk_id for c in chunks][:5]}...")
+                raise
+
+            # Add to memory
+            self.chunks_by_size[chunk_size].extend(chunks)
+
+            # Invalidate BM25 index for this size
+            self.bm25_index[chunk_size] = None
         finally:
             rag_operation_lock.release()
-        
-        # Update chunks with embeddings and tokens
-        for chunk, embedding in zip(chunks, embeddings):
-            chunk.embedding = embedding
-            chunk.tokens = chunk.text.lower().split()
-        
-        # Add to ChromaDB (no lock needed - writes are local)
-        collection = self.collections[chunk_size]
-        try:
-            collection.add(
-                ids=[chunk.chunk_id for chunk in chunks],
-                embeddings=embeddings,
-                documents=texts,
-                metadatas=[chunk.metadata for chunk in chunks]
-            )
-            logger.debug(f"Added {len(chunks)} chunks to ChromaDB collection (size={chunk_size})")
-        except Exception as e:
-            logger.error(f"CRITICAL: ChromaDB add failed for chunk_size={chunk_size}: {type(e).__name__}: {e}")
-            logger.error(f"Attempting to add {len(chunks)} chunks with IDs: {[c.chunk_id for c in chunks][:5]}...")
-            raise
-        
-        # Add to memory
-        self.chunks_by_size[chunk_size].extend(chunks)
-        
-        # Invalidate BM25 index for this size
-        self.bm25_index[chunk_size] = None
     
     async def _rewrite_query(self, query: str) -> List[str]:
         """Stage A: Expand query into semantic variants."""

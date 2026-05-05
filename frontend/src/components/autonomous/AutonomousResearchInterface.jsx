@@ -10,6 +10,7 @@ import TextFileUploader from '../TextFileUploader';
 
 const AutonomousResearchInterface = ({
   isRunning,
+  isStopping = false,
   anyWorkflowRunning,
   status,
   activity,
@@ -34,18 +35,21 @@ const AutonomousResearchInterface = ({
   const [skipQueued, setSkipQueued] = useState(false);  // Skip has been queued pre-emptively
   const [explorationProgress, setExplorationProgress] = useState(null);  // Topic exploration phase tracking
   const [titleExplorationProgress, setTitleExplorationProgress] = useState(null);  // Paper title exploration tracking
-  const activityEndRef = useRef(null);
+  const activityFeedRef = useRef(null);
+  const prevActivityLengthRef = useRef(0);
 
   // Save research prompt to localStorage
   useEffect(() => {
     localStorage.setItem('autonomous_research_prompt', researchPrompt);
   }, [researchPrompt]);
 
-  // Auto-scroll activity feed
+  // Auto-scroll activity feed only when new items are added (not on mount/tab switch)
   useEffect(() => {
-    if (activityEndRef.current) {
-      activityEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    const currentLength = activity ? activity.length : 0;
+    if (currentLength > prevActivityLengthRef.current && activityFeedRef.current) {
+      activityFeedRef.current.scrollTop = activityFeedRef.current.scrollHeight;
     }
+    prevActivityLengthRef.current = currentLength;
   }, [activity]);
 
   // Listen for critique phase events in activity feed
@@ -307,6 +311,35 @@ const AutonomousResearchInterface = ({
         return '✓';
       case 'final_answer_complete':
         return '◆';
+      case 'proof_framing_decided':
+        return 'P';
+      case 'proof_check_started':
+        return '◌';
+      case 'proof_retry_scheduled':
+        return '↺';
+      case 'proof_retry_started':
+        return '↻';
+      case 'proof_check_candidates_found':
+        return '#';
+      case 'proof_check_no_candidates':
+        return '-';
+      case 'smt_check_started':
+        return 'S';
+      case 'smt_check_complete':
+        return 'Z';
+      case 'proof_attempt_started':
+        return '>';
+      case 'proof_attempt_failed':
+      case 'proof_attempts_exhausted':
+        return '⚠';
+      case 'proof_verified':
+      case 'known_proof_verified':
+      case 'proof_check_complete':
+        return '✓';
+      case 'novel_proof_discovered':
+        return '◆';
+      case 'proof_dependency_added':
+        return '↗';
       default:
         return '•';
     }
@@ -328,11 +361,23 @@ const AutonomousResearchInterface = ({
         event === 'tier3_chapter_complete' ||
         event === 'tier3_short_form_complete' ||
         event === 'tier3_long_form_complete' ||
-        event === 'reference_selection_complete') {
+        event === 'reference_selection_complete' ||
+        event === 'proof_verified' ||
+        event === 'novel_proof_discovered' ||
+        event === 'known_proof_verified' ||
+        event === 'proof_check_complete' ||
+        event === 'proof_dependency_added' ||
+        event === 'smt_check_complete') {
       return 'activity-success';
     }
     // Rejection events
-    if (event.includes('rejected') || event === 'compiler_rejection' || event === 'tier3_rejection') {
+    if (
+        event.includes('rejected') ||
+        event === 'compiler_rejection' ||
+        event === 'tier3_rejection' ||
+        event === 'proof_attempt_failed' ||
+        event === 'proof_attempts_exhausted'
+    ) {
       return 'activity-reject';
     }
     // Info events (reviews, starts, tier3 progress, etc.)
@@ -354,7 +399,14 @@ const AutonomousResearchInterface = ({
         event === 'critique_phase_ended' ||
         event === 'critique_phase_skipped' ||
         event === 'brainstorm_continuation_decided' ||
-        event === 'brainstorm_paper_limit_reached') {
+        event === 'brainstorm_paper_limit_reached' ||
+        event === 'proof_framing_decided' ||
+        event === 'proof_retry_scheduled' ||
+        event === 'proof_retry_started' ||
+        event === 'proof_check_candidates_found' ||
+        event === 'proof_check_no_candidates' ||
+        event === 'proof_attempt_started' ||
+        event === 'smt_check_started') {
       return 'activity-info';
     }
     return 'activity-neutral';
@@ -366,7 +418,7 @@ const AutonomousResearchInterface = ({
       <div className="autonomous-header">
         <h2>Autonomous Research</h2>
         <div className="autonomous-controls">
-          {!isRunning ? (
+          {!isRunning && !isStopping ? (
             <button 
               className="btn-start"
               onClick={handleStart}
@@ -378,14 +430,25 @@ const AutonomousResearchInterface = ({
               Start Research
             </button>
           ) : (
-            <button className="btn-stop" onClick={onStop}>
-              Stop Research
-            </button>
+            <>
+              <span
+                className="runtime-indicator"
+                role="status"
+                aria-live="polite"
+                title={isStopping ? "Autonomous research is stopping" : "Autonomous research is currently running"}
+              >
+                <span className="runtime-indicator-dot" aria-hidden="true"></span>
+                <span className="runtime-indicator-label">{isStopping ? 'Stopping' : 'Running'}</span>
+              </span>
+              <button className="btn-stop" onClick={onStop} disabled={isStopping}>
+                {isStopping ? 'Stopping...' : 'Stop Research'}
+              </button>
+            </>
           )}
           <button 
             className={`btn-clear ${showClearConfirm ? 'btn-confirm' : ''}`}
             onClick={handleClear}
-            disabled={isRunning || isClearing}
+            disabled={isRunning || isStopping || isClearing}
           >
             {isClearing ? 'Clearing...' : (showClearConfirm ? 'Confirm Clear' : 'Clear All')}
           </button>
@@ -431,7 +494,7 @@ const AutonomousResearchInterface = ({
         </div>
 
         {explorationProgress && (
-          <div className="current-brainstorm" style={{ borderLeft: '3px solid #a855f7' }}>
+          <div className="current-brainstorm" style={{ borderLeft: '3px solid #18cc17' }}>
             <span className="status-label">Topic Exploration:</span>
             <p className="brainstorm-prompt" style={{ color: '#c4b5fd' }}>
               Brainstorming candidate directions ({explorationProgress.accepted}/{explorationProgress.target} accepted)
@@ -665,10 +728,10 @@ const AutonomousResearchInterface = ({
       {/* Activity Feed */}
       <div className="activity-section">
         <h3>Live Activity</h3>
-        <div className="activity-feed">
+        <div className="activity-feed" ref={activityFeedRef}>
           {activity.length === 0 ? (
             <div className="activity-empty">
-              No activity yet. Start autonomous research to see updates.
+              No activity yet. Wait about 20 to 30 minutes. If you have not yet, press the start button under your prompt entry to begin research.
             </div>
           ) : (
             activity.map((item, index) => (
@@ -684,7 +747,6 @@ const AutonomousResearchInterface = ({
               </div>
             ))
           )}
-          <div ref={activityEndRef} />
         </div>
       </div>
     </div>

@@ -13,7 +13,7 @@ export const PAPER_DISCLAIMER =
   `${SEPARATOR}\n` +
   'DISCLAIMER\n' +
   '\n' +
-  'This content is provided for informational and experimental purposes only.\n' +
+  'This content is provided for informational purposes only.\n' +
   'This paper was autonomously generated with the novelty-seeking MOTO harness\n' +
   'without peer review or user oversight beyond the original prompt. It may\n' +
   'contain incorrect, incomplete, misleading, or fabricated claims presented\n' +
@@ -28,7 +28,7 @@ export const BRAINSTORM_DISCLAIMER =
   `${SEPARATOR}\n` +
   'DISCLAIMER\n' +
   '\n' +
-  'This content is provided for informational and experimental purposes only.\n' +
+  'This content is provided for informational purposes only.\n' +
   'This brainstorm database was autonomously generated with the novelty-seeking\n' +
   'MOTO harness without peer review or user oversight beyond the original\n' +
   'prompt. It may contain incorrect, incomplete, misleading, or\n' +

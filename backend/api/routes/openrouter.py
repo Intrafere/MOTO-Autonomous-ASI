@@ -15,9 +15,10 @@ from pydantic import BaseModel
 from typing import Dict, Any, Optional
 import logging
 import json
+import httpx
 from pathlib import Path
 
-from backend.shared.config import rag_config
+from backend.shared.config import rag_config, system_config
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import OpenRouterClient
 from backend.shared.api_client_manager import api_client_manager
@@ -54,6 +55,17 @@ async def check_lm_studio_availability() -> Dict[str, Any]:
         - models: List[str] - List of loaded model IDs
         - error: Optional[str] - Error message if unavailable
     """
+    if system_config.generic_mode:
+        return {
+            "success": True,
+            "available": False,
+            "has_models": False,
+            "model_count": 0,
+            "models": [],
+            "error": None,
+            "generic_mode": True,
+        }
+
     try:
         result = await lm_studio_client.check_availability()
         return {
@@ -68,7 +80,7 @@ async def check_lm_studio_availability() -> Dict[str, Any]:
             "has_models": False,
             "model_count": 0,
             "models": [],
-            "error": str(e)
+            "error": "Failed to check LM Studio availability"
         }
 
 
@@ -95,12 +107,42 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
         # Validate API key by testing connection
         client = OpenRouterClient(api_key)
         try:
-            models = await client.list_models()
-            
+            try:
+                models = await client.list_models(raise_on_error=True)
+            except httpx.HTTPStatusError as http_exc:
+                status_code = http_exc.response.status_code if http_exc.response is not None else 0
+                if status_code in (401, 403):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="OpenRouter rejected this API key (unauthorized). Please double-check the key at https://openrouter.ai/keys."
+                    ) from http_exc
+                logger.warning(
+                    "OpenRouter /models returned HTTP %s during key validation; treating as transient.",
+                    status_code,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"OpenRouter is temporarily unreachable (HTTP {status_code}). "
+                        "Your key was NOT saved. Please try again in a moment."
+                    ),
+                ) from http_exc
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as net_exc:
+                logger.warning(
+                    "Network error during OpenRouter key validation: %s", net_exc
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Could not reach OpenRouter to validate the key. "
+                        "Your key was NOT saved. Please check your internet connection and try again."
+                    ),
+                ) from net_exc
+
             if not models:
                 raise HTTPException(
                     status_code=400,
-                    detail="Failed to connect to OpenRouter or no models available. Please check your API key."
+                    detail="OpenRouter returned no models for this key. Please verify the key has access."
                 )
             
             # Store the API key globally
@@ -110,8 +152,13 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
             # Also configure the API client manager
             api_client_manager.set_openrouter_api_key(api_key)
 
-            # Persist to secure OS-backed storage so the key survives restarts.
-            store_openrouter_api_key(api_key)
+            if system_config.generic_mode:
+                logger.info("Generic mode active - keeping OpenRouter API key in runtime memory only")
+                success_message = "OpenRouter API key validated and loaded into runtime memory"
+            else:
+                # Persist to secure OS-backed storage so the key survives restarts.
+                store_openrouter_api_key(api_key)
+                success_message = "OpenRouter API key validated and saved"
             
             # Reset exhaustion flags so roles can retry OpenRouter
             free_model_manager.clear_account_exhaustion()
@@ -123,7 +170,7 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
             
             return {
                 "success": True,
-                "message": "OpenRouter API key validated and saved",
+                "message": success_message,
                 "model_count": len(models),
                 "roles_reset": list(reset_roles.keys())
             }
@@ -132,12 +179,12 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
             
     except SecretStoreError as e:
         logger.error(f"Failed to persist OpenRouter API key securely: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to set OpenRouter API key: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to validate API key: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to validate API key")
 
 
 @router.delete("/api/openrouter/api-key")
@@ -155,20 +202,26 @@ async def clear_api_key() -> Dict[str, Any]:
         rag_config.openrouter_api_key = None
         rag_config.openrouter_enabled = False
         api_client_manager.set_openrouter_api_key(None)
-        clear_openrouter_api_key()
+
+        if system_config.generic_mode:
+            logger.info("Generic mode active - cleared in-memory OpenRouter API key")
+            success_message = "OpenRouter API key cleared from runtime memory"
+        else:
+            clear_openrouter_api_key()
+            success_message = "OpenRouter API key cleared"
         
         logger.info("Global OpenRouter API key cleared")
         
         return {
             "success": True,
-            "message": "OpenRouter API key cleared"
+            "message": success_message
         }
     except SecretStoreError as e:
         logger.error(f"Failed to clear OpenRouter API key from secure storage: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     except Exception as e:
         logger.error(f"Failed to clear OpenRouter API key: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to clear API key: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to clear API key")
 
 
 @router.get("/api/openrouter/api-key-status")
@@ -232,7 +285,7 @@ async def get_models(api_key: Optional[str] = None, free_only: bool = False) -> 
         raise
     except Exception as e:
         logger.error(f"Failed to fetch OpenRouter models: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch models: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch models")
 
 
 @router.get("/api/openrouter/providers/{model_id:path}")
@@ -268,12 +321,18 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
         
         client = OpenRouterClient(key_to_use)
         try:
-            providers = await client.get_model_providers(model_id)
+            endpoints = await client.get_model_endpoints(model_id)
+            providers = sorted({
+                endpoint.get("provider_name")
+                for endpoint in endpoints
+                if isinstance(endpoint.get("provider_name"), str) and endpoint.get("provider_name")
+            })
             
             return {
                 "success": True,
                 "model_id": model_id,
-                "providers": providers
+                "providers": providers,
+                "endpoints": endpoints
             }
         finally:
             await client.close()
@@ -282,7 +341,7 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
         raise
     except Exception as e:
         logger.error(f"Failed to fetch providers for model {model_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch providers: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch providers")
 
 
 @router.get("/api/model-cache")
@@ -297,7 +356,7 @@ async def get_model_cache() -> Dict[str, str]:
         Dict mapping model display names to OpenRouter API IDs
     """
     try:
-        cache_file = Path(__file__).parent.parent.parent / "data" / "model_cache.json"
+        cache_file = Path(system_config.data_dir) / "model_cache.json"
         
         if not cache_file.exists():
             logger.warning(f"Model cache not found at {cache_file}")
@@ -338,7 +397,7 @@ async def set_free_model_settings(request: FreeModelSettings) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to update free model settings: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/api/openrouter/test-connection")
@@ -377,7 +436,7 @@ async def test_connection(request: SetApiKeyRequest) -> Dict[str, Any]:
             "success": True,  # Endpoint worked
             "connected": False,
             "model_count": 0,
-            "message": f"Failed to connect: {str(e)}"
+            "message": "Failed to connect to OpenRouter"
         }
 
 
@@ -411,4 +470,4 @@ async def reset_credit_exhaustion() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to reset credit exhaustion: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to reset: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to reset")

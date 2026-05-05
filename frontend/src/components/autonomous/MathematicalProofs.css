@@ -1,0 +1,445 @@
+.math-proofs-view {
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  color: var(--text-primary, #e5e7eb);
+}
+
+.math-proofs-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.math-proofs-header h2 {
+  margin: 0 0 0.35rem 0;
+  color: var(--text-primary, #f3f4f6);
+}
+
+.math-proofs-header p {
+  margin: 0;
+  color: var(--text-secondary, #9ca3af);
+  max-width: 60rem;
+}
+
+.math-proofs-status-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.math-proofs-status,
+.math-proofs-count,
+.math-proofs-version,
+.math-proofs-filter,
+.math-proofs-refresh {
+  border-radius: 999px;
+  border: 1px solid var(--border-default, #374151);
+  background: var(--surface-2, #111827);
+  color: var(--text-primary, #f3f4f6);
+  padding: 0.5rem 0.85rem;
+  font-size: 0.9rem;
+}
+
+.math-proofs-status.ready {
+  border-color: rgba(34, 197, 94, 0.5);
+  color: #86efac;
+}
+
+.math-proofs-status.pending {
+  border-color: rgba(250, 204, 21, 0.4);
+  color: #fde68a;
+}
+
+.math-proofs-status.disabled {
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #fca5a5;
+}
+
+.math-proofs-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.math-proofs-toolbar-groups,
+.math-proofs-version-group {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.math-proofs-manual-panel {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 1rem 1.1rem;
+  border-radius: 1rem;
+  border: 1px solid var(--border-default, #374151);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.math-proofs-manual-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.math-proofs-manual-copy strong {
+  color: var(--text-primary, #f3f4f6);
+}
+
+.math-proofs-manual-copy span {
+  color: var(--text-secondary, #9ca3af);
+}
+
+.math-proofs-manual-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.math-proofs-manual-controls select,
+.math-proofs-run-check {
+  border-radius: 0.8rem;
+  border: 1px solid var(--border-default, #374151);
+  background: var(--surface-2, #111827);
+  color: var(--text-primary, #f3f4f6);
+  padding: 0.6rem 0.8rem;
+  font-size: 0.92rem;
+}
+
+.math-proofs-run-check {
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.math-proofs-run-check:hover:not(:disabled) {
+  border-color: var(--accent-green, #22c55e);
+  transform: translateY(-1px);
+}
+
+.math-proofs-run-check:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.math-proofs-banner {
+  padding: 0.95rem 1rem;
+  border-radius: 0.9rem;
+  border: 1px solid var(--border-default, #374151);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.math-proofs-banner.success {
+  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.math-proofs-banner.error {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+.math-proofs-filters {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.math-proofs-filter,
+.math-proofs-refresh,
+.math-proof-expand {
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.math-proofs-filter:hover,
+.math-proofs-refresh:hover,
+.math-proof-expand:hover {
+  border-color: var(--accent-green, #22c55e);
+  transform: translateY(-1px);
+}
+
+.math-proofs-filter.active {
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+}
+
+.math-proofs-filter--gold.active {
+  background: rgba(255, 214, 92, 0.14);
+  color: #ffd65c;
+}
+
+.math-proofs-filter--silver.active {
+  background: rgba(192, 192, 192, 0.14);
+  color: #d8d8d8;
+}
+
+.math-proofs-filter--bronze.active {
+  background: rgba(205, 127, 50, 0.14);
+  color: #e8a060;
+}
+
+.math-proofs-filter:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
+.math-proofs-empty,
+.math-proofs-error {
+  padding: 1.25rem;
+  border-radius: 1rem;
+  border: 1px solid var(--border-default, #374151);
+  background: var(--surface-2, #111827);
+  color: var(--text-secondary, #9ca3af);
+}
+
+.math-proofs-error {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.math-proofs-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.math-proof-card {
+  border: 1px solid var(--border-default, #374151);
+  border-radius: 1rem;
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.95), rgba(15, 23, 42, 0.96));
+  padding: 1rem 1.1rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+.math-proof-card.novel {
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.math-proof-card.known {
+  border-color: rgba(96, 165, 250, 0.28);
+}
+
+.math-proof-card.gold {
+  border-color: rgba(255, 214, 92, 0.45);
+}
+
+.math-proof-card.silver {
+  border-color: rgba(192, 192, 192, 0.45);
+}
+
+.math-proof-card.bronze {
+  border-color: rgba(205, 127, 50, 0.45);
+}
+
+.math-proof-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.math-proof-card-topline {
+  display: flex;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.math-proof-badge,
+.math-proof-source {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.78rem;
+  border: 1px solid var(--border-default, #374151);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.math-proof-badge.novel {
+  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.math-proof-badge.known {
+  color: #18cc17;
+  border-color: rgba(96, 165, 250, 0.35);
+}
+
+.math-proof-badge.gold {
+  color: #ffd65c;
+  border-color: rgba(255, 214, 92, 0.5);
+  background: rgba(255, 214, 92, 0.08);
+}
+
+.math-proof-badge.silver {
+  color: #d8d8d8;
+  border-color: rgba(192, 192, 192, 0.45);
+  background: rgba(192, 192, 192, 0.08);
+}
+
+.math-proof-badge.bronze {
+  color: #e8a060;
+  border-color: rgba(205, 127, 50, 0.45);
+  background: rgba(205, 127, 50, 0.08);
+}
+
+.math-proof-source {
+  color: var(--text-secondary, #9ca3af);
+}
+
+.math-proof-card h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.05rem;
+  line-height: 1.45;
+}
+
+.math-proof-summary {
+  margin: 0;
+  color: var(--text-secondary, #9ca3af);
+  line-height: 1.55;
+}
+
+.math-proof-expand {
+  padding: 0.55rem 0.85rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--border-default, #374151);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-primary, #f3f4f6);
+  white-space: nowrap;
+}
+
+.math-proof-meta {
+  margin-top: 0.8rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  color: var(--text-secondary, #9ca3af);
+  font-size: 0.86rem;
+}
+
+.math-proof-details {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.math-proof-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.math-proof-download {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(34, 197, 94, 0.28);
+  background: rgba(34, 197, 94, 0.08);
+  color: #86efac;
+  padding: 0.55rem 0.8rem;
+  text-decoration: none;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.math-proof-download:hover {
+  border-color: rgba(34, 197, 94, 0.5);
+  transform: translateY(-1px);
+}
+
+.math-proof-detail-block {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.85rem;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 0.85rem 0.95rem;
+}
+
+.math-proof-detail-block strong {
+  display: block;
+  margin-bottom: 0.45rem;
+  color: var(--text-primary, #f3f4f6);
+}
+
+.math-proof-dependency-groups {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.math-proof-dependency-heading {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary, #f3f4f6);
+  margin-bottom: 0.45rem;
+}
+
+.math-proof-dependency-list {
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.4rem;
+  color: var(--text-secondary, #cbd5e1);
+}
+
+.math-proof-dependency-list li {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.math-proof-dependency-kind {
+  display: inline-flex;
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  background: rgba(96, 165, 250, 0.08);
+  color: #18cc17;
+  font-size: 0.72rem;
+  padding: 0.08rem 0.45rem;
+}
+
+.math-proof-dependency-source,
+.math-proof-dependency-empty {
+  color: var(--text-secondary, #9ca3af);
+  font-size: 0.84rem;
+}
+
+.math-proof-code {
+  margin: 0;
+  padding: 0.85rem;
+  border-radius: 0.75rem;
+  background: #020617;
+  color: #d1fae5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 900px) {
+  .math-proofs-manual-controls {
+    width: 100%;
+  }
+
+  .math-proofs-manual-controls select,
+  .math-proofs-run-check {
+    width: 100%;
+  }
+
+  .math-proof-card-header {
+    flex-direction: column;
+  }
+
+  .math-proof-expand {
+    width: 100%;
+  }
+}

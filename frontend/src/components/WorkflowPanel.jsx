@@ -3,6 +3,9 @@ import { websocket } from '../services/websocket';
 import { boostAPI, workflowAPI } from '../services/api';
 import './WorkflowPanel.css';
 
+const HOURLY_AUTO_OPEN_INTERVAL_SECONDS = 3600;
+const WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY = 'workflow_panel_last_auto_open_hour';
+
 const formatNumber = (n) => n.toLocaleString();
 
 const formatTime = (totalSeconds) => {
@@ -13,7 +16,10 @@ const formatTime = (totalSeconds) => {
 };
 
 export default function WorkflowPanel({ isRunning }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    const savedState = localStorage.getItem('workflow_panel_collapsed');
+    return savedState === 'true';
+  });
   const [mode, setMode] = useState('idle');
   
   // Boost controls state
@@ -30,6 +36,8 @@ export default function WorkflowPanel({ isRunning }) {
   const [showPerModel, setShowPerModel] = useState(false);
   const [localElapsed, setLocalElapsed] = useState(0);
   const lastSyncRef = useRef(Date.now());
+  const hasElapsedSyncRef = useRef(false);
+  const lastAutoOpenedHourRef = useRef(0);
 
   const expandPanel = useCallback(() => {
     setCollapsed(false);
@@ -68,10 +76,42 @@ export default function WorkflowPanel({ isRunning }) {
   }, [fetchBoostStatus]);
 
   useEffect(() => {
-    if (boostEnabled) {
+    if (boostEnabled && isRunning) {
       expandPanel();
     }
-  }, [boostEnabled, expandPanel]);
+  }, [boostEnabled, expandPanel, isRunning]);
+
+  // Clear stale auto-open state when a new workflow session begins
+  useEffect(() => {
+    if (isRunning) {
+      lastAutoOpenedHourRef.current = 0;
+      localStorage.removeItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY);
+    }
+  }, [isRunning]);
+
+  useEffect(() => {
+    if (!isRunning || !hasElapsedSyncRef.current) {
+      return;
+    }
+
+    const elapsedHours = Math.floor(localElapsed / HOURLY_AUTO_OPEN_INTERVAL_SECONDS);
+    if (elapsedHours < 1 || elapsedHours <= lastAutoOpenedHourRef.current) {
+      return;
+    }
+
+    if (collapsed) {
+      expandPanel();
+    }
+
+    lastAutoOpenedHourRef.current = elapsedHours;
+    localStorage.setItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY, elapsedHours.toString());
+  }, [collapsed, expandPanel, isRunning, localElapsed]);
+
+  useEffect(() => {
+    if (!isEditingBoostNext) {
+      setBoostNextInput(boostNextCount > 0 ? boostNextCount.toString() : '');
+    }
+  }, [boostNextCount, isEditingBoostNext]);
 
   useEffect(() => {
     if (!isEditingBoostNext) {
@@ -120,10 +160,13 @@ export default function WorkflowPanel({ isRunning }) {
 
   // Token stats: initial fetch on mount and when isRunning changes
   useEffect(() => {
+    hasElapsedSyncRef.current = false;
+
     const fetchTokenStats = async () => {
       try {
         const resp = await workflowAPI.getTokenStats();
         if (resp.success) {
+          hasElapsedSyncRef.current = true;
           setTokenStats(resp);
           setLocalElapsed(resp.elapsed_seconds || 0);
           lastSyncRef.current = Date.now();
@@ -136,6 +179,7 @@ export default function WorkflowPanel({ isRunning }) {
   // Token stats: listen for real-time WebSocket updates
   useEffect(() => {
     const handleTokenUpdate = (data) => {
+      hasElapsedSyncRef.current = true;
       setTokenStats(data);
       setLocalElapsed(data.elapsed_seconds || 0);
       lastSyncRef.current = Date.now();
@@ -220,14 +264,6 @@ export default function WorkflowPanel({ isRunning }) {
       websocket.off('boost_always_prefer_updated', handleAlwaysPreferUpdated);
     };
   }, [isRunning, fetchBoostStatus, expandPanel]);
-
-  // Load collapsed state from localStorage
-  useEffect(() => {
-    const savedState = localStorage.getItem('workflow_panel_collapsed');
-    if (savedState !== null) {
-      setCollapsed(savedState === 'true');
-    }
-  }, []);
 
   const toggleCollapse = () => {
     const newState = !collapsed;

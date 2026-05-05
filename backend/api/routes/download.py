@@ -10,6 +10,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional
 
+from backend.shared.config import system_config
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/download", tags=["download"])
@@ -317,6 +319,12 @@ async def generate_pdf(req: PDFRequest):
 
     The event loop is never blocked — PDF generation runs in a worker thread.
     """
+    if system_config.generic_mode:
+        raise HTTPException(
+            status_code=501,
+            detail="PDF generation unavailable in web mode. Use raw text download.",
+        )
+
     if not req.html_body or not req.html_body.strip():
         raise HTTPException(status_code=400, detail="html_body is required and cannot be empty")
 
@@ -351,4 +359,4 @@ async def generate_pdf(req: PDFRequest):
         )
     except Exception as e:
         logger.error(f"PDF generation failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="PDF generation failed")

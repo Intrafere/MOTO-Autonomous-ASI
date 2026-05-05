@@ -486,7 +486,7 @@ class Coordinator:
         if should_pause != self.should_pause_submitters:
             self.should_pause_submitters = should_pause
             if should_pause:
-                logger.warning(f"Queue size ({queue_size}) >= threshold ({system_config.queue_overflow_threshold}). Pausing submitters.")
+                logger.info(f"Queue size ({queue_size}) >= threshold ({system_config.queue_overflow_threshold}). Pausing submitters.")
                 await self._broadcast("submitters_paused", {
                     "queue_size": queue_size,
                     "threshold": system_config.queue_overflow_threshold
@@ -496,6 +496,25 @@ class Coordinator:
                 await self._broadcast("submitters_resumed", {
                     "queue_size": queue_size
                 })
+    
+    async def should_pause_submitter(self, submitter_id: int) -> bool:
+        """
+        Per-submitter fairness gate.
+        
+        Returns True if:
+          - the global queue-overflow pause is active (queue >= queue_overflow_threshold), OR
+          - this specific submitter already has more than per_submitter_queue_threshold
+            of its own submissions waiting in the queue.
+        
+        The per-submitter cap is skipped when only one submitter is configured
+        (no one else to be fair to - the global cap alone governs throughput).
+        """
+        if self.should_pause_submitters:
+            return True
+        if len(self.submitters) <= 1:
+            return False
+        own_count = await queue_manager.count_for_submitter(submitter_id)
+        return own_count > system_config.per_submitter_queue_threshold
     
     async def start(self) -> None:
         """Start the aggregator system."""
@@ -623,7 +642,7 @@ class Coordinator:
                 if self.broadcast_callback:
                     await self.broadcast_callback("free_models_exhausted", {
                         "role_id": "aggregator_validator",
-                        "message": str(e),
+                        "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except Exception as e:
@@ -725,7 +744,7 @@ class Coordinator:
                 if self.broadcast_callback:
                     await self.broadcast_callback("free_models_exhausted", {
                         "role_id": "aggregator_single_model",
-                        "message": str(e),
+                        "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except Exception as e:
@@ -1005,7 +1024,7 @@ class Coordinator:
             logger.error(f"Cleanup review failed: {e}", exc_info=True)
             await self._broadcast("cleanup_review_error", {
                 "review_number": self.cleanup_reviews_performed,
-                "error": str(e)
+                "error": "Cleanup review encountered an internal error"
             })
     
     async def _on_training_update(self) -> None:
@@ -1091,7 +1110,7 @@ class Coordinator:
         except Exception as e:
             logger.error(f"Incremental re-chunking FAILED: {e}", exc_info=True)
             await self._broadcast("rechunk_error", {
-                "error": str(e),
+                "error": "Incremental re-chunking failed",
                 "message": "Incremental re-chunking failed but system continues"
             })
         finally:

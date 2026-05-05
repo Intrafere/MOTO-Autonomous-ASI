@@ -21,6 +21,13 @@ ABSTRACT_PLACEHOLDER = "[HARD CODED PLACEHOLDER FOR THE ABSTRACT SECTION - TO BE
 INTRO_PLACEHOLDER = "[HARD CODED PLACEHOLDER FOR INTRODUCTION SECTION - TO BE WRITTEN AFTER THE CONCLUSION SECTION IS COMPLETE]"
 CONCLUSION_PLACEHOLDER = "[HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION - TO BE WRITTEN AFTER THE BODY SECTION IS COMPLETE]"
 
+# Theorems appendix bracket markers - wrap the Lean-4-verified theorems appendix.
+# System-managed; the body is free-form and may be empty (default placeholder line)
+# or contain theorem entries appended by the rigor flow.
+THEOREMS_APPENDIX_START = "[HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]"
+THEOREMS_APPENDIX_END = "[HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]"
+APPENDIX_EMPTY_PLACEHOLDER = "[Theorems appendix - verified Lean 4 theorems not placed inline will appear here]"
+
 
 class PaperMemory:
     """
@@ -179,12 +186,18 @@ class PaperMemory:
         Args:
             first_body_content: The first body section content (already validated)
         """
-        # Build paper with placeholders framing the body content
+        # Build paper with placeholders framing the body content.
+        # Appendix block sits between the conclusion placeholder and the paper anchor;
+        # its body starts as the empty-placeholder line and is later replaced /
+        # appended to by append_to_theorems_appendix.
         paper = (
             f"{ABSTRACT_PLACEHOLDER}\n\n"
             f"{INTRO_PLACEHOLDER}\n\n"
             f"{first_body_content}\n\n"
             f"{CONCLUSION_PLACEHOLDER}\n\n"
+            f"{THEOREMS_APPENDIX_START}\n"
+            f"{APPENDIX_EMPTY_PLACEHOLDER}\n"
+            f"{THEOREMS_APPENDIX_END}\n\n"
             f"{PAPER_ANCHOR}"
         )
         
@@ -284,13 +297,17 @@ class PaperMemory:
                     ABSTRACT_PLACEHOLDER not in line and
                     INTRO_PLACEHOLDER not in line and
                     CONCLUSION_PLACEHOLDER not in line and
+                    THEOREMS_APPENDIX_START not in line and
+                    THEOREMS_APPENDIX_END not in line and
                     PAPER_ANCHOR not in line):
                     body_start_idx = i
                     break
             
-            # Find where body ends (at CONCLUSION_PLACEHOLDER or PAPER_ANCHOR)
+            # Find where body ends (at CONCLUSION_PLACEHOLDER, THEOREMS_APPENDIX_START, or PAPER_ANCHOR)
             for i, line in enumerate(lines):
-                if CONCLUSION_PLACEHOLDER in line or PAPER_ANCHOR in line:
+                if (CONCLUSION_PLACEHOLDER in line
+                        or THEOREMS_APPENDIX_START in line
+                        or PAPER_ANCHOR in line):
                     body_end_idx = i
                     break
             
@@ -371,6 +388,152 @@ class PaperMemory:
         async with self._lock:
             return self.previous_versions.copy()
     
+    def _extract_body_and_appendix(self, paper: str) -> tuple[str, str]:
+        """
+        Split existing paper into (body_lines_text, appendix_body_text).
+        
+        The "body" is all non-marker content that sits OUTSIDE the
+        THEOREMS_APPENDIX_START / THEOREMS_APPENDIX_END brackets. The
+        "appendix body" is everything BETWEEN those two markers (preserved
+        verbatim so repair operations never lose verified-theorem entries).
+        
+        Marker lines themselves (placeholders + anchor + appendix brackets)
+        are stripped from the body half; they get re-emitted by the repair
+        logic.
+        
+        Args:
+            paper: Raw paper content
+        
+        Returns:
+            (body_text, appendix_body_text). Both stripped. Either may be "".
+        """
+        lines = paper.split('\n')
+        body_lines: list[str] = []
+        appendix_lines: list[str] = []
+        in_appendix = False
+        
+        for line in lines:
+            if THEOREMS_APPENDIX_START in line:
+                in_appendix = True
+                continue
+            if THEOREMS_APPENDIX_END in line:
+                in_appendix = False
+                continue
+            
+            if in_appendix:
+                appendix_lines.append(line)
+                continue
+            
+            # Outside the appendix: skip structural markers
+            if (ABSTRACT_PLACEHOLDER in line
+                    or INTRO_PLACEHOLDER in line
+                    or CONCLUSION_PLACEHOLDER in line
+                    or PAPER_ANCHOR in line):
+                continue
+            
+            body_lines.append(line)
+        
+        return '\n'.join(body_lines).strip(), '\n'.join(appendix_lines).strip()
+    
+    def _build_appendix_block(self, appendix_body: str) -> str:
+        """
+        Produce the fully-bracketed appendix block as it should appear in
+        the paper file. When the caller has no entries yet, the empty
+        placeholder line is used so the LLM-facing rendering stays readable.
+        """
+        body = (appendix_body or "").strip()
+        if not body:
+            body = APPENDIX_EMPTY_PLACEHOLDER
+        return (
+            f"{THEOREMS_APPENDIX_START}\n"
+            f"{body}\n"
+            f"{THEOREMS_APPENDIX_END}"
+        )
+    
+    async def append_to_theorems_appendix(self, theorem_entry: str) -> bool:
+        """
+        Atomically append a verified-theorem entry to the Theorems Appendix.
+        
+        - Locates the THEOREMS_APPENDIX_END marker and inserts the new entry
+          immediately above it.
+        - If the appendix is still carrying the default APPENDIX_EMPTY_PLACEHOLDER
+          line, that line is replaced wholesale by the new entry (first entry).
+        - If neither marker exists yet, the paper is left untouched and False
+          is returned (caller should trigger ensure_markers_intact first).
+        - Triggers the re-chunking callback outside the lock so RAG sees the
+          new theorem text.
+        
+        Args:
+            theorem_entry: Preformatted entry (statement + Lean code + trailing
+                separator). Caller controls formatting.
+        
+        Returns:
+            True on success, False when the paper is missing or markers aren't
+            present yet.
+        """
+        entry = (theorem_entry or "").strip()
+        if not entry:
+            logger.warning("append_to_theorems_appendix called with empty entry")
+            return False
+        
+        final_content: Optional[str] = None
+        
+        async with self._lock:
+            if not self.file_path.exists():
+                logger.warning("Cannot append to appendix: paper file does not exist")
+                return False
+            
+            async with aiofiles.open(self.file_path, 'r', encoding='utf-8') as f:
+                paper = await f.read()
+            
+            if THEOREMS_APPENDIX_START not in paper or THEOREMS_APPENDIX_END not in paper:
+                logger.warning(
+                    "Appendix markers missing - cannot append theorem entry. "
+                    "Caller should call ensure_markers_intact() first."
+                )
+                return False
+            
+            body_text, appendix_body = self._extract_body_and_appendix(paper)
+            
+            # First real entry replaces the empty placeholder
+            if not appendix_body or appendix_body.strip() == APPENDIX_EMPTY_PLACEHOLDER:
+                new_appendix_body = entry
+            else:
+                new_appendix_body = f"{appendix_body}\n\n{entry}"
+            
+            # Reconstruct paper using the bracketed appendix block in the same
+            # slot it currently occupies. Simplest correct approach: locate
+            # the original bracket span and swap it out.
+            start_idx = paper.find(THEOREMS_APPENDIX_START)
+            end_idx = paper.find(THEOREMS_APPENDIX_END, start_idx)
+            if start_idx < 0 or end_idx < 0:
+                # Defensive: should not happen given the earlier guard.
+                logger.error("Appendix markers disappeared between checks")
+                return False
+            end_idx += len(THEOREMS_APPENDIX_END)
+            
+            new_block = self._build_appendix_block(new_appendix_body)
+            new_paper = paper[:start_idx] + new_block + paper[end_idx:]
+            
+            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
+                await f.write(new_paper)
+            
+            self.version += 1
+            final_content = new_paper
+            logger.info(
+                f"Appended theorem to appendix (version {self.version}, "
+                f"appendix now {len(new_appendix_body)} chars)"
+            )
+        
+        # Trigger re-chunking callback OUTSIDE the lock to avoid deadlock
+        if final_content and self.rechunk_callback:
+            try:
+                await self.rechunk_callback(final_content)
+            except Exception as e:
+                logger.error(f"Re-chunking callback failed after appendix append: {e}")
+        
+        return True
+    
     async def ensure_placeholders_exist(self) -> bool:
         """
         Ensure placeholders exist in the paper when resuming from an existing file.
@@ -404,6 +567,8 @@ class PaperMemory:
             has_intro_placeholder = INTRO_PLACEHOLDER in paper
             has_conclusion_placeholder = CONCLUSION_PLACEHOLDER in paper
             has_anchor = PAPER_ANCHOR in paper
+            has_appendix_start = THEOREMS_APPENDIX_START in paper
+            has_appendix_end = THEOREMS_APPENDIX_END in paper
             
             # Check for actual section content (not placeholders)
             # Use flexible patterns to detect if sections have been written
@@ -442,36 +607,38 @@ class PaperMemory:
                 else:
                     return len(after_header_sample) > 50  # No keywords, check substance
             
-            has_abstract_content = has_real_section_content(r'^Abstract\s*$', paper)
-            has_intro_content = has_real_section_content(r'^I\.?\s+Introduction|^Introduction\s*$', paper)
-            has_conclusion_content = has_real_section_content(r'^(?:[IVXLCDM]+\.?\s+)?Conclusion\s*$|^\d+\.?\s+Conclusion\s*$', paper)
+            has_abstract_content = has_real_section_content(
+                r'^(?:Abstract\s*|\\(?:section|chapter)\*?\{Abstract\}|\\begin\{abstract\})\s*$',
+                paper,
+            )
+            has_intro_content = has_real_section_content(
+                r'^(?:(?:I\.?\s+)?Introduction|\\(?:section|chapter)\*?\{(?:I\.?\s*)?Introduction\})\s*$',
+                paper,
+            )
+            has_conclusion_content = has_real_section_content(
+                r'^(?:(?:[IVXLCDM]+\.?\s+|\d+\.?\s+)?Conclusion|\\(?:section|chapter)\*?\{Conclusion\})\s*$',
+                paper,
+            )
             
-            # If all placeholders exist OR corresponding content exists, nothing to do
-            if (has_abstract_placeholder or has_abstract_content) and \
-               (has_intro_placeholder or has_intro_content) and \
-               (has_conclusion_placeholder or has_conclusion_content):
-                logger.info("Placeholders check: All sections either have placeholders or actual content")
+            # Real section content supersedes its placeholder. If both are
+            # present, rebuild below to strip the stale placeholder.
+            if (((has_abstract_placeholder or has_abstract_content) and not (has_abstract_placeholder and has_abstract_content)) and
+                    ((has_intro_placeholder or has_intro_content) and not (has_intro_placeholder and has_intro_content)) and
+                    ((has_conclusion_placeholder or has_conclusion_content) and not (has_conclusion_placeholder and has_conclusion_content)) and
+                    has_appendix_start and has_appendix_end):
+                logger.info("Placeholders check: all sections present and appendix intact")
                 return False
             
-            logger.info(f"Placeholder check - abstract: {has_abstract_placeholder}/{has_abstract_content}, "
-                       f"intro: {has_intro_placeholder}/{has_intro_content}, "
-                       f"conclusion: {has_conclusion_placeholder}/{has_conclusion_content}")
+            logger.info(
+                f"Placeholder check - abstract: {has_abstract_placeholder}/{has_abstract_content}, "
+                f"intro: {has_intro_placeholder}/{has_intro_content}, "
+                f"conclusion: {has_conclusion_placeholder}/{has_conclusion_content}, "
+                f"appendix: {has_appendix_start}/{has_appendix_end}"
+            )
             
-            # Need to add missing placeholders
-            # Extract current body content (everything that's not a placeholder or anchor)
-            lines = paper.split('\n')
-            body_lines = []
-            
-            for line in lines:
-                # Skip existing placeholders and anchor
-                if ABSTRACT_PLACEHOLDER in line or \
-                   INTRO_PLACEHOLDER in line or \
-                   CONCLUSION_PLACEHOLDER in line or \
-                   PAPER_ANCHOR in line:
-                    continue
-                body_lines.append(line)
-            
-            body_content = '\n'.join(body_lines).strip()
+            # Need to add missing placeholders. Preserve any existing appendix
+            # body content while we rebuild the skeleton.
+            body_content, appendix_body = self._extract_body_and_appendix(paper)
             
             if not body_content:
                 logger.warning("No body content found - cannot add placeholders to empty paper")
@@ -500,6 +667,11 @@ class PaperMemory:
             if not has_conclusion_content:
                 new_paper_parts.append(CONCLUSION_PLACEHOLDER)
                 new_paper_parts.append("")
+            
+            # Theorems Appendix (preserve existing entries if any, otherwise
+            # insert the empty placeholder line inside the bracket pair)
+            new_paper_parts.append(self._build_appendix_block(appendix_body))
+            new_paper_parts.append("")
             
             # Anchor at end
             new_paper_parts.append(PAPER_ANCHOR)
@@ -544,6 +716,8 @@ class PaperMemory:
             has_intro_placeholder = INTRO_PLACEHOLDER in paper
             has_conclusion_placeholder = CONCLUSION_PLACEHOLDER in paper
             has_anchor = PAPER_ANCHOR in paper
+            has_appendix_start = THEOREMS_APPENDIX_START in paper
+            has_appendix_end = THEOREMS_APPENDIX_END in paper
             
             # Check for actual section content (not placeholders)
             # CRITICAL: Must distinguish between real content and fake placeholders inserted by model
@@ -581,31 +755,29 @@ class PaperMemory:
                 else:
                     return len(after_header_sample) > 50  # No keywords, check substance
             
-            has_abstract_content = has_real_section_content(r'^Abstract\s*$', paper)
-            has_intro_content = has_real_section_content(r'^I\.?\s+Introduction|^Introduction\s*$', paper)
-            has_conclusion_content = has_real_section_content(r'^(?:[IVXLCDM]+\.?\s+)?Conclusion\s*$|^\d+\.?\s+Conclusion\s*$', paper)
+            has_abstract_content = has_real_section_content(
+                r'^(?:Abstract\s*|\\(?:section|chapter)\*?\{Abstract\}|\\begin\{abstract\})\s*$',
+                paper,
+            )
+            has_intro_content = has_real_section_content(
+                r'^(?:(?:I\.?\s+)?Introduction|\\(?:section|chapter)\*?\{(?:I\.?\s*)?Introduction\})\s*$',
+                paper,
+            )
+            has_conclusion_content = has_real_section_content(
+                r'^(?:(?:[IVXLCDM]+\.?\s+|\d+\.?\s+)?Conclusion|\\(?:section|chapter)\*?\{Conclusion\})\s*$',
+                paper,
+            )
             
-            # If all markers exist OR corresponding content exists, nothing to repair
-            if (has_abstract_placeholder or has_abstract_content) and \
-               (has_intro_placeholder or has_intro_content) and \
-               (has_conclusion_placeholder or has_conclusion_content) and \
-               has_anchor:
+            # Real section content supersedes its placeholder. If both are
+            # present, rebuild below to strip the stale placeholder.
+            if ((has_abstract_placeholder or has_abstract_content) and not (has_abstract_placeholder and has_abstract_content)) and \
+               ((has_intro_placeholder or has_intro_content) and not (has_intro_placeholder and has_intro_content)) and \
+               ((has_conclusion_placeholder or has_conclusion_content) and not (has_conclusion_placeholder and has_conclusion_content)) and \
+               has_anchor and has_appendix_start and has_appendix_end:
                 return False
             
-            # Need to repair - extract body content
-            lines = paper.split('\n')
-            body_lines = []
-            
-            for line in lines:
-                # Skip existing placeholders and anchor
-                if ABSTRACT_PLACEHOLDER in line or \
-                   INTRO_PLACEHOLDER in line or \
-                   CONCLUSION_PLACEHOLDER in line or \
-                   PAPER_ANCHOR in line:
-                    continue
-                body_lines.append(line)
-            
-            body_content = '\n'.join(body_lines).strip()
+            # Need to repair - preserve body + appendix body across the rebuild
+            body_content, appendix_body = self._extract_body_and_appendix(paper)
             
             if not body_content:
                 # Empty paper - just ensure anchor exists
@@ -637,6 +809,10 @@ class PaperMemory:
             if not has_conclusion_content:
                 new_paper_parts.append(CONCLUSION_PLACEHOLDER)
                 new_paper_parts.append("")
+            
+            # Theorems Appendix (preserve existing entries, default otherwise)
+            new_paper_parts.append(self._build_appendix_block(appendix_body))
+            new_paper_parts.append("")
             
             # Anchor at end
             new_paper_parts.append(PAPER_ANCHOR)

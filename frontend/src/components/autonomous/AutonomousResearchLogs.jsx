@@ -21,7 +21,8 @@ const EMPTY_API_STATS = Object.freeze({
 });
 
 const AutonomousResearchLogs = ({ stats, events }) => {
-  const eventsEndRef = useRef(null);
+  const eventsContainerRef = useRef(null);
+  const prevEventsLengthRef = useRef(0);
   const [expandedSubmitters, setExpandedSubmitters] = useState({});
   
   // API Logs state
@@ -32,10 +33,13 @@ const AutonomousResearchLogs = ({ stats, events }) => {
   const [apiAutoRefresh, setApiAutoRefresh] = useState(true);
   const abortControllerRef = useRef(null);
 
+  // Auto-scroll event log only when new events are added (not on mount/tab switch)
   useEffect(() => {
-    if (eventsEndRef.current) {
-      eventsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    const currentLength = events ? events.length : 0;
+    if (currentLength > prevEventsLengthRef.current && eventsContainerRef.current) {
+      eventsContainerRef.current.scrollTop = eventsContainerRef.current.scrollHeight;
     }
+    prevEventsLengthRef.current = currentLength;
   }, [events]);
 
   // Fetch API logs
@@ -294,6 +298,40 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         return data.should_remove 
           ? `Redundancy: Removed ${data.paper_id}` 
           : 'Redundancy: No removal needed';
+      case 'proof_framing_decided':
+        return data.is_proof_amenable
+          ? 'Proof framing enabled for this run'
+          : 'Proof framing not applied for this run';
+      case 'proof_check_started':
+        if (data.trigger === 'manual') {
+          return `Manual proof check started for ${data.source_type} ${data.source_id}`;
+        }
+        if (data.trigger === 'retry') {
+          return `Paper-stage proof retry started for ${data.source_type} ${data.source_id}`;
+        }
+        return `Proof check started for ${data.source_type} ${data.source_id}`;
+      case 'proof_retry_scheduled':
+        return `Scheduled ${data.count || 0} proof retry candidate(s) for paper ${data.source_id}`;
+      case 'proof_retry_started':
+        return `Retrying ${data.count || 0} failed proof candidate(s) against paper ${data.source_id}`;
+      case 'proof_check_no_candidates':
+        return `No formal theorem candidates found in ${data.source_type} ${data.source_id}`;
+      case 'proof_check_candidates_found':
+        return `Proof candidates found: ${data.count || 0}`;
+      case 'proof_attempt_started':
+        return `Proof attempt ${data.attempt || 1}: ${data.theorem_statement || data.theorem_id}`;
+      case 'proof_attempt_failed':
+        return `Proof attempt ${data.attempt || '?'} failed: ${data.error_summary || data.theorem_statement || data.theorem_id}`;
+      case 'proof_verified':
+        return `Lean 4 verified: ${data.theorem_statement || data.theorem_id}`;
+      case 'proof_attempts_exhausted':
+        return `Proof attempts exhausted: ${data.theorem_statement || data.theorem_id}`;
+      case 'novel_proof_discovered':
+        return `Novel proof discovered: ${data.theorem_statement}`;
+      case 'known_proof_verified':
+        return `Known proof verified for ${data.source_type} ${data.source_id}`;
+      case 'proof_check_complete':
+        return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
       default:
         return event.event;
     }
@@ -301,6 +339,28 @@ const AutonomousResearchLogs = ({ stats, events }) => {
 
   const getEventClass = (event) => {
     const eventName = event.event || '';
+    if (eventName === 'proof_attempt_failed' || eventName === 'proof_attempts_exhausted') {
+      return 'log-reject';
+    }
+    if (
+      eventName === 'proof_verified' ||
+      eventName === 'novel_proof_discovered' ||
+      eventName === 'known_proof_verified' ||
+      eventName === 'proof_check_complete'
+    ) {
+      return 'log-success';
+    }
+    if (
+      eventName === 'proof_framing_decided' ||
+      eventName === 'proof_check_started' ||
+      eventName === 'proof_retry_scheduled' ||
+      eventName === 'proof_retry_started' ||
+      eventName === 'proof_check_no_candidates' ||
+      eventName === 'proof_check_candidates_found' ||
+      eventName === 'proof_attempt_started'
+    ) {
+      return 'log-info';
+    }
     if (eventName.includes('completed') || eventName.includes('accepted') || eventName === 'submission_accepted' || eventName === 'topic_exploration_complete' || eventName === 'paper_title_exploration_complete') {
       return 'log-success';
     }
@@ -663,7 +723,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
 
       {/* Event Log */}
       <h4 style={{ marginTop: '20px' }}>Event Log</h4>
-      <div className="logs-events">
+      <div className="logs-events" ref={eventsContainerRef}>
         {(!events || events.length === 0) ? (
           <div className="auto-empty-state">
             No events recorded yet.
@@ -686,7 +746,6 @@ const AutonomousResearchLogs = ({ stats, events }) => {
             </div>
           ))
         )}
-        <div ref={eventsEndRef} />
       </div>
     </div>
   );

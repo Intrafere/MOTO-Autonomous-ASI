@@ -6,6 +6,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import './AutonomousResearch.css';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
+import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 
 const BrainstormList = ({ brainstorms, onRefresh, api }) => {
@@ -18,6 +19,13 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
   const [showLatex, setShowLatex] = useState(true);
   const [userChoseLatex, setUserChoseLatex] = useState(false);
   const unsubscribeRef = useRef(null);
+  const [proofActionMessage, setProofActionMessage] = useState('');
+  const {
+    getSourceState,
+    manualCheckEnabled,
+    manualCheckReason,
+    queueManualProofCheck,
+  } = useProofCheckRuntime();
 
   // Auto-disable LaTeX rendering when brainstorm grows large (>50k chars).
   // Only fires if the user has not explicitly toggled the LaTeX checkbox.
@@ -50,18 +58,37 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
 
   // Subscribe to WebSocket events for immediate updates
   useEffect(() => {
-    const handleSubmissionAccepted = async (data) => {
-      if (expandedId && data.topic_id === expandedId) {
-        try {
-          const refreshedData = await api.getBrainstorm(expandedId);
-          setFileContent(refreshedData.content || 'No content yet...');
-        } catch (error) {
-          console.error('Failed to refresh submissions:', error);
-        }
+    const refreshExpandedBrainstorm = async () => {
+      try {
+        const refreshedData = await api.getBrainstorm(expandedId);
+        setFileContent(refreshedData.content || 'No content yet...');
+      } catch (error) {
+        console.error('Failed to refresh brainstorm content:', error);
       }
     };
 
-    unsubscribeRef.current = websocket.on('brainstorm_submission_accepted', handleSubmissionAccepted);
+    const handleSubmissionAccepted = async (data) => {
+      if (expandedId && data.topic_id === expandedId) {
+        await refreshExpandedBrainstorm();
+      }
+    };
+
+    const handleNovelProofDiscovered = async (data) => {
+      if (
+        expandedId &&
+        data.source_type === 'brainstorm' &&
+        data.source_id === expandedId
+      ) {
+        await refreshExpandedBrainstorm();
+      }
+    };
+
+    const unsubscribeSubmission = websocket.on('brainstorm_submission_accepted', handleSubmissionAccepted);
+    const unsubscribeNovelProof = websocket.on('novel_proof_discovered', handleNovelProofDiscovered);
+    unsubscribeRef.current = () => {
+      unsubscribeSubmission();
+      unsubscribeNovelProof();
+    };
     return () => {
       if (unsubscribeRef.current) {
         unsubscribeRef.current();
@@ -129,6 +156,20 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
     URL.revokeObjectURL(url);
   };
 
+  const handleProofCheck = async (e, brainstorm) => {
+    e.stopPropagation();
+    try {
+      setProofActionMessage('');
+      await queueManualProofCheck({
+        sourceType: 'brainstorm',
+        sourceId: brainstorm.topic_id,
+      });
+      setProofActionMessage(`Queued proof check for brainstorm ${brainstorm.topic_id}.`);
+    } catch (error) {
+      setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    }
+  };
+
   const formatDate = (dateStr) => {
     if (!dateStr) return 'N/A';
     return new Date(dateStr).toLocaleString();
@@ -164,6 +205,12 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
       <div className="brainstorm-list-warning">
         (WARNING: Any given brainstorm idea may be pruned/deleted if the AI deems it to hurt the collective database quality. These brainstorms are the real powerhouse behind the ASI creativity! The brainstorms themselves often contain many great ideas that get turned into the stage 2 papers.)
       </div>
+
+      {proofActionMessage && (
+        <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
+          {proofActionMessage}
+        </div>
+      )}
 
       {brainstorms.map((brainstorm) => (
         <div
@@ -212,13 +259,39 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
                 </div>
               </div>
             ) : (
-              <button 
-                className="btn-delete-brainstorm"
-                onClick={(e) => handleDeleteClick(e, brainstorm.topic_id)}
-                title="Delete brainstorm and associated papers"
-              >
-                Delete
-              </button>
+              <>
+                {(() => {
+                  const proofCheckState = getSourceState('brainstorm', brainstorm.topic_id);
+                  const proofCheckLabel = proofCheckState?.status === 'queued'
+                    ? 'Queueing Proof Check...'
+                    : proofCheckState?.status === 'running'
+                      ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
+                      : 'Try to prove with Lean 4 theorem prover';
+                  const disabledReason = brainstorm.status !== 'complete'
+                    ? 'Manual proof checks require a completed brainstorm.'
+                    : manualCheckReason;
+                  return (
+                    <button
+                      className="btn-download-small"
+                      onClick={(e) => handleProofCheck(e, brainstorm)}
+                      disabled={!manualCheckEnabled || Boolean(proofCheckState) || brainstorm.status !== 'complete'}
+                      title={proofCheckState?.status === 'running'
+                        ? 'A proof verification is already running for this brainstorm.'
+                        : disabledReason || 'Queue a manual proof check for this brainstorm.'}
+                    >
+                      {proofCheckLabel}
+                    </button>
+                  );
+                })()}
+
+                <button 
+                  className="btn-delete-brainstorm"
+                  onClick={(e) => handleDeleteClick(e, brainstorm.topic_id)}
+                  title="Delete brainstorm and associated papers"
+                >
+                  Delete
+                </button>
+              </>
             )}
           </div>
 

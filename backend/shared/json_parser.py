@@ -469,7 +469,7 @@ def sanitize_json_response(raw_content: str) -> str:
     # (e.g., \pi, \phi, \epsilon, \alpha, \gamma, \delta, etc.)
     
     def robust_escape_latex(text):
-        """
+        r"""
         Parse JSON string and escape invalid backslash sequences.
         Handles complex nested LaTeX like \\phi_{\\\\\\pi_v} correctly.
         
@@ -521,8 +521,8 @@ def sanitize_json_response(raw_content: str) -> str:
                         continue
                     
                     # Valid JSON escape sequences  
-                    if next_char in '"\/':
-                        # \", \/, - valid escapes, keep as-is
+                    if next_char in '"\\/':
+                        # \", \\, \/ - valid escapes, keep as-is
                         result.append(char)
                         i += 1
                         continue

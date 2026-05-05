@@ -8,6 +8,7 @@ This ensures the final answer is synthesized from validated, complete research p
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -86,6 +87,86 @@ class FinalAnswerMemory:
             base_dir = session_dir / "final_answer"
 
         return base_dir if base_dir.exists() else None
+
+    @staticmethod
+    def _normalize_user_prompt(prompt: Any) -> str:
+        """Normalize prompt values loaded from mixed legacy/session metadata."""
+        return prompt.strip() if isinstance(prompt, str) else ""
+
+    @classmethod
+    def _derive_prompt_from_session_id(cls, session_id: str) -> str:
+        """Recover a readable prompt from the session folder slug when metadata is blank."""
+        if session_id == "legacy":
+            return "Legacy research session"
+
+        prompt_slug = re.sub(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$", "", session_id or "")
+        prompt = prompt_slug.replace("_", " ").strip()
+        if not prompt:
+            return "Unknown research question"
+
+        return prompt[0].upper() + prompt[1:]
+
+    @classmethod
+    def _select_user_prompt(cls, session_id: str, *candidates: Any) -> str:
+        """Choose the best available prompt, falling back to a readable session slug."""
+        for candidate in candidates:
+            prompt = cls._normalize_user_prompt(candidate)
+            if prompt and prompt != "Unknown research question":
+                return prompt
+
+        return cls._derive_prompt_from_session_id(session_id)
+
+    @classmethod
+    async def _read_session_metadata_prompt(cls, session_id: str, base_dir: Optional[Path] = None) -> str:
+        """Read the prompt from sibling session metadata for legacy and session-scoped answers."""
+        if session_id == "legacy":
+            metadata_path = Path(system_config.auto_research_metadata_file)
+        elif base_dir is not None:
+            metadata_path = base_dir.parent / "session_metadata.json"
+        else:
+            try:
+                session_dir = resolve_path_within_root(
+                    Path(system_config.auto_sessions_base_dir),
+                    validate_single_path_component(session_id, "final answer ID"),
+                )
+            except ValueError:
+                return cls._derive_prompt_from_session_id(session_id)
+
+            metadata_path = session_dir / "session_metadata.json"
+
+        if not metadata_path.exists():
+            return cls._derive_prompt_from_session_id(session_id)
+
+        try:
+            async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.loads(await f.read())
+        except Exception as e:
+            logger.warning(f"Failed to read final answer prompt metadata for {session_id}: {e}")
+            return cls._derive_prompt_from_session_id(session_id)
+
+        return cls._select_user_prompt(
+            session_id,
+            metadata.get("user_prompt"),
+            metadata.get("user_research_prompt"),
+        )
+
+    @classmethod
+    def _extract_user_prompt_from_state(
+        cls,
+        session_id: str,
+        state_data: Dict[str, Any],
+        session_metadata_prompt: str,
+    ) -> str:
+        """Resolve the display prompt from Tier 3 state with metadata and slug fallbacks."""
+        model_usage = state_data.get("model_usage", {}) or {}
+        cert_assess = state_data.get("certainty_assessment", {}) or {}
+
+        return cls._select_user_prompt(
+            session_id,
+            model_usage.get("user_prompt"),
+            cert_assess.get("user_prompt"),
+            session_metadata_prompt,
+        )
     
     def set_session_manager(self, session_manager) -> None:
         """Set session manager for session-based path resolution."""
@@ -583,7 +664,7 @@ class FinalAnswerMemory:
             "=" * 80,
             "AUTONOMOUS AI SOLUTION",
             "",
-            "Disclaimer: This content is provided for informational and experimental purposes only. This paper was autonomously generated with the novelty-seeking MOTO harness without peer review or user oversight beyond the original prompt. It may contain incorrect, incomplete, misleading, or fabricated claims presented with high confidence. Use of this content is at your own risk. You are solely responsible for reviewing and independently verifying any output before relying on it, and the developers, operators, and contributors are not responsible for errors, omissions, decisions made from this content, or any resulting loss, damage, cost, or liability.",
+            "Disclaimer: This content is provided for informational purposes only. This paper was autonomously generated with the novelty-seeking MOTO harness without peer review or user oversight beyond the original prompt. It may contain incorrect, incomplete, misleading, or fabricated claims presented with high confidence. Use of this content is at your own risk. You are solely responsible for reviewing and independently verifying any output before relying on it, and the developers, operators, and contributors are not responsible for errors, omissions, decisions made from this content, or any resulting loss, damage, cost, or liability.",
             "",
             f"User's Research Prompt: {display_prompt}",
             "",
@@ -1355,12 +1436,12 @@ class FinalAnswerMemory:
                             title = state_data.get("short_form_title", "Untitled Paper")
                             chapter_count = 0
                         
-                        # Get user prompt from model_usage or certainty assessment
-                        model_usage = state_data.get("model_usage", {})
-                        user_prompt = model_usage.get("user_prompt", "")
-                        if not user_prompt:
-                            cert_assess = state_data.get("certainty_assessment", {})
-                            user_prompt = cert_assess.get("user_prompt", "Unknown research question")
+                        session_metadata_prompt = await self._read_session_metadata_prompt("legacy", legacy_dir)
+                        user_prompt = self._extract_user_prompt_from_state(
+                            "legacy",
+                            state_data,
+                            session_metadata_prompt,
+                        )
                         
                         certainty_level = state_data.get("certainty_assessment", {}).get("certainty_level", "unknown")
                         completion_date = state_data.get("timestamp", datetime.now().isoformat())
@@ -1431,12 +1512,15 @@ class FinalAnswerMemory:
                             title = state_data.get("short_form_title", "Untitled Paper")
                             chapter_count = 0
                         
-                        # Get user prompt
-                        model_usage = state_data.get("model_usage", {})
-                        user_prompt = model_usage.get("user_prompt", "")
-                        if not user_prompt:
-                            cert_assess = state_data.get("certainty_assessment", {})
-                            user_prompt = cert_assess.get("user_prompt", "Unknown research question")
+                        session_metadata_prompt = await self._read_session_metadata_prompt(
+                            session_folder.name,
+                            final_answer_dir,
+                        )
+                        user_prompt = self._extract_user_prompt_from_state(
+                            session_folder.name,
+                            state_data,
+                            session_metadata_prompt,
+                        )
                         
                         certainty_level = state_data.get("certainty_assessment", {}).get("certainty_level", "unknown")
                         completion_date = state_data.get("timestamp", datetime.now().isoformat())
@@ -1518,11 +1602,12 @@ class FinalAnswerMemory:
                 else:
                     full_content = ""
             
-            model_usage = state_data.get("model_usage", {})
-            user_prompt = model_usage.get("user_prompt", "")
-            if not user_prompt:
-                cert_assess = state_data.get("certainty_assessment", {})
-                user_prompt = cert_assess.get("user_prompt", "Unknown research question")
+            session_metadata_prompt = await self._read_session_metadata_prompt(answer_id, base_dir)
+            user_prompt = self._extract_user_prompt_from_state(
+                answer_id,
+                state_data,
+                session_metadata_prompt,
+            )
             
             certainty_level = state_data.get("certainty_assessment", {}).get("certainty_level", "unknown")
             completion_date = state_data.get("timestamp", datetime.now().isoformat())

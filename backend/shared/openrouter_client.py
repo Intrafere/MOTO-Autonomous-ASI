@@ -6,6 +6,7 @@ The system's evolving context provides sufficient diversity through growing data
 """
 import httpx
 import asyncio
+import json
 import logging
 import time
 from typing import List, Dict, Any, Optional
@@ -142,12 +143,16 @@ class OpenRouterClient:
             "X-Title": self.APP_TITLE
         }
     
-    async def list_models(self, free_only: bool = False) -> List[Dict[str, Any]]:
+    async def list_models(self, free_only: bool = False, raise_on_error: bool = False) -> List[Dict[str, Any]]:
         """
         List available models from OpenRouter.
         
         Args:
             free_only: If True, only return models with $0 pricing (both prompt and completion)
+            raise_on_error: If True, re-raise exceptions instead of swallowing them and
+                returning ``[]``. Callers that need to distinguish an invalid API key from
+                a transient network/OpenRouter hiccup (e.g. the set-api-key validation
+                endpoint) should pass ``True`` so they can surface an accurate error.
         
         Returns:
             List of model objects, each containing:
@@ -191,112 +196,130 @@ class OpenRouterClient:
             return sorted(models, key=lambda m: m.get("name", m.get("id", "")))
         except Exception as e:
             logger.error(f"Failed to list OpenRouter models: {e}")
+            if raise_on_error:
+                raise
             return []
     
-    async def get_model_providers(self, model_id: str) -> List[str]:
+    async def get_model_endpoints(self, model_id: str) -> List[Dict[str, Any]]:
         """
-        Get available providers/endpoints for a specific model using OpenRouter's
-        dedicated endpoints API.
-        
+        Get available endpoint metadata for a specific OpenRouter model.
+
         Args:
             model_id: The OpenRouter model identifier (e.g., "anthropic/claude-3.5-sonnet")
-            
+
         Returns:
-            List of provider names that offer this model.
-            Returns empty list if model not found or no providers available.
-            
-        Note:
-            Uses OpenRouter's /api/v1/models/:author/:slug/endpoints endpoint
-            to get the actual list of available providers for a model.
+            List of available endpoint dicts for the model. Each endpoint includes
+            provider_name, context_length, max_completion_tokens, and
+            max_prompt_tokens when available.
         """
         try:
             # Model ID format is "author/slug" (e.g., "anthropic/claude-3.5-sonnet")
             if "/" not in model_id:
                 logger.warning(f"Invalid model ID format (expected 'author/slug'): {model_id}")
                 return []
-            
+
             parts = model_id.split("/", 1)
             if len(parts) != 2:
                 logger.warning(f"Could not parse model ID: {model_id}")
                 return []
-            
+
             author, slug = parts
-            
-            # Call the dedicated endpoints API
+
             url = f"{self.BASE_URL}/models/{author}/{slug}/endpoints"
-            logger.debug(f"Fetching providers from: {url}")
-            
+            logger.debug(f"Fetching endpoints from: {url}")
+
             response = await self.client.get(
                 url,
                 headers=self._get_headers()
             )
-            
+
             if response.status_code == 404:
                 logger.warning(f"Model {model_id} not found in OpenRouter")
                 return []
-            
+
             response.raise_for_status()
             data = response.json()
-            
-            # Cache the response but don't spam logs with the full data
+
             logger.debug(f"OpenRouter endpoints API response for {model_id} (cached)")
-            
-            providers = []
-            
-            # The response should contain endpoint data with provider info
-            # Expected structure: {"data": {"endpoints": [{"provider_name": "...", ...}, ...]}}
-            # or similar variations
-            
+
+            cleaned_endpoints: List[Dict[str, Any]] = []
+
             if isinstance(data, dict):
-                # Check for 'data' wrapper
                 endpoints_data = data.get("data", data)
-                
-                # Check for 'endpoints' array
-                endpoints = None
+
+                raw_endpoints = None
                 if isinstance(endpoints_data, dict):
-                    endpoints = endpoints_data.get("endpoints", [])
+                    raw_endpoints = endpoints_data.get("endpoints")
+                    if raw_endpoints is None and any(
+                        key in endpoints_data for key in ("provider_name", "provider", "name", "id")
+                    ):
+                        raw_endpoints = [endpoints_data]
                 elif isinstance(endpoints_data, list):
-                    endpoints = endpoints_data
-                
-                if endpoints and isinstance(endpoints, list):
-                    for endpoint in endpoints:
-                        if isinstance(endpoint, dict):
-                            # Check if provider is available (status == 0 means available)
-                            status = endpoint.get("status", -1)
-                            if status < 0:
-                                # Skip unavailable providers
-                                provider_name = endpoint.get("provider_name", "unknown")
-                                logger.debug(f"Filtering out unavailable provider {provider_name} (status={status})")
-                                continue
-                            
-                            # Try various field names for provider
-                            provider = (
-                                endpoint.get("provider_name") or
-                                endpoint.get("provider") or
-                                endpoint.get("name") or
-                                endpoint.get("id")
+                    raw_endpoints = endpoints_data
+
+                if isinstance(raw_endpoints, list):
+                    for endpoint in raw_endpoints:
+                        if not isinstance(endpoint, dict):
+                            continue
+
+                        status = endpoint.get("status", -1)
+                        if status is None or status < 0:
+                            provider_name = endpoint.get("provider_name", "unknown")
+                            logger.debug(
+                                f"Filtering out unavailable provider {provider_name} (status={status})"
                             )
-                            if provider and isinstance(provider, str):
-                                providers.append(provider)
-                
-                # Also check top-level for provider info
-                if not providers:
-                    if "provider_name" in endpoints_data:
-                        providers.append(endpoints_data["provider_name"])
-                    elif "provider" in endpoints_data:
-                        providers.append(endpoints_data["provider"])
-            
-            # Deduplicate and sort (caching silently works behind the scenes)
-            unique_providers = sorted(list(set(providers)))
-            logger.debug(f"Available providers for {model_id}: {unique_providers}")
-            return unique_providers
-            
+                            continue
+
+                        provider_name = (
+                            endpoint.get("provider_name") or
+                            endpoint.get("provider") or
+                            endpoint.get("name") or
+                            endpoint.get("id")
+                        )
+
+                        cleaned_endpoints.append({
+                            "provider_name": provider_name,
+                            "context_length": endpoint.get("context_length"),
+                            "max_completion_tokens": endpoint.get("max_completion_tokens"),
+                            "max_prompt_tokens": endpoint.get("max_prompt_tokens"),
+                            "supported_parameters": endpoint.get("supported_parameters", []),
+                            "status": status,
+                            "tag": endpoint.get("tag"),
+                            "name": endpoint.get("name"),
+                            "quantization": endpoint.get("quantization"),
+                        })
+
+            logger.debug(f"Available endpoints for {model_id}: {len(cleaned_endpoints)}")
+            return cleaned_endpoints
+
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error fetching providers for {model_id}: {e.response.status_code}")
+            logger.error(f"HTTP error fetching endpoints for {model_id}: {e.response.status_code}")
             return []
         except Exception as e:
-            logger.error(f"Failed to get providers for model {model_id}: {e}")
+            logger.error(f"Failed to get endpoints for model {model_id}: {e}")
             return []
+
+    async def get_model_providers(self, model_id: str) -> List[str]:
+        """
+        Get available providers/endpoints for a specific model using OpenRouter's
+        dedicated endpoints API.
+
+        Args:
+            model_id: The OpenRouter model identifier (e.g., "anthropic/claude-3.5-sonnet")
+
+        Returns:
+            List of provider names that offer this model.
+            Returns empty list if model not found or no providers available.
+        """
+        endpoints = await self.get_model_endpoints(model_id)
+        providers = {
+            endpoint.get("provider_name")
+            for endpoint in endpoints
+            if isinstance(endpoint.get("provider_name"), str) and endpoint.get("provider_name")
+        }
+        unique_providers = sorted(providers)
+        logger.debug(f"Available providers for {model_id}: {unique_providers}")
+        return unique_providers
     
     async def generate_completion(
         self,
@@ -305,7 +328,9 @@ class OpenRouterClient:
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, str]] = None,
-        provider: Optional[str] = None
+        provider: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Generate a completion using OpenRouter API with validation and retry.
@@ -317,6 +342,9 @@ class OpenRouterClient:
             max_tokens: Maximum tokens to generate
             response_format: Optional response format constraints
             provider: Optional specific provider to use (None lets OpenRouter choose)
+            tools: Optional OpenAI-compatible tool schemas the model may call.
+            tool_choice: Optional tool-choice directive (e.g. "auto", "none",
+                or ``{"type": "function", "function": {"name": "..."}}``).
             
         Returns:
             API response dict
@@ -330,7 +358,14 @@ class OpenRouterClient:
         # ACQUIRE THIS MODEL'S SEMAPHORE to prevent concurrent requests
         async with model_semaphore:
             return await self._execute_completion_request(
-                model, messages, temperature, max_tokens, response_format, provider
+                model,
+                messages,
+                temperature,
+                max_tokens,
+                response_format,
+                provider,
+                tools=tools,
+                tool_choice=tool_choice,
             )
     
     def _is_reasoning_model_without_temperature(self, model: str) -> bool:
@@ -365,7 +400,9 @@ class OpenRouterClient:
         temperature: float,
         max_tokens: Optional[int],
         response_format: Optional[Dict[str, str]],
-        provider: Optional[str] = None
+        provider: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Execute the actual completion request."""
         # Check if this model is currently rate-limited (for free models)
@@ -406,6 +443,15 @@ class OpenRouterClient:
         if response_format:
             payload["response_format"] = response_format
         
+        # OpenAI-compatible tool calling: pass tools + tool_choice straight
+        # through to OpenRouter. Providers that do not support tools tend to
+        # ignore the field, in which case the caller will see a response with
+        # no `tool_calls` and the single-shot fallback path applies.
+        if tools:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+        
         # Add provider routing if specified
         if provider:
             payload["provider"] = {"order": [provider]}
@@ -439,7 +485,35 @@ class OpenRouterClient:
                     )
                 
                 response.raise_for_status()
-                return response.json()
+                try:
+                    return response.json()
+                except (json.JSONDecodeError, ValueError) as json_err:
+                    # OpenRouter returned 2xx but body is not valid JSON.
+                    # This is typically a gateway/CDN error page, truncated stream,
+                    # or other transport-level failure — NOT a context-size problem.
+                    body_text = ""
+                    try:
+                        body_text = response.text or ""
+                    except Exception:
+                        body_text = ""
+                    body_preview = body_text[:500]
+                    content_type = response.headers.get("content-type", "") if hasattr(response, "headers") else ""
+                    logger.error(
+                        f"OpenRouter returned non-JSON body (status={response.status_code}, "
+                        f"content_type={content_type!r}, body_len={len(body_text)}, "
+                        f"parse_error={json_err}). Body preview: {body_preview!r}"
+                    )
+                    # Retry on transient malformed responses
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                        continue
+                    raise OpenRouterInvalidResponseError(
+                        f"OpenRouter returned non-JSON body after {self.MAX_RETRIES} attempts "
+                        f"(status={response.status_code}, content_type={content_type!r}): {json_err}",
+                        status_code=response.status_code,
+                        content_type=content_type,
+                        body_preview=body_preview,
+                    )
                 
             except CreditExhaustionError:
                 # Don't retry credit exhaustion - propagate immediately
@@ -447,6 +521,11 @@ class OpenRouterClient:
             
             except OpenRouterPrivacyPolicyError:
                 # Don't retry privacy policy errors - propagate immediately
+                raise
+
+            except OpenRouterInvalidResponseError:
+                # Already handled/retried above; propagate cleanly so callers can
+                # distinguish transport failures from real context overflows.
                 raise
                 
             except httpx.HTTPStatusError as e:
@@ -593,7 +672,28 @@ class OpenRouterClient:
                 raise CreditExhaustionError("OpenRouter credits exhausted for embeddings")
             
             response.raise_for_status()
-            data = response.json()
+            try:
+                data = response.json()
+            except (json.JSONDecodeError, ValueError) as json_err:
+                body_text = ""
+                try:
+                    body_text = response.text or ""
+                except Exception:
+                    body_text = ""
+                body_preview = body_text[:500]
+                content_type = response.headers.get("content-type", "") if hasattr(response, "headers") else ""
+                logger.error(
+                    f"OpenRouter embeddings returned non-JSON body (status={response.status_code}, "
+                    f"content_type={content_type!r}, body_len={len(body_text)}, "
+                    f"parse_error={json_err}). Body preview: {body_preview!r}"
+                )
+                raise OpenRouterInvalidResponseError(
+                    f"OpenRouter embeddings returned non-JSON body "
+                    f"(status={response.status_code}, content_type={content_type!r}): {json_err}",
+                    status_code=response.status_code,
+                    content_type=content_type,
+                    body_preview=body_preview,
+                )
             
             # Extract embeddings in order
             embeddings = [
@@ -704,6 +804,30 @@ class OpenRouterClient:
             logger.info("OpenRouter client closed successfully")
         except Exception as e:
             logger.error(f"Error closing OpenRouter client: {e}")
+
+
+class OpenRouterInvalidResponseError(ValueError):
+    """
+    Raised when OpenRouter returns a non-JSON (or otherwise malformed) response body
+    on a 2xx status. This typically indicates an upstream proxy/CDN error page,
+    a truncated stream, or a transient gateway failure rather than a real
+    context-window / prompt-size problem.
+
+    Inherits from ValueError so that existing ``except ValueError`` handlers in
+    the submitter chain continue to propagate transport failures correctly
+    (rather than accidentally swallowing them via a broad ``except Exception:
+    return None`` further up the call stack).
+
+    Attributes:
+        status_code: HTTP status code returned by OpenRouter
+        content_type: Content-Type header (if any)
+        body_preview: First ~500 chars of the response body, for diagnostics
+    """
+    def __init__(self, message: str, status_code: int, content_type: str, body_preview: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.content_type = content_type
+        self.body_preview = body_preview
 
 
 class CreditExhaustionError(Exception):

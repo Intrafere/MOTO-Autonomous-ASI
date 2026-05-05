@@ -132,7 +132,7 @@ async def start_compiler(request: CompilerStartRequest):
     except Exception as e:
         # Other errors
         logger.error(f"Failed to start compiler: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/stop")
@@ -144,7 +144,7 @@ async def stop_compiler():
         return {"status": "stopped", "message": "Compiler stopped"}
     except Exception as e:
         logger.error(f"Failed to stop compiler: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/skip-critique")
@@ -174,7 +174,7 @@ async def skip_critique():
         raise
     except Exception as e:
         logger.error(f"Failed to skip critique: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/test-models")
@@ -223,7 +223,7 @@ async def get_status():
         return status
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/paper")
@@ -248,7 +248,7 @@ async def get_paper():
         }
     except Exception as e:
         logger.error(f"Failed to get paper: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/outline")
@@ -263,7 +263,7 @@ async def get_outline():
         }
     except Exception as e:
         logger.error(f"Failed to get outline: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/save-paper")
@@ -331,7 +331,7 @@ async def save_paper():
         full_content = "\n".join(full_content_parts)
         
         # Save to output directory
-        output_path = Path("backend/data/compiler_paper_saved.txt")
+        output_path = Path(system_config.data_dir) / "compiler_paper_saved.txt"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         async with aiofiles.open(output_path, 'w', encoding='utf-8') as f:
@@ -346,7 +346,7 @@ async def save_paper():
         }
     except Exception as e:
         logger.error(f"Failed to save paper: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/metrics")
@@ -397,7 +397,7 @@ async def get_metrics():
         }
     except Exception as e:
         logger.error(f"Failed to get metrics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/clear-paper")
@@ -430,7 +430,7 @@ async def clear_paper(confirm: bool = False):
         }
     except Exception as e:
         logger.error(f"Failed to clear paper: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/critique-status")
@@ -445,7 +445,7 @@ async def get_critique_status():
         }
     except Exception as e:
         logger.error(f"Failed to get critique status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/previous-versions")
@@ -456,7 +456,7 @@ async def get_previous_versions():
         return {"previous_versions": versions}
     except Exception as e:
         logger.error(f"Failed to get previous versions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -638,7 +638,7 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         raise
     except Exception as e:
         logger.error(f"Failed to request compiler paper critique: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/critiques")
@@ -670,7 +670,7 @@ async def get_compiler_critiques():
         
     except Exception as e:
         logger.error(f"Failed to get compiler paper critiques: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/critiques")
@@ -704,7 +704,7 @@ async def delete_compiler_critiques(confirm: bool = False):
         raise
     except Exception as e:
         logger.error(f"Failed to delete compiler paper critiques: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/default-critique-prompt")
@@ -764,25 +764,30 @@ async def set_wolfram_api_key(request: dict):
         system_config.wolfram_alpha_api_key = api_key
         system_config.wolfram_alpha_enabled = True
 
-        # Persist to secure backend storage so the key survives restarts.
-        store_wolfram_api_key(api_key)
+        if system_config.generic_mode:
+            logger.info("Generic mode active - keeping Wolfram Alpha API key in runtime memory only")
+            success_message = "Wolfram Alpha API key validated and loaded into runtime memory"
+        else:
+            # Persist to secure backend storage so the key survives restarts.
+            store_wolfram_api_key(api_key)
+            success_message = "Wolfram Alpha API key validated successfully"
         
         logger.info("Wolfram Alpha API key set and validated")
         
         return {
             "success": True,
-            "message": "Wolfram Alpha API key validated successfully",
+            "message": success_message,
             "test_result": test_result
         }
         
     except SecretStoreError as e:
         logger.error(f"Failed to persist Wolfram Alpha API key securely: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to set Wolfram Alpha API key: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/wolfram/api-key")
@@ -803,21 +808,27 @@ async def clear_wolfram_api_key():
         # Clear from config
         system_config.wolfram_alpha_api_key = None
         system_config.wolfram_alpha_enabled = False
-        clear_persisted_wolfram_api_key()
+
+        if system_config.generic_mode:
+            logger.info("Generic mode active - cleared in-memory Wolfram Alpha API key")
+            success_message = "Wolfram Alpha API key cleared from runtime memory"
+        else:
+            clear_persisted_wolfram_api_key()
+            success_message = "Wolfram Alpha API key cleared"
         
         logger.info("Wolfram Alpha API key cleared")
         
         return {
             "success": True,
-            "message": "Wolfram Alpha API key cleared"
+            "message": success_message
         }
         
     except SecretStoreError as e:
         logger.error(f"Failed to clear Wolfram Alpha API key from secure storage: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     except Exception as e:
         logger.error(f"Failed to clear Wolfram Alpha API key: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/wolfram/status")
@@ -880,5 +891,5 @@ async def test_wolfram_query(request: dict):
         raise
     except Exception as e:
         logger.error(f"Failed to test Wolfram Alpha query: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 

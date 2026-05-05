@@ -17,6 +17,9 @@ from backend.shared.config import system_config
 from backend.shared.models import (
     AutonomousResearchState,
     BrainstormMetadata,
+    ProofCandidate,
+    ProofRoleConfigSnapshot,
+    ProofRuntimeConfigSnapshot,
     TopicSelectionSubmission,
     SubmitterConfig,
     WorkflowTask,
@@ -27,6 +30,7 @@ from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.token_tracker import token_tracker
+from backend.shared.json_parser import parse_json
 
 # Memory managers
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
@@ -35,6 +39,7 @@ from backend.autonomous.memory.research_metadata import research_metadata
 from backend.autonomous.memory.autonomous_rejection_logs import autonomous_rejection_logs
 from backend.autonomous.memory.session_manager import session_manager
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
+from backend.autonomous.memory.proof_database import proof_database
 
 # RAG manager
 from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
@@ -45,6 +50,11 @@ from backend.autonomous.agents.topic_validator import TopicValidatorAgent
 from backend.autonomous.agents.completion_reviewer import CompletionReviewerAgent
 from backend.autonomous.agents.reference_selector import ReferenceSelectorAgent
 from backend.autonomous.agents.paper_title_selector import PaperTitleSelectorAgent
+from backend.autonomous.prompts.proof_prompts import (
+    PROOF_FRAMING_CONTEXT,
+    build_proof_framing_gate_prompt,
+)
+from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
 
 # Validation
 from backend.autonomous.validation.paper_redundancy_checker import PaperRedundancyChecker
@@ -86,6 +96,8 @@ class AutonomousCoordinator:
         self._running = False
         self._state = AutonomousResearchState()
         self._stop_event = asyncio.Event()
+        self._main_task: Optional[asyncio.Task] = None
+        self._stop_broadcast_sent = False
         
         # Configuration (set during initialize)
         self._user_research_prompt: str = ""
@@ -140,11 +152,17 @@ class AutonomousCoordinator:
         self._last_completion_review_at: int = 0  # Acceptance count at last completion review
         self._manual_paper_writing_triggered: bool = False
         self._resume_paper_phase: Optional[str] = None  # Saved phase for resume (body/conclusion/intro/abstract)
+        self._brainstorm_missing_during_paper: bool = False
         
         # Brainstorm multi-paper continuation tracking
         self._brainstorm_paper_count: int = 0  # Papers written from current brainstorm (max 3)
         self._current_brainstorm_paper_ids: List[str] = []  # Paper IDs from current brainstorm cycle
         self._last_completed_paper_id: Optional[str] = None  # Persists after _current_paper_id is cleared
+        self._base_user_research_prompt: str = ""
+        self._proof_framing_active: bool = False
+        self._proof_framing_context: str = ""
+        self._proof_framing_reasoning: str = ""
+        self._proof_verification_stage = ProofVerificationStage()
         
         # Tier 3 Final Answer tracking
         self._last_tier3_check_at: int = 0  # Paper count at last Tier 3 check
@@ -171,6 +189,198 @@ class AutonomousCoordinator:
         if self._broadcast_callback:
             # broadcast_event expects (event_type, data) as separate arguments
             await self._broadcast_callback(event, data or {})
+
+    def _append_proof_framing(self, prompt: str) -> str:
+        """Append the persisted proof-framing context when active."""
+        effective_prompt = prompt or ""
+        if self._proof_framing_active and self._proof_framing_context:
+            if self._proof_framing_context not in effective_prompt:
+                effective_prompt = f"{effective_prompt}\n\n{self._proof_framing_context}".strip()
+        return effective_prompt
+
+    def _apply_proof_context(self, prompt: str) -> str:
+        """Append proof framing context and inject verified novel proofs."""
+        effective_prompt = self._append_proof_framing(prompt)
+        return proof_database.inject_into_prompt(effective_prompt)
+
+    def _get_effective_user_research_prompt(self) -> str:
+        """Return the current research prompt with all proof context applied."""
+        return self._apply_proof_context(self._user_research_prompt)
+
+    async def _get_effective_brainstorm_prompt(self, topic_prompt: str) -> str:
+        """Return the brainstorm prompt with proof context applied."""
+        effective_prompt = self._apply_proof_context(topic_prompt)
+        effective_prompt = await proof_database.inject_failure_hints_into_prompt(
+            effective_prompt,
+            self._current_topic_id or "",
+        )
+        # Append a compact summary of known (non-novel) proofs scoped to this
+        # brainstorm topic so the system can avoid re-proving standard results.
+        # Theorem statements only — no Lean code — to keep token cost low.
+        counts = proof_database.count_proofs()
+        if counts["known"] > 0:
+            known_summary = proof_database.get_known_proofs_summary_for_browsing(
+                source_id=self._current_topic_id or None,
+                limit=15,
+            )
+            if known_summary:
+                effective_prompt = f"{effective_prompt}\n\n{known_summary}"
+        return effective_prompt
+
+    def _get_effective_compiler_prompt(self, paper_title: str) -> str:
+        """Return the compiler prompt with proof context applied."""
+        return self._apply_proof_context(
+            f"Write a mathematical research paper titled: {paper_title}"
+        )
+
+    def _build_proof_runtime_config_snapshot(self) -> Dict[str, Any]:
+        """Build the persisted runtime snapshot used by proof routes/manual checks."""
+        first_submitter = self._submitter_configs[0] if self._submitter_configs else None
+        brainstorm_config = ProofRoleConfigSnapshot(
+            provider=first_submitter.provider if first_submitter else "lm_studio",
+            model_id=first_submitter.model_id if first_submitter else self._high_context_model,
+            openrouter_provider=first_submitter.openrouter_provider if first_submitter else self._high_context_openrouter_provider,
+            lm_studio_fallback_id=first_submitter.lm_studio_fallback_id if first_submitter else self._high_context_lm_studio_fallback,
+            context_window=first_submitter.context_window if first_submitter else self._high_context_context,
+            max_output_tokens=first_submitter.max_output_tokens if first_submitter else self._high_context_max_tokens,
+        )
+        paper_config = ProofRoleConfigSnapshot(
+            provider=self._high_context_provider,
+            model_id=self._high_context_model,
+            openrouter_provider=self._high_context_openrouter_provider,
+            lm_studio_fallback_id=self._high_context_lm_studio_fallback,
+            context_window=self._high_context_context,
+            max_output_tokens=self._high_context_max_tokens,
+        )
+        validator_config = ProofRoleConfigSnapshot(
+            provider=self._validator_provider,
+            model_id=self._validator_model,
+            openrouter_provider=self._validator_openrouter_provider,
+            lm_studio_fallback_id=self._validator_lm_studio_fallback,
+            context_window=self._validator_context,
+            max_output_tokens=self._validator_max_tokens,
+        )
+        return ProofRuntimeConfigSnapshot(
+            brainstorm=brainstorm_config,
+            paper=paper_config,
+            validator=validator_config,
+        ).model_dump(mode="json")
+
+    async def _run_proof_framing_gate(self) -> None:
+        """Run the one-time proof-framing decision before fresh research begins."""
+        if not self._submitter_configs:
+            logger.warning("Proof framing gate skipped: no submitter configuration available")
+            return
+
+        base_prompt = self._base_user_research_prompt or self._user_research_prompt
+        prompt = build_proof_framing_gate_prompt(base_prompt)
+        first_submitter = self._submitter_configs[0]
+
+        reasoning = ""
+        is_proof_amenable = False
+        try:
+            response = await api_client_manager.generate_completion(
+                task_id="proof_framing_gate_000",
+                role_id="autonomous_proof_framing_gate",
+                model=first_submitter.model_id,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=first_submitter.max_output_tokens,
+                temperature=0.0,
+            )
+            if response and response.get("choices"):
+                message = response["choices"][0].get("message", {})
+                content = message.get("content") or message.get("reasoning") or ""
+                if content:
+                    parsed = parse_json(content)
+                    if isinstance(parsed, list):
+                        parsed = parsed[0] if parsed else {}
+                    is_proof_amenable = bool(parsed.get("is_proof_amenable", False))
+                    reasoning = str(parsed.get("reasoning", "")).strip()
+        except Exception as exc:
+            logger.warning("Proof framing gate failed, continuing without proof framing: %s", exc)
+            reasoning = f"Proof framing gate failed: {exc}"
+
+        self._proof_framing_active = is_proof_amenable
+        self._proof_framing_context = PROOF_FRAMING_CONTEXT if is_proof_amenable else ""
+        self._proof_framing_reasoning = reasoning
+        self._user_research_prompt = (
+            self._append_proof_framing(base_prompt)
+            if is_proof_amenable
+            else base_prompt
+        )
+
+        await research_metadata.set_proof_framing_state(
+            base_user_prompt=base_prompt,
+            effective_user_prompt=self._user_research_prompt,
+            active=self._proof_framing_active,
+            context=self._proof_framing_context,
+            reasoning=self._proof_framing_reasoning,
+        )
+        await self._save_workflow_state()
+        await self._broadcast(
+            "proof_framing_decided",
+            {
+                "is_proof_amenable": self._proof_framing_active,
+                "reasoning": self._proof_framing_reasoning,
+            },
+        )
+
+    async def _run_proof_verification(
+        self,
+        content: str,
+        source_type: str,
+        source_id: str,
+        source_title: str = "",
+        theorem_candidates: Optional[List[ProofCandidate]] = None,
+        trigger: str = "automatic",
+        role_suffix_override: Optional[str] = None,
+    ) -> None:
+        """Run the Lean 4 proof verification stage for a completed brainstorm or paper."""
+        if not content or not source_id:
+            return
+
+        if source_type == "brainstorm":
+            submitter_model = self._submitter_configs[0].model_id if self._submitter_configs else self._high_context_model
+            submitter_context = self._submitter_configs[0].context_window if self._submitter_configs else self._high_context_context
+            submitter_max_tokens = self._submitter_configs[0].max_output_tokens if self._submitter_configs else self._high_context_max_tokens
+        else:
+            submitter_model = self._high_context_model
+            submitter_context = self._high_context_context
+            submitter_max_tokens = self._high_context_max_tokens
+
+        await self._proof_verification_stage.run(
+            content=content,
+            source_type=source_type,
+            source_id=source_id,
+            user_prompt=self._get_effective_user_research_prompt(),
+            submitter_model=submitter_model,
+            submitter_context=submitter_context,
+            submitter_max_tokens=submitter_max_tokens,
+            validator_model=self._validator_model,
+            validator_context=self._validator_context,
+            validator_max_tokens=self._validator_max_tokens,
+            broadcast_fn=self._broadcast,
+            novel_proofs_db=proof_database,
+            source_title=source_title,
+            theorem_candidates=theorem_candidates,
+            role_suffix_override=role_suffix_override,
+            trigger=trigger,
+            should_stop=self._stop_event.is_set,
+        )
+
+    async def _run_brainstorm_completion_proofs(self) -> None:
+        """Run proof verification for the current completed brainstorm."""
+        if not self._current_topic_id:
+            return
+
+        metadata = await brainstorm_memory.get_metadata(self._current_topic_id)
+        brainstorm_content = await brainstorm_memory.get_database_content(self._current_topic_id)
+        await self._run_proof_verification(
+            brainstorm_content,
+            "brainstorm",
+            self._current_topic_id,
+            source_title=metadata.topic_prompt if metadata else "",
+        )
     
     async def initialize(
         self,
@@ -276,6 +486,7 @@ class AutonomousCoordinator:
             paper_library.set_session_manager(session_manager)
             research_metadata.set_session_manager(session_manager)
             final_answer_memory.set_session_manager(session_manager)
+            proof_database.set_session_manager(session_manager)
             
             # Override the user_research_prompt with the one from the interrupted session
             # This ensures we continue with the same research goal
@@ -298,6 +509,7 @@ class AutonomousCoordinator:
                 # Don't set session manager - memory modules will use default legacy paths
                 # Clear any previous session manager state
                 await session_manager.clear()
+                proof_database.set_session_manager(None)
             else:
                 # PRIORITY 3: No interrupted session, no legacy data - create new session folder
                 await session_manager.initialize(user_research_prompt, system_config.auto_sessions_base_dir)
@@ -308,12 +520,18 @@ class AutonomousCoordinator:
                 paper_library.set_session_manager(session_manager)
                 research_metadata.set_session_manager(session_manager)
                 final_answer_memory.set_session_manager(session_manager)
+                proof_database.set_session_manager(session_manager)
         
         # Initialize memory systems
         await brainstorm_memory.initialize()
         await paper_library.initialize()
         await research_metadata.initialize(user_research_prompt)
+        await proof_database.initialize()
         await autonomous_rejection_logs.initialize()
+
+        self._base_user_research_prompt = await research_metadata.get_base_user_prompt()
+        if not self._base_user_research_prompt:
+            self._base_user_research_prompt = self._user_research_prompt
         
         # CRITICAL: Reset and clear all RAG state for fresh autonomous session
         # This prevents cross-contamination from Part 1 manual mode
@@ -473,6 +691,190 @@ class AutonomousCoordinator:
                 max_output_tokens=validator_max_tokens
             )
         )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_identification_brainstorm",
+            ModelConfig(
+                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
+                model_id=first_submitter_model,
+                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
+                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
+                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
+                context_window=first_submitter_context,
+                max_output_tokens=first_submitter_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_lemma_search_brainstorm",
+            ModelConfig(
+                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
+                model_id=first_submitter_model,
+                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
+                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
+                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
+                context_window=first_submitter_context,
+                max_output_tokens=first_submitter_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_framing_gate",
+            ModelConfig(
+                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
+                model_id=first_submitter_model,
+                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
+                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
+                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
+                context_window=first_submitter_context,
+                max_output_tokens=first_submitter_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_formalization_brainstorm",
+            ModelConfig(
+                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
+                model_id=first_submitter_model,
+                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
+                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
+                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
+                context_window=first_submitter_context,
+                max_output_tokens=first_submitter_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_identification_paper",
+            ModelConfig(
+                provider=high_context_provider,
+                model_id=self._high_context_model,
+                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
+                openrouter_provider=high_context_openrouter_provider,
+                lm_studio_fallback_id=high_context_lm_studio_fallback,
+                context_window=self._high_context_context,
+                max_output_tokens=self._high_context_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_lemma_search_paper",
+            ModelConfig(
+                provider=high_context_provider,
+                model_id=self._high_context_model,
+                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
+                openrouter_provider=high_context_openrouter_provider,
+                lm_studio_fallback_id=high_context_lm_studio_fallback,
+                context_window=self._high_context_context,
+                max_output_tokens=self._high_context_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_formalization_paper",
+            ModelConfig(
+                provider=high_context_provider,
+                model_id=self._high_context_model,
+                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
+                openrouter_provider=high_context_openrouter_provider,
+                lm_studio_fallback_id=high_context_lm_studio_fallback,
+                context_window=self._high_context_context,
+                max_output_tokens=self._high_context_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_novelty",
+            ModelConfig(
+                provider=validator_provider,
+                model_id=validator_model,
+                openrouter_model_id=validator_model if validator_provider == "openrouter" else None,
+                openrouter_provider=validator_openrouter_provider,
+                lm_studio_fallback_id=validator_lm_studio_fallback,
+                context_window=validator_context_window,
+                max_output_tokens=validator_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_identification_manual_brainstorm",
+            ModelConfig(
+                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
+                model_id=first_submitter_model,
+                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
+                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
+                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
+                context_window=first_submitter_context,
+                max_output_tokens=first_submitter_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_lemma_search_manual_brainstorm",
+            ModelConfig(
+                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
+                model_id=first_submitter_model,
+                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
+                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
+                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
+                context_window=first_submitter_context,
+                max_output_tokens=first_submitter_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_formalization_manual_brainstorm",
+            ModelConfig(
+                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
+                model_id=first_submitter_model,
+                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
+                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
+                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
+                context_window=first_submitter_context,
+                max_output_tokens=first_submitter_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_identification_manual_paper",
+            ModelConfig(
+                provider=high_context_provider,
+                model_id=self._high_context_model,
+                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
+                openrouter_provider=high_context_openrouter_provider,
+                lm_studio_fallback_id=high_context_lm_studio_fallback,
+                context_window=self._high_context_context,
+                max_output_tokens=self._high_context_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_lemma_search_manual_paper",
+            ModelConfig(
+                provider=high_context_provider,
+                model_id=self._high_context_model,
+                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
+                openrouter_provider=high_context_openrouter_provider,
+                lm_studio_fallback_id=high_context_lm_studio_fallback,
+                context_window=self._high_context_context,
+                max_output_tokens=self._high_context_max_tokens
+            )
+        )
+
+        api_client_manager.configure_role(
+            "autonomous_proof_formalization_manual_paper",
+            ModelConfig(
+                provider=high_context_provider,
+                model_id=self._high_context_model,
+                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
+                openrouter_provider=high_context_openrouter_provider,
+                lm_studio_fallback_id=high_context_lm_studio_fallback,
+                context_window=self._high_context_context,
+                max_output_tokens=self._high_context_max_tokens
+            )
+        )
+
+        await research_metadata.set_proof_runtime_config(self._build_proof_runtime_config_snapshot())
         
         # Configure Tier 3 Final Answer agents (certainty assessor, format selector, volume organizer)
         # These use the first submitter model configuration
@@ -572,6 +974,15 @@ class AutonomousCoordinator:
             # Restore brainstorm multi-paper continuation tracking
             self._brainstorm_paper_count = workflow_state.get("brainstorm_paper_count", 0)
             self._current_brainstorm_paper_ids = workflow_state.get("current_brainstorm_paper_ids", [])
+
+            # Restore proof framing state
+            self._proof_framing_active = workflow_state.get("proof_framing_active", False)
+            self._proof_framing_context = workflow_state.get("proof_framing_context", "")
+            self._proof_framing_reasoning = workflow_state.get("proof_framing_reasoning", "")
+            self._base_user_research_prompt = await research_metadata.get_base_user_prompt()
+            if not self._base_user_research_prompt:
+                self._base_user_research_prompt = self._user_research_prompt
+            self._user_research_prompt = self._append_proof_framing(self._base_user_research_prompt)
             
             # Restore Tier 3 flags for proper resume
             self._tier3_active = workflow_state.get("tier3_active", False)
@@ -611,33 +1022,52 @@ class AutonomousCoordinator:
         
         In this case, we set up the resume state to continue writing the incomplete paper.
         """
-        incomplete_paper = await paper_library.get_most_recent_incomplete_paper()
-        
-        if incomplete_paper:
+        while True:
+            incomplete_paper = await paper_library.get_most_recent_incomplete_paper()
+            if not incomplete_paper:
+                return
+
             logger.info(f"Found incomplete paper: {incomplete_paper.paper_id} "
                        f"(title: {incomplete_paper.title}, "
                        f"from brainstorm: {incomplete_paper.source_brainstorm_ids})")
-            
+
+            topic_id = incomplete_paper.source_brainstorm_ids[0] if incomplete_paper.source_brainstorm_ids else None
+            if not topic_id:
+                await self._delete_stale_incomplete_paper(
+                    incomplete_paper.paper_id,
+                    topic_id,
+                    "missing source brainstorm id for incomplete paper resume"
+                )
+                continue
+
+            metadata = await brainstorm_memory.get_metadata(topic_id)
+            brainstorm_db_path = brainstorm_memory.get_database_path(topic_id)
+            if metadata is None or not os.path.exists(brainstorm_db_path):
+                await self._delete_stale_incomplete_paper(
+                    incomplete_paper.paper_id,
+                    topic_id,
+                    f"source brainstorm not found at {brainstorm_db_path}"
+                )
+                continue
+
             # Set up resume state for the incomplete paper
             self._current_paper_id = incomplete_paper.paper_id
             self._current_paper_title = incomplete_paper.title
-            
-            # Get source brainstorm (use first one if multiple)
-            if incomplete_paper.source_brainstorm_ids:
-                self._current_topic_id = incomplete_paper.source_brainstorm_ids[0]
-            
+            self._current_topic_id = topic_id
+
             # Restore reference papers
             self._current_reference_papers = incomplete_paper.referenced_papers or []
-            
+
             # Detect which phase the paper needs to resume from based on content
             paper_content = await self._get_paper_content_for_resume(incomplete_paper.paper_id)
             self._resume_paper_phase = self._detect_paper_phase(paper_content)
-            
+
             logger.info(f"Will resume incomplete paper {incomplete_paper.paper_id} "
                        f"from phase: {self._resume_paper_phase}")
-            
+
             # Save workflow state so the resume logic kicks in
             await self._save_workflow_state(tier="tier2_paper_writing", phase=self._resume_paper_phase)
+            return
     
     async def _get_paper_content_for_resume(self, paper_id: str) -> str:
         """Get paper content for detecting resume phase."""
@@ -717,12 +1147,14 @@ class AutonomousCoordinator:
             rf"#\s*{section_name}",        # Markdown heading
             rf"\*\*{section_name}\*\*",    # Bold text
             rf"^{section_name}\s*$",       # Plain section name
+            rf"^\\(?:section|chapter)\*?\{{{section_name}\}}\s*$",  # LaTeX heading
         ]
         
         # Add section-specific patterns
         if section_name == "Introduction":
             # Introduction is always numbered as "I."
             base_patterns.append(rf"^I\.\s*{section_name}")
+            base_patterns.append(rf"^\\(?:section|chapter)\*?\{{I\.?\s*{section_name}\}}\s*$")
         elif section_name == "Conclusion":
             # Conclusion can have Roman numeral (variable position in paper)
             base_patterns.append(rf"^[IVXLC]+\.\s*{section_name}")
@@ -791,6 +1223,84 @@ class AutonomousCoordinator:
                 
         except Exception as e:
             logger.error(f"Failed to load saved paper {paper_id} to compiler: {e}")
+
+    async def _delete_stale_incomplete_paper(
+        self,
+        paper_id: Optional[str],
+        topic_id: Optional[str],
+        reason: str
+    ) -> None:
+        """Delete an orphaned incomplete paper so it cannot be resurrected on restart."""
+        if not paper_id:
+            return
+
+        logger.warning(
+            f"Deleting stale incomplete paper {paper_id} for brainstorm {topic_id}: {reason}"
+        )
+
+        paper_metadata = await paper_library.get_metadata(paper_id)
+        if paper_metadata and paper_metadata.status == "complete":
+            logger.warning(
+                f"Skipping stale-paper deletion for {paper_id}: paper is already complete"
+            )
+            return
+
+        await paper_library.delete_paper(paper_id)
+        await research_metadata.delete_paper(paper_id)
+        if topic_id:
+            await brainstorm_memory.remove_paper_reference(topic_id, paper_id)
+
+    async def _clear_stale_paper_writing_state(
+        self,
+        topic_id: Optional[str],
+        reason: str,
+        paper_id: Optional[str] = None,
+        mark_missing: bool = True
+    ) -> None:
+        """Clear a paper-writing resume point when its source brainstorm no longer exists.
+
+        IMPORTANT: We save (not delete) the workflow state so that the session remains
+        visible to find_interrupted_session(). The session finder requires a
+        workflow_state.json with a current_tier + papers_completed_count to detect
+        the session as resumable. Deleting the file hides the session.
+        """
+        logger.warning(
+            f"Clearing stale paper-writing state for brainstorm {topic_id}: {reason}"
+        )
+        stale_paper_id = paper_id if paper_id is not None else self._current_paper_id
+        await self._delete_stale_incomplete_paper(stale_paper_id, topic_id, reason)
+        self._current_topic_id = None
+        self._current_paper_id = None
+        self._current_paper_title = None
+        self._current_reference_papers = []
+        self._resume_paper_phase = None
+        self._brainstorm_paper_count = 0
+        self._current_brainstorm_paper_ids = []
+        self._last_completed_paper_id = None
+        self._brainstorm_missing_during_paper = mark_missing
+        # Save workflow state at tier1 with no topic/paper so the session stays
+        # discoverable for resume while the stale Tier 2 pointer is gone.
+        await self._save_workflow_state(tier="tier1_aggregation")
+
+    async def _current_brainstorm_available_for_paper(self) -> bool:
+        """Return False and clear paper-writing state if the current brainstorm was deleted."""
+        if not self._current_topic_id:
+            await self._clear_stale_paper_writing_state(
+                self._current_topic_id,
+                "no current brainstorm id is set"
+            )
+            return False
+
+        metadata = await brainstorm_memory.get_metadata(self._current_topic_id)
+        brainstorm_db_path = brainstorm_memory.get_database_path(self._current_topic_id)
+        if metadata is None or not os.path.exists(brainstorm_db_path):
+            await self._clear_stale_paper_writing_state(
+                self._current_topic_id,
+                f"brainstorm database not found at {brainstorm_db_path}"
+            )
+            return False
+
+        return True
 
     async def _preserve_failed_paper_state(self, paper_id: str, paper_title: str) -> None:
         """
@@ -862,6 +1372,9 @@ class AutonomousCoordinator:
             # Brainstorm multi-paper continuation tracking
             "brainstorm_paper_count": self._brainstorm_paper_count,
             "current_brainstorm_paper_ids": self._current_brainstorm_paper_ids,
+            "proof_framing_active": self._proof_framing_active,
+            "proof_framing_context": self._proof_framing_context,
+            "proof_framing_reasoning": self._proof_framing_reasoning,
             # Tier 3 Final Answer crash recovery fields
             "tier3_active": self._tier3_active,
             "tier3_enabled": self._tier3_enabled,
@@ -882,6 +1395,52 @@ class AutonomousCoordinator:
         }
         await research_metadata.save_workflow_state(state)
     
+    @property
+    def is_active(self) -> bool:
+        """Return True when autonomous research is running or its task is still alive."""
+        return (
+            self._running
+            or self._state.is_running
+            or (self._main_task is not None and not self._main_task.done())
+        )
+
+    def start_in_background(self) -> bool:
+        """Launch the autonomous loop and retain a task handle for cancellation."""
+        if self._main_task and not self._main_task.done():
+            logger.warning("AutonomousCoordinator task already running")
+            return False
+
+        self._main_task = asyncio.create_task(self.start())
+        self._main_task.add_done_callback(self._on_main_task_done)
+        return True
+
+    def _on_main_task_done(self, task: asyncio.Task) -> None:
+        """Log background task failures and clear the retained task handle."""
+        try:
+            if task.cancelled():
+                logger.info("AutonomousCoordinator background task cancelled")
+            else:
+                exc = task.exception()
+                if exc:
+                    logger.error(
+                        "AutonomousCoordinator background task failed",
+                        exc_info=(type(exc), exc, exc.__traceback__)
+                    )
+        finally:
+            if self._main_task is task:
+                self._main_task = None
+
+    async def _broadcast_stopped_once(self) -> None:
+        """Notify clients once that autonomous research is stopped."""
+        if self._stop_broadcast_sent:
+            return
+
+        self._stop_broadcast_sent = True
+        stats = await research_metadata.get_stats()
+        await self._broadcast("auto_research_stopped", {
+            "final_stats": stats
+        })
+
     async def start(self) -> None:
         """Start the autonomous research loop."""
         if self._running:
@@ -891,6 +1450,10 @@ class AutonomousCoordinator:
         self._running = True
         self._stop_event.clear()
         self._state.is_running = True
+        self._stop_broadcast_sent = False
+        
+        # Reset free model manager state for fresh start
+        free_model_manager.reset()
         
         # Reset free model manager state for fresh start
         free_model_manager.reset()
@@ -931,6 +1494,9 @@ class AutonomousCoordinator:
         
         # Check for interrupted workflow to resume
         resume_state = await self._get_resume_point()
+
+        if not resume_state:
+            await self._run_proof_framing_gate()
         
         try:
             # Main research loop
@@ -962,6 +1528,20 @@ class AutonomousCoordinator:
                         resume_tier = "tier3_final_answer"
                     
                     if resume_tier == "tier2_paper_writing" and resume_topic:
+                        # If the user deleted the brainstorm while a paper was paused,
+                        # the saved paper-writing resume point is no longer valid.
+                        metadata = await brainstorm_memory.get_metadata(resume_topic)
+                        brainstorm_db_path = brainstorm_memory.get_database_path(resume_topic)
+                        if metadata is None or not os.path.exists(brainstorm_db_path):
+                            await self._clear_stale_paper_writing_state(
+                                resume_topic,
+                                "saved Tier 2 resume references a deleted brainstorm",
+                                paper_id=resume_paper,
+                                mark_missing=False
+                            )
+                            resume_state = None
+                            continue
+
                         # Resume paper writing - skip to compilation
                         # CRITICAL: Restore paper_id so compilation workflow knows to resume
                         self._current_topic_id = resume_topic
@@ -982,6 +1562,12 @@ class AutonomousCoordinator:
                                 emit_resume_event=(_resume_paper_attempt == 1)
                             ):
                                 break
+                            if self._brainstorm_missing_during_paper:
+                                break
+
+                        if self._brainstorm_missing_during_paper:
+                            self._brainstorm_missing_during_paper = False
+                            continue
 
                         if not self._stop_event.is_set():
                             self._brainstorm_paper_count += 1
@@ -1003,9 +1589,11 @@ class AutonomousCoordinator:
                                 next_ok = False
                                 while not self._stop_event.is_set():
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
-                                    if next_ok or self._stop_event.is_set():
+                                    if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
                                     await asyncio.sleep(5)
+                                if self._brainstorm_missing_during_paper:
+                                    break
                                 if not next_ok or self._stop_event.is_set():
                                     break
                                 self._brainstorm_paper_count += 1
@@ -1013,6 +1601,10 @@ class AutonomousCoordinator:
                                     self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                                 await self._check_paper_redundancy()
                             
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
+
                             self._brainstorm_paper_count = 0
                             self._current_brainstorm_paper_ids = []
                             self._last_completed_paper_id = None
@@ -1051,10 +1643,16 @@ class AutonomousCoordinator:
                             while not self._stop_event.is_set():
                                 if await self._paper_compilation_workflow():
                                     break
+                                if self._brainstorm_missing_during_paper:
+                                    break
                                 await asyncio.sleep(5)
                             
                             if self._stop_event.is_set():
                                 break
+
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
                             
                             self._brainstorm_paper_count += 1
                             if self._last_completed_paper_id:
@@ -1073,9 +1671,11 @@ class AutonomousCoordinator:
                                 next_ok = False
                                 while not self._stop_event.is_set():
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
-                                    if next_ok or self._stop_event.is_set():
+                                    if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
                                     await asyncio.sleep(5)
+                                if self._brainstorm_missing_during_paper:
+                                    break
                                 if not next_ok or self._stop_event.is_set():
                                     break
                                 self._brainstorm_paper_count += 1
@@ -1083,6 +1683,10 @@ class AutonomousCoordinator:
                                     self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                                 await self._check_paper_redundancy()
                             
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
+
                             self._brainstorm_paper_count = 0
                             self._current_brainstorm_paper_ids = []
                             self._last_completed_paper_id = None
@@ -1096,7 +1700,8 @@ class AutonomousCoordinator:
                         metadata = await brainstorm_memory.get_metadata(resume_topic)
                         if metadata is None:
                             logger.warning(f"Resume state references missing brainstorm {resume_topic}; clearing resume state")
-                            await research_metadata.clear_workflow_state()
+                            self._current_topic_id = None
+                            await self._save_workflow_state(tier="tier1_aggregation")
                             resume_state = None
                             continue
                         
@@ -1119,9 +1724,15 @@ class AutonomousCoordinator:
                                     await asyncio.sleep(5)
                                 if await self._paper_compilation_workflow():
                                     break
+                                if self._brainstorm_missing_during_paper:
+                                    break
 
                             if self._stop_event.is_set():
                                 break
+
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
 
                             self._brainstorm_paper_count += 1
                             if self._last_completed_paper_id:
@@ -1142,9 +1753,11 @@ class AutonomousCoordinator:
                                 next_ok = False
                                 while not self._stop_event.is_set():
                                     next_ok = await self._paper_compilation_workflow(skip_reference_selection=True)
-                                    if next_ok or self._stop_event.is_set():
+                                    if next_ok or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                         break
                                     await asyncio.sleep(5)
+                                if self._brainstorm_missing_during_paper:
+                                    break
                                 if not next_ok or self._stop_event.is_set():
                                     break
                                 self._brainstorm_paper_count += 1
@@ -1152,6 +1765,10 @@ class AutonomousCoordinator:
                                     self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                                 await self._check_paper_redundancy()
                             
+                            if self._brainstorm_missing_during_paper:
+                                self._brainstorm_missing_during_paper = False
+                                continue
+
                             self._brainstorm_paper_count = 0
                             self._current_brainstorm_paper_ids = []
                             self._last_completed_paper_id = None
@@ -1290,11 +1907,15 @@ class AutonomousCoordinator:
 
                     paper_success = await self._paper_compilation_workflow()
 
-                    if paper_success or self._stop_event.is_set():
+                    if paper_success or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                         break
 
                 if self._stop_event.is_set():
                     break
+
+                if self._brainstorm_missing_during_paper:
+                    self._brainstorm_missing_during_paper = False
+                    continue
 
                 # Only check redundancy and log completion if paper was successful
                 if paper_success:
@@ -1325,9 +1946,12 @@ class AutonomousCoordinator:
                             next_paper_success = await self._paper_compilation_workflow(
                                 skip_reference_selection=True
                             )
-                            if next_paper_success or self._stop_event.is_set():
+                            if next_paper_success or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                 break
                         
+                        if self._brainstorm_missing_during_paper:
+                            break
+
                         if not next_paper_success or self._stop_event.is_set():
                             break
                         
@@ -1336,6 +1960,10 @@ class AutonomousCoordinator:
                             self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                         await self._check_paper_redundancy()
                     
+                    if self._brainstorm_missing_during_paper:
+                        self._brainstorm_missing_during_paper = False
+                        continue
+
                     if self._brainstorm_paper_count >= 3:
                         logger.info("Brainstorm paper limit reached (3/3)")
                         await self._broadcast("brainstorm_paper_limit_reached", {
@@ -1371,7 +1999,7 @@ class AutonomousCoordinator:
                 logger.warning(f"AutonomousCoordinator: all free models exhausted: {e}")
                 await self._broadcast("free_models_exhausted", {
                     "role_id": "autonomous",
-                    "message": str(e),
+                    "message": "All free models exhausted, waiting to retry",
                 })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
 
@@ -1383,11 +2011,7 @@ class AutonomousCoordinator:
             self._running = False
             self._state.is_running = False
             token_tracker.stop_timer()
-            
-            stats = await research_metadata.get_stats()
-            await self._broadcast("auto_research_stopped", {
-                "final_stats": stats
-            })
+            await self._broadcast_stopped_once()
             logger.info("AutonomousCoordinator stopped")
     
     async def _get_resume_point(self) -> Optional[Dict[str, Any]]:
@@ -1406,19 +2030,37 @@ class AutonomousCoordinator:
         logger.info("Stopping AutonomousCoordinator...")
         self._stop_event.set()
         self._running = False
+        self._state.is_running = False
+        await self._broadcast_stopped_once()
+
+        async def _run_shutdown_step(label: str, awaitable, timeout: float = 5.0) -> bool:
+            task = asyncio.create_task(awaitable)
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+            if task in done:
+                await task
+                return True
+
+            task.cancel()
+            task.add_done_callback(
+                lambda done_task: None
+                if done_task.cancelled()
+                else done_task.exception()
+            )
+            logger.warning("Timed out stopping %s; continuing shutdown", label)
+            return False
         
         # Stop any running aggregator or compiler to prevent orphan tasks
         if self._brainstorm_aggregator:
             try:
-                await self._brainstorm_aggregator.stop()
-                logger.info("Stopped brainstorm aggregator")
+                if await _run_shutdown_step("brainstorm aggregator", self._brainstorm_aggregator.stop()):
+                    logger.info("Stopped brainstorm aggregator")
             except Exception as e:
                 logger.warning(f"Error stopping aggregator: {e}")
         
         if self._paper_compiler:
             try:
-                await self._paper_compiler.stop()
-                logger.info("Stopped paper compiler")
+                if await _run_shutdown_step("paper compiler", self._paper_compiler.stop()):
+                    logger.info("Stopped paper compiler")
             except Exception as e:
                 logger.warning(f"Error stopping compiler: {e}")
         
@@ -1441,6 +2083,13 @@ class AutonomousCoordinator:
             logger.info(f"Workflow state saved for resume (tier={current_tier}, topic={self._current_topic_id})")
         except Exception as e:
             logger.warning(f"Could not save workflow state on stop: {e}")
+
+        main_task = self._main_task
+        if main_task and not main_task.done() and main_task is not asyncio.current_task():
+            main_task.cancel()
+            done, _ = await asyncio.wait({main_task}, timeout=5)
+            if main_task not in done:
+                logger.warning("AutonomousCoordinator background task is still cancelling")
         
         logger.info("Autonomous research stopped - press Start to resume from last state")
     
@@ -1661,11 +2310,15 @@ class AutonomousCoordinator:
 
                     paper_success = await self._paper_compilation_workflow()
 
-                    if paper_success or self._stop_event.is_set():
+                    if paper_success or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                         break
 
                 if self._stop_event.is_set():
                     break
+
+                if self._brainstorm_missing_during_paper:
+                    self._brainstorm_missing_during_paper = False
+                    continue
 
                 # Only check redundancy and log completion if paper was successful
                 if paper_success:
@@ -1696,9 +2349,12 @@ class AutonomousCoordinator:
                             next_paper_success = await self._paper_compilation_workflow(
                                 skip_reference_selection=True
                             )
-                            if next_paper_success or self._stop_event.is_set():
+                            if next_paper_success or self._stop_event.is_set() or self._brainstorm_missing_during_paper:
                                 break
                         
+                        if self._brainstorm_missing_during_paper:
+                            break
+
                         if not next_paper_success or self._stop_event.is_set():
                             break
                         
@@ -1707,6 +2363,10 @@ class AutonomousCoordinator:
                             self._current_brainstorm_paper_ids.append(self._last_completed_paper_id)
                         await self._check_paper_redundancy()
                     
+                    if self._brainstorm_missing_during_paper:
+                        self._brainstorm_missing_during_paper = False
+                        continue
+
                     if self._brainstorm_paper_count >= 3:
                         logger.info("Brainstorm paper limit reached (3/3)")
                         await self._broadcast("brainstorm_paper_limit_reached", {
@@ -1742,7 +2402,7 @@ class AutonomousCoordinator:
                 logger.warning(f"Resumed research: all free models exhausted: {e}")
                 await self._broadcast("free_models_exhausted", {
                     "role_id": "autonomous_resumed",
-                    "message": str(e),
+                    "message": "All free models exhausted, waiting to retry",
                 })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
 
@@ -1788,6 +2448,12 @@ class AutonomousCoordinator:
             "validator_provider": self._validator_provider,
             "validator_openrouter_provider": self._validator_openrouter_provider,
         }
+
+    def get_proof_runtime_config(self) -> Optional[Dict[str, Any]]:
+        """Return the current proof runtime snapshot when initialized."""
+        if not self._validator_model:
+            return None
+        return self._build_proof_runtime_config_snapshot()
     
     async def skip_critique_phase(self) -> bool:
         """
@@ -1840,7 +2506,7 @@ class AutonomousCoordinator:
         papers_summary = await autonomous_rag_manager.get_all_papers_summary()
         
         exploration_prompt = build_exploration_user_prompt(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             brainstorms_summary=brainstorms_summary,
             papers_summary=papers_summary
         )
@@ -2021,7 +2687,7 @@ class AutonomousCoordinator:
             papers_summary = await autonomous_rag_manager.get_all_papers_summary()
             
             submission = await self._topic_selector.select_topic(
-                user_research_prompt=self._user_research_prompt,
+                user_research_prompt=self._get_effective_user_research_prompt(),
                 brainstorms_summary=brainstorms_summary,
                 papers_summary=papers_summary,
                 candidate_questions=candidate_questions
@@ -2034,7 +2700,7 @@ class AutonomousCoordinator:
             
             validation = await self._topic_validator.validate(
                 submission=submission,
-                user_research_prompt=self._user_research_prompt,
+                user_research_prompt=self._get_effective_user_research_prompt(),
                 brainstorms_summary=brainstorms_summary,
                 papers_summary=papers_summary
             )
@@ -2099,6 +2765,21 @@ class AutonomousCoordinator:
                 
                 if metadata is None:
                     logger.error(f"Brainstorm not found: {topic_id}")
+                    return None
+                
+                # HARD GUARD: Completed brainstorms cannot be re-opened.
+                # The spec says continue_existing is for INCOMPLETE brainstorms only.
+                # LLMs sometimes ignore the "complete" status in the prompt context.
+                if metadata.status == "complete":
+                    logger.warning(
+                        f"Rejected continue_existing for {topic_id}: brainstorm is already complete "
+                        f"({metadata.submission_count} submissions, papers: {metadata.papers_generated}). "
+                        f"Forcing re-selection."
+                    )
+                    await self._broadcast("topic_selection_rejected", {
+                        "reasoning": f"Cannot continue brainstorm {topic_id} — it is already marked complete. "
+                                     f"Select a new topic or continue an incomplete brainstorm."
+                    })
                     return None
                 
                 self._current_topic_id = topic_id
@@ -2196,7 +2877,7 @@ class AutonomousCoordinator:
             logger.info(f"Brainstorm continuation decision attempt {attempt}")
             
             prompt = build_continuation_decision_prompt(
-                user_research_prompt=self._user_research_prompt,
+                user_research_prompt=self._get_effective_user_research_prompt(),
                 topic_prompt=topic_prompt,
                 brainstorm_summary=brainstorm_summary,
                 papers_from_brainstorm=papers_context,
@@ -2244,11 +2925,11 @@ class AutonomousCoordinator:
                         topic_prompt=f"[CONTINUATION DECISION: {decision}]",
                         reasoning=reasoning[:200]
                     ),
-                    user_research_prompt=self._user_research_prompt,
+                    user_research_prompt=self._get_effective_user_research_prompt(),
                     brainstorms_summary=await autonomous_rag_manager.get_all_brainstorms_summary(),
                     papers_summary=await autonomous_rag_manager.get_all_papers_summary(),
                     override_prompt=build_continuation_validation_prompt(
-                        user_research_prompt=self._user_research_prompt,
+                        user_research_prompt=self._get_effective_user_research_prompt(),
                         topic_prompt=topic_prompt,
                         brainstorm_summary=brainstorm_summary,
                         papers_from_brainstorm=papers_context,
@@ -2318,7 +2999,7 @@ class AutonomousCoordinator:
         
         # Run reference selection in "initial" mode (before brainstorm)
         selected_ids = await self._reference_selector.select_references(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt=topic_prompt,
             brainstorm_summary=brainstorm_summary,
             available_papers=papers_summary,
@@ -2462,7 +3143,7 @@ class AutonomousCoordinator:
             # CRITICAL: Pass per-submitter configs for multi-submitter support
             # CRITICAL: Pass reference papers as user_files to enable compounding knowledge
             await self._brainstorm_aggregator.initialize(
-                user_prompt=metadata.topic_prompt,
+                user_prompt=await self._get_effective_brainstorm_prompt(metadata.topic_prompt),
                 submitter_configs=self._submitter_configs,  # Per-submitter configs (1-10 submitters)
                 validator_model=self._validator_model,
                 user_files=reference_paper_paths,  # Reference papers for compounding knowledge
@@ -2512,6 +3193,7 @@ class AutonomousCoordinator:
             if self._manual_paper_writing_triggered:
                 logger.info("Manual override detected during initialization - skipping aggregator start")
                 self._manual_paper_writing_triggered = False
+                await self._run_brainstorm_completion_proofs()
                 return True
             
             # Start aggregator
@@ -2525,17 +3207,26 @@ class AutonomousCoordinator:
             last_acceptances = status.total_acceptances  # Should be 0 for new brainstorm
             last_rejections = status.total_rejections  # Track rejections for stat increments
             
+            # Base offset for continue_existing: fresh aggregator counts from 0 but topic
+            # already has prior submissions.  The 30-cap must apply to the TOTAL across
+            # all rounds, so we track the offset and add it to every aggregator reading.
+            resume_acceptance_base = 0
+            
             # CRITICAL BUG FIX: Don't reset counters if resuming from workflow state
             # Check if counters were already restored (non-zero means we're resuming)
             is_resuming = self._acceptance_count > 0 or self._rejection_count > 0
             
             if is_resuming:
-                # Resuming: Use the restored counters from workflow state, don't reset
-                logger.info(f"Resuming brainstorm with {self._acceptance_count} acceptances, "
+                # Resuming / continue_existing: The aggregator starts at 0 but the topic
+                # already has self._acceptance_count prior acceptances.  We store that as
+                # the base so every comparison uses total = base + aggregator_count.
+                resume_acceptance_base = self._acceptance_count
+                logger.info(f"Resuming brainstorm with {self._acceptance_count} prior acceptances "
+                           f"(base offset={resume_acceptance_base}), "
                            f"{self._rejection_count} rejections from workflow state")
-                # Set last_* to current values so we can track NEW acceptances/rejections from here
-                last_acceptances = self._acceptance_count
-                last_rejections = self._rejection_count
+                # Reset last_* to 0 so we track the fresh aggregator's output correctly
+                last_acceptances = 0
+                last_rejections = 0
             else:
                 # Fresh brainstorm: Initialize counters from aggregator stats (should be 0)
                 self._acceptance_count = last_acceptances
@@ -2545,6 +3236,20 @@ class AutonomousCoordinator:
                 self._exhaustion_signals = 0
                 self._last_completion_review_at = 0  # Reset completion review checkpoint
                 logger.info(f"Starting fresh brainstorm with {last_acceptances} acceptances")
+            
+            # Safety check: if topic already at or past hard cap (e.g. resume of
+            # already-complete brainstorm that slipped past the code guard), skip
+            # aggregation entirely and go straight to paper writing.
+            if self._acceptance_count >= 30:
+                logger.info(
+                    f"Topic {self._current_topic_id} already at {self._acceptance_count} "
+                    f"acceptances (>= 30 cap). Skipping aggregation, forcing paper writing."
+                )
+                await brainstorm_memory.mark_complete(self._current_topic_id)
+                await research_metadata.mark_brainstorm_complete(self._current_topic_id)
+                await self._brainstorm_aggregator.stop()
+                await self._run_brainstorm_completion_proofs()
+                return True
             
             while self._running and not self._stop_event.is_set():
                 # Get current aggregator stats
@@ -2565,7 +3270,7 @@ class AutonomousCoordinator:
                 # Track new acceptances/rejections
                 if current_acceptances > last_acceptances:
                     new_acceptances = current_acceptances - last_acceptances
-                    self._acceptance_count = current_acceptances
+                    self._acceptance_count = resume_acceptance_base + current_acceptances
                     self._consecutive_rejections = 0
                     last_acceptances = current_acceptances
                     
@@ -2605,6 +3310,7 @@ class AutonomousCoordinator:
                         
                         # Stop aggregator
                         await self._brainstorm_aggregator.stop()
+                        await self._run_brainstorm_completion_proofs()
                         
                         # Force transition to paper writing (skip completion review)
                         return True
@@ -2622,6 +3328,7 @@ class AutonomousCoordinator:
                         if write_paper:
                             # Stop aggregator
                             await self._brainstorm_aggregator.stop()
+                            await self._run_brainstorm_completion_proofs()
                             return True
                 
                 # Check for manual override trigger (before checking stop event)
@@ -2629,6 +3336,7 @@ class AutonomousCoordinator:
                     logger.info("Manual override detected - transitioning to paper writing")
                     self._manual_paper_writing_triggered = False
                     await self._brainstorm_aggregator.stop()
+                    await self._run_brainstorm_completion_proofs()
                     return True
                 
                 # Track consecutive rejections and increment total rejections stat
@@ -2663,6 +3371,7 @@ class AutonomousCoordinator:
                         
                         # Stop aggregator
                         await self._brainstorm_aggregator.stop()
+                        await self._run_brainstorm_completion_proofs()
                         
                         # Force transition to paper writing (skip completion review)
                         return True
@@ -2936,8 +3645,8 @@ class AutonomousCoordinator:
             return {"success": False, "result": "error", "message": "Invalid mode or state"}
             
         except Exception as e:
-            logger.error(f"Error forcing Tier 3: {e}")
-            return {"success": False, "result": "error", "message": str(e)}
+            logger.error(f"Error forcing Tier 3: {e}", exc_info=True)
+            return {"success": False, "result": "error", "message": "An internal error occurred during Tier 3 processing"}
     
     def _should_run_completion_review(self) -> bool:
         """Check if completion review should run.
@@ -2981,7 +3690,7 @@ class AutonomousCoordinator:
         
         # Run completion review with self-validation
         result, is_validated = await self._completion_reviewer.review_completion(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             topic_id=self._current_topic_id,
             topic_prompt=metadata.topic_prompt,
             brainstorm_database=brainstorm_content,
@@ -3042,6 +3751,10 @@ class AutonomousCoordinator:
         api_client_manager.set_autonomous_phase("paper_compilation")
         
         logger.info(f"Starting paper compilation for brainstorm {self._current_topic_id}")
+
+        if not await self._current_brainstorm_available_for_paper():
+            logger.info("Paper compilation skipped because the source brainstorm is unavailable")
+            return False
         
         # Check if we're resuming an in-progress paper
         # This flag tracks whether we're resuming (for passing to _compile_paper)
@@ -3161,6 +3874,9 @@ class AutonomousCoordinator:
         
         if paper_content is None:
             logger.error("Paper compilation failed")
+            if self._brainstorm_missing_during_paper:
+                logger.info("Not preserving failed paper state because the source brainstorm was deleted")
+                return False
             await self._preserve_failed_paper_state(paper_id, paper_title)
             return False
 
@@ -3247,7 +3963,7 @@ class AutonomousCoordinator:
         
         # Run reference selection in "additional" mode
         additional_ids = await self._reference_selector.select_references(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt=topic_prompt,
             brainstorm_summary=brainstorm_summary,
             available_papers=available_for_selection,
@@ -3305,7 +4021,7 @@ class AutonomousCoordinator:
         
         # Select title (pass stop_event so user stop is honoured mid-loop)
         title = await self._title_selector.select_title(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt=metadata.topic_prompt,
             brainstorm_summary=brainstorm_summary,
             existing_papers_from_brainstorm=existing_papers,
@@ -3342,18 +4058,11 @@ class AutonomousCoordinator:
         TARGET_CANDIDATES = 5
         MAX_CONSECUTIVE_REJECTIONS = 15
         
-        await self._broadcast("paper_title_exploration_started", {
-            "target": TARGET_CANDIDATES,
-            "resumed_count": 0
-        })
-        
-        logger.info(f"Starting paper title exploration phase (target: {TARGET_CANDIDATES} candidates)")
-        
         # Build the exploration user prompt for the aggregator
         from backend.autonomous.prompts.paper_title_exploration_prompts import build_title_exploration_user_prompt
         
         exploration_prompt = build_title_exploration_user_prompt(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt=topic_prompt,
             brainstorm_summary=brainstorm_summary,
             existing_papers_from_brainstorm=existing_papers or [],
@@ -3365,84 +4074,117 @@ class AutonomousCoordinator:
         title_db_path = brainstorm_memory._base_dir / f"title_candidates_{topic_suffix}.txt"
         title_db_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # Clear any stale title candidates DB
-        if title_db_path.exists():
-            title_db_path.unlink()
-        
-        # Override shared training memory path for title exploration
+        # CRASH-RESUME: Preserve any prior validated candidates.
+        # If a previous run was interrupted mid-exploration, the finally-block cleanup
+        # never ran, so the file still contains accepted candidates. We reuse them and
+        # only top up to TARGET_CANDIDATES instead of restarting from zero.
+        # Override shared training memory path BEFORE counting so the reload reads this file.
         original_shared_path = system_config.shared_training_file
         system_config.shared_training_file = str(title_db_path)
         original_memory_path = shared_training_memory.file_path
         shared_training_memory.file_path = title_db_path
         await shared_training_memory.reload_insights_from_current_path()
         
+        resumed_count = len(shared_training_memory.insights)
+        if resumed_count > 0:
+            logger.info(
+                f"TitleExploration: Resuming with {resumed_count} previously-accepted "
+                f"candidate(s) from {title_db_path.name}"
+            )
+        
+        await self._broadcast("paper_title_exploration_started", {
+            "target": TARGET_CANDIDATES,
+            "resumed_count": resumed_count
+        })
+        
+        logger.info(
+            f"Starting paper title exploration phase (target: {TARGET_CANDIDATES} candidates, "
+            f"resumed: {resumed_count})"
+        )
+        
         exploration_aggregator = None
         
         try:
-            exploration_aggregator = AggregatorCoordinator()
-            
-            await exploration_aggregator.initialize(
-                user_prompt=exploration_prompt,
-                submitter_configs=self._submitter_configs,
-                validator_model=self._validator_model,
-                user_files=[],
-                skip_stats_load=True,
-                validator_context_window=self._validator_context,
-                validator_max_tokens=self._validator_max_tokens,
-                validator_provider=self._validator_provider,
-                validator_openrouter_provider=self._validator_openrouter_provider,
-                validator_lm_studio_fallback=self._validator_lm_studio_fallback,
-                enable_cleanup_review=False
-            )
-            
-            if self._broadcast_callback:
-                exploration_aggregator.websocket_broadcaster = self._broadcast_callback
-            
-            await exploration_aggregator.start()
-            logger.info("Title exploration aggregator started with parallel submitters")
-            
-            last_acceptances = 0
-            last_rejections = 0
-            consecutive_rejections = 0
-            
-            while self._running and not self._stop_event.is_set():
-                status = await exploration_aggregator.get_status()
-                current_acceptances = status.total_acceptances
-                current_rejections = status.total_rejections
+            # Short-circuit: if we already have enough candidates from a prior run,
+            # skip the aggregator entirely and proceed directly to reading them.
+            if resumed_count >= TARGET_CANDIDATES:
+                logger.info(
+                    f"TitleExploration: Already have {resumed_count} candidates from "
+                    f"prior run (>= target {TARGET_CANDIDATES}); skipping aggregator."
+                )
+                last_acceptances = resumed_count
+                last_rejections = 0
+            else:
+                exploration_aggregator = AggregatorCoordinator()
                 
-                if current_acceptances > last_acceptances:
-                    consecutive_rejections = 0
-                    last_acceptances = current_acceptances
-                    
-                    await self._broadcast("paper_title_exploration_progress", {
-                        "accepted": current_acceptances,
-                        "target": TARGET_CANDIDATES,
-                        "total_attempts": current_acceptances + current_rejections
-                    })
-                    
-                    await self._save_workflow_state(
-                        tier=self._state.current_tier,
-                        phase="paper_title_exploration"
-                    )
-                    
-                    logger.info(f"TitleExploration: {current_acceptances}/{TARGET_CANDIDATES} candidates accepted")
-                    
-                    if current_acceptances >= TARGET_CANDIDATES:
-                        logger.info(f"TitleExploration: Target of {TARGET_CANDIDATES} candidates reached")
-                        break
+                await exploration_aggregator.initialize(
+                    user_prompt=exploration_prompt,
+                    submitter_configs=self._submitter_configs,
+                    validator_model=self._validator_model,
+                    user_files=[],
+                    skip_stats_load=True,
+                    validator_context_window=self._validator_context,
+                    validator_max_tokens=self._validator_max_tokens,
+                    validator_provider=self._validator_provider,
+                    validator_openrouter_provider=self._validator_openrouter_provider,
+                    validator_lm_studio_fallback=self._validator_lm_studio_fallback,
+                    enable_cleanup_review=False
+                )
                 
-                if current_rejections > last_rejections:
-                    new_rejections = current_rejections - last_rejections
-                    consecutive_rejections += new_rejections
-                    last_rejections = current_rejections
-                    
-                    if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
-                        logger.warning(f"TitleExploration: {consecutive_rejections} consecutive rejections - proceeding with {current_acceptances} candidates")
-                        break
+                if self._broadcast_callback:
+                    exploration_aggregator.websocket_broadcaster = self._broadcast_callback
                 
-                await asyncio.sleep(2)
-            
-            await exploration_aggregator.stop()
+                await exploration_aggregator.start()
+                logger.info("Title exploration aggregator started with parallel submitters")
+                
+                # Aggregator starts at 0 acceptances even though the file may already
+                # contain resumed candidates. We track the aggregator's own counter for
+                # delta detection, but report the sum (resumed + new) as progress.
+                last_aggregator_acceptances = 0
+                last_acceptances = resumed_count
+                last_rejections = 0
+                consecutive_rejections = 0
+                
+                while self._running and not self._stop_event.is_set():
+                    status = await exploration_aggregator.get_status()
+                    current_aggregator_acceptances = status.total_acceptances
+                    current_acceptances = resumed_count + current_aggregator_acceptances
+                    current_rejections = status.total_rejections
+                    
+                    if current_aggregator_acceptances > last_aggregator_acceptances:
+                        consecutive_rejections = 0
+                        last_aggregator_acceptances = current_aggregator_acceptances
+                        last_acceptances = current_acceptances
+                        
+                        await self._broadcast("paper_title_exploration_progress", {
+                            "accepted": current_acceptances,
+                            "target": TARGET_CANDIDATES,
+                            "total_attempts": current_acceptances + current_rejections
+                        })
+                        
+                        await self._save_workflow_state(
+                            tier=self._state.current_tier,
+                            phase="paper_title_exploration"
+                        )
+                        
+                        logger.info(f"TitleExploration: {current_acceptances}/{TARGET_CANDIDATES} candidates accepted")
+                        
+                        if current_acceptances >= TARGET_CANDIDATES:
+                            logger.info(f"TitleExploration: Target of {TARGET_CANDIDATES} candidates reached")
+                            break
+                    
+                    if current_rejections > last_rejections:
+                        new_rejections = current_rejections - last_rejections
+                        consecutive_rejections += new_rejections
+                        last_rejections = current_rejections
+                        
+                        if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
+                            logger.warning(f"TitleExploration: {consecutive_rejections} consecutive rejections - proceeding with {current_acceptances} candidates")
+                            break
+                    
+                    await asyncio.sleep(2)
+                
+                await exploration_aggregator.stop()
             
             # Read accepted candidates from the title candidates database
             candidates_text = ""
@@ -3555,7 +4297,7 @@ class AutonomousCoordinator:
             # CRITICAL: skip_aggregator_db=True prevents loading Part 1 aggregator database
             # Autonomous mode should ONLY use the brainstorm database for this topic
             await self._paper_compiler.initialize(
-                compiler_prompt=f"Write a mathematical research paper titled: {paper_title}",
+                compiler_prompt=self._get_effective_compiler_prompt(paper_title),
                 validator_model=self._validator_model,
                 high_context_model=self._high_context_model,
                 high_param_model=self._high_param_model,
@@ -3582,6 +4324,7 @@ class AutonomousCoordinator:
             
             # Enable autonomous section order constraint
             self._paper_compiler.enable_autonomous_mode()
+            self._paper_compiler._current_paper_tracker = self._current_paper_tracker
             self._paper_compiler._current_topic_id = self._current_topic_id
             self._paper_compiler._current_reference_paper_ids = list(dict.fromkeys(
                 reference_paper_ids + self._current_brainstorm_paper_ids
@@ -3622,18 +4365,37 @@ class AutonomousCoordinator:
             
             # Load brainstorm database into compiler RAG
             # This is now the ONLY aggregator content loaded (no Part 1 pollution)
-            # IMPORTANT: Use brainstorm_memory.get_database_path() for session-aware path resolution
+            # Proof sections (both novel and non-novel) are stripped before indexing
+            # so that RAG chunks contain only mathematical submission content.
+            # Novel proofs reach the compiler via proof_database.inject_into_prompt().
             brainstorm_db_path = brainstorm_memory.get_database_path(self._current_topic_id)
             if os.path.exists(brainstorm_db_path):
                 logger.info(f"Loading brainstorm database into compiler RAG: {brainstorm_db_path}")
-                await rag_manager.add_document(
-                    brainstorm_db_path,
-                    chunk_sizes=[512],  # Use standard chunk size for brainstorm
-                    is_user_file=True  # High priority, permanent
+                brainstorm_content_for_rag = await brainstorm_memory.get_database_content(
+                    self._current_topic_id, strip_proofs=True
                 )
-                logger.info("Brainstorm database loaded into compiler RAG")
+                if brainstorm_content_for_rag:
+                    await rag_manager.add_text(
+                        brainstorm_content_for_rag,
+                        f"brainstorm_{self._current_topic_id}.txt",
+                        chunk_sizes=[512],
+                        is_permanent=True
+                    )
+                    logger.info("Brainstorm database loaded into compiler RAG (proof sections stripped)")
+                else:
+                    logger.warning("Brainstorm database was empty after proof stripping")
             else:
                 logger.warning(f"Brainstorm database not found: {brainstorm_db_path}")
+                logger.error("Aborting paper compilation: brainstorm database is required")
+                try:
+                    await self._paper_compiler.stop()
+                except Exception as stop_exc:
+                    logger.warning(f"Failed to stop compiler after missing brainstorm abort: {stop_exc}")
+                await self._clear_stale_paper_writing_state(
+                    self._current_topic_id,
+                    f"brainstorm database not found at {brainstorm_db_path}"
+                )
+                return None
             
             # Load reference papers into compiler RAG (if any)
             if reference_paper_ids:
@@ -3642,12 +4404,17 @@ class AutonomousCoordinator:
                     # IMPORTANT: Use paper_library.get_paper_path() for session-aware path resolution
                     paper_path = paper_library.get_paper_path(ref_paper_id)
                     if os.path.exists(paper_path):
-                        await rag_manager.add_document(
-                            paper_path,
-                            chunk_sizes=[512],
-                            is_user_file=False  # Lower priority than brainstorm
-                        )
-                        logger.info(f"Reference paper loaded: {ref_paper_id}")
+                        ref_content = await paper_library.get_paper_content(ref_paper_id, strip_proofs=True)
+                        if ref_content:
+                            await rag_manager.add_text(
+                                ref_content,
+                                f"reference_paper_{ref_paper_id}.txt",
+                                chunk_sizes=[512],
+                                is_permanent=False
+                            )
+                            logger.info(f"Reference paper loaded: {ref_paper_id}")
+                        else:
+                            logger.warning(f"Reference paper was empty after proof stripping: {ref_paper_id}")
                     else:
                         logger.warning(f"Reference paper not found: {paper_path}")
                 logger.info("All reference papers loaded into compiler RAG")
@@ -3658,12 +4425,17 @@ class AutonomousCoordinator:
                 for bp_id in self._current_brainstorm_paper_ids:
                     bp_path = paper_library.get_paper_path(bp_id)
                     if os.path.exists(bp_path):
-                        await rag_manager.add_document(
-                            bp_path,
-                            chunk_sizes=[512],
-                            is_user_file=True
-                        )
-                        logger.info(f"Prior brainstorm paper loaded as auto-reference: {bp_id}")
+                        bp_content = await paper_library.get_paper_content(bp_id, strip_proofs=True)
+                        if bp_content:
+                            await rag_manager.add_text(
+                                bp_content,
+                                f"prior_paper_{bp_id}.txt",
+                                chunk_sizes=[512],
+                                is_permanent=True
+                            )
+                            logger.info(f"Prior brainstorm paper loaded as auto-reference: {bp_id}")
+                        else:
+                            logger.warning(f"Prior brainstorm paper was empty after proof stripping: {bp_id}")
                     else:
                         logger.warning(f"Prior brainstorm paper not found: {bp_path}")
             
@@ -3736,6 +4508,8 @@ class AutonomousCoordinator:
             r"##\s*Abstract",
             r"#\s*Abstract",
             r"\*\*Abstract\*\*",
+            r"\\(?:section|chapter)\*?\{Abstract\}",
+            r"\\begin\{abstract\}",
             r"Abstract\s*\n",
         ]
         
@@ -3752,6 +4526,8 @@ class AutonomousCoordinator:
             r"##\s*Abstract\s*\n(.*?)(?=\n##|\n#|\Z)",
             r"#\s*Abstract\s*\n(.*?)(?=\n##|\n#|\Z)",
             r"\*\*Abstract\*\*\s*\n(.*?)(?=\n##|\n#|\n\*\*|\Z)",
+            r"\\(?:section|chapter)\*?\{Abstract\}\s*\n(.*?)(?=\n\\(?:section|chapter)\*?\{|\Z)",
+            r"\\begin\{abstract\}\s*(.*?)\s*\\end\{abstract\}",
         ]
         
         for pattern in abstract_patterns:
@@ -3836,6 +4612,32 @@ class AutonomousCoordinator:
                 final_content = final_content + "\n" + model_credits
             
             logger.info("Added author attribution and model credits to paper")
+
+        if mark_complete and self._current_topic_id:
+            try:
+                novel_source_proofs = [
+                    proof
+                    for proof in await proof_database.get_all_proofs(novel_only=True)
+                    if proof.source_type == "brainstorm"
+                    and proof.source_id == self._current_topic_id
+                ]
+                if novel_source_proofs:
+                    final_content = paper_library.attach_verified_proofs_to_content(
+                        final_content,
+                        novel_source_proofs,
+                        f"source brainstorm {self._current_topic_id}",
+                    )
+                    logger.info(
+                        "Attached %s novel source-brainstorm proof(s) to paper %s",
+                        len(novel_source_proofs),
+                        paper_id,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to attach source-brainstorm proofs to paper %s: %s",
+                    paper_id,
+                    exc,
+                )
         
         # Save paper with appropriate status
         paper_metadata = await paper_library.save_paper(
@@ -3868,6 +4670,64 @@ class AutonomousCoordinator:
                 "title": title,
                 "word_count": paper_metadata.word_count
             })
+
+            await self._run_proof_verification(
+                content,
+                "paper",
+                paper_id,
+                source_title=title,
+            )
+
+            pending_retry_candidates: List[ProofCandidate] = []
+            retry_source_ids = paper_metadata.source_brainstorm_ids or ([self._current_topic_id] if self._current_topic_id else [])
+            for brainstorm_id in retry_source_ids:
+                pending_retries = await proof_database.get_pending_retries(
+                    brainstorm_id,
+                    retry_source_id=paper_id,
+                )
+                for pending_retry in pending_retries:
+                    combined_excerpt_parts = []
+                    if pending_retry.source_excerpt:
+                        combined_excerpt_parts.append(
+                            "ORIGINAL BRAINSTORM EXCERPT:\n" + pending_retry.source_excerpt
+                        )
+                    if content:
+                        combined_excerpt_parts.append(
+                            "REFINED PAPER CONTEXT:\n" + content[:6000]
+                        )
+
+                    retry_formal_sketch = pending_retry.formal_sketch
+                    if pending_retry.error_summary:
+                        retry_formal_sketch = (
+                            f"{retry_formal_sketch}\n\nPrior Lean 4 failure summary: {pending_retry.error_summary}"
+                        ).strip()
+
+                    pending_retry_candidates.append(
+                        ProofCandidate(
+                            theorem_id=pending_retry.theorem_id,
+                            statement=pending_retry.theorem_statement,
+                            formal_sketch=retry_formal_sketch,
+                            source_excerpt="\n\n".join(part for part in combined_excerpt_parts if part).strip(),
+                            origin_source_id=brainstorm_id,
+                        )
+                    )
+
+            if pending_retry_candidates:
+                await self._broadcast("proof_retry_scheduled", {
+                    "source_type": "paper",
+                    "source_id": paper_id,
+                    "source_title": title,
+                    "count": len(pending_retry_candidates),
+                    "brainstorm_ids": retry_source_ids,
+                })
+                await self._run_proof_verification(
+                    content,
+                    "paper",
+                    paper_id,
+                    source_title=title,
+                    theorem_candidates=pending_retry_candidates,
+                    trigger="retry",
+                )
 
             # Trigger auto-critique generation in background (only if marking as complete)
             asyncio.create_task(self._auto_generate_paper_critique(
@@ -4078,7 +4938,7 @@ class AutonomousCoordinator:
         
         # Check for redundancy
         result = await self._redundancy_checker.check_redundancy(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             papers_summary=papers_summary
         )
         
@@ -4284,7 +5144,7 @@ class AutonomousCoordinator:
                 })
                 
                 format_selection = await self._format_selector.select_format(
-                    user_research_prompt=self._user_research_prompt,
+                    user_research_prompt=self._get_effective_user_research_prompt(),
                     certainty_assessment=assessment,
                     all_papers=all_papers
                 )
@@ -4578,7 +5438,7 @@ class AutonomousCoordinator:
             })
             
             assessment = await self._certainty_assessor.assess_certainty(
-                user_research_prompt=self._user_research_prompt,
+                user_research_prompt=self._get_effective_user_research_prompt(),
                 all_papers=all_papers
             )
             
@@ -4617,7 +5477,7 @@ class AutonomousCoordinator:
             })
             
             format_selection = await self._format_selector.select_format(
-                user_research_prompt=self._user_research_prompt,
+                user_research_prompt=self._get_effective_user_research_prompt(),
                 certainty_assessment=assessment,
                 all_papers=all_papers
             )
@@ -4787,7 +5647,7 @@ class AutonomousCoordinator:
         try:
             # Step 1: Organize volume structure
             volume = await self._volume_organizer.organize_volume(
-                user_research_prompt=self._user_research_prompt,
+                user_research_prompt=self._get_effective_user_research_prompt(),
                 certainty_assessment=assessment,
                 all_papers=all_papers
             )
@@ -4871,7 +5731,7 @@ class AutonomousCoordinator:
 
         # For Tier 3, we browse ALL papers and select those most useful for answering
         selected_ids = await self._reference_selector.select_references(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt="[Tier 3 Final Answer - selecting papers to answer the research question]",
             brainstorm_summary="[No brainstorm - Tier 3 operates on completed papers only]",
             available_papers=all_papers,
@@ -4911,7 +5771,7 @@ class AutonomousCoordinator:
         
         # Use the existing title selector with special context + candidate titles
         title = await self._title_selector.select_title(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt=topic_prompt,
             brainstorm_summary=brainstorm_summary,
             existing_papers_from_brainstorm=[],
@@ -4956,9 +5816,11 @@ class AutonomousCoordinator:
             
             # Initialize compiler
             await self._paper_compiler.initialize(
-                compiler_prompt=f"Write a mathematical research paper titled: {paper_title}\n\n"
-                               f"IMPORTANT: This paper directly answers the research question.\n"
-                               f"Known Certainties: {assessment.known_certainties_summary}",
+                compiler_prompt=self._apply_proof_context(
+                    f"Write a mathematical research paper titled: {paper_title}\n\n"
+                    f"IMPORTANT: This paper directly answers the research question.\n"
+                    f"Known Certainties: {assessment.known_certainties_summary}"
+                ),
                 validator_model=self._validator_model,
                 high_context_model=self._high_context_model,
                 high_param_model=self._high_param_model,
@@ -5084,7 +5946,7 @@ class AutonomousCoordinator:
         
         # Select chapter title from candidates
         chapter_title = await self._title_selector.select_title(
-            user_research_prompt=self._user_research_prompt,
+            user_research_prompt=self._get_effective_user_research_prompt(),
             topic_prompt=f"[VOLUME CHAPTER: {chapter.chapter_type}] {context}",
             brainstorm_summary=f"Known Certainties:\n{assessment.known_certainties_summary}",
             existing_papers_from_brainstorm=[],

@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import TextFileUploader from '../TextFileUploader';
+import { getRuntimeDataPath } from '../../utils/runtimeConfig';
 
-function CompilerInterface({ activeTab, anyWorkflowRunning = false }) {
+function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false }) {
   const [compilerPrompt, setCompilerPrompt] = useState('');
   const [status, setStatus] = useState({ is_running: false });
   const [isStarting, setIsStarting] = useState(false);
@@ -17,6 +18,33 @@ function CompilerInterface({ activeTab, anyWorkflowRunning = false }) {
   const [paperVersion, setPaperVersion] = useState(1);
   const [isSkipping, setIsSkipping] = useState(false);
   const [skipQueued, setSkipQueued] = useState(false);
+  const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+
+  const normalizeCompilerSettingsForCapabilities = (settings = {}) => {
+    if (lmStudioEnabled) {
+      return settings;
+    }
+
+    const nextSettings = { ...settings };
+    const rolePrefixes = ['validator', 'highContext', 'highParam', 'critiqueSubmitter'];
+
+    rolePrefixes.forEach((rolePrefix) => {
+      const providerKey = `${rolePrefix}Provider`;
+      const modelKey = `${rolePrefix}Model`;
+      const openRouterProviderKey = `${rolePrefix}OpenrouterProvider`;
+      const fallbackKey = `${rolePrefix}LmStudioFallback`;
+      const keepOpenRouterState = nextSettings[providerKey] === 'openrouter';
+
+      nextSettings[providerKey] = 'openrouter';
+      nextSettings[modelKey] = keepOpenRouterState ? (nextSettings[modelKey] || '') : '';
+      nextSettings[openRouterProviderKey] = keepOpenRouterState
+        ? (nextSettings[openRouterProviderKey] || null)
+        : null;
+      nextSettings[fallbackKey] = null;
+    });
+
+    return nextSettings;
+  };
 
   useEffect(() => {
     loadStatus();
@@ -73,19 +101,22 @@ function CompilerInterface({ activeTab, anyWorkflowRunning = false }) {
     if (activeTab === 'compiler-interface') {
       loadSettings();
     }
-  }, [activeTab]);
+  }, [activeTab, lmStudioEnabled]);
 
   const loadSettings = () => {
     const savedSettings = localStorage.getItem('compiler_settings');
     if (savedSettings) {
       try {
-        const settings = JSON.parse(savedSettings);
+        const settings = normalizeCompilerSettingsForCapabilities(JSON.parse(savedSettings));
         if (settings.validatorContextSize) setValidatorContextSize(settings.validatorContextSize);
         if (settings.highContextContextSize) setHighContextContextSize(settings.highContextContextSize);
         if (settings.highParamContextSize) setHighParamContextSize(settings.highParamContextSize);
         if (settings.critiqueSubmitterContextSize) setCritiqueSubmitterContextSize(settings.critiqueSubmitterContextSize);
         // Store for use in handleStart
         window.compilerSettings = settings;
+        if (!lmStudioEnabled) {
+          localStorage.setItem('compiler_settings', JSON.stringify(settings));
+        }
       } catch (error) {
         console.error('Failed to load compiler settings:', error);
       }
@@ -147,31 +178,35 @@ function CompilerInterface({ activeTab, anyWorkflowRunning = false }) {
       await compilerAPI.start({
         compiler_prompt: compilerPrompt,
         // Validator config with OpenRouter support
-        validator_provider: settings.validatorProvider || 'lm_studio',
+        validator_provider: lmStudioEnabled ? (settings.validatorProvider || 'lm_studio') : 'openrouter',
         validator_model: settings.validatorModel,
         validator_openrouter_provider: settings.validatorOpenrouterProvider || null,
-        validator_lm_studio_fallback: settings.validatorLmStudioFallback || null,
+        validator_lm_studio_fallback: lmStudioEnabled ? (settings.validatorLmStudioFallback || null) : null,
         validator_context_size: settings.validatorContextSize || validatorContextSize,
         validator_max_output_tokens: settings.validatorMaxOutput || 25000,
         // High-context submitter config with OpenRouter support
-        high_context_provider: settings.highContextProvider || 'lm_studio',
+        high_context_provider: lmStudioEnabled ? (settings.highContextProvider || 'lm_studio') : 'openrouter',
         high_context_model: settings.highContextModel,
         high_context_openrouter_provider: settings.highContextOpenrouterProvider || null,
-        high_context_lm_studio_fallback: settings.highContextLmStudioFallback || null,
+        high_context_lm_studio_fallback: lmStudioEnabled ? (settings.highContextLmStudioFallback || null) : null,
         high_context_context_size: settings.highContextContextSize || highContextContextSize,
         high_context_max_output_tokens: settings.highContextMaxOutput || 25000,
         // High-param submitter config with OpenRouter support
-        high_param_provider: settings.highParamProvider || 'lm_studio',
+        high_param_provider: lmStudioEnabled ? (settings.highParamProvider || 'lm_studio') : 'openrouter',
         high_param_model: settings.highParamModel,
         high_param_openrouter_provider: settings.highParamOpenrouterProvider || null,
-        high_param_lm_studio_fallback: settings.highParamLmStudioFallback || null,
+        high_param_lm_studio_fallback: lmStudioEnabled ? (settings.highParamLmStudioFallback || null) : null,
         high_param_context_size: settings.highParamContextSize || highParamContextSize,
         high_param_max_output_tokens: settings.highParamMaxOutput || 25000,
         // Critique submitter config with OpenRouter support
-        critique_submitter_provider: settings.critiqueSubmitterProvider || 'lm_studio',
+        critique_submitter_provider: lmStudioEnabled
+          ? (settings.critiqueSubmitterProvider || 'lm_studio')
+          : 'openrouter',
         critique_submitter_model: settings.critiqueSubmitterModel,
         critique_submitter_openrouter_provider: settings.critiqueSubmitterOpenrouterProvider || null,
-        critique_submitter_lm_studio_fallback: settings.critiqueSubmitterLmStudioFallback || null,
+        critique_submitter_lm_studio_fallback: lmStudioEnabled
+          ? (settings.critiqueSubmitterLmStudioFallback || null)
+          : null,
         critique_submitter_context_window: settings.critiqueSubmitterContextSize || critiqueSubmitterContextSize,
         critique_submitter_max_tokens: settings.critiqueSubmitterMaxOutput || 25000
       });
@@ -372,7 +407,7 @@ function CompilerInterface({ activeTab, anyWorkflowRunning = false }) {
       <div className="info-section">
         <h3>Aggregator Database</h3>
         <p>The compiler will read from the aggregator's accepted submissions database.</p>
-        <p>Location: <code>backend/data/rag_shared_training.txt</code></p>
+        <p>Location: <code>{getRuntimeDataPath('rag_shared_training.txt')}</code></p>
       </div>
     </div>
   );

@@ -177,7 +177,7 @@ class PaperModelTracker:
             "=" * 80,
             "AUTONOMOUS AI SOLUTION",
             "",
-            "Disclaimer: This content is provided for informational and experimental purposes only. "
+            "Disclaimer: This content is provided for informational purposes only. "
             "This paper was autonomously generated with the novelty-seeking MOTO harness without "
             "peer review or user oversight beyond the original prompt. It may contain incorrect, "
             "incomplete, misleading, or fabricated claims presented with high confidence. Use of "

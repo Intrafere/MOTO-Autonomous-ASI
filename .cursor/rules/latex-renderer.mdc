@@ -1,6 +1,7 @@
 ---
 alwaysApply: false
 ---
+
 # LaTeX Renderer System
 
 ## 🔒 CRITICAL SECURITY REQUIREMENTS
@@ -164,6 +165,8 @@ Ratings: Novelty, Correctness, Impact (1-10 scale). Up to 10 history entries. Re
 **Integration localStorage keys:**
 - `autonomous_critique_custom_prompt` — PaperLibrary + FinalAnswerView
 - `compiler_critique_custom_prompt` — LivePaper
+
+When a frontend storage prefix is active for multi-instance shared-origin use, these keys are automatically namespaced by the runtime layer rather than stored as one global browser-wide bucket.
 
 ---
 

@@ -1,0 +1,166 @@
+/* ProofLibrary.css - Proof-specific overrides for the FinalAnswerLibrary layout */
+
+.proof-library .library-header h2 {
+  color: #1eff1c;
+}
+
+/* Legacy fallback — keeps old records styled correctly */
+.proof-card--novel {
+  border-left: 3px solid #ffd65c;
+}
+
+.proof-card--known {
+  border-left: 3px solid #666;
+}
+
+/* Tier-specific card accents */
+.proof-card--gold {
+  border-left: 3px solid #ffd65c;
+}
+
+.proof-card--silver {
+  border-left: 3px solid #c0c0c0;
+}
+
+.proof-card--bronze {
+  border-left: 3px solid #cd7f32;
+}
+
+/* Legacy fallback badge */
+.proof-badge--novel {
+  background: linear-gradient(135deg, #ffd65c 0%, #ffe99a 100%);
+  color: #1a1a00;
+}
+
+.proof-badge--known {
+  background: #555;
+  color: #ccc;
+}
+
+/* Tier-specific badges */
+.proof-badge--gold {
+  background: linear-gradient(135deg, #ffd65c 0%, #ffe99a 100%);
+  color: #1a1a00;
+}
+
+.proof-badge--silver {
+  background: linear-gradient(135deg, #c0c0c0 0%, #e8e8e8 100%);
+  color: #1a1a1a;
+}
+
+.proof-badge--bronze {
+  background: linear-gradient(135deg, #cd7f32 0%, #e8a060 100%);
+  color: #1a0a00;
+}
+
+.proof-title {
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.02em;
+}
+
+.proof-statement {
+  color: #b9b9c6;
+  font-size: 0.92rem;
+  line-height: 1.55;
+  margin-bottom: 8px;
+  font-style: italic;
+}
+
+/* Expanded proof details */
+.proof-expanded-content {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.proof-detail-section h4 {
+  color: #1eff1c;
+  font-size: 0.95rem;
+  margin: 0 0 8px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.proof-detail-section p {
+  color: #ccc;
+  font-size: 0.93rem;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.proof-code-block {
+  background: #0d0d0d;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 14px 16px;
+  color: #e0e0e0;
+  font-family: 'Courier New', monospace;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-x: auto;
+  max-height: 500px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.proof-lean-code {
+  color: #7dff6f;
+}
+
+.proof-dependencies-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.proof-dependencies-list li {
+  color: #ccc;
+  font-size: 0.9rem;
+  padding: 4px 0;
+}
+
+.proof-dep-kind {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.proof-dep-kind--mathlib {
+  background: rgba(46, 134, 222, 0.2);
+  border: 1px solid rgba(46, 134, 222, 0.4);
+  color: #b9ddff;
+}
+
+.proof-dep-kind--moto {
+  background: rgba(30, 255, 28, 0.15);
+  border: 1px solid rgba(30, 255, 28, 0.3);
+  color: #b7ffb6;
+}
+
+/* Code block scrollbar */
+.proof-code-block::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.proof-code-block::-webkit-scrollbar-track {
+  background: #111;
+}
+
+.proof-code-block::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 4px;
+}
+
+.proof-code-block::-webkit-scrollbar-thumb:hover {
+  background: #666;
+}

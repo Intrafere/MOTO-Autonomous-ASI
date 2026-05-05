@@ -82,6 +82,11 @@ class ResearchMetadata:
             if self._data is None:
                 self._data = {
                     "user_research_prompt": "",
+                    "base_user_research_prompt": "",
+                    "proof_framing_active": False,
+                    "proof_framing_context": "",
+                    "proof_framing_reasoning": "",
+                    "proof_runtime_config": {},
                     "brainstorms": [],
                     "papers": [],
                     "next_topic_id": 1,
@@ -114,10 +119,17 @@ class ResearchMetadata:
             if user_research_prompt and self._data.get("user_research_prompt") != user_research_prompt:
                 logger.info("User research prompt updated")
                 self._data["user_research_prompt"] = user_research_prompt
+                if not self._data.get("base_user_research_prompt"):
+                    self._data["base_user_research_prompt"] = user_research_prompt
                 await self._save_metadata()
         else:
             self._data = {
                 "user_research_prompt": user_research_prompt,
+                "base_user_research_prompt": user_research_prompt,
+                "proof_framing_active": False,
+                "proof_framing_context": "",
+                "proof_framing_reasoning": "",
+                "proof_runtime_config": {},
                 "brainstorms": [],
                 "papers": [],
                 "next_topic_id": 1,
@@ -149,6 +161,11 @@ class ResearchMetadata:
             # This is OUTSIDE the async with block so we can safely save
             defaults = {
                 "user_research_prompt": "",
+                "base_user_research_prompt": "",
+                "proof_framing_active": False,
+                "proof_framing_context": "",
+                "proof_framing_reasoning": "",
+                "proof_runtime_config": {},
                 "brainstorms": [],
                 "papers": [],
                 "next_topic_id": 1,
@@ -165,6 +182,11 @@ class ResearchMetadata:
             logger.error(f"Failed to load research metadata: {e}")
             self._data = {
                 "user_research_prompt": "",
+                "base_user_research_prompt": "",
+                "proof_framing_active": False,
+                "proof_framing_context": "",
+                "proof_framing_reasoning": "",
+                "proof_runtime_config": {},
                 "brainstorms": [],
                 "papers": [],
                 "next_topic_id": 1,
@@ -225,6 +247,10 @@ class ResearchMetadata:
             "current_paper_id": None,
             "current_paper_title": None,
             "paper_phase": None,  # "body", "conclusion", "introduction", "abstract"
+            "base_user_research_prompt": "",
+            "proof_framing_active": False,
+            "proof_framing_context": "",
+            "proof_framing_reasoning": "",
             "acceptance_count": 0,
             "rejection_count": 0,
             "consecutive_rejections": 0,
@@ -326,11 +352,46 @@ class ResearchMetadata:
         """Get the user's research prompt."""
         await self._ensure_initialized()
         return self._data.get("user_research_prompt", "")
+
+    async def get_base_user_prompt(self) -> str:
+        """Get the original user research prompt before proof framing."""
+        await self._ensure_initialized()
+        return self._data.get("base_user_research_prompt") or self._data.get("user_research_prompt", "")
     
     async def set_user_prompt(self, prompt: str) -> None:
         """Set the user's research prompt."""
         async with self._lock:
             self._data["user_research_prompt"] = prompt
+            await self._save_metadata()
+
+    async def set_proof_framing_state(
+        self,
+        *,
+        base_user_prompt: str,
+        effective_user_prompt: str,
+        active: bool,
+        context: str,
+        reasoning: str,
+    ) -> None:
+        """Persist the proof-framing decision in metadata."""
+        async with self._lock:
+            self._data["base_user_research_prompt"] = base_user_prompt
+            self._data["user_research_prompt"] = effective_user_prompt
+            self._data["proof_framing_active"] = active
+            self._data["proof_framing_context"] = context
+            self._data["proof_framing_reasoning"] = reasoning
+            await self._save_metadata()
+
+    async def get_proof_runtime_config(self) -> Dict[str, Any]:
+        """Return the persisted proof runtime model configuration snapshot."""
+        await self._ensure_initialized()
+        value = self._data.get("proof_runtime_config")
+        return value if isinstance(value, dict) else {}
+
+    async def set_proof_runtime_config(self, config: Dict[str, Any]) -> None:
+        """Persist the proof runtime model configuration snapshot."""
+        async with self._lock:
+            self._data["proof_runtime_config"] = config if isinstance(config, dict) else {}
             await self._save_metadata()
     
     # ========================================================================

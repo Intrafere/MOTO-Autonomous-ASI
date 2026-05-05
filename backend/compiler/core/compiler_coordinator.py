@@ -16,7 +16,7 @@ from backend.shared.config import system_config, rag_config
 from backend.shared.models import CompilerState, CompilerSubmission, CompilerValidationResult, WorkflowTask, SubmitterConfig, ValidationResult, ModelConfig
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
-from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
@@ -38,6 +38,37 @@ from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
 from backend.autonomous.memory.paper_model_tracker import PaperModelTracker
 
 logger = logging.getLogger(__name__)
+
+
+def _classify_submitter_error(err: BaseException) -> tuple[str, str]:
+    """
+    Classify an exception raised by a HighContextSubmitter.submit_* call.
+
+    Distinguishes true context / prompt-size overflows (which are meaningful
+    "decline to submit" signals) from upstream transport / API failures
+    (non-JSON responses, connection errors, generic API errors) which are NOT
+    context overflows and should not be reported to the user as such.
+
+    Returns:
+        (label, reason_prefix) where:
+            - label is a short human-readable classification used in logs
+              and UI messages (e.g. "Context overflow", "API transport error")
+            - reason_prefix is the leading text used when building the
+              full reason/reasoning string (e.g. "Context overflow: ...")
+    """
+    msg = str(err) if err is not None else ""
+    msg_lower = msg.lower()
+
+    if isinstance(err, OpenRouterInvalidResponseError):
+        return ("API transport error", "API transport error")
+
+    if "prompt too large" in msg_lower or "tokens > " in msg_lower:
+        return ("Context overflow", "Context overflow")
+
+    if msg_lower.startswith("openrouter api error") or msg_lower.startswith("openrouter connection failed") or msg_lower.startswith("openrouter rate limit"):
+        return ("API transport error", "API transport error")
+
+    return ("Submitter error", "Submitter error")
 
 
 class CompilerCoordinator:
@@ -225,7 +256,7 @@ class CompilerCoordinator:
         if system_config.wolfram_alpha_enabled and system_config.wolfram_alpha_api_key:
             from backend.shared.wolfram_alpha_client import initialize_wolfram_client
             initialize_wolfram_client(system_config.wolfram_alpha_api_key)
-            logger.info("Wolfram Alpha client initialized for rigor mode")
+            logger.info("Wolfram Alpha client initialized (available as a construction-mode tool)")
         
         # Note: Resume logic is handled in _main_workflow() to properly skip startup loops
         
@@ -676,7 +707,7 @@ class CompilerCoordinator:
             logger.warning(f"Compiler: all free models exhausted: {e}")
             await self._broadcast("free_models_exhausted", {
                 "role_id": "compiler",
-                "message": str(e),
+                "message": "All free models exhausted, waiting to retry",
             })
             await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             if self.is_running:
@@ -685,8 +716,7 @@ class CompilerCoordinator:
             logger.error(f"Compiler workflow error: {e}", exc_info=True)
             self.is_running = False
             await self._broadcast("compiler_error", {
-                "error": str(e),
-                "traceback": traceback.format_exc(),
+                "error": "Compiler workflow encountered an internal error",
                 "mode": self.current_mode,
                 "total_submissions": self.total_submissions
             })
@@ -957,7 +987,7 @@ INVALID:
                 if self.autonomous_mode and self._current_topic_id:
                     try:
                         from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
-                        first_brainstorm_content = await brainstorm_memory.get_database_content(self._current_topic_id)
+                        first_brainstorm_content = await brainstorm_memory.get_database_content(self._current_topic_id, strip_proofs=True)
                         first_brainstorm_source = f"brainstorm_{self._current_topic_id}.txt"
                     except Exception:
                         pass
@@ -988,11 +1018,12 @@ INVALID:
                     
             except FreeModelExhaustedError:
                 raise
-            except ValueError as e:
-                logger.error(f"Construction context overflow in initial loop (attempt {attempt}): {e}")
+            except (ValueError, OpenRouterInvalidResponseError) as e:
+                label, reason_prefix = _classify_submitter_error(e)
+                logger.error(f"Construction {label.lower()} in initial loop (attempt {attempt}): {e}")
                 await self._broadcast("compiler_rejection", {
                     "mode": "construction",
-                    "reasoning": f"Context overflow: {e}"
+                    "reasoning": f"{reason_prefix}: {e}"
                 })
                 await compiler_rejection_log.add_rejection(
                     CompilerValidationResult(
@@ -1041,6 +1072,7 @@ INVALID:
                 await paper_memory.initialize_with_placeholders(submission.content)
                 initial_portion_accepted = True
                 self.construction_acceptances += 1
+                self._track_submission_wolfram_calls(submission)
                 
                 await compiler_rejection_log.add_acceptance(
                     submission.submission_id,
@@ -1121,20 +1153,61 @@ INVALID:
             await self._submit_and_validate_review()
         
         logger.info("Construction loop complete")
+
+    def _track_submission_wolfram_calls(self, submission: CompilerSubmission) -> None:
+        """Record accepted construction-mode Wolfram tool calls in paper credits.
+
+        HighContextSubmitter stores the full Wolfram audit trail on
+        `submission.metadata["wolfram_calls"]`. PaperModelTracker only tracks a
+        count (and accepts the query for logging), so we bridge the two here
+        after the paper operation has been accepted.
+        """
+        wolfram_calls = (submission.metadata or {}).get("wolfram_calls") or []
+        if not wolfram_calls:
+            return
+
+        tracker = (
+            self._current_paper_tracker
+            if self.autonomous_mode
+            else self._paper_model_tracker
+        )
+        if not tracker:
+            logger.debug(
+                "Accepted submission had %s Wolfram call(s), but no paper tracker is active.",
+                len(wolfram_calls),
+            )
+            return
+
+        for call in wolfram_calls:
+            query = ""
+            if isinstance(call, dict):
+                query = str(call.get("query", "") or "").strip()
+            else:
+                query = str(call or "").strip()
+            tracker.track_wolfram_call(query)
+        logger.info("Tracked %s accepted Wolfram Alpha construction call(s)", len(wolfram_calls))
     
     async def _rigor_loop(self) -> None:
-        """LOOP 2: Rigor enhancement (steps 19-21)."""
+        """LOOP 2: Rigor enhancement.
+
+        With the new Lean-4-verified-theorem flow, every verified theorem
+        lands somewhere (inline or appendix). So the rigor loop continues
+        as long as `_submit_and_validate_rigor` returns True (theorem was
+        placed somewhere in this cycle) and ends on the first decline
+        (no theorem worth proposing, 5 Lean attempts failed, or Lean 4 is
+        disabled).
+        """
         logger.info("Starting rigor loop...")
         self.rigor_cycle_active = True
         
-        # Continue until first rejection
+        # Continue until first decline (no theorem found or Lean failed 5x).
         while self.is_running and self.rigor_cycle_active:
-            accepted = await self._submit_and_validate_rigor()
+            continued = await self._submit_and_validate_rigor()
             
-            if not accepted:
-                # First rejection - return to Loop 1
+            if not continued:
+                # Decline - end this rigor loop and return to construction.
                 self.rigor_cycle_active = False
-                logger.info("Rigor cycle ended (first rejection)")
+                logger.info("Rigor cycle ended (decline: no more theorems or Lean failed)")
         
         logger.info("Rigor loop complete")
     
@@ -1185,7 +1258,7 @@ INVALID:
         if self.autonomous_mode and self._current_topic_id:
             try:
                 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
-                brainstorm_content_for_submitter = await brainstorm_memory.get_database_content(self._current_topic_id)
+                brainstorm_content_for_submitter = await brainstorm_memory.get_database_content(self._current_topic_id, strip_proofs=True)
                 brainstorm_source_for_submitter = f"brainstorm_{self._current_topic_id}.txt"
                 if brainstorm_content_for_submitter:
                     logger.info(f"Loaded brainstorm content for retroactive corrections: {len(brainstorm_content_for_submitter)} chars")
@@ -1203,10 +1276,11 @@ INVALID:
                 brainstorm_content=brainstorm_content_for_submitter,
                 brainstorm_source_name=brainstorm_source_for_submitter
             )
-        except ValueError as e:
-            logger.error(f"Construction context overflow: {e}")
+        except (ValueError, OpenRouterInvalidResponseError) as e:
+            label, reason_prefix = _classify_submitter_error(e)
+            logger.error(f"Construction {label.lower()}: {e}")
             self.construction_rejections += 1
-            overflow_reason = f"Context overflow: {e}"
+            overflow_reason = f"{reason_prefix}: {e}"
             await compiler_rejection_log.add_rejection(
                 CompilerValidationResult(
                     submission_id=str(uuid.uuid4()),
@@ -1418,6 +1492,7 @@ INVALID:
                 
                 # Phase transitioned successfully - this is a success, not a rejection
                 logger.info(f"Phase transition successful. New phase: {self.autonomous_section_phase}")
+                self._track_submission_wolfram_calls(submission)
                 
                 await self._broadcast("phase_completion_signal", {
                     "previous_phase": submission.metadata.get("phase", "unknown"),
@@ -1449,34 +1524,51 @@ INVALID:
         )
         
         if result.decision == "accept":
-            # Update paper - use placeholder replacement for conclusion/intro/abstract
-            # This ensures content replaces the placeholder marker instead of generic insertion
+            # Update paper. For phase-section creation, prefer placeholder replacement
+            # only when the submission actually targets that placeholder. If the
+            # placeholder is already gone (resume/retry) or the model submitted a
+            # validated edit against existing section text, apply the edit normally.
             section_phase = self.autonomous_section_phase if self.autonomous_mode else None
-            
-            if section_phase == "conclusion":
-                # Replace the conclusion placeholder with validated content
-                success = await paper_memory.replace_placeholder(CONCLUSION_PLACEHOLDER, submission.content)
-                if not success:
-                    logger.error("Conclusion placeholder not found - paper is in invalid state. Rejecting.")
-                    updated_paper = None  # Trigger rejection
+            placeholder_replaced = False
+            phase_placeholder = {
+                "conclusion": CONCLUSION_PLACEHOLDER,
+                "introduction": INTRO_PLACEHOLDER,
+                "abstract": ABSTRACT_PLACEHOLDER,
+            }.get(section_phase)
+
+            if phase_placeholder:
+                old_string = (submission.old_string or "").strip()
+                uses_placeholder_target = (
+                    phase_placeholder in current_paper
+                    and (
+                        submission.operation == "full_content"
+                        or (
+                            submission.operation == "replace"
+                            and (not old_string or old_string == phase_placeholder)
+                        )
+                    )
+                )
+
+                if uses_placeholder_target:
+                    success = await paper_memory.replace_placeholder(phase_placeholder, submission.content)
+                    if not success:
+                        logger.error("%s placeholder was present but replacement failed.", section_phase.capitalize())
+                        updated_paper = None  # Trigger rejection
+                    else:
+                        placeholder_replaced = True
+                        updated_paper = await paper_memory.get_paper()
                 else:
-                    updated_paper = await paper_memory.get_paper()
-            elif section_phase == "introduction":
-                # Replace the introduction placeholder with validated content
-                success = await paper_memory.replace_placeholder(INTRO_PLACEHOLDER, submission.content)
-                if not success:
-                    logger.error("Introduction placeholder not found - paper is in invalid state. Rejecting.")
-                    updated_paper = None  # Trigger rejection
-                else:
-                    updated_paper = await paper_memory.get_paper()
-            elif section_phase == "abstract":
-                # Replace the abstract placeholder with validated content
-                success = await paper_memory.replace_placeholder(ABSTRACT_PLACEHOLDER, submission.content)
-                if not success:
-                    logger.error("Abstract placeholder not found - paper is in invalid state. Rejecting.")
-                    updated_paper = None  # Trigger rejection
-                else:
-                    updated_paper = await paper_memory.get_paper()
+                    if phase_placeholder not in current_paper:
+                        logger.info(
+                            "%s placeholder not present; applying validated edit operation instead",
+                            section_phase.capitalize(),
+                        )
+                    else:
+                        logger.info(
+                            "%s phase submission targets existing content; applying validated edit operation",
+                            section_phase.capitalize(),
+                        )
+                    updated_paper = self._apply_edit(current_paper, submission)
             else:
                 # Body section or no phase - use standard _apply_edit
                 updated_paper = self._apply_edit(current_paper, submission)
@@ -1489,8 +1581,8 @@ INVALID:
                 )
                 self.construction_rejections += 1
                 
-                # Create emergency rejection
-                emergency_result = CompilerValidationResult(
+                # Create rejection result for placement failure
+                rejection_result = CompilerValidationResult(
                     submission_id=submission.submission_id,
                     decision="reject",
                     reasoning=f"Exact string match failed: old_string='{submission.old_string[:100]}...' not found or not unique in document",
@@ -1499,21 +1591,22 @@ INVALID:
                     validation_stage="pre-validation"  # Exact string match check
                 )
                 
-                await compiler_rejection_log.add_rejection(emergency_result, "construction", submission.content)
+                await compiler_rejection_log.add_rejection(rejection_result, "construction", submission.content)
                 
                 await self._broadcast("compiler_rejection", {
                     "mode": "construction",
                     "submission_id": submission.submission_id,
-                    "reasoning": "Emergency rejection: exact string match failed"
+                    "reasoning": "Exact string match failed"
                 })
                 
-                return False, emergency_result.reasoning
+                return False, rejection_result.reasoning
             
-            # Only call update_paper for _apply_edit cases (placeholder replacement already saved)
-            if section_phase not in ("conclusion", "introduction", "abstract"):
+            # Only skip update_paper when replace_placeholder already saved.
+            if not placeholder_replaced:
                 await paper_memory.update_paper(updated_paper)
             
             self.construction_acceptances += 1
+            self._track_submission_wolfram_calls(submission)
             
             # If rewrite was pending, mark it as completed now (first successful acceptance)
             if self.rewrite_pending:
@@ -1586,7 +1679,7 @@ INVALID:
         logger.info(f"Processing retroactive brainstorm {brainstorm_op.action} for topic {topic_id}")
         
         try:
-            brainstorm_content = await brainstorm_memory.get_database_content(topic_id)
+            brainstorm_content = await brainstorm_memory.get_database_content(topic_id, strip_proofs=True)
             if not brainstorm_content:
                 logger.warning(f"Brainstorm {topic_id} is empty, skipping retroactive operation")
                 return
@@ -1696,8 +1789,8 @@ INVALID:
                 )
                 self.outline_rejections += 1
                 
-                # Create emergency rejection
-                emergency_result = CompilerValidationResult(
+                # Create rejection result for outline placement failure
+                rejection_result = CompilerValidationResult(
                     submission_id=submission.submission_id,
                     decision="reject",
                     reasoning=f"Outline exact string match failed: old_string='{submission.old_string[:100]}...' not found or not unique in outline",
@@ -1706,12 +1799,12 @@ INVALID:
                     validation_stage="pre-validation"  # Exact string match check
                 )
                 
-                await compiler_rejection_log.add_rejection(emergency_result, "outline_update", submission.content)
+                await compiler_rejection_log.add_rejection(rejection_result, "outline_update", submission.content)
                 
                 await self._broadcast("compiler_rejection", {
                     "mode": "outline_update",
                     "submission_id": submission.submission_id,
-                    "reasoning": "Emergency rejection: outline exact string match failed"
+                    "reasoning": "Outline exact string match failed"
                 })
                 
                 return False
@@ -1759,14 +1852,15 @@ INVALID:
         submission = None
         try:
             submission = await self.high_context_submitter.submit_review(review_focus=review_focus)
-        except ValueError as e:
-            logger.error(f"{review_label.capitalize()} context overflow: {e}")
+        except (ValueError, OpenRouterInvalidResponseError) as e:
+            label, reason_prefix = _classify_submitter_error(e)
+            logger.error(f"{review_label.capitalize()} {label.lower()}: {e}")
             self.review_declines += 1
-            await compiler_rejection_log.add_decline("review", f"Context overflow: {e}")
+            await compiler_rejection_log.add_decline("review", f"{reason_prefix}: {e}")
             await self._broadcast("compiler_decline", {
                 "mode": "review",
                 "review_focus": review_focus,
-                "reasoning": f"Context overflow: {e}"
+                "reasoning": f"{reason_prefix}: {e}"
             })
             return False
         
@@ -1821,8 +1915,8 @@ INVALID:
                 )
                 self.review_rejections += 1
                 
-                # Create emergency rejection
-                emergency_result = CompilerValidationResult(
+                # Create rejection result for placement failure
+                rejection_result = CompilerValidationResult(
                     submission_id=submission.submission_id,
                     decision="reject",
                     reasoning=f"Exact string match failed: old_string='{submission.old_string[:100]}...' not found or not unique in document",
@@ -1831,13 +1925,13 @@ INVALID:
                     validation_stage="pre-validation"  # Exact string match check
                 )
                 
-                await compiler_rejection_log.add_rejection(emergency_result, "review", submission.content)
+                await compiler_rejection_log.add_rejection(rejection_result, "review", submission.content)
                 
                 await self._broadcast("compiler_rejection", {
                     "mode": "review",
                     "submission_id": submission.submission_id,
                     "review_focus": review_focus,
-                    "reasoning": "Emergency rejection: exact string match failed"
+                    "reasoning": "Exact string match failed"
                 })
                 
                 return False
@@ -1918,134 +2012,290 @@ INVALID:
         )
     
     async def _submit_and_validate_rigor(self) -> bool:
-        """Submit and validate rigor enhancement. Returns True if accepted."""
+        """Run one rigor cycle.
+
+        New Lean-4-verified-theorem flow:
+          1. If Lean 4 is disabled in config, decline immediately (no work).
+          2. Submitter does discovery + 5 Lean attempts + novelty + store.
+             If it returns None, decline and end the rigor cycle.
+          3. Coordinator owns the 2-attempt validator placement loop.
+          4. If both placement attempts reject (or the submitter never
+             produced a legal attempt-1), the theorem is routed to the
+             Theorems Appendix (its Lean 4 verification is preserved).
+             Counts as a rigor_acceptance per the build plan.
+
+        Returns True to signal "continue the rigor loop" (a theorem landed
+        somewhere). Returns False on decline (no theorem to propose / Lean
+        5-attempt failure / Lean 4 disabled) so the outer loop ends this
+        rigor cycle.
+        """
         self.current_mode = "rigor"
-        
+
+        # Hard guard: Lean 4 disabled system-wide means rigor mode has no work.
+        if not system_config.lean4_enabled:
+            logger.info("Rigor loop: Lean 4 disabled; declining cycle")
+            self.rigor_declines += 1
+            await compiler_rejection_log.add_decline(
+                "rigor", "Lean 4 is disabled in system configuration"
+            )
+            await self._broadcast(
+                "compiler_decline",
+                {"mode": "rigor", "reasoning": "Lean 4 is disabled"},
+            )
+            return False
+
         try:
-            submission = await self.high_param_submitter.submit_rigor_enhancement()
-        except ValueError as e:
-            logger.error(f"Rigor enhancement error: {e}")
+            lean_result = await self.high_param_submitter.submit_rigor_lean_theorem()
+        except ValueError as exc:
+            logger.error(f"Rigor lean flow error: {exc}")
             self.rigor_declines += 1
-            await compiler_rejection_log.add_decline("rigor", f"LLM error: {e}")
-            await self._broadcast("compiler_decline", {
-                "mode": "rigor",
-                "reasoning": f"LLM error: {e}"
-            })
+            await compiler_rejection_log.add_decline("rigor", f"LLM error: {exc}")
+            await self._broadcast(
+                "compiler_decline", {"mode": "rigor", "reasoning": f"LLM error: {exc}"}
+            )
             return False
-        
-        if submission is None:
-            logger.info("No rigor enhancement needed")
+        except Exception as exc:
+            logger.error(f"Rigor lean flow raised: {exc}", exc_info=True)
             self.rigor_declines += 1
-            await compiler_rejection_log.add_decline("rigor", "Rigor already adequate")
-            
-            await self._broadcast("compiler_decline", {
-                "mode": "rigor",
-                "reasoning": "Rigor already adequate"
-            })
-            
-            # Treat as rejection for loop purposes
+            await compiler_rejection_log.add_decline(
+                "rigor", f"Internal error: {exc}"
+            )
+            await self._broadcast(
+                "compiler_decline",
+                {"mode": "rigor", "reasoning": f"Internal error: {exc}"},
+            )
             return False
-        
-        self.total_submissions += 1
-        
-        await self._broadcast("compiler_submission", {
-            "mode": "rigor",
-            "submission_id": submission.submission_id
-        })
-        
-        current_paper = await paper_memory.get_paper()
-        current_outline = await outline_memory.get_outline()
-        
-        result = await self.validator.validate_submission(
-            submission,
-            current_paper=current_paper,
-            current_outline=current_outline
+
+        if lean_result is None:
+            logger.info("Rigor loop: no theorem attempted this cycle (decline)")
+            self.rigor_declines += 1
+            await compiler_rejection_log.add_decline(
+                "rigor",
+                "No theorem to formalize or 5 Lean 4 attempts failed",
+            )
+            await self._broadcast(
+                "compiler_decline",
+                {
+                    "mode": "rigor",
+                    "reasoning": "No theorem to formalize or 5 Lean 4 attempts failed",
+                },
+            )
+            return False
+
+        # At this point a Lean-4-verified proof exists in proof_database.
+        # The submitter may or may not have produced an attempt-1 placement.
+        return await self._place_or_appendix_fallback(lean_result)
+
+    async def _place_or_appendix_fallback(self, lean_result) -> bool:
+        """Drive the 2-attempt placement validator loop.
+
+        On double rejection (or when the submitter never produced a legal
+        attempt), the theorem is appended to the Theorems Appendix and the
+        cycle is counted as a rigor_acceptance.
+        """
+        from backend.compiler.agents.high_param_submitter import (
+            format_theorem_appendix_entry,
         )
-        
-        if result.decision == "accept":
-            # Apply enhancement
-            updated_paper = self._apply_edit(current_paper, submission)
-            
-            # Check if exact string match failed
-            if updated_paper is None:
-                logger.error(
-                    f"Placement execution failed despite validator acceptance. "
-                    f"Treating as rejection. Submission: {submission.submission_id}"
+
+        submission = lean_result.initial_placement_submission
+        validator_feedback = ""
+
+        for placement_attempt in (1, 2):
+            if submission is None:
+                logger.info(
+                    "Rigor placement attempt %s: submitter returned no placement submission; "
+                    "routing directly to appendix fallback",
+                    placement_attempt,
                 )
-                self.rigor_rejections += 1
-                
-                # Create emergency rejection
-                emergency_result = CompilerValidationResult(
-                    submission_id=submission.submission_id,
-                    decision="reject",
-                    reasoning=f"Exact string match failed: old_string='{submission.old_string[:100]}...' not found or not unique in document",
-                    summary="Exact string match failed - old_string not found or not unique",
-                    placement_check=False,
-                    validation_stage="pre-validation"  # Exact string match check
-                )
-                
-                await compiler_rejection_log.add_rejection(emergency_result, "rigor", submission.content)
-                
-                await self._broadcast("compiler_rejection", {
+                break
+
+            self.total_submissions += 1
+            await self._broadcast(
+                "compiler_submission",
+                {
                     "mode": "rigor",
                     "submission_id": submission.submission_id,
-                    "reasoning": "Emergency rejection: exact string match failed"
-                })
-                
-                return False
-            
-            await paper_memory.update_paper(updated_paper)
-            
-            self.rigor_acceptances += 1
-            
-            # Track Wolfram Alpha call if applicable (only for accepted submissions)
-            if submission.metadata.get("wolfram_query"):
-                if self.autonomous_mode and self._current_paper_tracker:
-                    # Autonomous mode (Part 3)
-                    self._current_paper_tracker.track_wolfram_call(
-                        submission.metadata["wolfram_query"]
-                    )
-                    logger.info(f"Tracked Wolfram Alpha call (autonomous): {submission.metadata['wolfram_query']}")
-                elif not self.autonomous_mode and self._paper_model_tracker:
-                    # Manual mode (Part 2)
-                    self._paper_model_tracker.track_wolfram_call(
-                        submission.metadata["wolfram_query"]
-                    )
-                    logger.info(f"Tracked Wolfram Alpha call (manual): {submission.metadata['wolfram_query']}")
-            
-            await compiler_rejection_log.add_acceptance(
-                submission.submission_id,
-                "rigor",
-                submission.content[:500]
+                    "lean_proof_id": lean_result.proof_id,
+                    "placement_attempt": placement_attempt,
+                },
             )
-            
-            word_count = await paper_memory.get_word_count()
-            
-            await self._broadcast("compiler_acceptance", {
-                "mode": "rigor",
-                "submission_id": submission.submission_id
-            })
-            
-            await self._broadcast("paper_updated", {
-                "word_count": word_count,
-                "preview": updated_paper[:500]
-            })
-            
-            logger.info(f"Rigor enhancement accepted ({word_count} words)")
-            return True
-        else:
+
+            current_paper = await paper_memory.get_paper()
+            current_outline = await outline_memory.get_outline()
+
+            result = await self.validator.validate_submission(
+                submission,
+                current_paper=current_paper,
+                current_outline=current_outline,
+            )
+
+            if result.decision == "accept":
+                updated_paper = self._apply_edit(current_paper, submission)
+                if updated_paper is None:
+                    logger.error(
+                        "Rigor placement attempt %s: exact-string apply failed after "
+                        "validator acceptance for submission %s",
+                        placement_attempt,
+                        submission.submission_id,
+                    )
+                    # Treat apply failure as a placement rejection for retry
+                    validator_feedback = (
+                        f"Exact-string match failed when applying your edit: "
+                        f"old_string='{(submission.old_string or '')[:120]}...' was not "
+                        "found or not unique in the current paper. Pick a more "
+                        "specific anchor."
+                    )
+                    rejection_result = CompilerValidationResult(
+                        submission_id=submission.submission_id,
+                        decision="reject",
+                        reasoning=validator_feedback,
+                        summary=validator_feedback[:750],
+                        placement_check=False,
+                        validation_stage="pre-validation",
+                    )
+                    await compiler_rejection_log.add_rejection(
+                        rejection_result, "rigor", submission.content
+                    )
+                    await self._broadcast(
+                        "compiler_rejection",
+                        {
+                            "mode": "rigor",
+                            "submission_id": submission.submission_id,
+                            "reasoning": validator_feedback,
+                            "placement_attempt": placement_attempt,
+                        },
+                    )
+                    self.rigor_rejections += 1
+                    if placement_attempt == 1:
+                        submission = await self.high_param_submitter.submit_rigor_placement_retry(
+                            lean_result, validator_feedback
+                        )
+                    continue
+
+                # Success: inline placement accepted + applied.
+                await paper_memory.update_paper(updated_paper)
+
+                # Also drop a short cross-reference stub into the appendix so
+                # the full Lean proof is preserved and easy to look up.
+                appendix_stub = format_theorem_appendix_entry(
+                    proof_id=lean_result.proof_id,
+                    theorem_statement=lean_result.theorem_statement,
+                    lean_code=lean_result.lean_code,
+                    is_novel=lean_result.is_novel,
+                    theorem_name=lean_result.theorem_name,
+                    novelty_tier=lean_result.novelty_tier,
+                    placement_outcome="inline",
+                )
+                try:
+                    await paper_memory.append_to_theorems_appendix(appendix_stub)
+                except Exception as exc:
+                    logger.warning(
+                        "Inline-placed theorem appendix stub append failed (non-fatal): %s",
+                        exc,
+                    )
+
+                self.rigor_acceptances += 1
+                await compiler_rejection_log.add_acceptance(
+                    submission.submission_id,
+                    "rigor",
+                    submission.content[:500],
+                )
+
+                word_count = await paper_memory.get_word_count()
+                await self._broadcast(
+                    "compiler_acceptance",
+                    {
+                        "mode": "rigor",
+                        "submission_id": submission.submission_id,
+                        "placement_outcome": "inline",
+                        "lean_proof_id": lean_result.proof_id,
+                        "is_novel": lean_result.is_novel,
+                        "placement_attempt": placement_attempt,
+                    },
+                )
+                await self._broadcast(
+                    "paper_updated",
+                    {"word_count": word_count, "preview": updated_paper[:500]},
+                )
+                logger.info(
+                    "Rigor theorem %s placed inline on attempt %s (%s words)",
+                    lean_result.proof_id,
+                    placement_attempt,
+                    word_count,
+                )
+                return True
+
+            # Validator rejected this placement attempt
             self.rigor_rejections += 1
-            
-            await compiler_rejection_log.add_rejection(result, "rigor", submission.content)
-            
-            await self._broadcast("compiler_rejection", {
+            validator_feedback = result.reasoning or "Placement rejected without reason"
+            await compiler_rejection_log.add_rejection(
+                result, "rigor", submission.content
+            )
+            await self._broadcast(
+                "compiler_rejection",
+                {
+                    "mode": "rigor",
+                    "submission_id": submission.submission_id,
+                    "reasoning": result.reasoning,
+                    "placement_attempt": placement_attempt,
+                },
+            )
+            logger.info(
+                "Rigor placement attempt %s rejected: %s",
+                placement_attempt,
+                (result.reasoning or "")[:160],
+            )
+
+            if placement_attempt == 1:
+                submission = await self.high_param_submitter.submit_rigor_placement_retry(
+                    lean_result, validator_feedback
+                )
+
+        # Appendix fallback: both placement attempts failed (or attempt 1 was
+        # impossible). The math is already Lean-verified, so the theorem is
+        # preserved in the Theorems Appendix and counted as a rigor_acceptance.
+        appendix_entry = format_theorem_appendix_entry(
+            proof_id=lean_result.proof_id,
+            theorem_statement=lean_result.theorem_statement,
+            lean_code=lean_result.lean_code,
+            is_novel=lean_result.is_novel,
+            theorem_name=lean_result.theorem_name,
+            novelty_tier=lean_result.novelty_tier,
+            placement_outcome="appendix_fallback",
+        )
+        appended = await paper_memory.append_to_theorems_appendix(appendix_entry)
+        if not appended:
+            # Paper markers might be missing - try one repair pass then retry.
+            logger.warning(
+                "Appendix append returned False; attempting marker repair before retry"
+            )
+            await paper_memory.ensure_markers_intact()
+            appended = await paper_memory.append_to_theorems_appendix(appendix_entry)
+
+        self.rigor_acceptances += 1
+        word_count = await paper_memory.get_word_count()
+        await self._broadcast(
+            "compiler_acceptance",
+            {
                 "mode": "rigor",
-                "submission_id": submission.submission_id,
-                "reasoning": result.reasoning
-            })
-            
-            logger.info("Rigor enhancement rejected")
-            return False
+                "submission_id": (
+                    lean_result.initial_placement_submission.submission_id
+                    if lean_result.initial_placement_submission
+                    else f"rigor_appendix_{lean_result.proof_id}"
+                ),
+                "placement_outcome": "appendix_fallback",
+                "lean_proof_id": lean_result.proof_id,
+                "is_novel": lean_result.is_novel,
+            },
+        )
+        await self._broadcast("paper_updated", {"word_count": word_count})
+        logger.info(
+            "Rigor theorem %s stored in Theorems Appendix (both placement attempts "
+            "failed or unavailable)",
+            lean_result.proof_id,
+        )
+        return True
+
     
     def _apply_edit_to_outline(self, current_outline: str, submission: CompilerSubmission) -> Optional[str]:
         """
@@ -3581,7 +3831,7 @@ INVALID:
             # VERIFY CONCLUSION ACTUALLY EXISTS BEFORE TRANSITIONING
             current_paper = await paper_memory.get_paper()
             has_conclusion = bool(re.search(
-                r"(?:^|\n)\s*(?:#+\s*)?(?:[IVXLCDM]+\.?\s*)?(?:Conclusion|Summary|Discussion|Final\s*Remarks|Concluding\s*Remarks)",
+                r"(?:^|\n)\s*(?:(?:#+\s*)?(?:[IVXLCDM]+\.?\s*)?(?:Conclusion|Summary|Discussion|Final\s*Remarks|Concluding\s*Remarks)|\\(?:section|chapter)\*?\{(?:Conclusion|Summary|Discussion|Final\s*Remarks|Concluding\s*Remarks)\})",
                 current_paper, re.IGNORECASE | re.MULTILINE
             ))
             
@@ -3603,7 +3853,7 @@ INVALID:
             # VERIFY INTRODUCTION ACTUALLY EXISTS BEFORE TRANSITIONING
             current_paper = await paper_memory.get_paper()
             has_introduction = bool(re.search(
-                r"(?:^|\n)\s*(?:#+\s*)?(?:I\.?\s*)?Introduction",
+                r"(?:^|\n)\s*(?:(?:#+\s*)?(?:I\.?\s*)?Introduction|\\(?:section|chapter)\*?\{(?:I\.?\s*)?Introduction\})",
                 current_paper, re.IGNORECASE | re.MULTILINE
             ))
             
@@ -3628,7 +3878,7 @@ INVALID:
             # VERIFY ABSTRACT ACTUALLY EXISTS BEFORE MARKING PAPER COMPLETE
             current_paper = await paper_memory.get_paper()
             has_abstract = bool(re.search(
-                r"(?:^|\n)\s*(?:#+\s*)?\*{0,2}Abstract\*{0,2}",
+                r"(?:^|\n)\s*(?:(?:#+\s*)?\*{0,2}Abstract\*{0,2}|\\(?:section|chapter)\*?\{Abstract\}|\\begin\{abstract\})",
                 current_paper, re.IGNORECASE | re.MULTILINE
             ))
             

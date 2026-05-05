@@ -11,6 +11,48 @@ PHASE ORDER (enforced):
 from typing import Optional
 
 from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
+from backend.shared.config import system_config
+
+
+CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES:
+- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
+- Theoretical claims must be supported by sound derivation, proof, or explicit assumptions inside the paper.
+- Literature claims must include explicit in-text citations identifying the external source.
+- Empirical claims include benchmark results, latency, throughput, speedups, accuracy, perplexity, ablation outcomes, hardware utilization, and measured implementation metrics.
+- Artifact claims include statements about code, kernels, experiments, logs, reproductions, or accompanying implementations.
+- Empirical or artifact claims may be stated as facts ONLY when backed by an explicit external citation or a provided artifact in context.
+- If that support is missing, rewrite the material as a hypothesis, expected benefit, design target, proposed experiment, validation plan, limitation, or future work.
+- NEVER invent citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts."""
+
+
+def get_wolfram_tool_guidance() -> str:
+    """Return prompt guidance for the construction-only Wolfram tool.
+
+    The actual OpenAI-compatible tool schema is registered by
+    HighContextSubmitter.submit_construction. This prompt section is only shown
+    when Wolfram is enabled so the model knows the tool exists and when to use
+    it.
+    """
+    if not system_config.wolfram_alpha_enabled:
+        return ""
+
+    return """WOLFRAM ALPHA TOOL AVAILABLE (CONSTRUCTION MODE ONLY):
+You may call the `wolfram_alpha_query` tool when it would help verify a mathematical or computational claim BEFORE writing it into the paper.
+
+Use the tool for:
+- concrete symbolic calculations, simplifications, integrals, sums, or equations
+- numerical checks, constants, arithmetic, factorization, or unit conversions
+- established computational facts that can be queried directly
+
+Do NOT use the tool for:
+- open research questions
+- narrative prose
+- claims that require Lean 4 proof verification
+- broad literature claims or source discovery
+
+Tool budget: up to 20 Wolfram Alpha calls for this submission. If you do not need a computational check, skip the tool and produce your JSON normally.
+
+When you use the tool, incorporate only relevant verified results into your final JSON `new_string` and explain in `reasoning` how the Wolfram result informed the content. The system records the full audit trail separately."""
 
 
 CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES:
@@ -79,10 +121,16 @@ The paper uses placeholder markers that the SYSTEM adds automatically (you did N
 **PAPER ANCHOR** (marks document boundary):
 - [HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]
 
+**THEOREMS APPENDIX BRACKETS** (wrap verified Lean 4 theorem appendix):
+- [HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]
+- [HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]
+
 CRITICAL DISTINCTIONS:
 1. **Placeholders/anchors in CURRENT DOCUMENT PROGRESS (shown below)**: These are SYSTEM-MANAGED. The code in paper_memory.py adds them automatically. You did NOT create them.
 
-2. **You must NEVER output these markers in YOUR SUBMISSIONS**: If you include any of these markers in your submitted content, your submission will be automatically rejected by pre-validation.
+2. **Use editable prose for old_string anchors**: old_string must match the visible CURRENT DOCUMENT PROGRESS verbatim. Do not include theorem appendix brackets or the paper anchor in insert_after/delete targets. For replace, prefer editable content only; if you accidentally include a protected marker as trailing context, the validator may trim it.
+
+3. **You must NEVER include these markers in new_string / generated paper content**: If markers appear in your generated content, the system will strip or reject them.
 
 HOW PLACEHOLDERS WORK:
 - When you see a placeholder in CURRENT DOCUMENT PROGRESS, that section has NOT been written yet
@@ -256,10 +304,16 @@ The paper uses placeholder markers that the SYSTEM adds automatically (you did N
 **PAPER ANCHOR** (marks document boundary):
 - [HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]
 
+**THEOREMS APPENDIX BRACKETS** (wrap verified Lean 4 theorem appendix):
+- [HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]
+- [HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]
+
 CRITICAL DISTINCTIONS:
 1. **Placeholders/anchors in CURRENT DOCUMENT PROGRESS (shown below)**: These are SYSTEM-MANAGED. The code in paper_memory.py adds them automatically. You did NOT create them.
 
-2. **You must NEVER output these markers in YOUR SUBMISSIONS**: If you include any of these markers in your submitted content, your submission will be automatically rejected by pre-validation.
+2. **Use editable prose for old_string anchors**: old_string must match the visible CURRENT DOCUMENT PROGRESS verbatim. Do not include theorem appendix brackets or the paper anchor in insert_after/delete targets. For replace, prefer editable content only; if you accidentally include a protected marker as trailing context, the validator may trim it.
+
+3. **You must NEVER include these markers in new_string / generated paper content**: If markers appear in your generated content, the system will strip or reject them.
 
 HOW PLACEHOLDERS WORK:
 - When you see a placeholder in CURRENT DOCUMENT PROGRESS, that section has NOT been written yet
@@ -407,10 +461,16 @@ The paper uses placeholder markers that the SYSTEM adds automatically (you did N
 **PAPER ANCHOR** (marks document boundary):
 - [HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]
 
+**THEOREMS APPENDIX BRACKETS** (wrap verified Lean 4 theorem appendix):
+- [HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]
+- [HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]
+
 CRITICAL DISTINCTIONS:
 1. **Placeholders/anchors in CURRENT DOCUMENT PROGRESS (shown below)**: These are SYSTEM-MANAGED. The code in paper_memory.py adds them automatically. You did NOT create them.
 
-2. **You must NEVER output these markers in YOUR SUBMISSIONS**: If you include any of these markers in your submitted content, your submission will be automatically rejected by pre-validation.
+2. **Use editable prose for old_string anchors**: old_string must match the visible CURRENT DOCUMENT PROGRESS verbatim. Do not include theorem appendix brackets or the paper anchor in insert_after/delete targets. For replace, prefer editable content only; if you accidentally include a protected marker as trailing context, the validator may trim it.
+
+3. **You must NEVER include these markers in new_string / generated paper content**: If markers appear in your generated content, the system will strip or reject them.
 
 HOW PLACEHOLDERS WORK:
 - When you see a placeholder in CURRENT DOCUMENT PROGRESS, that section has NOT been written yet
@@ -563,10 +623,16 @@ The paper uses placeholder markers that the SYSTEM adds automatically (you did N
 **PAPER ANCHOR** (marks document boundary):
 - [HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]
 
+**THEOREMS APPENDIX BRACKETS** (wrap verified Lean 4 theorem appendix):
+- [HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]
+- [HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]
+
 CRITICAL DISTINCTIONS:
 1. **Placeholders/anchors in CURRENT DOCUMENT PROGRESS (shown below)**: These are SYSTEM-MANAGED. The code in paper_memory.py adds them automatically. You did NOT create them.
 
-2. **You must NEVER output these markers in YOUR SUBMISSIONS**: If you include any of these markers in your submitted content, your submission will be automatically rejected by pre-validation.
+2. **Use editable prose for old_string anchors**: old_string must match the visible CURRENT DOCUMENT PROGRESS verbatim. Do not include theorem appendix brackets or the paper anchor in insert_after/delete targets. For replace, prefer editable content only; if you accidentally include a protected marker as trailing context, the validator may trim it.
+
+3. **You must NEVER include these markers in new_string / generated paper content**: If markers appear in your generated content, the system will strip or reject them.
 
 HOW PLACEHOLDERS WORK:
 - When you see a placeholder in CURRENT DOCUMENT PROGRESS, that section has NOT been written yet
@@ -939,6 +1005,11 @@ async def build_construction_prompt(
         get_construction_json_schema(),
         "\n---\n"
     ]
+
+    wolfram_guidance = get_wolfram_tool_guidance()
+    if wolfram_guidance:
+        parts.append(wolfram_guidance)
+        parts.append("\n---\n")
     
     # Add rejection history (DIRECT INJECTION - almost always fits)
     rejection_history = await compiler_rejection_log.get_rejections_text()

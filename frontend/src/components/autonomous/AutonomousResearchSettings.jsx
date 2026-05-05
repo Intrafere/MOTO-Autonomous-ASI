@@ -7,6 +7,12 @@
 import React, { useState, useEffect } from 'react';
 import { openRouterAPI, api, autonomousAPI } from '../../services/api';
 import {
+  computeOpenRouterAutoSettings,
+  findOpenRouterModel,
+  getProviderNames,
+  hasEndpointMetadata,
+} from '../../utils/openRouterSelection';
+import {
   AUTONOMOUS_SETTINGS_STORAGE_KEY,
   AUTONOMOUS_PROFILES_STORAGE_KEY,
   RECOMMENDED_PROFILE_KEYS,
@@ -14,6 +20,7 @@ import {
   applyAutonomousProfileSelection,
   getStoredAutonomousSettings,
 } from '../../utils/autonomousProfiles';
+import HelpTooltip from '../HelpTooltip';
 import './AutonomousResearch.css';
 import '../settings-common.css';
 
@@ -27,36 +34,67 @@ const DEFAULT_SUBMITTER_CONFIG = {
   maxOutputTokens: 25000
 };
 
+const OsTag = () => (
+  <span className="os-tag-tooltip-anchor">
+    <span className="os-tag">OS</span>
+    <span className="os-tag-tooltip">
+      Open source — weights available on Hugging Face for local use with LM Studio.
+    </span>
+  </span>
+);
+
 // ModelSelector component - extracted outside to prevent recreation on every render
-const ModelSelector = ({ provider, modelId, openrouterProv, fallback, onProviderChange, onModelChange, onOpenrouterProviderChange, onFallbackChange, lmStudioModels, openRouterModels, modelProviders, hasOpenRouterKey, isRunning }) => {
-  const currentModels = provider === 'openrouter' ? openRouterModels : lmStudioModels;
-  const providers = modelId && provider === 'openrouter' ? (modelProviders[modelId] || []) : [];
+const ModelSelector = ({
+  provider,
+  modelId,
+  openrouterProv,
+  fallback,
+  onProviderChange,
+  onModelChange,
+  onOpenrouterProviderChange,
+  onFallbackChange,
+  lmStudioModels,
+  openRouterModels,
+  modelProviders,
+  hasOpenRouterKey,
+  isRunning,
+  lmStudioEnabled,
+}) => {
+  const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
+  const currentModels = effectiveProvider === 'openrouter' ? openRouterModels : lmStudioModels;
+  const providers = modelId && effectiveProvider === 'openrouter'
+    ? getProviderNames(modelProviders[modelId])
+    : [];
 
   return (
     <>
       {/* Provider Toggle */}
       <div className="settings-row">
         <label>Provider</label>
-        <div className="provider-toggle-group">
-          <button
-            type="button"
-            className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
-            onClick={() => onProviderChange('lm_studio')}
-            disabled={isRunning}
-          >
-            LM Studio
-          </button>
-          <button
-            type="button"
-            className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
-            onClick={() => hasOpenRouterKey && onProviderChange('openrouter')}
-            disabled={isRunning || !hasOpenRouterKey}
-            style={!hasOpenRouterKey ? { color: '#666' } : undefined}
-            title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
-          >
-            OpenRouter
-          </button>
-        </div>
+        {lmStudioEnabled ? (
+          <div className="provider-toggle-group">
+            <button
+              type="button"
+              className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
+              onClick={() => onProviderChange('lm_studio')}
+              disabled={isRunning}
+            >
+              LM Studio
+            </button>
+            <button
+              type="button"
+              className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
+              onClick={() => hasOpenRouterKey && onProviderChange('openrouter')}
+              disabled={isRunning || !hasOpenRouterKey}
+              style={!hasOpenRouterKey ? { color: '#666' } : undefined}
+              title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
+            >
+              OpenRouter
+            </button>
+          </div>
+        ) : (
+          <small className="settings-hint">OpenRouter is required in this deployment.</small>
+        )}
       </div>
 
       {/* Model Selection */}
@@ -69,7 +107,7 @@ const ModelSelector = ({ provider, modelId, openrouterProv, fallback, onProvider
         >
           <option value="">Select model...</option>
           {currentModels.map(m => {
-            const isFree = provider === 'openrouter' && 
+            const isFree = effectiveProvider === 'openrouter' && 
                           m.pricing?.prompt === "0" && 
                           m.pricing?.completion === "0";
             const displayName = m.name || m.id;
@@ -85,7 +123,7 @@ const ModelSelector = ({ provider, modelId, openrouterProv, fallback, onProvider
       </div>
 
       {/* OpenRouter Provider (if OpenRouter) */}
-      {provider === 'openrouter' && modelId && (
+      {effectiveProvider === 'openrouter' && modelId && (
         <div className="settings-row">
           <label>Host Provider (optional)</label>
           <select
@@ -102,7 +140,7 @@ const ModelSelector = ({ provider, modelId, openrouterProv, fallback, onProvider
       )}
 
       {/* LM Studio Fallback (if OpenRouter) */}
-      {provider === 'openrouter' && (
+      {effectiveProvider === 'openrouter' && lmStudioEnabled && (
         <div className="settings-row">
           <label className="label--muted">LM Studio Fallback (optional)</label>
           <select
@@ -123,8 +161,26 @@ const ModelSelector = ({ provider, modelId, openrouterProv, fallback, onProvider
 };
 
 // RoleConfig component - extracted outside to prevent recreation on every render
-const RoleConfig = ({ title, hint, rolePrefix, borderColor = '#333', localConfig, handleProviderChange, handleModelChange, handleChange, handleNumericBlur, isRunning, lmStudioModels, openRouterModels, modelProviders, hasOpenRouterKey }) => {
-  const provider = localConfig[`${rolePrefix}_provider`] || 'lm_studio';
+const RoleConfig = ({
+  title,
+  hint,
+  rolePrefix,
+  borderColor = '#333',
+  localConfig,
+  handleProviderChange,
+  handleModelChange,
+  handleOpenRouterProviderChange,
+  handleChange,
+  handleNumericBlur,
+  isRunning,
+  lmStudioModels,
+  openRouterModels,
+  modelProviders,
+  hasOpenRouterKey,
+  lmStudioEnabled,
+}) => {
+  const storedProvider = localConfig[`${rolePrefix}_provider`] || 'lm_studio';
+  const provider = lmStudioEnabled ? storedProvider : 'openrouter';
   const modelId = localConfig[`${rolePrefix}_model`] || '';
   const openrouterProv = localConfig[`${rolePrefix}_openrouter_provider`];
   const fallback = localConfig[`${rolePrefix}_lm_studio_fallback`];
@@ -148,13 +204,14 @@ const RoleConfig = ({ title, hint, rolePrefix, borderColor = '#333', localConfig
         fallback={fallback}
         onProviderChange={(p) => handleProviderChange(rolePrefix, p)}
         onModelChange={(m) => handleModelChange(rolePrefix, m)}
-        onOpenrouterProviderChange={(p) => handleChange(`${rolePrefix}_openrouter_provider`, p)}
+        onOpenrouterProviderChange={(p) => handleOpenRouterProviderChange(rolePrefix, p)}
         onFallbackChange={(f) => handleChange(`${rolePrefix}_lm_studio_fallback`, f)}
         lmStudioModels={lmStudioModels}
         openRouterModels={openRouterModels}
         modelProviders={modelProviders}
         hasOpenRouterKey={hasOpenRouterKey}
         isRunning={isRunning}
+        lmStudioEnabled={lmStudioEnabled}
       />
 
       <div className="settings-row">
@@ -166,7 +223,7 @@ const RoleConfig = ({ title, hint, rolePrefix, borderColor = '#333', localConfig
           onBlur={(e) => handleNumericBlur(`${rolePrefix}_context_window`, e.target.value)}
           disabled={isRunning}
           min={4096}
-          max={999999}
+          max={50000000}
           step={1024}
         />
       </div>
@@ -180,7 +237,7 @@ const RoleConfig = ({ title, hint, rolePrefix, borderColor = '#333', localConfig
           onBlur={(e) => handleNumericBlur(`${rolePrefix}_max_tokens`, e.target.value)}
           disabled={isRunning}
           min={1000}
-          max={100000}
+          max={50000000}
           step={1000}
         />
       </div>
@@ -188,7 +245,7 @@ const RoleConfig = ({ title, hint, rolePrefix, borderColor = '#333', localConfig
   );
 };
 
-const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning }) => {
+const AutonomousResearchSettings = ({ config, onConfigChange, models, capabilities, isRunning }) => {
   // Models and OpenRouter state
   const [lmStudioModels, setLmStudioModels] = useState(models || []);
   const [openRouterModels, setOpenRouterModels] = useState([]);
@@ -215,6 +272,16 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
   const [hasStoredWolframKey, setHasStoredWolframKey] = useState(false);
   const [wolframTestResult, setWolframTestResult] = useState('');
   const [testingWolfram, setTestingWolfram] = useState(false);
+  const [proofStatus, setProofStatus] = useState(null);
+  const [proofSettingsEnabled, setProofSettingsEnabled] = useState(false);
+  const [proofSettingsTimeout, setProofSettingsTimeout] = useState('120');
+  const [proofSettingsLspEnabled, setProofSettingsLspEnabled] = useState(false);
+  const [proofSettingsLspIdleTimeout, setProofSettingsLspIdleTimeout] = useState('600');
+  const [proofSettingsSmtEnabled, setProofSettingsSmtEnabled] = useState(false);
+  const [proofSettingsZ3Path, setProofSettingsZ3Path] = useState('');
+  const [proofSettingsSmtTimeout, setProofSettingsSmtTimeout] = useState('30');
+  const [savingProofSettings, setSavingProofSettings] = useState(false);
+  const [proofSettingsMessage, setProofSettingsMessage] = useState('');
   
   // Critique prompt editor state
   const [advancedSettingsExpanded, setAdvancedSettingsExpanded] = useState(false);
@@ -222,6 +289,9 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
   const [customCritiquePrompt, setCustomCritiquePrompt] = useState('');
   const [critiquePromptSaved, setCritiquePromptSaved] = useState(false);
   const [defaultCritiquePrompt, setDefaultCritiquePrompt] = useState('');
+  const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const genericMode = Boolean(capabilities?.genericMode);
+  const showLean4Settings = Boolean(lmStudioEnabled && proofStatus?.lean4_path && !genericMode);
 
   const handleCollapsibleKeyDown = (event, toggleFn) => {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -387,17 +457,46 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
       }
 
       // Try to fetch fresh LM Studio models
-      try {
-        const freshModels = await api.getModels();
-        setLmStudioModels(freshModels);
-      } catch (err) {
-        console.error('Failed to fetch LM Studio models:', err);
+      if (lmStudioEnabled) {
+        try {
+          const freshModels = await api.getModels();
+          setLmStudioModels(freshModels.models || freshModels || []);
+        } catch (err) {
+          console.error('Failed to fetch LM Studio models:', err);
+        }
+      } else {
+        setLmStudioModels([]);
       }
       
       setIsLoadedFromStorage(true);
     };
     init();
-  }, []);
+  }, [lmStudioEnabled]);
+
+  useEffect(() => {
+    if (genericMode) {
+      setProofStatus(null);
+      return;
+    }
+
+    const loadProofStatus = async () => {
+      try {
+        const status = await autonomousAPI.getProofStatus();
+        setProofStatus(status);
+        setProofSettingsEnabled(Boolean(status.lean4_enabled));
+        setProofSettingsTimeout(String(status.lean4_proof_timeout ?? 120));
+        setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
+        setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? 600));
+        setProofSettingsSmtEnabled(Boolean(status.smt_enabled));
+        setProofSettingsZ3Path(status.z3_path || '');
+        setProofSettingsSmtTimeout(String(status.smt_timeout ?? 30));
+      } catch (err) {
+        console.error('Failed to load Lean 4 proof status:', err);
+      }
+    };
+
+    loadProofStatus();
+  }, [genericMode]);
 
   // Fetch providers for any OpenRouter models after settings are loaded
   useEffect(() => {
@@ -449,12 +548,81 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, isRunning 
     localStorage.setItem(AUTONOMOUS_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   }, [isLoadedFromStorage, numSubmitters, submitterConfigs, localConfig, freeOnly, freeModelLooping, freeModelAutoSelector, tier3Enabled, modelProviders, selectedProfile]);
 
+  useEffect(() => {
+    if (!isLoadedFromStorage || lmStudioEnabled) {
+      return;
+    }
+
+    setLmStudioModels([]);
+
+    const normalizedSubmitters = submitterConfigs.map((submitterConfig) => {
+      const keepOpenRouterState = submitterConfig.provider === 'openrouter';
+      return {
+        ...submitterConfig,
+        provider: 'openrouter',
+        modelId: keepOpenRouterState ? (submitterConfig.modelId || '') : '',
+        openrouterProvider: keepOpenRouterState ? (submitterConfig.openrouterProvider || null) : null,
+        lmStudioFallbackId: null,
+      };
+    });
+
+    const normalizedLocalConfig = { ...localConfig };
+    ['validator', 'high_context', 'high_param', 'critique_submitter'].forEach((rolePrefix) => {
+      const providerKey = `${rolePrefix}_provider`;
+      const modelKey = `${rolePrefix}_model`;
+      const openRouterProviderKey = `${rolePrefix}_openrouter_provider`;
+      const fallbackKey = `${rolePrefix}_lm_studio_fallback`;
+      const keepOpenRouterState = normalizedLocalConfig[providerKey] === 'openrouter';
+
+      normalizedLocalConfig[providerKey] = 'openrouter';
+      normalizedLocalConfig[modelKey] = keepOpenRouterState ? (normalizedLocalConfig[modelKey] || '') : '';
+      normalizedLocalConfig[openRouterProviderKey] = keepOpenRouterState
+        ? (normalizedLocalConfig[openRouterProviderKey] || null)
+        : null;
+      normalizedLocalConfig[fallbackKey] = null;
+    });
+
+    if (JSON.stringify(normalizedSubmitters) !== JSON.stringify(submitterConfigs)) {
+      setSubmitterConfigs(normalizedSubmitters);
+    }
+    if (JSON.stringify(normalizedLocalConfig) !== JSON.stringify(localConfig)) {
+      setLocalConfig(normalizedLocalConfig);
+    }
+
+    const currentConfig = {
+      ...localConfig,
+      submitter_configs: submitterConfigs.slice(0, numSubmitters),
+      tier3_enabled: tier3Enabled,
+    };
+    const nextConfig = {
+      ...normalizedLocalConfig,
+      submitter_configs: normalizedSubmitters.slice(0, numSubmitters),
+      tier3_enabled: tier3Enabled,
+    };
+    if (JSON.stringify(nextConfig) !== JSON.stringify(currentConfig)) {
+      onConfigChange(nextConfig);
+    }
+  }, [
+    isLoadedFromStorage,
+    lmStudioEnabled,
+    submitterConfigs,
+    localConfig,
+    numSubmitters,
+    tier3Enabled,
+    onConfigChange,
+  ]);
+
   // Update LM Studio models when prop changes
   useEffect(() => {
+    if (!lmStudioEnabled) {
+      setLmStudioModels([]);
+      return;
+    }
+
     if (models && models.length > 0) {
       setLmStudioModels(models);
     }
-  }, [models]);
+  }, [models, lmStudioEnabled]);
 
   // Propagate tier3Enabled to parent config whenever it changes
   useEffect(() => {
@@ -536,13 +704,50 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   }, []);
 
   const fetchProvidersForModel = async (modelId) => {
-    if (!modelId || modelProviders[modelId]) return;
+    if (!modelId) return null;
+
+    const cachedProviderData = modelProviders[modelId];
+    if (hasEndpointMetadata(cachedProviderData)) {
+      return cachedProviderData;
+    }
+
     try {
       const result = await openRouterAPI.getProviders(modelId);
-      setModelProviders(prev => ({ ...prev, [modelId]: result.providers || [] }));
+      const providerData = {
+        providers: result.providers || [],
+        endpoints: result.endpoints || [],
+      };
+      setModelProviders(prev => ({ ...prev, [modelId]: providerData }));
+      return providerData;
     } catch (err) {
       console.error(`Failed to fetch providers for ${modelId}:`, err);
+      return cachedProviderData || null;
     }
+  };
+
+  const getAutoSettingsForModel = async (modelId, selectedProvider = null) => {
+    const model = findOpenRouterModel(openRouterModels, modelId);
+    if (!model) {
+      console.debug('[AutonomousAutoFill] model not in loaded list, skipping auto-fill', { modelId });
+      return null;
+    }
+
+    const providerData = await fetchProvidersForModel(modelId);
+    const autoSettings = computeOpenRouterAutoSettings(model, providerData, selectedProvider);
+    if (autoSettings) {
+      console.debug('[AutonomousAutoFill] computed auto-settings', {
+        modelId,
+        selectedProvider,
+        source: autoSettings.source,
+        contextWindow: autoSettings.contextWindow,
+        maxOutputTokens: autoSettings.maxOutputTokens,
+        warnings: autoSettings.warnings,
+      });
+      if (autoSettings.warnings && autoSettings.warnings.length > 0) {
+        console.warn('[AutonomousAutoFill] auto-settings fallback used:', autoSettings.warnings);
+      }
+    }
+    return autoSettings;
   };
 
   const markProfileAsCustom = () => {
@@ -611,11 +816,60 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   };
 
   // Handle model change with provider fetching for OpenRouter
-  const handleModelChange = (rolePrefix, modelId) => {
-    handleChange(`${rolePrefix}_model`, modelId);
-    if (localConfig[`${rolePrefix}_provider`] === 'openrouter' && modelId) {
-      fetchProvidersForModel(modelId);
+  const handleModelChange = async (rolePrefix, modelId) => {
+    const newConfig = {
+      ...localConfig,
+      [`${rolePrefix}_model`]: modelId,
+      [`${rolePrefix}_openrouter_provider`]: null,
+    };
+    markProfileAsCustom();
+    setLocalConfig(newConfig);
+    onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+
+    if (localConfig[`${rolePrefix}_provider`] !== 'openrouter' || !modelId) {
+      return;
     }
+
+    const autoSettings = await getAutoSettingsForModel(modelId, null);
+    if (!autoSettings) {
+      return;
+    }
+
+    const autofilledConfig = {
+      ...newConfig,
+      ...(autoSettings.contextWindowKnown ? { [`${rolePrefix}_context_window`]: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { [`${rolePrefix}_max_tokens`]: autoSettings.maxOutputTokens } : {}),
+    };
+    setLocalConfig(autofilledConfig);
+    onConfigChange({ ...autofilledConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+  };
+
+  const handleOpenRouterProviderChange = async (rolePrefix, providerName) => {
+    const newConfig = {
+      ...localConfig,
+      [`${rolePrefix}_openrouter_provider`]: providerName,
+    };
+    markProfileAsCustom();
+    setLocalConfig(newConfig);
+    onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
+
+    const modelId = newConfig[`${rolePrefix}_model`];
+    if (newConfig[`${rolePrefix}_provider`] !== 'openrouter' || !modelId) {
+      return;
+    }
+
+    const autoSettings = await getAutoSettingsForModel(modelId, providerName);
+    if (!autoSettings) {
+      return;
+    }
+
+    const autofilledConfig = {
+      ...newConfig,
+      ...(autoSettings.contextWindowKnown ? { [`${rolePrefix}_context_window`]: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { [`${rolePrefix}_max_tokens`]: autoSettings.maxOutputTokens } : {}),
+    };
+    setLocalConfig(autofilledConfig);
+    onConfigChange({ ...autofilledConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
   };
 
   // Handle number of submitters change
@@ -685,12 +939,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         [field]: newValue
       };
     }
-    
-    // Fetch providers if selecting OpenRouter model
-    if (field === 'modelId' && newConfigs[index].provider === 'openrouter' && newValue) {
-      fetchProvidersForModel(newValue);
-    }
-    
+
     markProfileAsCustom();
     setSubmitterConfigs(newConfigs);
     
@@ -698,6 +947,70 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     if (!numericFields.includes(field)) {
       onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
     }
+  };
+
+  const handleSubmitterModelChange = async (index, modelId) => {
+    const newConfigs = [...submitterConfigs];
+    newConfigs[index] = {
+      ...newConfigs[index],
+      modelId,
+      openrouterProvider: null,
+    };
+
+    markProfileAsCustom();
+    setSubmitterConfigs(newConfigs);
+    onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
+
+    if (newConfigs[index].provider !== 'openrouter' || !modelId) {
+      return;
+    }
+
+    const autoSettings = await getAutoSettingsForModel(modelId, null);
+    if (!autoSettings) {
+      return;
+    }
+
+    const autofilledConfigs = [...newConfigs];
+    autofilledConfigs[index] = {
+      ...autofilledConfigs[index],
+      ...(autoSettings.contextWindowKnown ? { contextWindow: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { maxOutputTokens: autoSettings.maxOutputTokens } : {}),
+    };
+
+    setSubmitterConfigs(autofilledConfigs);
+    onConfigChange({ ...localConfig, submitter_configs: autofilledConfigs.slice(0, numSubmitters) });
+  };
+
+  const handleSubmitterOpenRouterProviderChange = async (index, providerName) => {
+    const newConfigs = [...submitterConfigs];
+    newConfigs[index] = {
+      ...newConfigs[index],
+      openrouterProvider: providerName,
+    };
+
+    markProfileAsCustom();
+    setSubmitterConfigs(newConfigs);
+    onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
+
+    const modelId = newConfigs[index].modelId;
+    if (newConfigs[index].provider !== 'openrouter' || !modelId) {
+      return;
+    }
+
+    const autoSettings = await getAutoSettingsForModel(modelId, providerName);
+    if (!autoSettings) {
+      return;
+    }
+
+    const autofilledConfigs = [...newConfigs];
+    autofilledConfigs[index] = {
+      ...autofilledConfigs[index],
+      ...(autoSettings.contextWindowKnown ? { contextWindow: autoSettings.contextWindow } : {}),
+      ...(autoSettings.outputCapKnown ? { maxOutputTokens: autoSettings.maxOutputTokens } : {}),
+    };
+
+    setSubmitterConfigs(autofilledConfigs);
+    onConfigChange({ ...localConfig, submitter_configs: autofilledConfigs.slice(0, numSubmitters) });
   };
 
   // Handler for when user finishes editing a submitter numeric field
@@ -788,6 +1101,42 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       setTimeout(() => setWolframTestResult(''), 3000);
     } catch (err) {
       console.error('Failed to clear Wolfram Alpha key:', err);
+    }
+  };
+
+  const handleSaveProofSettings = async () => {
+    const parsedTimeout = parseInt(proofSettingsTimeout, 10);
+    const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 120;
+    const parsedLspIdleTimeout = parseInt(proofSettingsLspIdleTimeout, 10);
+    const lspIdleTimeout = Number.isFinite(parsedLspIdleTimeout) ? parsedLspIdleTimeout : 600;
+    const parsedSmtTimeout = parseInt(proofSettingsSmtTimeout, 10);
+    const smtTimeout = Number.isFinite(parsedSmtTimeout) ? parsedSmtTimeout : 30;
+
+    try {
+      setSavingProofSettings(true);
+      setProofSettingsMessage('');
+      const status = await autonomousAPI.updateProofSettings({
+        enabled: proofSettingsEnabled,
+        timeout,
+        lean4_lsp_enabled: proofSettingsLspEnabled,
+        lean4_lsp_idle_timeout: lspIdleTimeout,
+        smt_enabled: proofSettingsSmtEnabled,
+        z3_path: proofSettingsZ3Path,
+        smt_timeout: smtTimeout,
+      });
+      setProofStatus(status);
+      setProofSettingsEnabled(Boolean(status.lean4_enabled));
+      setProofSettingsTimeout(String(status.lean4_proof_timeout ?? timeout));
+      setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
+      setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? lspIdleTimeout));
+      setProofSettingsSmtEnabled(Boolean(status.smt_enabled));
+      setProofSettingsZ3Path(status.z3_path || '');
+      setProofSettingsSmtTimeout(String(status.smt_timeout ?? smtTimeout));
+      setProofSettingsMessage('Lean 4 / SMT proof settings saved.');
+    } catch (err) {
+      setProofSettingsMessage(`Failed to save Lean 4 / SMT proof settings: ${err.message}`);
+    } finally {
+      setSavingProofSettings(false);
     }
   };
 
@@ -918,18 +1267,22 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <div className="known-models-sidebar">
           <h3 className="flex-row-center">
             <span>Highlighted Models</span>
-            <div className="tooltip-anchor">
+            <div className="help-tooltip-anchor">
               <button
-                className="info-tooltip-btn info-tooltip-btn--orange"
+                type="button"
+                className="help-tooltip-btn"
+                aria-label="Learn about highlighted models"
                 onMouseEnter={() => setShowTestedModelsTooltip(true)}
                 onMouseLeave={() => setShowTestedModelsTooltip(false)}
+                onFocus={() => setShowTestedModelsTooltip(true)}
+                onBlur={() => setShowTestedModelsTooltip(false)}
               >
                 ?
               </button>
               {showTestedModelsTooltip && (
                 /* sidebar-escape: fixed positioning so the tooltip breaks out of the
-                   322px sidebar and renders freely. See settings-common.css for coords. */
-                <div className="tooltip-popup tooltip-popup--sidebar-escape">
+                   322px sidebar and renders freely. See index.css for coords. */
+                <div className="help-tooltip-popup help-tooltip-popup--sidebar-escape">
                   The models and hosts listed here are not affiliated with MOTO or Intrafere LLC. This chart reflects developer-tested configurations intended to help guide model selection. All statements regarding pricing, performance, roles, rankings, or capabilities are speculative and based on individual testing experience. Intrafere LLC and the MOTO development team make no guarantees about the accuracy of this chart. MOTO is compatible with the majority of models, including many not listed here.
                 </div>
               )}
@@ -942,20 +1295,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             {/* Podium - Top 3 */}
             <div className="models-podium">
               <div className="models-podium-label">Leaderboard</div>
-              <div className="model-item model-item--ranked model-item--gold">
+              <div className="model-item model-item--ranked model-item--gold model-item--os">
+                <OsTag />
                 <div className="flex-row-center">
-                  <div className="model-item-name">Kimi K2.5</div>
-                  <div className="ranking-badge ranking-badge--gold">👑 KING OF THE HILL</div>
-                  <div className="tooltip-anchor" style={{ zIndex: 100 }}>
-                    <button
-                      className="info-tooltip-btn info-tooltip-btn--gold"
-                      onMouseEnter={() => setShowKothTooltip(true)}
-                      onMouseLeave={() => setShowKothTooltip(false)}
-                    >
-                      ?
-                    </button>
+                  <div className="model-item-name">Kimi K2.6</div>
+                  <div
+                    className="help-tooltip-anchor"
+                    style={{ zIndex: 100 }}
+                    aria-label="Learn about the King of the Hill ranking"
+                    onMouseEnter={() => setShowKothTooltip(true)}
+                    onMouseLeave={() => setShowKothTooltip(false)}
+                    onFocus={() => setShowKothTooltip(true)}
+                    onBlur={() => setShowKothTooltip(false)}
+                    tabIndex={0}
+                  >
+                    <div className="ranking-badge ranking-badge--gold">👑 KING OF THE HILL</div>
                     {showKothTooltip && (
-                      <div className="tooltip-popup tooltip-popup--fixed" style={{ top: '50px', right: '20px' }}>
+                      <div
+                        className="help-tooltip-popup"
+                        style={{ top: 'auto', bottom: 'calc(100% + 10px)', left: 'calc(100% + 10px)', right: 'auto' }}
+                      >
                         This model was chosen by the Intrafere developers as the best overall performer in the MOTO harness, optimized for cost, speed, and knowledge.
                       </div>
                     )}
@@ -972,17 +1331,22 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 <div className="model-item-badge">Fast validator</div>
               </div>
 
-              <div className="model-item model-item--ranked model-item--bronze">
+              <div className="model-item model-item--ranked model-item--bronze model-item--os">
+                <OsTag />
                 <div className="flex-row-center">
                   <div className="model-item-name">GPT OSS 120B</div>
                   <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
                 </div>
                 <div className="model-item-badge">Balanced knowledge and speed at low cost</div>
-                <div className="model-item-note">(outputs may corrupt over time depending on host)</div>
               </div>
             </div>
 
             {/* Alphabetical list (rest of models) */}
+
+            <div className="model-item">
+              <div className="model-item-name">Arcee AI's Trinity Large</div>
+              <div className="model-item-badge">Highly knowledgeable</div>
+            </div>
             
             <div className="model-item">
               <div className="model-item-name">Amazon Nova Pro/Premier</div>
@@ -994,7 +1358,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">DeepSeek</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
@@ -1009,17 +1374,20 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Google's Gemma</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">GLM</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">GLM Turbo</div>
               <div className="model-item-badge">Fast validator</div>
             </div>
@@ -1029,10 +1397,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Computer science</div>
             </div>
             
-            <div className="model-item">
-              <div className="model-item-name">GPT OSS</div>
+            <div className="model-item model-item--os">
+              <OsTag />
+              <div className="model-item-name">OpenAI's GPT OSS</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
-              <div className="model-item-note">(outputs may corrupt over time depending on host)</div>
             </div>
             
             <div className="model-item">
@@ -1050,12 +1418,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Rapid knowledge</div>
             </div>
 
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Nemotron Super</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
             </div>
 
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Nous Hermes</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
@@ -1065,7 +1435,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Native internet search capability</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Microsoft's Phi</div>
               <div className="model-item-badge">Balanced knowledge and speed</div>
             </div>
@@ -1075,12 +1446,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Qwen Coder</div>
               <div className="model-item-badge">Computer science</div>
             </div>
             
-            <div className="model-item">
+            <div className="model-item model-item--os">
+              <OsTag />
               <div className="model-item-name">Qwen</div>
               <div className="model-item-badge">Highly knowledgeable</div>
             </div>
@@ -1094,11 +1467,27 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       <div className="settings-group" style={{ marginBottom: '1.5rem' }}>
         <h4>Profile Selection</h4>
         <p className="settings-info">
-          Load a recommended profile or create your own custom profile. (These models and hosts are not affiliated with MOTO/Intrafere)
+          Load one of the preselected example profiles as a starting point, or create your own custom profile. (These models and hosts are not affiliated with MOTO/Intrafere)
         </p>
         
         <div className="settings-row">
-          <label>Select Profile</label>
+          <label>
+            Select Profile
+            <HelpTooltip
+              label="Learn how profile selection works"
+              anchorClassName="help-tooltip-anchor--inline"
+              buttonClassName="help-tooltip-btn--green"
+              useFixedPosition
+            >
+              <strong>Profile menu guide</strong>
+              <br /><br />
+              <code>-- Custom Settings --</code> means no saved profile is currently loaded, so you are editing the settings manually.
+              <br /><br />
+              <code>Recommended Profiles</code> are preselected example profiles you can load as starting points.
+              <br /><br />
+              <code>My Profiles</code> contains any custom profiles you save from your current settings.
+            </HelpTooltip>
+          </label>
           <select
             value={selectedProfile}
             onChange={(e) => {
@@ -1219,20 +1608,22 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
       {/* Show only free models + model refresh controls — grouped at top */}
       <div className="model-refresh-controls">
-        <button 
-          className="secondary"
-          onClick={async () => {
-            try {
-              const freshModels = await api.getModels();
-              setLmStudioModels(freshModels);
-            } catch (err) {
-              console.error('Failed to refresh LM Studio models:', err);
-            }
-          }}
-          disabled={isRunning}
-        >
-          Refresh LM Studio Models
-        </button>
+        {lmStudioEnabled && (
+          <button 
+            className="secondary"
+            onClick={async () => {
+              try {
+                const freshModels = await api.getModels();
+                setLmStudioModels(freshModels.models || freshModels || []);
+              } catch (err) {
+                console.error('Failed to refresh LM Studio models:', err);
+              }
+            }}
+            disabled={isRunning}
+          >
+            Refresh LM Studio Models
+          </button>
+        )}
         {hasOpenRouterKey && (
           <>
             <button 
@@ -1301,13 +1692,16 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
         {/* Per-submitter configuration */}
         {submitterConfigs.slice(0, numSubmitters).map((cfg, idx) => (
+          (() => {
+            const effectiveProvider = lmStudioEnabled ? cfg.provider : 'openrouter';
+            return (
           <div 
             key={idx} 
-            className={`submitter-config-section${cfg.provider === 'openrouter' ? ' role-config-card--openrouter-orange' : (idx === 0 ? ' role-config-card--main' : '')}`}
+            className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : (idx === 0 ? ' role-config-card--main' : '')}`}
           >
-            <h5 className={cfg.provider === 'openrouter' ? 'card-title--orange' : (idx === 0 ? 'card-title--green' : '')}>
+            <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : (idx === 0 ? 'card-title--green' : '')}>
               {idx === 0 ? 'Submitter 1 (Main Submitter)' : `Submitter ${idx + 1}`}
-              {cfg.provider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
+              {effectiveProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
             </h5>
             
             <ModelSelector
@@ -1316,14 +1710,15 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               openrouterProv={cfg.openrouterProvider}
               fallback={cfg.lmStudioFallbackId}
               onProviderChange={(p) => handleSubmitterConfigChange(idx, 'provider', p)}
-              onModelChange={(m) => handleSubmitterConfigChange(idx, 'modelId', m)}
-              onOpenrouterProviderChange={(p) => handleSubmitterConfigChange(idx, 'openrouterProvider', p)}
+              onModelChange={(m) => handleSubmitterModelChange(idx, m)}
+              onOpenrouterProviderChange={(p) => handleSubmitterOpenRouterProviderChange(idx, p)}
               onFallbackChange={(f) => handleSubmitterConfigChange(idx, 'lmStudioFallbackId', f)}
               lmStudioModels={lmStudioModels}
               openRouterModels={openRouterModels}
               modelProviders={modelProviders}
               hasOpenRouterKey={hasOpenRouterKey}
               isRunning={isRunning}
+              lmStudioEnabled={lmStudioEnabled}
             />
 
             <div className="settings-row">
@@ -1335,7 +1730,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 onBlur={(e) => handleSubmitterNumericBlur(idx, 'contextWindow', e.target.value)}
                 disabled={isRunning}
                 min={4096}
-                max={999999}
+                max={50000000}
                 step={1024}
               />
             </div>
@@ -1349,11 +1744,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 onBlur={(e) => handleSubmitterNumericBlur(idx, 'maxOutputTokens', e.target.value)}
                 disabled={isRunning}
                 min={1000}
-                max={100000}
+                max={50000000}
                 step={1000}
               />
             </div>
           </div>
+            );
+          })()
         ))}
       </div>
 
@@ -1371,6 +1768,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
+          handleOpenRouterProviderChange={handleOpenRouterProviderChange}
           handleChange={handleChange}
           handleNumericBlur={handleNumericBlur}
           isRunning={isRunning}
@@ -1378,6 +1776,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           openRouterModels={openRouterModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
+          lmStudioEnabled={lmStudioEnabled}
         />
       </div>
 
@@ -1396,6 +1795,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
+          handleOpenRouterProviderChange={handleOpenRouterProviderChange}
           handleChange={handleChange}
           handleNumericBlur={handleNumericBlur}
           isRunning={isRunning}
@@ -1403,16 +1803,18 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           openRouterModels={openRouterModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
+          lmStudioEnabled={lmStudioEnabled}
         />
 
         <RoleConfig
           title="High-Parameter Submitter"
           hint="Handles mathematical rigor enhancement."
           rolePrefix="high_param"
-          borderColor="#1eff1c"
+          borderColor="#2a2a2a"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
+          handleOpenRouterProviderChange={handleOpenRouterProviderChange}
           handleChange={handleChange}
           handleNumericBlur={handleNumericBlur}
           isRunning={isRunning}
@@ -1420,6 +1822,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           openRouterModels={openRouterModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
+          lmStudioEnabled={lmStudioEnabled}
         />
 
         <RoleConfig
@@ -1430,6 +1833,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
+          handleOpenRouterProviderChange={handleOpenRouterProviderChange}
           handleChange={handleChange}
           handleNumericBlur={handleNumericBlur}
           isRunning={isRunning}
@@ -1437,6 +1841,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           openRouterModels={openRouterModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
+          lmStudioEnabled={lmStudioEnabled}
         />
       </div>
 
@@ -1477,6 +1882,184 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 </p>
               </div>
 
+              {showLean4Settings && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 className="form-group--compact">Lean 4 Proof Solver</h4>
+                  <small className="hint-text">
+                    Desktop-only controls for the automatic proof checker, manual proof runs, and certificate export.
+                  </small>
+
+                  <div className="settings-row">
+                    <label>Lean 4 Status</label>
+                    <div>
+                      <strong>{proofStatus ? (proofStatus.lean4_enabled ? 'Enabled' : 'Disabled') : 'Starting…'}</strong>
+                      <small className="settings-hint" style={{ display: 'block', marginTop: '0.35rem' }}>
+                        Workspace: {proofStatus ? (proofStatus.workspace_ready ? 'Ready' : 'Not ready yet') : 'Starting…'}
+                      </small>
+                    </div>
+                  </div>
+
+                  <div className="settings-row">
+                    <label>Lean Version</label>
+                    <div>{proofStatus?.lean4_version || 'Unavailable'}</div>
+                  </div>
+
+                  <div className="settings-row">
+                    <label>Mathlib Revision</label>
+                    <div>{proofStatus?.mathlib_commit || 'Unavailable'}</div>
+                  </div>
+
+                  <div className="settings-row">
+                    <label>Lean Binary</label>
+                    <div>{proofStatus?.lean4_path || 'Launcher-managed / not detected yet'}</div>
+                  </div>
+
+                  <div className="settings-row">
+                    <label>Workspace Directory</label>
+                    <div>{proofStatus?.lean4_workspace_dir || 'Unavailable'}</div>
+                  </div>
+
+                  <div className="settings-row">
+                    <label>Persistent LSP Status</label>
+                    <div>
+                      {proofStatus?.lsp_active
+                        ? 'Active'
+                        : proofStatus?.lsp_available
+                          ? 'Available'
+                          : 'Disabled'}
+                    </div>
+                  </div>
+
+                  <div className="settings-row">
+                    <label>Z3 Status</label>
+                    <div>
+                      <strong>{proofStatus?.smt_available ? 'Ready' : 'Unavailable'}</strong>
+                      <small className="settings-hint" style={{ display: 'block', marginTop: '0.35rem' }}>
+                        {proofStatus?.z3_version || 'No Z3 version detected yet'}
+                      </small>
+                    </div>
+                  </div>
+
+                  <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ cursor: isRunning ? 'not-allowed' : 'pointer', marginTop: '1rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={proofSettingsEnabled}
+                      onChange={(e) => setProofSettingsEnabled(e.target.checked)}
+                      disabled={isRunning || savingProofSettings}
+                    />
+                    <span className="settings-option-copy">
+                      <span className="settings-option-title">Enable Lean 4 proof verification</span>
+                      <span className="settings-option-description">
+                        Turns on automatic proof checks after brainstorm and paper completion plus manual proof checks from the Proofs tab.
+                      </span>
+                    </span>
+                  </label>
+
+                  <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ cursor: isRunning ? 'not-allowed' : 'pointer', marginTop: '1rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={proofSettingsLspEnabled}
+                      onChange={(e) => setProofSettingsLspEnabled(e.target.checked)}
+                      disabled={isRunning || savingProofSettings}
+                    />
+                    <span className="settings-option-copy">
+                      <span className="settings-option-title">Enable persistent Lean LSP mode</span>
+                      <span className="settings-option-description">
+                        Keeps a warm Lean server available for lower-latency proof verification while preserving subprocess fallback.
+                      </span>
+                    </span>
+                  </label>
+
+                  <div className="settings-row">
+                    <label>Proof Timeout (seconds)</label>
+                    <input
+                      type="number"
+                      value={proofSettingsTimeout}
+                      onChange={(e) => setProofSettingsTimeout(e.target.value)}
+                      disabled={isRunning || savingProofSettings}
+                      min={10}
+                      max={3600}
+                      step={5}
+                    />
+                  </div>
+
+                  <div className="settings-row">
+                    <label>LSP Idle Timeout (seconds)</label>
+                    <input
+                      type="number"
+                      value={proofSettingsLspIdleTimeout}
+                      onChange={(e) => setProofSettingsLspIdleTimeout(e.target.value)}
+                      disabled={isRunning || savingProofSettings}
+                      min={60}
+                      max={7200}
+                      step={30}
+                    />
+                  </div>
+
+                  <div style={{ marginTop: '1rem' }}>
+                    <h5 className="form-group--compact">SMT (Z3) Integration</h5>
+                    <small className="hint-text">
+                      Optional early theorem classification and Lean tactic hinting for arithmetic-friendly proof goals. Lean 4 remains authoritative for every stored proof.
+                    </small>
+                  </div>
+
+                  <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ cursor: isRunning ? 'not-allowed' : 'pointer', marginTop: '1rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={proofSettingsSmtEnabled}
+                      onChange={(e) => setProofSettingsSmtEnabled(e.target.checked)}
+                      disabled={isRunning || savingProofSettings}
+                    />
+                    <span className="settings-option-copy">
+                      <span className="settings-option-title">Enable SMT-assisted proof guidance</span>
+                      <span className="settings-option-description">
+                        Runs Z3 on conservative SMT-amenable goals and feeds any successful result back into Lean proof prompting as hints only.
+                      </span>
+                    </span>
+                  </label>
+
+                  <div className="settings-row">
+                    <label>Z3 Binary Path</label>
+                    <input
+                      type="text"
+                      value={proofSettingsZ3Path}
+                      onChange={(e) => setProofSettingsZ3Path(e.target.value)}
+                      disabled={isRunning || savingProofSettings}
+                      placeholder="Optional explicit z3 path"
+                    />
+                  </div>
+
+                  <div className="settings-row">
+                    <label>SMT Timeout (seconds)</label>
+                    <input
+                      type="number"
+                      value={proofSettingsSmtTimeout}
+                      onChange={(e) => setProofSettingsSmtTimeout(e.target.value)}
+                      disabled={isRunning || savingProofSettings}
+                      min={1}
+                      max={600}
+                      step={1}
+                    />
+                  </div>
+
+                  <div className="actions-row">
+                    <button
+                      className="btn-success-sm"
+                      onClick={handleSaveProofSettings}
+                      disabled={isRunning || savingProofSettings}
+                    >
+                      {savingProofSettings ? 'Saving...' : 'Save Proof Settings'}
+                    </button>
+                  </div>
+
+                  {proofSettingsMessage && (
+                    <div className={`test-result-banner ${proofSettingsMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
+                      {proofSettingsMessage}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <h4 className="form-group--compact">Wolfram Alpha Integration (Optional)</h4>
               <small className="hint-text">
                 Enable Wolfram Alpha API for computational verification in rigor mode. When selecting your key select "full results" for your key type, then copy your APP ID and save it here. This key is also shared with the manual compiler mode.
@@ -1512,12 +2095,22 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                       type="password"
                       value={wolframApiKey}
                       onChange={(e) => setWolframApiKey(e.target.value)}
-                      placeholder={hasStoredWolframKey && !wolframApiKey ? "Stored securely on backend. Enter a new App ID to replace it." : "Enter your Wolfram Alpha App ID"}
+                      placeholder={
+                        hasStoredWolframKey && !wolframApiKey
+                          ? (
+                            genericMode
+                              ? 'Loaded in the current backend session. Enter a new App ID to replace it.'
+                              : 'Stored securely on backend. Enter a new App ID to replace it.'
+                          )
+                          : 'Enter your Wolfram Alpha App ID'
+                      }
                       className="input-dark"
                     />
                     {hasStoredWolframKey && !wolframApiKey && (
                       <small className="hint-text">
-                        A Wolfram Alpha key is already stored securely on the backend for this machine.
+                        {genericMode
+                          ? 'A Wolfram Alpha key is already loaded in the current backend session.'
+                          : 'A Wolfram Alpha key is already stored securely on the backend for this machine.'}
                       </small>
                     )}
                   </div>
@@ -1558,11 +2151,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             {/* Tier 3 Final Answer Toggle */}
             <div className="settings-subsection settings-subsection--accent-danger">
               <div className="settings-subsection-header">
-                <h5 className="settings-subsection-title">Experimental / Ending Options</h5>
+                <h5 className="settings-subsection-title">Advanced / Ending Options</h5>
               </div>
               <h4 className="form-group--compact">Stage 3: Final Answer Generation</h4>
               <p className="settings-info">
-                Feature in construction. Enabling this is optional and not recommended. Stage 3 is a highly experimental mode. Most users should not enable this feature — it is expensive and wasteful at this current stage of development. When enabled, the system will automatically synthesize all completed Stage 2 papers into a final answer that is often book-length or greater. This feature is highly hallucinatory — Stage 2 papers are the recommended final output. Disabled by default; final paper quality is currently much lower than Stage 2 papers. Once optimized and better-functioning, this mode will be advertised more.
+                Feature in construction. Enabling this is optional and not recommended. Stage 3 is an in-development mode. Most users should not enable this feature — it is expensive and wasteful at this current stage of development. When enabled, the system will automatically synthesize all completed Stage 2 papers into a final answer that is often book-length or greater. This feature is highly hallucinatory — Stage 2 papers are the recommended final output. Disabled by default; final paper quality is currently much lower than Stage 2 papers. Once optimized and better-functioning, this mode will be advertised more.
               </p>
               <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ cursor: isRunning ? 'not-allowed' : 'pointer' }}>
                 <input
@@ -1572,7 +2165,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   disabled={isRunning}
                 />
                 <span className="settings-option-copy">
-                  <span className="settings-option-title">Enable Stage 3 Final Answer Generation (Very Experimental)</span>
+                  <span className="settings-option-title">Enable Stage 3 Final Answer Generation (In Development)</span>
                   <span className="settings-option-description">
                     Allows the system to synthesize completed Stage 2 papers into a final answer after enough papers accumulate.
                   </span>
@@ -1703,10 +2296,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     <span className="settings-option-copy">
                       <span className="settings-option-title">
                         Enable Free Model Looping
-                        <span
-                          title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
-                          className="help-hint"
-                        >(?)</span>
+                        <HelpTooltip
+                          label="Learn about free model looping"
+                          anchorClassName="help-tooltip-anchor--inline"
+                          popupStyle={{ top: 'auto', bottom: 'calc(100% + 10px)', left: 'calc(100% + 10px)', right: 'auto' }}
+                        >
+                          When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits.
+                        </HelpTooltip>
                       </span>
                       <span className="settings-option-description">
                         Automatically rotate to the next selected free model when one hits a rate limit.
@@ -1725,10 +2321,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     <span className="settings-option-copy">
                       <span className="settings-option-title">
                         Use OpenRouter Free Models Auto-Selector as Backup
-                        <span
-                          title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
-                          className="help-hint"
-                        >(?)</span>
+                        <HelpTooltip
+                          label="Learn about the free models auto-selector backup"
+                          anchorClassName="help-tooltip-anchor--inline"
+                          popupStyle={{ top: 'auto', bottom: 'calc(100% + 10px)', left: 'calc(100% + 10px)', right: 'auto' }}
+                        >
+                          When all selected free models are rate-limited, use OpenRouter&apos;s Free Models Router (`openrouter/free`) as a last resort backup. Works independently of Free Model Looping.
+                        </HelpTooltip>
                       </span>
                       <span className="settings-option-description">
                         Falls back to OpenRouter&apos;s free router when every selected free model is temporarily exhausted.

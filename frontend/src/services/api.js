@@ -2,7 +2,74 @@
  * API service for backend communication
  */
 
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_MOTO_API_BASE || '/api';
+
+/**
+ * Extract the most useful human-readable message from a non-ok fetch Response.
+ *
+ * The backend returns FastAPI-style `{ "detail": "..." }` on errors, but:
+ *   - `detail` may be a string, or a list/object (e.g. 422 validation errors)
+ *   - proxies / dev servers can return HTML or empty bodies on 502/504
+ *   - `response.json()` throws on any non-JSON body, which is how the old
+ *     wrappers ended up surfacing a generic "Failed to ..." fallback even
+ *     when the backend had a perfectly clear error to report
+ *
+ * Returns a string containing the HTTP status + the best available reason.
+ */
+async function extractErrorMessage(response, fallbackMessage) {
+  const status = response.status;
+  const statusText = response.statusText || '';
+  const prefix = `HTTP ${status}${statusText ? ` ${statusText}` : ''}`;
+
+  let bodyText = '';
+  try {
+    bodyText = await response.text();
+  } catch {
+    return `${prefix} (no response body): ${fallbackMessage}`;
+  }
+
+  if (!bodyText.trim()) {
+    return `${prefix}: ${fallbackMessage}`;
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    const snippet = bodyText.trim().slice(0, 500);
+    return `${prefix}: ${snippet || fallbackMessage}`;
+  }
+
+  let detail = parsed && typeof parsed === 'object' ? parsed.detail : null;
+  if (detail == null && parsed && typeof parsed === 'object') {
+    detail = parsed.message || parsed.error || null;
+  }
+
+  if (typeof detail === 'string' && detail.trim()) {
+    return `${prefix}: ${detail.trim()}`;
+  }
+  if (detail != null) {
+    try {
+      return `${prefix}: ${JSON.stringify(detail)}`;
+    } catch {
+      // fall through to fallback
+    }
+  }
+  return `${prefix}: ${fallbackMessage}`;
+}
+
+/**
+ * Throw an Error whose `.message` is the most informative reason we can
+ * synthesize from a non-ok Response. Attaches `.status` and `.body` so callers
+ * can inspect them programmatically.
+ */
+async function throwFromResponse(response, fallbackMessage) {
+  const message = await extractErrorMessage(response, fallbackMessage);
+  const err = new Error(message);
+  err.status = response.status;
+  err.statusText = response.statusText;
+  throw err;
+}
 
 // Aggregator API
 export const api = {
@@ -10,6 +77,32 @@ export const api = {
   async getModels() {
     const response = await fetch(`${API_BASE}/aggregator/models`);
     if (!response.ok) throw new Error('Failed to fetch models');
+    return response.json();
+  },
+
+  // Get shared runtime feature flags and build identity
+  async getFeatures() {
+    const response = await fetch(`${API_BASE}/features`);
+    if (!response.ok) throw new Error('Failed to fetch features');
+    return response.json();
+  },
+
+  // Get update notice written by the launcher (if any)
+  async getUpdateNotice() {
+    const response = await fetch(`${API_BASE}/update-notice`);
+    if (!response.ok) return { update_available: false };
+    return response.json();
+  },
+
+  async startPull() {
+    const response = await fetch(`${API_BASE}/update/pull`, { method: 'POST' });
+    if (!response.ok) throw new Error('Failed to start pull');
+    return response.json();
+  },
+
+  async getPullStatus() {
+    const response = await fetch(`${API_BASE}/update/pull-status`);
+    if (!response.ok) throw new Error('Failed to get pull status');
     return response.json();
   },
 
@@ -388,6 +481,106 @@ export const autonomousAPI = {
   async getStats() {
     const response = await fetch(`${API_BASE}/auto-research/stats`);
     if (!response.ok) throw new Error('Failed to get autonomous stats');
+    return response.json();
+  },
+
+  // Get all verified proofs
+  async getProofs() {
+    const response = await fetch(`${API_BASE}/proofs`);
+    if (!response.ok) throw new Error('Failed to get proofs');
+    return response.json();
+  },
+
+  // Get only novel verified proofs
+  async getNovelProofs() {
+    const response = await fetch(`${API_BASE}/proofs/novel`);
+    if (!response.ok) throw new Error('Failed to get novel proofs');
+    return response.json();
+  },
+
+  // Get Lean 4 proof system status
+  async getProofStatus() {
+    const response = await fetch(`${API_BASE}/proofs/status`);
+    if (!response.ok) throw new Error('Failed to get proof status');
+    return response.json();
+  },
+
+  // Update runtime Lean 4 proof settings
+  async updateProofSettings(settings) {
+    const response = await fetch(`${API_BASE}/proofs/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData?.detail?.message || errorData?.detail || 'Failed to update proof settings');
+    }
+    return response.json();
+  },
+
+  // Queue a manual proof check for one brainstorm or paper
+  async runProofCheck({ sourceType, sourceId }) {
+    const response = await fetch(`${API_BASE}/proofs/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_type: sourceType,
+        source_id: sourceId,
+      }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData?.detail?.message || errorData?.detail || 'Failed to queue proof check');
+    }
+    return response.json();
+  },
+
+  // Get one proof with full Lean code
+  async getProof(proofId) {
+    const response = await fetch(`${API_BASE}/proofs/${encodeURIComponent(proofId)}`);
+    if (!response.ok) throw new Error(`Failed to get proof ${proofId}`);
+    return response.json();
+  },
+
+  // Get dependency edges for one proof
+  async getProofDependencies(proofId) {
+    const response = await fetch(`${API_BASE}/proofs/${encodeURIComponent(proofId)}/dependencies`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData?.detail?.message || errorData?.detail || `Failed to get proof dependencies for ${proofId}`);
+    }
+    return response.json();
+  },
+
+  // Get the full proof dependency graph in one payload
+  async getProofGraph() {
+    const response = await fetch(`${API_BASE}/proofs/graph`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData?.detail?.message || errorData?.detail || 'Failed to get proof graph');
+    }
+    return response.json();
+  },
+
+  // Download URLs for machine-readable proof certificates
+  getProofCertificateUrl(proofId) {
+    return `${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate`;
+  },
+
+  getProofLeanDownloadUrl(proofId) {
+    return `${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate.lean`;
+  },
+
+  async getProofLibrary(novelOnly = true) {
+    const response = await fetch(`${API_BASE}/proofs/library?novel_only=${novelOnly}`);
+    if (!response.ok) throw new Error('Failed to get proof library');
+    return response.json();
+  },
+
+  async getLibraryProof(sessionId, proofId) {
+    const response = await fetch(`${API_BASE}/proofs/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}`);
+    if (!response.ok) throw new Error(`Failed to get library proof ${proofId}`);
     return response.json();
   },
 
@@ -900,7 +1093,7 @@ export const openRouterAPI = {
   // Get API key status (has_key, enabled)
   async getApiKeyStatus() {
     const response = await fetch(`${API_BASE}/openrouter/api-key-status`);
-    if (!response.ok) throw new Error('Failed to get API key status');
+    if (!response.ok) await throwFromResponse(response, 'Failed to get API key status');
     return response.json();
   },
 
@@ -911,10 +1104,7 @@ export const openRouterAPI = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey }),
     });
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to set API key');
-    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to set API key');
     return response.json();
   },
 
@@ -923,7 +1113,7 @@ export const openRouterAPI = {
     const response = await fetch(`${API_BASE}/openrouter/api-key`, {
       method: 'DELETE',
     });
-    if (!response.ok) throw new Error('Failed to clear API key');
+    if (!response.ok) await throwFromResponse(response, 'Failed to clear API key');
     return response.json();
   },
 
@@ -934,10 +1124,7 @@ export const openRouterAPI = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey }),
     });
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to test connection');
-    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to test connection');
     return response.json();
   },
 
@@ -949,10 +1136,7 @@ export const openRouterAPI = {
     
     const url = `${API_BASE}/openrouter/models${params.toString() ? '?' + params.toString() : ''}`;
     const response = await fetch(url);
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to fetch models');
-    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to fetch models');
     return response.json();
   },
 
@@ -962,19 +1146,13 @@ export const openRouterAPI = {
     const response = await fetch(url, {
       headers: apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}
     });
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to fetch providers');
-    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to fetch providers');
     return response.json();
   },
 
   async getFreeModelSettings() {
     const response = await fetch(`${API_BASE}/openrouter/free-model-settings`);
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to fetch free model settings');
-    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to fetch free model settings');
     return response.json();
   },
 
@@ -987,10 +1165,7 @@ export const openRouterAPI = {
         auto_selector_enabled: autoSelectorEnabled,
       }),
     });
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to update free model settings');
-    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to update free model settings');
     return response.json();
   },
 
@@ -998,10 +1173,7 @@ export const openRouterAPI = {
     const response = await fetch(`${API_BASE}/openrouter/reset-exhaustion`, {
       method: 'POST',
     });
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to reset credit exhaustion');
-    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to reset credit exhaustion');
     return response.json();
   },
 };
@@ -1013,19 +1185,13 @@ api.post = async (url, data) => {
     headers: { 'Content-Type': 'application/json' },
     body: data ? JSON.stringify(data) : undefined,
   });
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.detail || 'Request failed');
-  }
+  if (!response.ok) await throwFromResponse(response, 'Request failed');
   return response.json();
 };
 
 api.get = async (url) => {
   const response = await fetch(url);
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(errorData.detail || 'Request failed');
-  }
+  if (!response.ok) await throwFromResponse(response, 'Request failed');
   return response.json();
 };
 

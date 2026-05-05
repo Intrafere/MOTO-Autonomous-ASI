@@ -9,4 +9,6 @@ export { default as AutonomousResearchSettings } from './AutonomousResearchSetti
 export { default as AutonomousResearchLogs } from './AutonomousResearchLogs';
 export { default as FinalAnswerView } from './FinalAnswerView';
 export { default as FinalAnswerLibrary } from './FinalAnswerLibrary';
+export { default as MathematicalProofs } from './MathematicalProofs';
+export { default as ProofLibrary } from './ProofLibrary';
 

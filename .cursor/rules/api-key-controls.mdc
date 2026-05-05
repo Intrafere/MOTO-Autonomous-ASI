@@ -1,21 +1,34 @@
 ---
 alwaysApply: false
 ---
+
 # API Key Controls & Workflow Management System
 
 ## Overview
 
-Enables OpenRouter integration with automatic LM Studio fallback, plus boost controls and research metrics in the workflow panel.
+Enables OpenRouter integration with automatic LM Studio fallback (default mode) or OpenRouter-only operation (generic mode), plus boost controls and research metrics in the workflow panel.
 
 **Key Features:**
-- **Per-Role OpenRouter Selection**: Each role independently uses LM Studio or OpenRouter
-- **Global OpenRouter API Key**: Single key for all per-role OpenRouter selections. Boost can reuse it when no explicit boost-only override key is provided.
-- **LM Studio Fallback**: Optional fallback per role on credit exhaustion
+- **Per-Role OpenRouter Selection**: Each role independently uses LM Studio or OpenRouter (default mode); all roles use OpenRouter in generic mode
+- **Global OpenRouter API Key**: Single key for all per-role OpenRouter selections within one running backend instance. Boost can reuse it when no explicit boost-only override key is provided.
+- **OpenRouter Auto-Fill**: OpenRouter selectors auto-fill context window from model `context_length` and auto-fill max output tokens as `min(20% of model context_length, smallest available host max_completion_tokens)`
+- **LM Studio Fallback** (default mode only): Optional fallback per role on credit exhaustion
 - **Free Model Cooldown Handling**: SERIAL BOTTLENECK pause, free model looping, and auto-selector backup (see below)
 - **Boost Mode**: Selective task acceleration via two modes, using either an explicit boost override key or the active global OpenRouter key:
   - **Boost Next X Calls**: Counter-based, next X API calls regardless of task ID
   - **Category Boost**: Role-based, boosts all calls for specific role categories (Aggregator and Compiler only; Autonomous agents inherit from their parent roles automatically)
-- **System works without LM Studio**: Defaults to OpenRouter when LM Studio unavailable
+- **System works without LM Studio**: Defaults to OpenRouter when LM Studio unavailable; generic mode never attempts LM Studio
+
+## Mode-Specific Behavior
+
+| Behavior | Default Mode | Generic Mode |
+|----------|-------------|--------------|
+| LLM provider | LM Studio + OpenRouter + fallback | OpenRouter only |
+| Embeddings | LM Studio → OpenRouter fallback | FastEmbed (in-process) |
+| LM Studio UI | Shown (provider toggle per role) | Hidden (frontend checks `/api/features`) |
+| Secret persistence | OS keyring via `secret_store.py` | Env-injected/in-memory; keyring bypassed |
+| `Authorization` header | Used for OpenRouter key passthrough | Same; NOT reused for sandbox proxy auth |
+| API key on startup | Restored from keyring | Loaded from `OPENROUTER_API_KEY` env var if present |
 
 ---
 
@@ -36,9 +49,11 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus boost con
 - Credit exhaustion detection: HTTP 402 OR error messages containing "credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"
 - Raises `CreditExhaustionError` on exhaustion (no retries). Retries transient errors (max 3).
 - Temperature=0.0 default. No stop sequences (removed — caused premature truncation with certain models).
+- Exposes both model-level metadata (`/models`) and provider endpoint metadata (`/models/{author}/{slug}/endpoints`) so the UI can compute safe host-aware OpenRouter auto-fill values.
 
 #### APIClientManager (`backend/shared/api_client_manager.py`)
-- Central router for all API calls: boost check → role's OpenRouter (with resettable fallback) → LM Studio
+- Central router for all API calls: boost check → role's OpenRouter (with resettable fallback) → LM Studio (default mode) or OpenRouter-only (generic mode)
+- Generic mode: `get_embeddings()` early-returns to `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain
 - Tracks fallback state per role: `_role_fallback_state: Dict[str, str]`
 - `reset_openrouter_fallbacks()`: Resets all roles originally configured for OpenRouter back from LM Studio fallback. Called automatically on API key set, or manually via reset endpoint.
 - Lazy initialization: OpenRouter client initializes from `rag_config.openrouter_api_key` when first needed
@@ -46,6 +61,7 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus boost con
 **CRITICAL REQUIREMENT - Role Configuration:**
 - **EVERY role calling `api_client_manager.generate_completion()` MUST be configured via `api_client_manager.configure_role()`**
 - This includes: aggregator submitters/validator, compiler submitters/validator/critique, autonomous agents, Tier 3 final answer agents
+- **Proof agents (Part 3, optional)** do NOT have standalone role configs. `ProofVerificationStage` reuses the stored `ProofRuntimeConfigSnapshot` (brainstorm submitter, high-context submitter, validator) captured by `autonomous_coordinator._build_proof_runtime_config_snapshot()` and persisted via `research_metadata.set_proof_runtime_config()`. Manual `POST /api/proofs/check` requires `lean4_enabled=True` AND a seeded snapshot — start autonomous research once to seed it.
 
 **Boost Mode Priority** (`should_use_boost(task_id)`):
 1. Boost Next X: `boost_next_count > 0` → True
@@ -53,7 +69,7 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus boost con
 
 **Counter Decrement:** `boost_next_count` decrements ONLY on successful boost API calls. Failed/exhausted calls do NOT decrement.
 
-**Resettable Fallback:** When a role hits credit exhaustion, it falls back to LM Studio for subsequent calls. User can reset all fallen-back roles via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key (auto-resets). Each role has independent fallback state. If no fallback configured: raises RuntimeError.
+**Resettable Fallback:** When a role hits credit exhaustion, it falls back to LM Studio for subsequent calls (default mode; generic mode has no LM Studio fallback — raises RuntimeError if no fallback configured). User can reset all fallen-back roles via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key (auto-resets). Each role has independent fallback state.
 
 **Categories from role_id:**
 - `aggregator_submitter_*` → "Aggregator Submitters"
@@ -66,10 +82,10 @@ Enables OpenRouter integration with automatic LM Studio fallback, plus boost con
 #### BoostManager (`backend/shared/boost_manager.py`)
 - Singleton. Key methods: `set_boost_config`, `clear_boost`, `set_boost_next_count`, `toggle_category_boost`, `should_use_boost` (main check for coordinators), `consume_boost_count` (only after successful boost call)
 - Boost can use an **explicit override** OpenRouter API key, or it falls back to the active global OpenRouter key. A temporary `OpenRouterClient` is created per boosted task and closed immediately after.
-- **Autonomous agent task ID inheritance**: All autonomous orchestration agents use parent role task ID prefixes — Topic Selector/Completion Reviewer/Reference Selector/Paper Title Selector/Tier 3 agents use `agg_sub1_*`; Topic Validator/Redundancy Checker use `agg_val_*`. Boosting a parent role automatically covers all autonomous agents that run on that model.
+- **Autonomous agent task ID inheritance**: All autonomous orchestration agents use parent role task ID prefixes — Topic Selector/Completion Reviewer/Reference Selector/Paper Title Selector/Tier 3 agents use `agg_sub1_*`; Topic Validator/Redundancy Checker use `agg_val_*`. Boosting a parent role automatically covers all autonomous agents that run on that model. **Proof agents are the exception**: they use their own prefixes (`proof_id_*`, `proof_lemma_*`, `proof_form_*`, `proof_novelty_*`, `proof_framing_gate_*`) because they run under the `autonomous_proof_*` role IDs with distinct runtime-snapshot configs; Aggregator/Validator category boosts do NOT cover proof agents.
 
 #### BoostLogger (`backend/shared/boost_logger.py`)
-- Singleton. Log file: `backend/data/boost_api_log.txt`
+- Singleton. Log file resolves under the active instance data root (default desktop path: `backend/data/boost_api_log.txt`)
 - Methods: `log_api_call`, `get_logs(limit)`, `clear_logs`, `get_stats`
 - Boost logs are merged into the main API call log view; boost endpoints remain available for boost-only debugging.
 
@@ -78,6 +94,7 @@ Coordinators track task IDs internally for boost routing. The frontend does NOT 
 - Aggregator: `agg_sub{N}_{seq:03d}`, `agg_val_{seq:03d}`
 - Compiler: `comp_hc_{seq:03d}`, `comp_hp_{seq:03d}`, `comp_val_{seq:03d}`
 - Autonomous: `auto_te_{seq:03d}`, `auto_tev_{seq:03d}`, `auto_ts_{seq:03d}`, `auto_tv_{seq:03d}`
+- Autonomous proof (optional, when `lean4_enabled`): `proof_framing_gate_{seq:03d}`, `proof_id_{seq:03d}`, `proof_lemma_{seq:03d}`, `proof_form_{seq:03d}`, `proof_novelty_{seq:03d}`
 
 ---
 
@@ -117,7 +134,7 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 - `POST /api/boost/toggle-category/{category}` — Toggle category boost
 - `GET /api/boost/categories?mode=` — All categories (mode param ignored, always returns all)
 - `GET /api/boost/openrouter-models` — Fetch OpenRouter models (Bearer key header)
-- `GET /api/boost/model-providers?model_id=` — Providers for a model
+- `GET /api/boost/model-providers?model_id=` — Providers + endpoint metadata for a model
 - `GET /api/boost/logs?limit=` — Recent boost-only logs (debug)
 - `POST /api/boost/clear-logs` — Clear logs
 
@@ -128,7 +145,7 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 - `DELETE /api/openrouter/api-key` — Clear key
 - `GET /api/openrouter/api-key-status` — `{ has_key, enabled }`
 - `GET /api/openrouter/models` — Available models (also caches free models for rotation)
-- `GET /api/openrouter/providers/{model_id}` — Providers for model
+- `GET /api/openrouter/providers/{model_id}` — Providers + endpoint metadata for model
 - `GET /api/openrouter/free-model-settings` — `{ looping_enabled, auto_selector_enabled, ... }`
 - `POST /api/openrouter/free-model-settings` — Update free model settings (body: `FreeModelSettings`)
 - `POST /api/openrouter/test-connection` — Test key without storing
@@ -143,7 +160,7 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ## Error Handling
 
-**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota"/"key limit"/"limit exceeded" → `CreditExhaustionError` → LM Studio fallback for that role (or RuntimeError if no fallback). Fallback is resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key.
+**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota"/"key limit"/"limit exceeded" → `CreditExhaustionError` → default mode: LM Studio fallback for that role; generic mode: RuntimeError (no LM Studio). Fallback is resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key.
 
 **Boost Exhaustion:** Falls back to primary for that task; boost stays enabled; counter NOT decremented.
 
@@ -162,7 +179,7 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 **Rotation chain** (in `api_client_manager._try_free_model_rotation()` called from RateLimitError handler):
 1. If `looping_enabled`: **iterate through ALL** non-rate-limited free models (highest context first) using `tried_models` set to avoid re-trying. On each `RateLimitError`, refresh rate-limited dict and continue to next model. On `CreditExhaustionError`, stop looping.
 2. If all looping candidates exhausted and `auto_selector_enabled`: try `openrouter/free`
-3. If still failed: check LM Studio fallback (fall-through to LM Studio)
+3. If still failed: check LM Studio fallback (default mode only; generic mode skips this)
 4. If no fallback: raise `FreeModelExhaustedError(soonest_retry=...)`
 
 `get_alternative_free_model()` accepts optional `skip_models: set` parameter to skip already-tried models.
@@ -185,14 +202,18 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 **WebSocket Events:** `free_model_rotated`, `free_model_auto_selector_used`, `serial_bottleneck_paused`, `serial_bottleneck_resumed`, `all_free_models_exhausted`, `account_credits_exhausted`
 
-**Frontend:** Two checkboxes in all settings panels (Aggregator, Compiler, Autonomous) near "Show free models only". Both default checked, persist to localStorage, control same backend singleton.
+**Frontend:** Two checkboxes in all settings panels (Aggregator, Compiler, Autonomous) near "Show free models only". Both default checked, persist to localStorage (namespaced automatically when a storage prefix is active), control the same backend singleton for that running backend instance.
 
 ---
 
 ## Configuration Persistence
 
-**Secure backend storage (OS keyring):** OpenRouter global API key and Wolfram Alpha API key persist via `backend/shared/secret_store.py` using the OS keychain/keyring. Restored into backend memory on startup in `backend/api/main.py`.
+**Secure backend storage (OS keyring — default mode):** OpenRouter global API key and Wolfram Alpha API key persist via `backend/shared/secret_store.py` using the OS keychain/keyring. The keyring service name is derived from `MOTO_SECRET_NAMESPACE`; `None` means the shared desktop service `MOTO-Autonomous-ASI`. `moto_launcher.py` MUST keep `.moto_last_instance.json` stable across normal relaunches (including `instance_id="default"`) so the backend reads the same keyring service every startup. Never let port availability, Windows `TIME_WAIT`, or Lean/LM startup timing create a new namespace for a plain relaunch.
 
-**localStorage:** `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`)
+**Startup key detection:** `backend/api/main.py` restores desktop credentials before serving `/api/openrouter/api-key-status`. Expensive optional startup work (Lean 4 warm start, Mathlib cache, etc.) must not block the FastAPI lifespan; run it in the background and clean up subprocesses on cancellation. Frontend startup state must treat unreachable key-status as `unknown`, not `has_key=false`, so it never opens the setup modal or shows a missing-key state over a persisted key.
 
-**Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs, free model manager state. Boost logs persist to file (`boost_api_log.txt`) and are merged into the main API call log view.
+**Hosted generic mode (no keyring):** Provider keys are env-injected at sandbox launch and/or set via proxied MOTO API routes. `secret_store` persistence is bypassed; keys live in sandbox memory only. Re-injection required after sandbox recreation. `OPENROUTER_API_KEY` env var auto-loaded during lifespan if present.
+
+**localStorage:** `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`). When `MOTO_FRONTEND_STORAGE_PREFIX` / `VITE_MOTO_STORAGE_PREFIX` is active, these keys are automatically namespaced per instance.
+
+**Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs, free model manager state. Boost logs and boost state persist under the active instance data root (`boost_api_log.txt`, `boost_state.json`) and are merged into the main API call log view.

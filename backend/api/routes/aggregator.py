@@ -110,12 +110,12 @@ async def start_aggregator(request: AggregatorStartRequest):
     except ValueError as e:
         # Model compatibility errors
         logger.error(f"Model compatibility error: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Model compatibility error")
     
     except Exception as e:
         # Other errors
         logger.error(f"Failed to start aggregator: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/stop")
@@ -127,7 +127,7 @@ async def stop_aggregator():
         return {"status": "stopped", "message": "Aggregator system stopped"}
     except Exception as e:
         logger.error(f"Failed to stop aggregator: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/status", response_model=SystemStatus)
@@ -138,7 +138,7 @@ async def get_status():
         return status
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/results")
@@ -150,7 +150,7 @@ async def get_results():
         return {"results": results}
     except Exception as e:
         logger.error(f"Failed to get results: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/save-results")
@@ -161,7 +161,7 @@ async def save_results():
         results = await coordinator.get_results_formatted()
         
         # Save to downloads directory
-        output_path = Path("backend/data/aggregator_results.txt")
+        output_path = Path(system_config.data_dir) / "aggregator_results.txt"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         
         async with aiofiles.open(output_path, 'w', encoding='utf-8') as f:
@@ -174,7 +174,7 @@ async def save_results():
         }
     except Exception as e:
         logger.error(f"Failed to save results: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/clear-all")
@@ -189,7 +189,7 @@ async def clear_all_submissions():
         }
     except Exception as e:
         logger.error(f"Failed to clear submissions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/upload-file")
@@ -212,7 +212,7 @@ async def upload_file(file: UploadFile = File(...)):
         }
     except Exception as e:
         logger.error(f"Failed to upload file: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/models", response_model=List[ModelInfo])
@@ -223,7 +223,7 @@ async def get_models():
         return [ModelInfo(**model) for model in models]
     except Exception as e:
         logger.error(f"Failed to get models: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/settings")
@@ -234,7 +234,7 @@ async def get_aggregator_settings():
         return settings
     except Exception as e:
         logger.error(f"Failed to get aggregator settings: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/events")
@@ -245,4 +245,4 @@ async def get_events():
         return {"events": events}
     except Exception as e:
         logger.error(f"Failed to get events: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

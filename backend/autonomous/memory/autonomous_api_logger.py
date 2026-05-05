@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
+from backend.shared.config import system_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,7 +21,6 @@ class AutonomousAPILogger:
     Stores logs in data/auto_api_log.txt with JSON entries.
     """
     
-    LOG_FILE = "backend/data/auto_api_log.txt"
     MAX_LOG_ENTRIES = 1000  # Maximum entries to keep in log
     
     _instance = None
@@ -41,11 +42,15 @@ class AutonomousAPILogger:
     
     def _ensure_log_file(self) -> None:
         """Ensure the log file and directory exist."""
-        log_path = Path(self.LOG_FILE)
+        log_path = self._get_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         
         if not log_path.exists():
             log_path.write_text("")
+
+    def _get_log_path(self) -> Path:
+        """Return the instance-scoped autonomous API log path."""
+        return Path(system_config.data_dir) / "auto_api_log.txt"
     
     async def log_api_call(
         self,
@@ -97,7 +102,7 @@ class AutonomousAPILogger:
                 }
                 
                 # Append to log file
-                with open(self.LOG_FILE, "a", encoding="utf-8") as f:
+                with open(self._get_log_path(), "a", encoding="utf-8") as f:
                     f.write(json.dumps(log_entry) + "\n")
                 
                 logger.debug(f"Logged autonomous API call: task={task_id}, model={model}, success={success}, phase={phase}")
@@ -111,13 +116,13 @@ class AutonomousAPILogger:
     async def _trim_log_if_needed(self) -> None:
         """Trim log file if it exceeds MAX_LOG_ENTRIES."""
         try:
-            with open(self.LOG_FILE, "r", encoding="utf-8") as f:
+            with open(self._get_log_path(), "r", encoding="utf-8") as f:
                 lines = f.readlines()
             
             if len(lines) > self.MAX_LOG_ENTRIES:
                 # Keep only the most recent entries
                 lines = lines[-self.MAX_LOG_ENTRIES:]
-                with open(self.LOG_FILE, "w", encoding="utf-8") as f:
+                with open(self._get_log_path(), "w", encoding="utf-8") as f:
                     f.writelines(lines)
                 logger.debug(f"Trimmed autonomous API log to {self.MAX_LOG_ENTRIES} entries")
                 
@@ -136,10 +141,11 @@ class AutonomousAPILogger:
         """
         async with self._lock:
             try:
-                if not os.path.exists(self.LOG_FILE):
+                log_path = self._get_log_path()
+                if not os.path.exists(log_path):
                     return []
                 
-                with open(self.LOG_FILE, "r", encoding="utf-8") as f:
+                with open(log_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
                 
                 logs = []
@@ -164,7 +170,7 @@ class AutonomousAPILogger:
         """Clear all autonomous API logs."""
         async with self._lock:
             try:
-                with open(self.LOG_FILE, "w", encoding="utf-8") as f:
+                with open(self._get_log_path(), "w", encoding="utf-8") as f:
                     f.write("")
                 logger.info("Autonomous API logs cleared")
             except Exception as e:

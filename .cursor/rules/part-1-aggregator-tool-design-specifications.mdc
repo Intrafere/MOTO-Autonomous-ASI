@@ -22,6 +22,8 @@ Validator processes up to 3 submissions at once (batch validation). Takes whatev
 
 **Queue Overflow Threshold**: ≥10 submissions in queue → submitters paused until queue drops below 10.
 
+**Per-Submitter Fairness Cap**: When more than one submitter is configured, any individual submitter with >4 of its own submissions already waiting in the queue is paused; other submitters keep running. Skipped when only one submitter is configured. Defaults live in `SystemConfig.queue_overflow_threshold` and `SystemConfig.per_submitter_queue_threshold`.
+
 ## Batch Validation
 
 Validator processes 1, 2, or 3 submissions simultaneously using batch-specific prompts.
@@ -43,6 +45,8 @@ Validator processes 1, 2, or 3 submissions simultaneously using batch-specific p
 **Local Submitter Databases** — Per-submitter rejection log: last 5 rejections (validator summary ≤750 chars + submission preview ≤750 chars). File: `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{N}.txt`. Reset if submitter gets >15 consecutive rejections.
 
 **Submission context injection**: Direct inject if fits. If too large: RAG the submission as file, keep user prompt direct. If user prompt + RAG'd submission still too large: RAG all user-prompt files. If user prompt itself too large after all RAG: halt with error + diagnostic.
+
+**Hosted upload enforcement (generic mode)**: Server-side validation of `.txt` only, 5 MB max, filename sanitization, path traversal rejection. Applied in both modes but critical for hosted sandboxes where the control plane proxies uploads.
 
 ## Context Allocation
 
@@ -71,9 +75,11 @@ When ALL submitters AND validator use the same model → single-model mode:
 
 ## Multi-Submitter Configuration
 
-Per-submitter: provider (LM Studio / OpenRouter), model, OpenRouter host provider, LM Studio fallback, context window, max output tokens. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
+Per-submitter: provider (LM Studio / OpenRouter in default mode; OpenRouter only in generic mode), model, OpenRouter host provider, LM Studio fallback (default mode only), context window, max output tokens. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
 
-Embeddings for RAG: LM Studio first, falls back to OpenRouter (`openai/text-embedding-3-small`) if LM Studio unavailable.
+OpenRouter auto-fill rule: selecting an OpenRouter model auto-fills from endpoint metadata only. Context window uses the smallest relevant host `context_length`; max output tokens use `min(20% of that host context, smallest relevant host max_completion_tokens)`. If `max_prompt_tokens` is available, shrink usable context to respect it. If endpoint caps are incomplete, preserve current values (no guessing).
+
+Embeddings for RAG: Default mode uses LM Studio first, falls back to OpenRouter (`openai/text-embedding-3-small`) if LM Studio unavailable. Generic mode uses in-process FastEmbed (see `rag-design-for-overall-program.mdc`).
 
 ## Database Management
 

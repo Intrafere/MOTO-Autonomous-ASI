@@ -1,10 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { openRouterAPI, api, aggregatorAPI, compilerAPI } from '../../services/api';
+import {
+  computeOpenRouterAutoSettings,
+  findOpenRouterModel,
+  getProviderNames,
+  hasEndpointMetadata,
+} from '../../utils/openRouterSelection';
+import HelpTooltip from '../HelpTooltip';
 import '../settings-common.css';
 
 const SETTINGS_KEY = 'compiler_settings';
 
-function CompilerSettings() {
+function CompilerSettings({ capabilities }) {
   // LM Studio and OpenRouter models
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
@@ -62,6 +69,18 @@ function CompilerSettings() {
   const [customCritiquePrompt, setCustomCritiquePrompt] = useState('');
   const [critiquePromptSaved, setCritiquePromptSaved] = useState(false);
   const [defaultCritiquePrompt, setDefaultCritiquePrompt] = useState('');
+  const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const genericMode = Boolean(capabilities?.genericMode);
+
+  const normalizeRoleState = (provider, model, openrouterProvider) => {
+    const keepOpenRouterState = provider === 'openrouter';
+    return {
+      provider: 'openrouter',
+      model: keepOpenRouterState ? (model || '') : '',
+      openrouterProvider: keepOpenRouterState ? (openrouterProvider || null) : null,
+      lmStudioFallback: null,
+    };
+  };
 
   // Load settings from localStorage on mount
   useEffect(() => {
@@ -78,11 +97,15 @@ function CompilerSettings() {
       }
 
       // Fetch LM Studio models
-      try {
-        const models = await api.getModels();
-        setLmStudioModels(models);
-      } catch (err) {
-        console.error('Failed to fetch LM Studio models:', err);
+      if (lmStudioEnabled) {
+        try {
+          const models = await api.getModels();
+          setLmStudioModels(models.models || models || []);
+        } catch (err) {
+          console.error('Failed to fetch LM Studio models:', err);
+        }
+      } else {
+        setLmStudioModels([]);
       }
 
       // Load saved settings
@@ -148,7 +171,84 @@ function CompilerSettings() {
     };
 
     loadSettings();
-  }, []);
+  }, [lmStudioEnabled]);
+
+  useEffect(() => {
+    if (lmStudioEnabled) {
+      return;
+    }
+
+    setLmStudioModels([]);
+
+    const nextValidator = normalizeRoleState(
+      validatorProvider,
+      validatorModel,
+      validatorOpenrouterProvider
+    );
+    const nextHighContext = normalizeRoleState(
+      highContextProvider,
+      highContextModel,
+      highContextOpenrouterProvider
+    );
+    const nextHighParam = normalizeRoleState(
+      highParamProvider,
+      highParamModel,
+      highParamOpenrouterProvider
+    );
+    const nextCritique = normalizeRoleState(
+      critiqueSubmitterProvider,
+      critiqueSubmitterModel,
+      critiqueSubmitterOpenrouterProvider
+    );
+
+    if (validatorProvider !== nextValidator.provider) setValidatorProvider(nextValidator.provider);
+    if (validatorModel !== nextValidator.model) setValidatorModel(nextValidator.model);
+    if (validatorOpenrouterProvider !== nextValidator.openrouterProvider) {
+      setValidatorOpenrouterProvider(nextValidator.openrouterProvider);
+    }
+    if (validatorLmStudioFallback !== null) setValidatorLmStudioFallback(null);
+
+    if (highContextProvider !== nextHighContext.provider) setHighContextProvider(nextHighContext.provider);
+    if (highContextModel !== nextHighContext.model) setHighContextModel(nextHighContext.model);
+    if (highContextOpenrouterProvider !== nextHighContext.openrouterProvider) {
+      setHighContextOpenrouterProvider(nextHighContext.openrouterProvider);
+    }
+    if (highContextLmStudioFallback !== null) setHighContextLmStudioFallback(null);
+
+    if (highParamProvider !== nextHighParam.provider) setHighParamProvider(nextHighParam.provider);
+    if (highParamModel !== nextHighParam.model) setHighParamModel(nextHighParam.model);
+    if (highParamOpenrouterProvider !== nextHighParam.openrouterProvider) {
+      setHighParamOpenrouterProvider(nextHighParam.openrouterProvider);
+    }
+    if (highParamLmStudioFallback !== null) setHighParamLmStudioFallback(null);
+
+    if (critiqueSubmitterProvider !== nextCritique.provider) {
+      setCritiqueSubmitterProvider(nextCritique.provider);
+    }
+    if (critiqueSubmitterModel !== nextCritique.model) setCritiqueSubmitterModel(nextCritique.model);
+    if (critiqueSubmitterOpenrouterProvider !== nextCritique.openrouterProvider) {
+      setCritiqueSubmitterOpenrouterProvider(nextCritique.openrouterProvider);
+    }
+    if (critiqueSubmitterLmStudioFallback !== null) setCritiqueSubmitterLmStudioFallback(null);
+  }, [
+    lmStudioEnabled,
+    validatorProvider,
+    validatorModel,
+    validatorOpenrouterProvider,
+    validatorLmStudioFallback,
+    highContextProvider,
+    highContextModel,
+    highContextOpenrouterProvider,
+    highContextLmStudioFallback,
+    highParamProvider,
+    highParamModel,
+    highParamOpenrouterProvider,
+    highParamLmStudioFallback,
+    critiqueSubmitterProvider,
+    critiqueSubmitterModel,
+    critiqueSubmitterOpenrouterProvider,
+    critiqueSubmitterLmStudioFallback,
+  ]);
 
   // Fetch providers for any OpenRouter models after settings are loaded
   useEffect(() => {
@@ -269,13 +369,50 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   }, []);
 
   const fetchProvidersForModel = async (modelId) => {
-    if (!modelId || modelProviders[modelId]) return;
+    if (!modelId) return null;
+
+    const cachedProviderData = modelProviders[modelId];
+    if (hasEndpointMetadata(cachedProviderData)) {
+      return cachedProviderData;
+    }
+
     try {
       const result = await openRouterAPI.getProviders(modelId);
-      setModelProviders(prev => ({ ...prev, [modelId]: result.providers || [] }));
+      const providerData = {
+        providers: result.providers || [],
+        endpoints: result.endpoints || [],
+      };
+      setModelProviders(prev => ({ ...prev, [modelId]: providerData }));
+      return providerData;
     } catch (err) {
       console.error(`Failed to fetch providers for ${modelId}:`, err);
+      return cachedProviderData || null;
     }
+  };
+
+  const getAutoSettingsForModel = async (modelId, selectedProvider = null) => {
+    const model = findOpenRouterModel(openRouterModels, modelId);
+    if (!model) {
+      console.debug('[CompilerAutoFill] model not in loaded list, skipping auto-fill', { modelId });
+      return null;
+    }
+
+    const providerData = await fetchProvidersForModel(modelId);
+    const autoSettings = computeOpenRouterAutoSettings(model, providerData, selectedProvider);
+    if (autoSettings) {
+      console.debug('[CompilerAutoFill] computed auto-settings', {
+        modelId,
+        selectedProvider,
+        source: autoSettings.source,
+        contextWindow: autoSettings.contextWindow,
+        maxOutputTokens: autoSettings.maxOutputTokens,
+        warnings: autoSettings.warnings,
+      });
+      if (autoSettings.warnings && autoSettings.warnings.length > 0) {
+        console.warn('[CompilerAutoFill] auto-settings fallback used:', autoSettings.warnings);
+      }
+    }
+    return autoSettings;
   };
 
   // Critique prompt handlers
@@ -340,6 +477,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
   // Handler for "Use Aggregator Models" button
   const handleUseAggregatorModels = async () => {
+    if (!lmStudioEnabled) {
+      alert('Use Aggregator Models is unavailable when this deployment disables LM Studio.');
+      return;
+    }
+
     try {
       const response = await aggregatorAPI.getSettings();
       const settings = response.data;
@@ -388,53 +530,62 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     maxOutput, setMaxOutput,
     borderColor = '#333'
   }) => {
-    const models = provider === 'openrouter' ? openRouterModels : lmStudioModels;
-    const providers = model && provider === 'openrouter' ? (modelProviders[model] || []) : [];
+    const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
+    const models = effectiveProvider === 'openrouter' ? openRouterModels : lmStudioModels;
+    const providers = model && effectiveProvider === 'openrouter'
+      ? getProviderNames(modelProviders[model])
+      : [];
 
     return (
       <div
-        className={`role-config-card role-config-card--highlight${provider === 'openrouter' ? ' role-config-card--openrouter' : ''}`}
-        style={{ borderColor: provider === 'openrouter' ? undefined : borderColor, padding: '1.5rem' }}
+        className={`role-config-card role-config-card--highlight${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter' : ''}`}
+        style={{ borderColor: effectiveProvider === 'openrouter' ? undefined : borderColor, padding: '1.5rem' }}
       >
-        <h3 style={{ margin: '0 0 0.5rem 0', color: provider === 'openrouter' ? '#a29bfe' : borderColor }}>
+        <h3 style={{ margin: '0 0 0.5rem 0', color: effectiveProvider === 'openrouter' ? '#18cc17' : borderColor }}>
           {title}
-          {provider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
+          {effectiveProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
         </h3>
         <small className="role-description">{description}</small>
 
         {/* Provider Toggle */}
         <div className="form-group">
           <label>Provider</label>
-          <div className="provider-toggle-group">
-            <button
-              type="button"
-              onClick={() => {
-                setProvider('lm_studio');
-                setModel('');
-                setOpenrouterProv(null);
-                setFallback(null);
-              }}
-              className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
-            >
-              LM Studio
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (hasOpenRouterKey) {
-                  setProvider('openrouter');
+          {lmStudioEnabled ? (
+            <div className="provider-toggle-group">
+              <button
+                type="button"
+                onClick={() => {
+                  setProvider('lm_studio');
                   setModel('');
                   setOpenrouterProv(null);
                   setFallback(null);
-                }
-              }}
-              disabled={!hasOpenRouterKey}
-              className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or' : ''}`}
-              title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
-            >
-              OpenRouter
-            </button>
-          </div>
+                }}
+                className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
+              >
+                LM Studio
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (hasOpenRouterKey) {
+                    setProvider('openrouter');
+                    setModel('');
+                    setOpenrouterProv(null);
+                    setFallback(null);
+                  }
+                }}
+                disabled={!hasOpenRouterKey}
+                className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or' : ''}`}
+                title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
+              >
+                OpenRouter
+              </button>
+            </div>
+          ) : (
+            <small className="hint-text hint-text--dim">
+              OpenRouter is required in this deployment.
+            </small>
+          )}
         </div>
 
         {/* Model Selection */}
@@ -442,17 +593,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           <label>Model</label>
           <select
             value={model || ''}
-            onChange={(e) => {
+            onChange={async (e) => {
               const m = e.target.value;
               setModel(m);
-              if (provider === 'openrouter' && m) {
-                fetchProvidersForModel(m);
+              setOpenrouterProv(null);
+              if (effectiveProvider === 'openrouter' && m) {
+                const autoSettings = await getAutoSettingsForModel(m, null);
+                if (autoSettings) {
+                  if (autoSettings.contextWindowKnown) {
+                    setContextSize(autoSettings.contextWindow);
+                  }
+                  if (autoSettings.outputCapKnown) {
+                    setMaxOutput(autoSettings.maxOutputTokens);
+                  }
+                }
               }
             }}
           >
             <option value="">Select model...</option>
             {models.map(m => {
-              const isFree = provider === 'openrouter' && 
+              const isFree = effectiveProvider === 'openrouter' && 
                             m.pricing?.prompt === "0" && 
                             m.pricing?.completion === "0";
               const displayName = m.name || m.id;
@@ -468,12 +628,24 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         </div>
 
         {/* OpenRouter Provider (if OpenRouter) */}
-        {provider === 'openrouter' && model && (
+        {effectiveProvider === 'openrouter' && model && (
           <div className="form-group">
             <label>Host Provider (optional)</label>
             <select
               value={openrouterProv || ''}
-              onChange={(e) => setOpenrouterProv(e.target.value || null)}
+              onChange={async (e) => {
+                const providerName = e.target.value || null;
+                setOpenrouterProv(providerName);
+                const autoSettings = await getAutoSettingsForModel(model, providerName);
+                if (autoSettings) {
+                  if (autoSettings.contextWindowKnown) {
+                    setContextSize(autoSettings.contextWindow);
+                  }
+                  if (autoSettings.outputCapKnown) {
+                    setMaxOutput(autoSettings.maxOutputTokens);
+                  }
+                }
+              }}
             >
               <option value="">Auto (let OpenRouter choose)</option>
               {providers.map(p => (
@@ -484,7 +656,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         )}
 
         {/* LM Studio Fallback (if OpenRouter) */}
-        {provider === 'openrouter' && (
+        {effectiveProvider === 'openrouter' && lmStudioEnabled && (
           <div className="form-group">
             <label className="label--muted">LM Studio Fallback (optional)</label>
             <select
@@ -511,7 +683,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 setContextSize(isNaN(parsed) ? 131072 : parsed);
               }}
               min={4096}
-              max={999999}
+              max={50000000}
               step={1024}
             />
           </div>
@@ -526,7 +698,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 setMaxOutput(isNaN(parsed) ? 25000 : parsed);
               }}
               min={1000}
-              max={100000}
+              max={50000000}
               step={1000}
             />
           </div>
@@ -588,7 +760,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <RoleConfig
           title="High-Parameter Model"
           description="Rigor enhancement mode: adds citations, strengthens methodology, and clarifies assumptions."
-          borderColor="#1eff1c"
+          borderColor="#2a2a2a"
           provider={highParamProvider} setProvider={setHighParamProvider}
           model={highParamModel} setModel={setHighParamModel}
           openrouterProv={highParamOpenrouterProvider} setOpenrouterProv={setHighParamOpenrouterProvider}
@@ -614,21 +786,25 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       <div className="settings-panel settings-panel--blue">
         <h3 style={{ marginBottom: '1rem' }}>Model Management</h3>
         <div className="model-refresh-controls">
-          <button 
-            onClick={handleUseAggregatorModels}
-            className="secondary btn-primary-blue"
-          >
-            Use Aggregator Models
-          </button>
-          <button 
-            onClick={async () => {
-              const models = await api.getModels();
-              setLmStudioModels(models);
-            }} 
-            className="secondary"
-          >
-            Refresh LM Studio Models
-          </button>
+          {lmStudioEnabled && (
+            <>
+              <button 
+                onClick={handleUseAggregatorModels}
+                className="secondary btn-primary-blue"
+              >
+                Use Aggregator Models
+              </button>
+              <button 
+                onClick={async () => {
+                  const models = await api.getModels();
+                  setLmStudioModels(models.models || models || []);
+                }} 
+                className="secondary"
+              >
+                Refresh LM Studio Models
+              </button>
+            </>
+          )}
           {hasOpenRouterKey && (
             <>
               <button onClick={() => fetchOpenRouterModels(freeOnly)} className="secondary">
@@ -653,10 +829,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     }}
                   />
                   Enable Free Model Looping
-                  <span
-                    title="When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits."
-                    className="help-hint"
-                  >(?)</span>
+                  <HelpTooltip
+                    label="Learn about free model looping"
+                    anchorClassName="help-tooltip-anchor--inline"
+                  >
+                    When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits.
+                  </HelpTooltip>
                 </label>
                 <label className="settings-checkbox-label">
                   <input
@@ -668,17 +846,21 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     }}
                   />
                   Use OpenRouter Free Models Auto-Selector as Backup
-                  <span
-                    title="When all selected free models are rate-limited, use OpenRouter's Free Models Router (openrouter/free) as a last resort backup. Works independently of Free Model Looping."
-                    className="help-hint"
-                  >(?)</span>
+                  <HelpTooltip
+                    label="Learn about the free models auto-selector backup"
+                    anchorClassName="help-tooltip-anchor--inline"
+                  >
+                    When all selected free models are rate-limited, use OpenRouter&apos;s Free Models Router (`openrouter/free`) as a last resort backup. Works independently of Free Model Looping.
+                  </HelpTooltip>
                 </label>
               </div>
             </>
           )}
         </div>
         <small className="hint-text" style={{ marginTop: '0.75rem' }}>
-          "Use Aggregator Models" copies your aggregator's model selection to all compiler roles.
+          {lmStudioEnabled
+            ? '"Use Aggregator Models" copies your aggregator\'s model selection to all compiler roles.'
+            : 'LM Studio tools are hidden in hosted mode. Configure compiler roles directly with OpenRouter models below.'}
         </small>
       </div>
 
@@ -714,13 +896,23 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 type="password"
                 value={wolframApiKey}
                 onChange={(e) => setWolframApiKey(e.target.value)}
-                placeholder={hasStoredWolframKey && !wolframApiKey ? "Stored securely on backend. Enter a new App ID to replace it." : "Enter your Wolfram Alpha App ID"}
+                placeholder={
+                  hasStoredWolframKey && !wolframApiKey
+                    ? (
+                      genericMode
+                        ? 'Loaded in the current backend session. Enter a new App ID to replace it.'
+                        : 'Stored securely on backend. Enter a new App ID to replace it.'
+                    )
+                    : 'Enter your Wolfram Alpha App ID'
+                }
                 className="input-dark"
                 style={{ marginBottom: '0.5rem' }}
               />
               {hasStoredWolframKey && !wolframApiKey && (
                 <small className="hint-text">
-                  A Wolfram Alpha key is already stored securely on the backend for this machine.
+                  {genericMode
+                    ? 'A Wolfram Alpha key is already loaded in the current backend session.'
+                    : 'A Wolfram Alpha key is already stored securely on the backend for this machine.'}
                 </small>
               )}
             </div>

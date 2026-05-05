@@ -24,11 +24,48 @@ function compareStage3Answers(a, b) {
   return toTimestamp(b.completion_date) - toTimestamp(a.completion_date);
 }
 
+const UNKNOWN_RESEARCH_QUESTION = 'Unknown research question';
+
+function normalizePrompt(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function derivePromptFromSessionId(sessionId) {
+  if (sessionId === 'legacy') {
+    return 'Legacy research session';
+  }
+
+  const promptSlug = String(sessionId || '').replace(/_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$/, '');
+  const prompt = promptSlug.replace(/_/g, ' ').trim();
+
+  if (!prompt) {
+    return UNKNOWN_RESEARCH_QUESTION;
+  }
+
+  return prompt.charAt(0).toUpperCase() + prompt.slice(1);
+}
+
+function resolvePrompt(sessionId, ...candidates) {
+  for (const candidate of candidates) {
+    const prompt = normalizePrompt(candidate);
+    if (prompt && prompt !== UNKNOWN_RESEARCH_QUESTION) {
+      return prompt;
+    }
+  }
+
+  return derivePromptFromSessionId(sessionId);
+}
+
+function shouldUpgradePrompt(currentPrompt) {
+  const prompt = normalizePrompt(currentPrompt);
+  return !prompt || prompt === UNKNOWN_RESEARCH_QUESTION;
+}
+
 function buildFallbackRun(sessionId, seedItem = null) {
   return {
     sessionId,
     displaySessionId: sessionId === 'legacy' ? 'Legacy' : sessionId,
-    userPrompt: seedItem?.user_prompt || (sessionId === 'legacy' ? 'Legacy research session' : 'Unknown research question'),
+    userPrompt: resolvePrompt(sessionId, seedItem?.user_prompt, seedItem?.user_research_prompt),
     createdAt: seedItem?.created_at || seedItem?.completion_date || null,
     brainstormCount: null,
     sessionPaperCount: null,
@@ -64,7 +101,13 @@ export function buildResearchRunGroups({
       ? {
           sessionId,
           displaySessionId: sessionId === 'legacy' ? 'Legacy' : sessionId,
-          userPrompt: session.user_prompt || seedItem?.user_prompt || 'Unknown research question',
+          userPrompt: resolvePrompt(
+            sessionId,
+            session.user_prompt,
+            session.user_research_prompt,
+            seedItem?.user_prompt,
+            seedItem?.user_research_prompt,
+          ),
           createdAt: session.created_at || seedItem?.created_at || seedItem?.completion_date || null,
           brainstormCount: session.brainstorm_count ?? null,
           sessionPaperCount: session.paper_count ?? null,
@@ -82,8 +125,8 @@ export function buildResearchRunGroups({
   for (const paper of stage2Papers) {
     const group = ensureGroup(paper.session_id, paper);
     group.stage2Papers.push(paper);
-    if (!group.userPrompt && paper.user_prompt) {
-      group.userPrompt = paper.user_prompt;
+    if (shouldUpgradePrompt(group.userPrompt)) {
+      group.userPrompt = resolvePrompt(group.sessionId, paper.user_prompt, paper.user_research_prompt);
     }
     if (!group.createdAt) {
       group.createdAt = paper.created_at || null;
@@ -93,8 +136,8 @@ export function buildResearchRunGroups({
   for (const answer of stage3Answers) {
     const group = ensureGroup(answer.session_id, answer);
     group.stage3Answers.push(answer);
-    if (!group.userPrompt && answer.user_prompt) {
-      group.userPrompt = answer.user_prompt;
+    if (shouldUpgradePrompt(group.userPrompt)) {
+      group.userPrompt = resolvePrompt(group.sessionId, answer.user_prompt, answer.user_research_prompt);
     }
     if (!group.createdAt) {
       group.createdAt = answer.completion_date || null;

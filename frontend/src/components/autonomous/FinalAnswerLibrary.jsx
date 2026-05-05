@@ -291,7 +291,7 @@ function FinalAnswerLibrary() {
       {/* Header */}
       <div className="library-header">
         <h2>📚 Stage 3 Final Answers History</h2>
-        <p>If you have enabled Tier 3 experimental final answer generation, completed Stage 3 answers will appear here. Browse all completed research volumes and short-form answers from your autonomous research sessions.</p>
+        <p>If you have enabled Tier 3 final answer generation, completed Stage 3 answers will appear here. Browse all completed research volumes and short-form answers from your autonomous research sessions.</p>
         <div className="library-stats">
           <span className="stat-badge">
             {finalAnswers.length} {finalAnswers.length === 1 ? 'Answer' : 'Answers'}

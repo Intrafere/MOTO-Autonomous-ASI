@@ -88,7 +88,7 @@ class AutonomousRAGManager:
         Returns:
             Tuple of (content string, used_rag boolean)
         """
-        content = await brainstorm_memory.get_database_content(topic_id)
+        content = await brainstorm_memory.get_database_content(topic_id, strip_proofs=True)
         
         if not content:
             return "", False
@@ -220,7 +220,7 @@ class AutonomousRAGManager:
         total_tokens = 0
         
         for paper_id in paper_ids:
-            content = await paper_library.get_paper_content(paper_id)
+            content = await paper_library.get_paper_content(paper_id, strip_proofs=True)
             metadata = await paper_library.get_metadata(paper_id)
             
             if content and metadata:

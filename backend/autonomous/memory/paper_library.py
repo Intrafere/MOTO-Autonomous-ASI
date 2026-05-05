@@ -117,6 +117,34 @@ class PaperLibrary:
         scoped_library._archive_dir = base_dir / "archive"
         return scoped_library
 
+    @staticmethod
+    def _normalize_history_prompt(prompt: Any) -> str:
+        """Normalize prompt values loaded from mixed metadata schemas."""
+        return prompt.strip() if isinstance(prompt, str) else ""
+
+    @classmethod
+    def _derive_history_prompt_from_session_id(cls, session_id: str) -> str:
+        """Recover a readable prompt from the session folder slug when metadata is blank."""
+        if session_id == "legacy":
+            return "Legacy research session"
+
+        prompt_slug = re.sub(r"_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$", "", session_id or "")
+        prompt = prompt_slug.replace("_", " ").strip()
+        if not prompt:
+            return "Unknown research question"
+
+        return prompt[0].upper() + prompt[1:]
+
+    @classmethod
+    def _resolve_history_prompt(cls, session_id: str, *candidates: Any) -> str:
+        """Choose the best history prompt and fall back to a readable session slug."""
+        for candidate in candidates:
+            prompt = cls._normalize_history_prompt(candidate)
+            if prompt and prompt != "Unknown research question":
+                return prompt
+
+        return cls._derive_history_prompt_from_session_id(session_id)
+
     def get_history_papers_dir(self, session_id: str) -> Optional[Path]:
         """Resolve the papers directory for a history session."""
         if session_id == "legacy":
@@ -141,29 +169,27 @@ class PaperLibrary:
         """Read the user prompt associated with a legacy or session-based paper history entry."""
         if session_id == "legacy":
             metadata_path = Path(system_config.auto_research_metadata_file)
-            default_prompt = "Legacy research session"
         else:
             papers_dir = self.get_history_papers_dir(session_id)
             if not papers_dir:
-                return "Unknown research question"
+                return self._derive_history_prompt_from_session_id(session_id)
 
             metadata_path = papers_dir.parent / "session_metadata.json"
-            default_prompt = "Unknown research question"
 
         if not metadata_path.exists():
-            return default_prompt
+            return self._derive_history_prompt_from_session_id(session_id)
 
         try:
             async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
                 metadata = json.loads(await f.read())
-            return (
-                metadata.get("user_prompt")
-                or metadata.get("user_research_prompt")
-                or default_prompt
+            return self._resolve_history_prompt(
+                session_id,
+                metadata.get("user_prompt"),
+                metadata.get("user_research_prompt"),
             )
         except Exception as e:
             logger.warning(f"Failed to read history prompt for session {session_id}: {e}")
-            return default_prompt
+            return self._derive_history_prompt_from_session_id(session_id)
 
     @staticmethod
     def _calculate_critique_average(critique: Any) -> Optional[float]:
@@ -175,6 +201,132 @@ class PaperLibrary:
             (critique.novelty_rating + critique.correctness_rating + critique.impact_rating) / 3.0,
             1
         )
+
+    @staticmethod
+    def _proof_value(proof: Any, field: str, default: Any = "") -> Any:
+        """Read a proof field from either a Pydantic record or a plain dict."""
+        if isinstance(proof, dict):
+            return proof.get(field, default)
+        return getattr(proof, field, default)
+
+    @classmethod
+    def _format_verified_proof_entry(cls, proof: Any, source_context: str = "") -> str:
+        """Format one Lean-verified proof for a paper appendix."""
+        proof_id = str(cls._proof_value(proof, "proof_id", "") or "").strip()
+        theorem_name = str(cls._proof_value(proof, "theorem_name", "") or "").strip()
+        theorem_statement = str(cls._proof_value(proof, "theorem_statement", "") or "").strip()
+        lean_code = str(cls._proof_value(proof, "lean_code", "") or "").strip()
+        source_type = str(cls._proof_value(proof, "source_type", "") or "").strip()
+        source_id = str(cls._proof_value(proof, "source_id", "") or "").strip()
+        novel = bool(cls._proof_value(proof, "novel", False))
+        novelty_tier = str(cls._proof_value(proof, "novelty_tier", "") or "").strip()
+
+        tier_labels = {
+            "mathematical_discovery": "Mathematical Discovery",
+            "novel_variant": "Novel Reformulation",
+            "novel_formulation": "Novel Formalization",
+        }
+        novelty_label = tier_labels.get(novelty_tier, "Novel" if novel else "Known")
+        context_suffix = f"; carried in from {source_context}" if source_context else ""
+        header_name = theorem_name or proof_id or "Lean 4 verified theorem"
+        source_line = f"Source: {source_type} {source_id}".strip()
+
+        lines = [
+            f"Theorem ({proof_id or 'N/A'}) [{novelty_label}] - {header_name}",
+            f"Status: verified by Lean 4{context_suffix}",
+        ]
+        if source_line != "Source:":
+            lines.append(source_line)
+        lines.extend(
+            [
+                f"Statement: {theorem_statement}",
+                "Lean 4 proof:",
+                lean_code or "[lean code unavailable]",
+                "---",
+            ]
+        )
+        return "\n".join(lines)
+
+    @classmethod
+    def attach_verified_proofs_to_content(
+        cls,
+        content: str,
+        proofs_data: Any,
+        source_context: str = "",
+    ) -> str:
+        """Attach Lean-verified proof entries to a paper's existing appendix.
+
+        Uses the compiler-managed Theorems Appendix when present. If a paper was
+        produced before those markers existed, falls back to a plain text proof
+        section at the end of the file. Existing proof IDs are not duplicated.
+        """
+        existing_content = content or ""
+        proofs = proofs_data if isinstance(proofs_data, list) else [proofs_data]
+
+        entries: List[str] = []
+        for proof in proofs:
+            proof_id = str(cls._proof_value(proof, "proof_id", "") or "").strip()
+            if proof_id and proof_id in existing_content:
+                continue
+            entries.append(cls._format_verified_proof_entry(proof, source_context))
+
+        if not entries:
+            return existing_content
+
+        new_entries = "\n\n".join(entries).strip()
+        appendix_start = "[HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]"
+        appendix_end = "[HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]"
+        empty_placeholder = "[Theorems appendix - verified Lean 4 theorems not placed inline will appear here]"
+
+        start_idx = existing_content.find(appendix_start)
+        end_idx = existing_content.find(appendix_end, start_idx if start_idx >= 0 else 0)
+        if start_idx >= 0 and end_idx >= 0:
+            before = existing_content[:start_idx]
+            after = existing_content[end_idx + len(appendix_end):]
+            appendix_body = existing_content[start_idx + len(appendix_start):end_idx]
+            cleaned_body = appendix_body.replace(empty_placeholder, "").strip()
+            combined_body = (
+                f"{cleaned_body}\n\n{new_entries}".strip()
+                if cleaned_body
+                else new_entries
+            )
+            appendix_block = f"{appendix_start}\n{combined_body}\n{appendix_end}"
+            return before + appendix_block + after
+
+        fallback_header = "=== PROOFS ATTACHED TO THIS PAPER (Lean 4 Verified) ==="
+        if fallback_header in existing_content:
+            return existing_content.rstrip() + "\n\n" + new_entries + "\n"
+        return existing_content.rstrip() + "\n\n" + fallback_header + "\n\n" + new_entries + "\n"
+
+    @staticmethod
+    def strip_verified_proofs_from_content(content: str) -> str:
+        """Remove appended Lean proof sections from paper text for RAG/compiler use."""
+        if not content:
+            return ""
+
+        stripped = content
+        appendix_start = "[HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]"
+        appendix_end = "[HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]"
+        empty_placeholder = "[Theorems appendix - verified Lean 4 theorems not placed inline will appear here]"
+
+        start_idx = stripped.find(appendix_start)
+        end_idx = stripped.find(appendix_end, start_idx if start_idx >= 0 else 0)
+        if start_idx >= 0 and end_idx >= 0:
+            end_idx += len(appendix_end)
+            empty_appendix = f"{appendix_start}\n{empty_placeholder}\n{appendix_end}"
+            stripped = stripped[:start_idx] + empty_appendix + stripped[end_idx:]
+
+        terminal_headers = (
+            "=== PROOFS GENERATED FROM THIS PAPER",
+            "=== PROOFS ATTACHED TO THIS PAPER",
+        )
+        header_positions = [
+            idx for header in terminal_headers if (idx := stripped.find(header)) > 0
+        ]
+        if header_positions:
+            stripped = stripped[:min(header_positions)]
+
+        return stripped.rstrip()
 
     async def _list_history_papers_from_directory(self, papers_dir: Path, session_id: str) -> List[Dict[str, Any]]:
         """List complete, non-archived papers from one legacy/session papers directory."""
@@ -381,6 +533,8 @@ class PaperLibrary:
                 r"##\s*Abstract",
                 r"#\s*Abstract",
                 r"\*\*Abstract\*\*",
+                r"\\(?:section|chapter)\*?\{Abstract\}",
+                r"\\begin\{abstract\}",
                 r"^Abstract\s*$"  # Abstract on its own line
             ]
             
@@ -399,6 +553,7 @@ class PaperLibrary:
                 r"##\s*Introduction",
                 r"#\s*Introduction",
                 r"\*\*Introduction\*\*",
+                r"\\(?:section|chapter)\*?\{(?:I\.?\s*)?Introduction\}",
                 r"^I\.\s*Introduction",
                 r"^Introduction\s*$"
             ]
@@ -418,6 +573,7 @@ class PaperLibrary:
                 r"##\s*Conclusion",
                 r"#\s*Conclusion",
                 r"\*\*Conclusion\*\*",
+                r"\\(?:section|chapter)\*?\{Conclusion\}",
                 r"^\w+\.\s*Conclusion",  # e.g., "V. Conclusion"
                 r"^Conclusion\s*$"
             ]
@@ -536,19 +692,72 @@ class PaperLibrary:
             logger.info(f"Saved paper {paper_id}: '{title}' ({word_count} words, {model_count} models tracked)")
             return metadata
     
-    async def get_paper_content(self, paper_id: str) -> str:
-        """Get full paper content."""
+    async def get_paper_content(self, paper_id: str, *, strip_proofs: bool = False) -> str:
+        """Get full paper content.
+
+        Args:
+            paper_id: The paper ID.
+            strip_proofs: When True, truncate content at the proof section header.
+                Use this for compiler and RAG paths so that appended proof blocks
+                do not pollute LLM context.  Novel proofs are available via
+                proof_database.inject_into_prompt(); non-novel proofs are browsable
+                via proof_database.get_known_proofs_summary_for_browsing().
+        """
         paper_path = self._get_paper_path(paper_id)
-        
+
         if not paper_path.exists():
             return ""
-        
+
         try:
             async with aiofiles.open(paper_path, 'r', encoding='utf-8') as f:
-                return await f.read()
+                content = await f.read()
+            if strip_proofs and content:
+                content = self.strip_verified_proofs_from_content(content)
+            return content
         except Exception as e:
             logger.error(f"Failed to read paper {paper_id}: {e}")
             return ""
+
+    async def append_proofs_section(self, paper_id: str, proofs_data: Any) -> bool:
+        """Append verified proofs to the bottom of a saved paper."""
+        if ":" in paper_id:
+            session_id, scoped_paper_id = paper_id.split(":", 1)
+            papers_dir = self.get_history_papers_dir(session_id)
+            if papers_dir is None:
+                logger.error(f"History paper directory not found for proof append: {paper_id}")
+                return False
+            scoped_library = self._build_scoped_library(papers_dir)
+            return await scoped_library.append_proofs_section(scoped_paper_id, proofs_data)
+
+        async with self._lock:
+            paper_path = self._get_paper_path(paper_id)
+            if not paper_path.exists():
+                logger.error(f"Paper not found for proof append: {paper_id}")
+                return False
+
+            proofs = proofs_data if isinstance(proofs_data, list) else [proofs_data]
+
+            try:
+                async with aiofiles.open(paper_path, "r", encoding="utf-8") as handle:
+                    existing_content = await handle.read()
+
+                updated_content = self.attach_verified_proofs_to_content(
+                    existing_content,
+                    proofs,
+                    "this paper",
+                )
+                if updated_content == existing_content:
+                    logger.info("No new proof entries to append to paper %s", paper_id)
+                    return True
+
+                async with aiofiles.open(paper_path, "w", encoding="utf-8") as handle:
+                    await handle.write(updated_content)
+
+                logger.info("Appended %s proof(s) to paper %s", len(proofs), paper_id)
+                return True
+            except Exception as exc:
+                logger.error(f"Failed to append proofs to paper {paper_id}: {exc}")
+                return False
     
     async def get_abstract(self, paper_id: str) -> str:
         """Get paper abstract."""

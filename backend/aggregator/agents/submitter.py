@@ -15,6 +15,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
+from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
@@ -45,7 +46,7 @@ class SubmitterAgent:
     ):
         self.submitter_id = submitter_id
         self.model_name = model_name
-        self.user_prompt = user_prompt
+        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
         self.user_files_content = user_files_content
         self.websocket_broadcaster = websocket_broadcaster
         self.coordinator = coordinator
@@ -115,9 +116,9 @@ class SubmitterAgent:
         
         while self.is_running:
             try:
-                # Check if we should pause due to queue overflow
-                if self.coordinator and self.coordinator.should_pause_submitters:
-                    logger.debug(f"Submitter {self.submitter_id} paused (queue overflow)")
+                # Check if we should pause due to queue overflow or per-submitter fairness cap
+                if self.coordinator and await self.coordinator.should_pause_submitter(self.submitter_id):
+                    logger.debug(f"Submitter {self.submitter_id} paused (queue overflow or per-submitter cap)")
                     await asyncio.sleep(2)  # Wait before checking again
                     continue
                 
@@ -127,12 +128,23 @@ class SubmitterAgent:
                 submission = await self._generate_submission()
                 if submission:
                     # Hold submission until queue has capacity (prevents overflow when
-                    # the LLM call was already in-flight when the queue filled up)
+                    # the LLM call was already in-flight when the queue filled up).
+                    # Also respect the per-submitter fairness cap so a fast submitter
+                    # that just finished a call doesn't push itself over its personal limit.
                     while self.is_running:
-                        queue_size = await queue_manager.size()
-                        if queue_size < system_config.queue_overflow_threshold:
-                            break
-                        logger.debug(f"Submitter {self.submitter_id}: Queue full ({queue_size}), holding submission")
+                        if self.coordinator:
+                            if not await self.coordinator.should_pause_submitter(self.submitter_id):
+                                break
+                            queue_size = await queue_manager.size()
+                            logger.debug(
+                                f"Submitter {self.submitter_id}: Holding submission "
+                                f"(queue={queue_size}, own>{system_config.per_submitter_queue_threshold} possible)"
+                            )
+                        else:
+                            queue_size = await queue_manager.size()
+                            if queue_size < system_config.queue_overflow_threshold:
+                                break
+                            logger.debug(f"Submitter {self.submitter_id}: Queue full ({queue_size}), holding submission")
                         await asyncio.sleep(2)
 
                     if self.submission_callback and self.is_running:

@@ -4,13 +4,15 @@ import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
 import { buildResearchRunGroups } from '../../utils/researchRunHistory';
+import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import { websocket } from '../../services/websocket';
 import './FinalAnswerLibrary.css';
 import './AutonomousResearch.css';
 import './Stage2PaperHistory.css';
 
 function getCritiqueColor(rating) {
   if (rating >= 8) return '#10b981';
-  if (rating >= 6.25) return '#3b82f6';
+  if (rating >= 6.25) return '#18cc17';
   if (rating >= 4) return '#eab308';
   if (rating >= 2) return '#f97316';
   return '#ef4444';
@@ -41,10 +43,45 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
   const [generatingPdfId, setGeneratingPdfId] = useState(null);
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
   const [critiquePaper, setCritiquePaper] = useState(null);
+  const [proofActionMessage, setProofActionMessage] = useState('');
+  const {
+    getSourceState,
+    manualCheckEnabled,
+    manualCheckReason,
+    queueManualProofCheck,
+  } = useProofCheckRuntime();
 
   useEffect(() => {
     loadPaperHistory();
   }, []);
+
+  useEffect(() => {
+    const unsubscribeNovelProof = websocket.on('novel_proof_discovered', async (data) => {
+      if (!expandedContent || data.source_type !== 'paper') {
+        return;
+      }
+
+      const matchesExpandedPaper = (
+        data.source_id === expandedId ||
+        data.source_id === expandedContent.paper_id
+      );
+      if (!matchesExpandedPaper) {
+        return;
+      }
+
+      try {
+        const refreshed = await autonomousAPI.getHistoryPaper(
+          expandedContent.session_id,
+          expandedContent.paper_id,
+        );
+        setExpandedContent(refreshed);
+      } catch (error) {
+        console.error('Failed to refresh history paper after proof append:', error);
+      }
+    });
+
+    return () => unsubscribeNovelProof();
+  }, [expandedId, expandedContent]);
 
   const loadPaperHistory = async () => {
     try {
@@ -88,6 +125,20 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
       console.error('Failed to load Stage 2 paper history:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleProofCheck = async (event, paper) => {
+    event.stopPropagation();
+    try {
+      setProofActionMessage('');
+      await queueManualProofCheck({
+        sourceType: 'paper',
+        sourceId: paper.history_id,
+      });
+      setProofActionMessage(`Queued proof check for paper ${paper.paper_id}.`);
+    } catch (error) {
+      setProofActionMessage(`Failed to queue proof check: ${error.message}`);
     }
   };
 
@@ -289,6 +340,12 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
         </div>
       </div>
 
+      {proofActionMessage && (
+        <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
+          {proofActionMessage}
+        </div>
+      )}
+
       <div className="library-controls">
         <input
           type="text"
@@ -400,6 +457,28 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
                       {expandedId === paper.history_id && (
                         <>
                           <div className="paper-actions">
+                            {(() => {
+                              const proofCheckState = getSourceState('paper', paper.history_id);
+                              const proofCheckLabel = proofCheckState?.status === 'queued'
+                                ? 'Queueing Proof Check...'
+                                : proofCheckState?.status === 'running'
+                                  ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
+                                  : 'Try to prove with Lean 4 theorem prover';
+                              const proofCheckTitle = proofCheckState?.status === 'running'
+                                ? 'A proof verification is already running for this paper.'
+                                : manualCheckReason || 'Queue a manual proof check for this paper.';
+                              return (
+                                <button
+                                  className="btn-download"
+                                  onClick={(e) => handleProofCheck(e, paper)}
+                                  disabled={!manualCheckEnabled || Boolean(proofCheckState)}
+                                  title={proofCheckTitle}
+                                >
+                                  {proofCheckLabel}
+                                </button>
+                              );
+                            })()}
+
                             <button
                               className="btn-download"
                               onClick={(e) => handleDownloadPDF(e, paper)}

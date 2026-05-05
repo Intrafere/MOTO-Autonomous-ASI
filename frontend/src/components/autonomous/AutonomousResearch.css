@@ -84,7 +84,7 @@
 }
 
 .log-phase-badge {
-  background: #2563eb;
+  background: #18cc17;
   color: #fff;
   padding: 0.15rem 0.4rem;
   border-radius: var(--radius-sm);
@@ -223,6 +223,66 @@
   box-shadow: 0 4px 12px rgba(231, 76, 60, 0.4);
 }
 
+/* Runtime indicator: shown alongside the Stop Research button while a
+   research run is active so the user has an unmistakable "live" signal. */
+.runtime-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.85rem;
+  border-radius: 999px;
+  background: rgba(46, 204, 113, 0.12);
+  border: 1px solid rgba(46, 204, 113, 0.5);
+  color: #2ecc71;
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  user-select: none;
+  box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.45);
+  animation: runtime-indicator-glow 2s ease-in-out infinite;
+}
+
+.runtime-indicator-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2ecc71;
+  box-shadow: 0 0 8px rgba(46, 204, 113, 0.9);
+  animation: runtime-indicator-pulse 1.2s ease-in-out infinite;
+}
+
+.runtime-indicator-label {
+  line-height: 1;
+}
+
+@keyframes runtime-indicator-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.6;
+  }
+}
+
+@keyframes runtime-indicator-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(46, 204, 113, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-indicator,
+  .runtime-indicator-dot {
+    animation: none;
+  }
+}
+
 .btn-clear {
   background: var(--bg-secondary, #2a2a2a);
   color: var(--text-secondary, #888);
@@ -283,8 +343,8 @@
 
 .research-prompt-section textarea:focus {
   outline: none;
-  border-color: #3498db;
-  box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+  border-color: #18cc17;
+  box-shadow: 0 0 0 2px rgba(24, 204, 23, 0.2);
 }
 
 .research-prompt-section textarea:disabled {
@@ -354,7 +414,7 @@
   padding: 0.2rem 0.5rem;
   border-radius: 4px;
   font-size: 0.85rem;
-  color: #3498db;
+  color: #18cc17;
   margin-left: 0.5rem;
 }
 
@@ -392,9 +452,9 @@
 }
 
 .brainstorm-stats .submission-count.pruned {
-  background: rgba(155, 89, 182, 0.15);
-  color: #9b59b6;
-  border: 1px solid rgba(155, 89, 182, 0.3);
+  background: rgba(24, 204, 23, 0.15);
+  color: #18cc17;
+  border: 1px solid rgba(24, 204, 23, 0.3);
 }
 
 .brainstorm-stats .submission-count.queue {
@@ -422,7 +482,7 @@
   display: block;
   font-size: 1.75rem;
   font-weight: 700;
-  color: #3498db;
+  color: #18cc17;
   margin-bottom: 0.25rem;
 }
 
@@ -506,8 +566,8 @@
 }
 
 .activity-info {
-  background: rgba(52, 152, 219, 0.1);
-  color: #3498db;
+  background: rgba(24, 204, 23, 0.1);
+  color: #18cc17;
 }
 
 .activity-neutral {
@@ -552,12 +612,12 @@
 }
 
 .brainstorm-card:hover {
-  border-color: #3498db;
+  border-color: #18cc17;
   transform: translateY(-2px);
 }
 
 .brainstorm-card.expanded {
-  border-color: #3498db;
+  border-color: #18cc17;
 }
 
 .brainstorm-card-header {
@@ -569,7 +629,7 @@
 
 .brainstorm-card-id {
   font-family: 'Fira Code', monospace;
-  color: #3498db;
+  color: #18cc17;
   font-size: 0.9rem;
 }
 
@@ -643,71 +703,6 @@
   margin: 0.25rem 0 0.5rem 0;
 }
 
-/* Help icon tooltip */
-.paper-library-help-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 17px;
-  height: 17px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.15);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  color: #ccc;
-  font-size: 0.7rem;
-  font-weight: 700;
-  cursor: pointer;
-  margin-left: 8px;
-  position: relative;
-  vertical-align: middle;
-  user-select: none;
-  flex-shrink: 0;
-}
-
-.paper-library-help-icon:hover,
-.paper-library-help-icon:focus {
-  background: rgba(255, 255, 255, 0.25);
-  color: #fff;
-  outline: none;
-}
-
-.paper-library-tooltip {
-  display: none;
-  position: absolute;
-  top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  width: 380px;
-  background: #1e1e2e;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 8px;
-  padding: 14px 16px;
-  font-size: 0.78rem;
-  font-weight: 400;
-  color: #ccc;
-  line-height: 1.55;
-  z-index: 9999;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
-  text-align: left;
-  white-space: normal;
-  pointer-events: none;
-}
-
-.paper-library-tooltip code {
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 3px;
-  padding: 0.1em 0.3em;
-  font-size: 0.85em;
-  color: #c5c5c5;
-  font-family: 'Consolas', 'Monaco', monospace;
-}
-
-.paper-library-help-icon:hover .paper-library-tooltip,
-.paper-library-help-icon:focus .paper-library-tooltip {
-  display: block;
-}
-
 .paper-library-file-location {
   color: #aaa;
   font-size: 0.75rem;
@@ -748,7 +743,7 @@
 }
 
 .paper-card:hover {
-  border-color: #9b59b6;
+  border-color: #18cc17;
   transform: translateY(-2px);
 }
 
@@ -761,7 +756,7 @@
   z-index: 999;
   overflow-y: auto;
   box-shadow: 0 0 50px rgba(0, 0, 0, 0.8);
-  border-color: #9b59b6;
+  border-color: #18cc17;
   transform: none;
 }
 
@@ -774,7 +769,7 @@
 
 .paper-card-id {
   font-family: 'Fira Code', monospace;
-  color: #9b59b6;
+  color: #18cc17;
   font-size: 0.85rem;
 }
 
@@ -828,7 +823,7 @@
 .btn-download,
 .btn-download-raw,
 .btn-download-pdf {
-  background: linear-gradient(135deg, #3498db, #2980b9);
+  background: linear-gradient(135deg, #18cc17, #0f9110);
   color: white;
   border: none;
   padding: 0.35rem 0.7rem;
@@ -839,11 +834,28 @@
   font-size: 0.75rem;
 }
 
+.btn-download-small {
+  background: linear-gradient(135deg, #18cc17, #0f9110);
+  color: white;
+  border: none;
+  padding: 0.65rem 1.35rem;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
 .btn-download:hover,
 .btn-download-raw:hover,
-.btn-download-pdf:hover {
+.btn-download-pdf:hover,
+.btn-download-small:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(52, 152, 219, 0.4);
+  box-shadow: 0 4px 12px rgba(24, 204, 23, 0.4);
 }
 
 .paper-full-content {
@@ -878,6 +890,8 @@
   box-shadow: inset -1px 0 0 rgba(170, 245, 181, 0.04);
   flex-shrink: 0;
   padding: 1.5rem 0;
+  position: relative;
+  z-index: 2;
 }
 
 .known-models-sidebar {
@@ -999,6 +1013,65 @@
   font-style: italic;
 }
 
+/* Open Source tag */
+.model-item--os {
+  position: relative;
+}
+
+.os-tag {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  color: #fff;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.35rem;
+  border-radius: 3px;
+  line-height: 1;
+  user-select: none;
+  cursor: default;
+  z-index: 2;
+  box-shadow: 0 1px 4px rgba(79, 70, 229, 0.45);
+  transition: opacity 0.15s;
+}
+
+.os-tag-tooltip-anchor {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  z-index: 2;
+  display: inline-block;
+}
+
+.os-tag-tooltip-anchor .os-tag {
+  position: static;
+}
+
+.os-tag-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 210px;
+  background: #1a1a2e;
+  border: 1px solid rgba(99, 102, 241, 0.5);
+  border-radius: 6px;
+  padding: 0.55rem 0.75rem;
+  color: #c4c4ff;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 200;
+  white-space: normal;
+}
+
+.os-tag-tooltip-anchor:hover .os-tag-tooltip {
+  display: block;
+}
+
 /* Main settings content area */
 .autonomous-settings {
   flex: 1;
@@ -1008,16 +1081,31 @@
   gap: 1.5rem;
   overflow-y: auto;
   width: 100%;
+  /* Default: accounts for left sidebar (322px) + horizontal padding (3rem). */
   max-width: calc(100vw - 322px - 3rem);
   box-sizing: border-box;
+  position: relative;
+  z-index: 1;
+}
+
+/* When the WorkflowPanel sidebar is expanded (320px) or collapsed (50px),
+   slide settings content leftward so dropdowns/arrows don't get clipped
+   by the fixed-position panel overlay. */
+.app.workflow-panel-expanded .autonomous-settings {
+  max-width: calc(100vw - 322px - 3rem - 320px);
+  padding-right: 1.5rem;
+}
+
+.app.workflow-panel-collapsed .autonomous-settings {
+  max-width: calc(100vw - 322px - 3rem - 50px);
+  padding-right: 1.5rem;
 }
 
 .settings-group {
   background: var(--bg-secondary, #1e1e1e);
-  border: 1px solid var(--border-color, #333);
+  border: 1px solid #2a2a2a;
   border-radius: 8px;
   padding: 1rem;
-  border-right: 3px solid #3498db;
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
@@ -1026,8 +1114,8 @@
 
 /* Known Models Display - OLD (to be removed) */
 .known-models-display {
-  background: linear-gradient(135deg, rgba(52, 152, 219, 0.08), rgba(52, 152, 219, 0.05));
-  border: 1px solid rgba(52, 152, 219, 0.2);
+  background: linear-gradient(135deg, rgba(24, 204, 23, 0.08), rgba(24, 204, 23, 0.05));
+  border: 1px solid rgba(24, 204, 23, 0.2);
 }
 
 .models-grid {
@@ -1038,15 +1126,15 @@
 
 .model-card {
   background: var(--bg-tertiary, #252525);
-  border: 1px solid rgba(52, 152, 219, 0.2);
+  border: 1px solid rgba(24, 204, 23, 0.2);
   border-radius: 6px;
   padding: 0.75rem;
   transition: all 0.2s ease;
 }
 
 .model-card:hover {
-  border-color: #3498db;
-  background: rgba(52, 152, 219, 0.1);
+  border-color: #18cc17;
+  background: rgba(24, 204, 23, 0.1);
   transform: translateY(-2px);
 }
 
@@ -1059,8 +1147,8 @@
 }
 
 .model-badge {
-  background: rgba(52, 152, 219, 0.15);
-  color: #3498db;
+  background: rgba(24, 204, 23, 0.15);
+  color: #18cc17;
   padding: 0.3rem 0.6rem;
   border-radius: 4px;
   font-size: 0.75rem;
@@ -1097,7 +1185,7 @@
 .settings-row select,
 .settings-row input {
   background: var(--bg-tertiary, #252525);
-  border: 1px solid var(--border-color, #333);
+  border: 1px solid var(--border-default);
   border-radius: 6px;
   padding: 0.5rem 0.75rem;
   color: var(--text-primary, #e0e0e0);
@@ -1110,7 +1198,7 @@
 .settings-row select:focus,
 .settings-row input:focus {
   outline: none;
-  border-color: #3498db;
+  border-color: #18cc17;
 }
 
 .settings-row select:disabled,
@@ -1136,11 +1224,10 @@
 /* Per-submitter config section */
 .submitter-config-section {
   background: var(--bg-tertiary, #252525);
-  border: 1px solid var(--border-color, #333);
+  border: 1px solid #2a2a2a;
   border-radius: 6px;
   padding: 1rem;
   margin-bottom: 1rem;
-  border-right: 3px solid #3498db;
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
@@ -1161,8 +1248,8 @@
 /* Copy button for submitter configs */
 .copy-btn {
   background: var(--bg-secondary, #2a2a2a);
-  color: #3498db;
-  border: 1px solid #3498db;
+  color: #18cc17;
+  border: 1px solid #18cc17;
   padding: 0.35rem 0.75rem;
   border-radius: 4px;
   cursor: pointer;
@@ -1172,7 +1259,7 @@
 }
 
 .copy-btn:hover:not(:disabled) {
-  background: rgba(52, 152, 219, 0.2);
+  background: rgba(24, 204, 23, 0.2);
 }
 
 .copy-btn:disabled {
@@ -1216,7 +1303,7 @@
   display: block;
   font-size: 1.5rem;
   font-weight: 700;
-  color: #3498db;
+  color: #18cc17;
 }
 
 .metric-label {
@@ -1245,7 +1332,7 @@
 }
 
 .submitter-stat-card:hover {
-  border-color: #3498db;
+  border-color: #18cc17;
 }
 
 .submitter-header {
@@ -1260,7 +1347,7 @@
 }
 
 .submitter-header:hover {
-  background: rgba(52, 152, 219, 0.1);
+  background: rgba(24, 204, 23, 0.1);
 }
 
 .submitter-title {
@@ -1271,7 +1358,7 @@
 
 .submitter-model {
   font-family: 'Fira Code', monospace;
-  color: #3498db;
+  color: #18cc17;
   font-size: 0.85rem;
 }
 
@@ -1279,7 +1366,7 @@
   display: flex;
   gap: 1rem;
   padding: 0.5rem 1rem;
-  background: rgba(52, 152, 219, 0.05);
+  background: rgba(24, 204, 23, 0.05);
   border-top: 1px solid var(--border-color, #333);
   flex-wrap: wrap;
 }
@@ -1302,8 +1389,8 @@
 }
 
 .submitter-stats-line .stat-item.info {
-  color: #3498db;
-  background: rgba(52, 152, 219, 0.1);
+  color: #18cc17;
+  background: rgba(24, 204, 23, 0.1);
 }
 
 .submitter-expanded {
@@ -1384,13 +1471,13 @@
 
 .event-topic {
   font-family: 'Fira Code', monospace;
-  color: #3498db;
+  color: #18cc17;
   flex: 1;
 }
 
 .event-count {
   font-family: 'Fira Code', monospace;
-  color: #9b59b6;
+  color: #18cc17;
   font-weight: 600;
   font-size: 0.8rem;
 }
@@ -1435,8 +1522,8 @@
 }
 
 .auto-log-entry.log-info {
-  border-left-color: #3498db;
-  background: rgba(52, 152, 219, 0.08);
+  border-left-color: #18cc17;
+  background: rgba(24, 204, 23, 0.08);
 }
 
 .log-time {
@@ -1447,7 +1534,7 @@
 }
 
 .log-event {
-  color: #3498db;
+  color: #18cc17;
   flex-shrink: 0;
   min-width: 150px;
   font-weight: 600;
@@ -1507,11 +1594,11 @@
 }
 
 .submission-item:hover {
-  border-color: #3498db;
+  border-color: #18cc17;
 }
 
 .submission-item.expanded {
-  border-color: #3498db;
+  border-color: #18cc17;
 }
 
 .submission-header {
@@ -1530,7 +1617,7 @@
 
 .submission-number {
   font-family: 'Fira Code', monospace;
-  color: #3498db;
+  color: #18cc17;
   font-weight: 600;
   font-size: 0.9rem;
 }
@@ -1542,7 +1629,7 @@
 }
 
 .submission-toggle {
-  color: #3498db;
+  color: #18cc17;
   font-size: 0.8rem;
   flex-shrink: 0;
 }
@@ -1590,7 +1677,7 @@
 
 .btn-refresh:hover {
   background: var(--bg-tertiary, #333);
-  border-color: #3498db;
+  border-color: #18cc17;
 }
 
 .brainstorm-list-header {
@@ -1635,7 +1722,7 @@
 .toggle-icon {
   font-size: 0.8rem;
   margin-left: 0.5rem;
-  color: #3498db;
+  color: #18cc17;
 }
 
 .paper-meta {
@@ -1650,7 +1737,7 @@
   padding: 0.3rem 0.6rem;
   border-radius: 4px;
   font-size: 0.85rem;
-  color: #9b59b6;
+  color: #18cc17;
 }
 
 .paper-meta .word-count {
@@ -1743,13 +1830,13 @@
 }
 
 .outline-section .outline-content {
-  background: rgba(52, 152, 219, 0.05);
-  border-color: rgba(52, 152, 219, 0.2);
+  background: rgba(24, 204, 23, 0.05);
+  border-color: rgba(24, 204, 23, 0.2);
 }
 
 .paper-section .paper-content {
-  background: rgba(155, 89, 182, 0.05);
-  border-color: rgba(155, 89, 182, 0.2);
+  background: rgba(24, 204, 23, 0.05);
+  border-color: rgba(24, 204, 23, 0.2);
 }
 
 /* Manual Controls */
@@ -1808,12 +1895,25 @@
   background: linear-gradient(135deg, #e74c3c, #c0392b);
   color: white;
   border: none;
-  padding: 0.35rem 0.7rem;
   border-radius: 4px;
   cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.btn-delete-brainstorm {
+  padding: 0.65rem 1.35rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.btn-delete-paper {
+  padding: 0.35rem 0.7rem;
   font-size: 0.75rem;
   font-weight: 500;
-  transition: all 0.2s ease;
 }
 
 .btn-delete-brainstorm:hover,
@@ -1916,13 +2016,13 @@
 }
 
 .final-answer-view.status-active {
-  border-color: #3498db;
+  border-color: #18cc17;
   animation: tier3-pulse 2s infinite;
 }
 
 @keyframes tier3-pulse {
-  0%, 100% { box-shadow: 0 0 10px rgba(52, 152, 219, 0.3); }
-  50% { box-shadow: 0 0 25px rgba(52, 152, 219, 0.5); }
+  0%, 100% { box-shadow: 0 0 10px rgba(24, 204, 23, 0.3); }
+  50% { box-shadow: 0 0 25px rgba(24, 204, 23, 0.5); }
 }
 
 .final-answer-header {
@@ -1975,7 +2075,7 @@
 }
 
 .final-status-badge.status-active {
-  background: linear-gradient(135deg, #3498db, #2980b9);
+  background: linear-gradient(135deg, #18cc17, #0f9110);
   color: white;
 }
 
@@ -2047,9 +2147,9 @@
 }
 
 .section-tab.active {
-  background: #3498db;
+  background: #18cc17;
   color: white;
-  border-color: #3498db;
+  border-color: #18cc17;
 }
 
 .content-controls {
@@ -2167,9 +2267,9 @@
 }
 
 .format-badge.short_form {
-  background: linear-gradient(135deg, rgba(155, 89, 182, 0.2), rgba(142, 68, 173, 0.2));
-  border: 1px solid rgba(155, 89, 182, 0.4);
-  color: #9b59b6;
+  background: linear-gradient(135deg, rgba(24, 204, 23, 0.2), rgba(15, 145, 16, 0.2));
+  border: 1px solid rgba(24, 204, 23, 0.4);
+  color: #18cc17;
 }
 
 .format-badge.long_form {
@@ -2219,7 +2319,7 @@
 }
 
 .chapter-item.writing {
-  border-left: 3px solid #3498db;
+  border-left: 3px solid #18cc17;
   animation: writing-pulse 1.5s infinite;
 }
 
@@ -2230,7 +2330,7 @@
 
 @keyframes writing-pulse {
   0%, 100% { background: var(--bg-secondary, #1e1e1e); }
-  50% { background: rgba(52, 152, 219, 0.1); }
+  50% { background: rgba(24, 204, 23, 0.1); }
 }
 
 .chapter-item.pending {
@@ -2247,7 +2347,7 @@
 
 .chapter-number {
   font-family: 'Fira Code', monospace;
-  color: #3498db;
+  color: #18cc17;
   font-weight: 600;
   font-size: 0.85rem;
 }
@@ -2274,8 +2374,8 @@
 }
 
 .chapter-status.chapter-writing {
-  background: rgba(52, 152, 219, 0.2);
-  color: #3498db;
+  background: rgba(24, 204, 23, 0.2);
+  color: #18cc17;
 }
 
 .chapter-status.chapter-pending {
@@ -2360,7 +2460,7 @@
 }
 
 .no-content-stats {
-  color: #3498db;
+  color: #18cc17;
   font-size: 1.1rem;
   font-weight: 600;
   margin-bottom: 0.5rem;
@@ -2473,7 +2573,7 @@
 }
 
 .tier3-papers-count {
-  color: #3498db;
+  color: #18cc17;
   font-size: 0.9rem;
   margin-bottom: 1.5rem;
   font-weight: 500;

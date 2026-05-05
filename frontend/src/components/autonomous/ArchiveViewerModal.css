@@ -78,8 +78,8 @@
 }
 
 .archive-tab--active {
-  color: #60a5fa;
-  border-bottom-color: #60a5fa;
+  color: #18cc17;
+  border-bottom-color: #18cc17;
 }
 
 .archive-tab-icon {
@@ -163,7 +163,7 @@
 
 /* Detail view */
 .archive-back-btn {
-  color: #60a5fa;
+  color: #18cc17;
   background: transparent;
   border: none;
   cursor: pointer;
@@ -177,7 +177,7 @@
 }
 
 .archive-back-btn:hover {
-  color: #93c5fd;
+  color: #18cc17;
 }
 
 .archive-detail {
@@ -255,7 +255,7 @@
 .archive-icon-header {
   width: 20px;
   height: 20px;
-  color: #60a5fa;
+  color: #18cc17;
 }
 
 .archive-icon-close {

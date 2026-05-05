@@ -88,12 +88,19 @@ The CURRENT DOCUMENT you are reviewing may contain system-managed markers:
 **PAPER ANCHOR** (marks document boundary):
 - [HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]
 
+**THEOREMS APPENDIX BRACKETS** (wrap verified Lean 4 theorem appendix):
+- [HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]
+- [HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]
+
 IMPORTANT: These markers are SYSTEM-MANAGED (added by paper_memory.py), NOT AI-generated content. They are NORMAL and EXPECTED during document construction.
 
-**YOU MUST NEVER OUTPUT THESE MARKERS IN YOUR EDITS**
+**MARKER USE IN EDITS**
 
 When making edits:
-- Do NOT include any of these markers in your edit content
+- Use editable prose for old_string anchors
+- Do not include theorem appendix brackets or the paper anchor in insert_after/delete targets
+- For replace, prefer editable content only; if a protected marker is accidentally included as trailing context, validation may trim it
+- Do NOT include any of these markers in new_string / generated edit content
 - Placeholders in the current document are expected - don't try to remove them
 - Your edits should contain only actual mathematical prose
 
