@@ -6,8 +6,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
+import stat
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -420,12 +423,27 @@ class Lean4Client:
     def _wipe_lake_directory(self) -> None:
         """Remove the .lake directory to give lake update a clean slate."""
         lake_dir = self.workspace_dir / ".lake"
-        if lake_dir.exists():
+        if not lake_dir.exists():
+            return
+        for attempt in range(3):
             try:
-                shutil.rmtree(lake_dir)
+                shutil.rmtree(lake_dir, onerror=self._rmtree_onerror)
                 logger.info("Removed stale .lake directory at %s", lake_dir)
+                return
             except OSError as exc:
-                logger.warning("Failed to remove .lake directory at %s: %s", lake_dir, exc)
+                if attempt < 2:
+                    time.sleep(1)
+                else:
+                    logger.warning("Failed to remove .lake directory at %s after 3 attempts: %s", lake_dir, exc)
+
+    @staticmethod
+    def _rmtree_onerror(func: Any, path: str, exc_info: Any) -> None:
+        """Handle permission errors during rmtree by clearing read-only and retrying."""
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
 
     async def _repair_workspace_after_infrastructure_error(self, output: str) -> bool:
         logger.warning(
@@ -564,6 +582,29 @@ class Lean4Client:
                     "'object file' errors. Details: %s",
                     (cache_stderr or cache_stdout).strip(),
                 )
+                return False
+
+            # Sanity check: verify the cache is actually usable before marking ready.
+            # lake exe cache get can report success while files are missing on disk.
+            # NO TIMEOUT: First-time elaboration of `import Mathlib` against a fresh
+            # olean cache can take too long on a cold machine even when all
+            # files are present. A timeout here would false-report failure, wipe a
+            # valid .lake directory, and loop forever. Do NOT add a timeout.
+            sanity_rc, sanity_stdout, sanity_stderr = await self._run_process(
+                [lake_cmd, "env", self.lean_path or self._resolve_executable("lean"),
+                 root_file_path.name],
+                cwd=self.workspace_dir,
+            )
+            if sanity_rc != 0:
+                sanity_output = self._combined_process_output(sanity_stdout, sanity_stderr)
+                if self._is_workspace_infrastructure_error(sanity_output):
+                    logger.warning(
+                        "Lean 4 workspace sanity check failed — Mathlib cache is incomplete. "
+                        "Wiping .lake and marking unhealthy. Details: %s",
+                        sanity_output[:500],
+                    )
+                    self._wipe_lake_directory()
+                self._mark_workspace_unhealthy(sanity_output)
                 return False
 
         self._workspace_ready = True
