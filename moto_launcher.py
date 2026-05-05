@@ -1228,6 +1228,17 @@ def install_lean4(
         print()
         return
 
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["git", "config", "--global", "core.longpaths", "true"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
     workspace_dir = Path(runtime.data_root) / "lean4_workspace"
     try:
         _write_lean_workspace_files(workspace_dir)

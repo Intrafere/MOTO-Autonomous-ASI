@@ -45,7 +45,7 @@ Enables OpenRouter integration with automatic LM Studio fallback (default mode) 
 
 #### OpenRouterClient (`backend/shared/openrouter_client.py`)
 - Async HTTP client. Base URL: `https://openrouter.ai/api/v1`
-- App Attribution Headers: `HTTP-Referer: https://intrafere.com/moto-autonomous-home-ai/`, `X-Title: MOTO Deep Research Harness`
+- App Attribution Headers: `HTTP-Referer: https://intrafere.com/moto-autonomous-home-ai/`, `X-Title: MOTO Autonomous ASI`
 - Credit exhaustion detection: HTTP 402 OR error messages containing "credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"
 - Raises `CreditExhaustionError` on exhaustion (no retries). Retries transient errors (max 3).
 - Temperature=0.0 default. No stop sequences (removed — caused premature truncation with certain models).

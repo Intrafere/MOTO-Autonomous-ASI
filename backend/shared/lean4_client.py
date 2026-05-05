@@ -395,6 +395,26 @@ class Lean4Client:
             )
         return Lean4Result(success=False, error_output=error_output)
 
+    @staticmethod
+    def _is_stale_lake_state(output: str) -> bool:
+        """Detect Lake errors caused by a stale .lake directory from a prior failed clone."""
+        text = (output or "").lower()
+        return (
+            "url has changed" in text
+            or "exited with code 128" in text
+            or ("delete" in text and "packages" in text and "manually" in text)
+        )
+
+    def _wipe_lake_directory(self) -> None:
+        """Remove the .lake directory to give lake update a clean slate."""
+        lake_dir = self.workspace_dir / ".lake"
+        if lake_dir.exists():
+            try:
+                shutil.rmtree(lake_dir)
+                logger.info("Removed stale .lake directory at %s", lake_dir)
+            except OSError as exc:
+                logger.warning("Failed to remove .lake directory at %s: %s", lake_dir, exc)
+
     async def _repair_workspace_after_infrastructure_error(self, output: str) -> bool:
         logger.warning(
             "Lean 4 workspace infrastructure error detected; invalidating workspace cache and refetching Mathlib artifacts. Diagnostic: %s",
@@ -403,6 +423,7 @@ class Lean4Client:
         async with self._workspace_lock:
             self._workspace_unhealthy_error = ""
             self._workspace_ready = False
+            self._wipe_lake_directory()
             repaired = await self._ensure_workspace_locked()
             if not repaired:
                 self._mark_workspace_unhealthy(output)
@@ -473,12 +494,27 @@ class Lean4Client:
                 timeout=max(system_config.lean4_proof_timeout, 120),
             )
             if update_rc != 0:
-                self._mark_workspace_unhealthy(update_stderr or update_stdout)
-                logger.warning(
-                    "Lean 4 workspace update failed: %s",
-                    (update_stderr or update_stdout).strip(),
-                )
-                return False
+                combined_update_output = "\n".join(
+                    part for part in (update_stdout, update_stderr) if part
+                ).strip()
+                lake_dir = self.workspace_dir / ".lake"
+                if lake_dir.exists() and self._is_stale_lake_state(combined_update_output):
+                    logger.warning(
+                        "lake update failed due to stale .lake state; wiping .lake directory and retrying."
+                    )
+                    self._wipe_lake_directory()
+                    update_rc, update_stdout, update_stderr = await self._run_process(
+                        [lake_cmd, "update"],
+                        cwd=self.workspace_dir,
+                        timeout=max(system_config.lean4_proof_timeout, 120),
+                    )
+                if update_rc != 0:
+                    self._mark_workspace_unhealthy(update_stderr or update_stdout)
+                    logger.warning(
+                        "Lean 4 workspace update failed: %s",
+                        (update_stderr or update_stdout).strip(),
+                    )
+                    return False
 
             # The project's lean-toolchain MUST match Mathlib's pinned toolchain,
             # otherwise `lake exe cache get` refuses to download the prebuilt

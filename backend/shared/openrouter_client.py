@@ -34,7 +34,7 @@ class OpenRouterClient:
     # App attribution for OpenRouter leaderboards
     # See: https://openrouter.ai/docs/app-attribution
     APP_URL = "https://intrafere.com/moto-autonomous-home-ai/"
-    APP_TITLE = "MOTO Deep Research Harness"
+    APP_TITLE = "MOTO Autonomous ASI"
     
     def __init__(self, api_key: str):
         self.api_key = api_key
