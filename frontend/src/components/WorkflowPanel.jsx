@@ -3,8 +3,7 @@ import { websocket } from '../services/websocket';
 import { boostAPI, workflowAPI } from '../services/api';
 import './WorkflowPanel.css';
 
-const HOURLY_AUTO_OPEN_INTERVAL_SECONDS = 3600;
-const WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY = 'workflow_panel_last_auto_open_hour';
+const AUTO_OPEN_DELAY_SECONDS = 600;
 
 const formatNumber = (n) => n.toLocaleString();
 
@@ -16,10 +15,7 @@ const formatTime = (totalSeconds) => {
 };
 
 export default function WorkflowPanel({ isRunning }) {
-  const [collapsed, setCollapsed] = useState(() => {
-    const savedState = localStorage.getItem('workflow_panel_collapsed');
-    return savedState === 'true';
-  });
+  const [collapsed, setCollapsed] = useState(true);
   const [mode, setMode] = useState('idle');
   
   // Boost controls state
@@ -39,12 +35,30 @@ export default function WorkflowPanel({ isRunning }) {
   const hasElapsedSyncRef = useRef(false);
   const lastAutoOpenedHourRef = useRef(0);
 
+  // Auto-open: pop open exactly once, 10 minutes after user presses Start.
+  // No persistence. Resets every time isRunning goes true.
+  const hasPoppedThisSession = useRef(false);
+
   const expandPanel = useCallback(() => {
     setCollapsed(false);
     localStorage.setItem('workflow_panel_collapsed', 'false');
   }, []);
 
-  // Fetch boost status and categories when running
+  useEffect(() => {
+    if (isRunning) {
+      hasPoppedThisSession.current = false;
+    }
+  }, [isRunning]);
+
+  useEffect(() => {
+    if (!isRunning || hasPoppedThisSession.current) return;
+    if (localElapsed >= AUTO_OPEN_DELAY_SECONDS) {
+      expandPanel();
+      hasPoppedThisSession.current = true;
+    }
+  }, [isRunning, localElapsed, expandPanel]);
+
+  // Fetch boost status and categories
   const fetchBoostStatus = useCallback(async () => {
     try {
       const statusResponse = await boostAPI.getStatus();
@@ -54,8 +68,6 @@ export default function WorkflowPanel({ isRunning }) {
         setBoostedCategories(statusResponse.status.boosted_categories || []);
         setBoostAlwaysPrefer(statusResponse.status.boost_always_prefer || false);
       }
-      
-      // Always fetch all categories (no mode filter)
       const categoriesResponse = await boostAPI.getCategories('all');
       if (categoriesResponse.success) {
         setAvailableCategories(categoriesResponse.categories || []);
@@ -65,53 +77,11 @@ export default function WorkflowPanel({ isRunning }) {
     }
   }, []);
 
-  // Fetch boost status on mount and when running state changes
-  // ETERNAL: Always fetch boost status, even when not running
   useEffect(() => {
     fetchBoostStatus();
-    
-    // Poll boost status periodically (every 5 seconds)
     const interval = setInterval(fetchBoostStatus, 5000);
     return () => clearInterval(interval);
   }, [fetchBoostStatus]);
-
-  useEffect(() => {
-    if (boostEnabled && isRunning) {
-      expandPanel();
-    }
-  }, [boostEnabled, expandPanel, isRunning]);
-
-  // Clear stale auto-open state when a new workflow session begins
-  useEffect(() => {
-    if (isRunning) {
-      lastAutoOpenedHourRef.current = 0;
-      localStorage.removeItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY);
-    }
-  }, [isRunning]);
-
-  useEffect(() => {
-    if (!isRunning || !hasElapsedSyncRef.current) {
-      return;
-    }
-
-    const elapsedHours = Math.floor(localElapsed / HOURLY_AUTO_OPEN_INTERVAL_SECONDS);
-    if (elapsedHours < 1 || elapsedHours <= lastAutoOpenedHourRef.current) {
-      return;
-    }
-
-    if (collapsed) {
-      expandPanel();
-    }
-
-    lastAutoOpenedHourRef.current = elapsedHours;
-    localStorage.setItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY, elapsedHours.toString());
-  }, [collapsed, expandPanel, isRunning, localElapsed]);
-
-  useEffect(() => {
-    if (!isEditingBoostNext) {
-      setBoostNextInput(boostNextCount > 0 ? boostNextCount.toString() : '');
-    }
-  }, [boostNextCount, isEditingBoostNext]);
 
   useEffect(() => {
     if (!isEditingBoostNext) {
@@ -235,7 +205,6 @@ export default function WorkflowPanel({ isRunning }) {
 
     const handleBoostEnabled = () => {
       setBoostEnabled(true);
-      expandPanel();
       fetchBoostStatus();
     };
 
@@ -263,12 +232,14 @@ export default function WorkflowPanel({ isRunning }) {
       websocket.off('boost_disabled', handleBoostDisabled);
       websocket.off('boost_always_prefer_updated', handleAlwaysPreferUpdated);
     };
-  }, [isRunning, fetchBoostStatus, expandPanel]);
+  }, [isRunning, fetchBoostStatus]);
 
   const toggleCollapse = () => {
-    const newState = !collapsed;
-    setCollapsed(newState);
-    localStorage.setItem('workflow_panel_collapsed', newState.toString());
+    setCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem('workflow_panel_collapsed', next.toString());
+      return next;
+    });
   };
 
   // REMOVED: Conditional rendering that hid panel when no workflow running

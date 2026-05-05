@@ -160,62 +160,6 @@ class BoostManager:
         except Exception as e:
             logger.warning(f"Failed to save boost state: {e}")
     
-    def _load_state(self) -> None:
-        """Load persisted boost state from disk."""
-        try:
-            if os.path.exists(BOOST_STATE_FILE):
-                with open(BOOST_STATE_FILE, 'r', encoding='utf-8') as f:
-                    state = json.load(f)
-                
-                # Restore boost config if it was enabled
-                if state.get('enabled') and state.get('model_id'):
-                    self.boost_config = BoostConfig(
-                        enabled=True,
-                        openrouter_api_key=state.get('api_key', ''),
-                        boost_model_id=state.get('model_id'),
-                        boost_provider=state.get('provider'),
-                        boost_context_window=state.get('context_window', 131072),
-                        boost_max_output_tokens=state.get('max_output_tokens', 25000)
-                    )
-                
-                # Restore boost modes
-                self.boost_next_count = state.get('boost_next_count', 0)
-                self.boosted_categories = set(state.get('boosted_categories', []))
-                self.boost_always_prefer = state.get('boost_always_prefer', False)
-                self.boosted_task_ids = set(state.get('boosted_task_ids', []))
-                
-                logger.info(f"Loaded boost state: enabled={state.get('enabled')}, model={state.get('model_id')}, "
-                           f"next_count={self.boost_next_count}, categories={len(self.boosted_categories)}, "
-                           f"always_prefer={self.boost_always_prefer}")
-        except Exception as e:
-            logger.warning(f"Failed to load boost state: {e}")
-    
-    def _save_state(self) -> None:
-        """Persist current boost state to disk."""
-        try:
-            # Ensure data directory exists
-            os.makedirs(os.path.dirname(BOOST_STATE_FILE), exist_ok=True)
-            
-            state = {
-                'enabled': self.boost_config is not None and self.boost_config.enabled,
-                'model_id': self.boost_config.boost_model_id if self.boost_config else None,
-                'provider': self.boost_config.boost_provider if self.boost_config else None,
-                'context_window': self.boost_config.boost_context_window if self.boost_config else 131072,
-                'max_output_tokens': self.boost_config.boost_max_output_tokens if self.boost_config else 25000,
-                'api_key': self.boost_config.openrouter_api_key if self.boost_config else '',
-                'boost_next_count': self.boost_next_count,
-                'boosted_categories': list(self.boosted_categories),
-                'boost_always_prefer': self.boost_always_prefer,
-                'boosted_task_ids': list(self.boosted_task_ids)
-            }
-            
-            with open(BOOST_STATE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(state, f, indent=2)
-            
-            logger.debug("Boost state saved to disk")
-        except Exception as e:
-            logger.warning(f"Failed to save boost state: {e}")
-    
     def set_broadcast_callback(self, callback: Callable) -> None:
         """Set callback for broadcasting WebSocket events."""
         self._broadcast_callback = callback

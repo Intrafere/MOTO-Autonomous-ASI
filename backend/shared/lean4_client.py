@@ -6,8 +6,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
+import stat
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -103,6 +106,30 @@ _LEAN_WORKSPACE_ERROR_MARKERS: tuple[str, ...] = (
     "imports are out of date",
     "invalid or corrupt .olean",
     "invalid or corrupt olean",
+    "setup-file",
+)
+
+_LEAN_WORKSPACE_COMBINED_MARKERS: tuple[tuple[str, ...], ...] = (
+    ("no such file or directory", ".lake"),
+)
+
+# Lean emits "bad import" when an `import` statement references a module whose
+# .lean source doesn't exist. This is NOT an infrastructure error — it means the
+# proof code has a wrong/stale module path (e.g. Mathlib reorganised its tree).
+# We must NOT let this trigger the expensive workspace-repair loop.
+_BAD_IMPORT_RE = re.compile(
+    r"(?:bad import|unknown module|could not find module)[^\n]*",
+    re.IGNORECASE,
+)
+_BAD_IMPORT_HINT = (
+    "HINT: One or more `import` statements reference Mathlib modules that do not "
+    "exist in the current Mathlib version. Mathlib4 frequently reorganises its "
+    "module tree. Common renames include:\n"
+    "  • Mathlib.Analysis.NormedSpace.Banach → Mathlib.Analysis.Normed.Operator.Banach\n"
+    "  • Mathlib.Analysis.NormedSpace.OperatorNorm → Mathlib.Analysis.Normed.Operator.NormedSpace\n"
+    "  • Mathlib.Topology.MetricSpace.BanachFixedPoint → Mathlib.Topology.MetricSpace.Contracting\n"
+    "Use `import Mathlib` (imports everything) or check the current Mathlib4 source tree "
+    "for the correct module path."
 )
 
 # Markdown fence markers the LLM occasionally emits inside the `lean_code`
@@ -304,7 +331,7 @@ class Lean4Client:
         args: list[str],
         *,
         cwd: Path,
-        timeout: int,
+        timeout: Optional[int] = None,
     ) -> tuple[int, str, str]:
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -313,7 +340,10 @@ class Lean4Client:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            if timeout is not None:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            else:
+                stdout_bytes, stderr_bytes = await process.communicate()
         except asyncio.CancelledError:
             process.kill()
             await process.communicate()
@@ -361,9 +391,19 @@ class Lean4Client:
     def _is_workspace_infrastructure_error(output: str) -> bool:
         text = output or ""
         lowered = text.lower()
-        return bool(_OLEAN_OBJECT_FILE_MISSING_RE.search(text)) or any(
-            marker in lowered for marker in _LEAN_WORKSPACE_ERROR_MARKERS
-        )
+
+        # A "bad import" is a proof-level error (stale/renamed Mathlib module),
+        # not infrastructure failure. Short-circuit to avoid the repair loop.
+        if _BAD_IMPORT_RE.search(text):
+            return False
+
+        if bool(_OLEAN_OBJECT_FILE_MISSING_RE.search(text)):
+            return True
+        if any(marker in lowered for marker in _LEAN_WORKSPACE_ERROR_MARKERS):
+            return True
+        if any(all(part in lowered for part in combo) for combo in _LEAN_WORKSPACE_COMBINED_MARKERS):
+            return True
+        return False
 
     @staticmethod
     def _format_workspace_infrastructure_error(output: str) -> str:
@@ -395,6 +435,41 @@ class Lean4Client:
             )
         return Lean4Result(success=False, error_output=error_output)
 
+    @staticmethod
+    def _is_stale_lake_state(output: str) -> bool:
+        """Detect Lake errors caused by a stale .lake directory from a prior failed clone."""
+        text = (output or "").lower()
+        return (
+            "url has changed" in text
+            or "exited with code 128" in text
+            or ("delete" in text and "packages" in text and "manually" in text)
+        )
+
+    def _wipe_lake_directory(self) -> None:
+        """Remove the .lake directory to give lake update a clean slate."""
+        lake_dir = self.workspace_dir / ".lake"
+        if not lake_dir.exists():
+            return
+        for attempt in range(3):
+            try:
+                shutil.rmtree(lake_dir, onerror=self._rmtree_onerror)
+                logger.info("Removed stale .lake directory at %s", lake_dir)
+                return
+            except OSError as exc:
+                if attempt < 2:
+                    time.sleep(1)
+                else:
+                    logger.warning("Failed to remove .lake directory at %s after 3 attempts: %s", lake_dir, exc)
+
+    @staticmethod
+    def _rmtree_onerror(func: Any, path: str, exc_info: Any) -> None:
+        """Handle permission errors during rmtree by clearing read-only and retrying."""
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+
     async def _repair_workspace_after_infrastructure_error(self, output: str) -> bool:
         logger.warning(
             "Lean 4 workspace infrastructure error detected; invalidating workspace cache and refetching Mathlib artifacts. Diagnostic: %s",
@@ -403,6 +478,7 @@ class Lean4Client:
         async with self._workspace_lock:
             self._workspace_unhealthy_error = ""
             self._workspace_ready = False
+            self._wipe_lake_directory()
             repaired = await self._ensure_workspace_locked()
             if not repaired:
                 self._mark_workspace_unhealthy(output)
@@ -467,18 +543,33 @@ class Lean4Client:
         if needs_bootstrap or not self._workspace_ready:
             logger.info("Bootstrapping Lean 4 workspace at %s", self.workspace_dir)
 
+            # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
             update_rc, update_stdout, update_stderr = await self._run_process(
                 [lake_cmd, "update"],
                 cwd=self.workspace_dir,
-                timeout=max(system_config.lean4_proof_timeout, 120),
             )
             if update_rc != 0:
-                self._mark_workspace_unhealthy(update_stderr or update_stdout)
-                logger.warning(
-                    "Lean 4 workspace update failed: %s",
-                    (update_stderr or update_stdout).strip(),
-                )
-                return False
+                combined_update_output = "\n".join(
+                    part for part in (update_stdout, update_stderr) if part
+                ).strip()
+                lake_dir = self.workspace_dir / ".lake"
+                if lake_dir.exists() and self._is_stale_lake_state(combined_update_output):
+                    logger.warning(
+                        "lake update failed due to stale .lake state; wiping .lake directory and retrying."
+                    )
+                    self._wipe_lake_directory()
+                    # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
+                    update_rc, update_stdout, update_stderr = await self._run_process(
+                        [lake_cmd, "update"],
+                        cwd=self.workspace_dir,
+                    )
+                if update_rc != 0:
+                    self._mark_workspace_unhealthy(update_stderr or update_stdout)
+                    logger.warning(
+                        "Lean 4 workspace update failed: %s",
+                        (update_stderr or update_stdout).strip(),
+                    )
+                    return False
 
             # The project's lean-toolchain MUST match Mathlib's pinned toolchain,
             # otherwise `lake exe cache get` refuses to download the prebuilt
@@ -492,10 +583,10 @@ class Lean4Client:
                 logger.info(
                     "Aligned workspace lean-toolchain with Mathlib; re-running lake update."
                 )
+                # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
                 update_rc, update_stdout, update_stderr = await self._run_process(
                     [lake_cmd, "update"],
                     cwd=self.workspace_dir,
-                    timeout=max(system_config.lean4_proof_timeout, 120),
                 )
                 if update_rc != 0:
                     self._mark_workspace_unhealthy(update_stderr or update_stdout)
@@ -518,6 +609,29 @@ class Lean4Client:
                 )
                 return False
 
+            # Sanity check: verify the cache is actually usable before marking ready.
+            # lake exe cache get can report success while files are missing on disk.
+            # NO TIMEOUT: First-time elaboration of `import Mathlib` against a fresh
+            # olean cache can take too long on a cold machine even when all
+            # files are present. A timeout here would false-report failure, wipe a
+            # valid .lake directory, and loop forever. Do NOT add a timeout.
+            sanity_rc, sanity_stdout, sanity_stderr = await self._run_process(
+                [lake_cmd, "env", self.lean_path or self._resolve_executable("lean"),
+                 root_file_path.name],
+                cwd=self.workspace_dir,
+            )
+            if sanity_rc != 0:
+                sanity_output = self._combined_process_output(sanity_stdout, sanity_stderr)
+                if self._is_workspace_infrastructure_error(sanity_output):
+                    logger.warning(
+                        "Lean 4 workspace sanity check failed — Mathlib cache is incomplete. "
+                        "Wiping .lake and marking unhealthy. Details: %s",
+                        sanity_output[:500],
+                    )
+                    self._wipe_lake_directory()
+                self._mark_workspace_unhealthy(sanity_output)
+                return False
+
         self._workspace_ready = True
         self._workspace_unhealthy_error = ""
         return True
@@ -528,13 +642,14 @@ class Lean4Client:
         lake_cmd: str,
         cwd: Path,
     ) -> tuple[int, str, str]:
-        """Fetch Mathlib's cache, retrying once after pruning corrupt downloads."""
-        timeout = max(system_config.lean4_proof_timeout, 600)
+        """Fetch Mathlib's cache, retrying once after pruning corrupt downloads.
+
+        NO TIMEOUT: This downloads ~6 GB of prebuilt olean files. Do NOT add a timeout.
+        """
         cache_args = [lake_cmd, "exe", "cache", "get"]
         cache_rc, cache_stdout, cache_stderr = await self._run_process(
             cache_args,
             cwd=cwd,
-            timeout=timeout,
         )
         if cache_rc == 0:
             return cache_rc, cache_stdout, cache_stderr
@@ -557,7 +672,6 @@ class Lean4Client:
         return await self._run_process(
             cache_args,
             cwd=cwd,
-            timeout=timeout,
         )
 
     @staticmethod
@@ -722,6 +836,21 @@ class Lean4Client:
         if _NO_GOALS_HINT in error_output:
             return error_output
         return f"{_NO_GOALS_HINT}\n\n{error_output}"
+
+    @staticmethod
+    def _annotate_bad_import_hint(error_output: str) -> str:
+        """Prepend a hint when Lean reports a bad/unknown import.
+
+        This tells the LLM that module paths have been renamed and suggests
+        alternatives, preventing it from assuming the workspace is broken.
+        """
+        if not error_output:
+            return error_output
+        if not _BAD_IMPORT_RE.search(error_output):
+            return error_output
+        if _BAD_IMPORT_HINT in error_output:
+            return error_output
+        return f"{_BAD_IMPORT_HINT}\n\n{error_output}"
 
     @staticmethod
     def _format_tactic_lines(tactic_list: list[str]) -> list[str]:
@@ -900,7 +1029,9 @@ class Lean4Client:
         error_output = combined_output or "Lean 4 rejected the proof without additional diagnostics."
         return Lean4Result(
             success=False,
-            error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+            error_output=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output))
+            ),
             goal_states=goal_states,
             raw_stderr=stderr.strip(),
         )
@@ -1063,10 +1194,14 @@ class Lean4Client:
         error_output = tactic_error_slice or combined_output or "Lean 4 rejected the tactic script without additional diagnostics."
         return Lean4Result(
             success=False,
-            error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+            error_output=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output))
+            ),
             goal_states=goal_states,
             raw_stderr=stderr.strip(),
-            tactic_error_slice=self._annotate_no_goals_hint(tactic_error_slice),
+            tactic_error_slice=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(tactic_error_slice)
+            ),
             failing_tactic_index=failing_tactic_index,
         )
 
@@ -1484,10 +1619,14 @@ class Lean4LspClient(Lean4Client):
 
         return Lean4Result(
             success=False,
-            error_output=self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output)),
+            error_output=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(self._prioritize_errors_in_output(error_output))
+            ),
             goal_states=goal_states,
             raw_stderr=raw_stderr,
-            tactic_error_slice=self._annotate_no_goals_hint(tactic_error_slice),
+            tactic_error_slice=self._annotate_bad_import_hint(
+                self._annotate_no_goals_hint(tactic_error_slice)
+            ),
             failing_tactic_index=failing_tactic_index,
         )
 

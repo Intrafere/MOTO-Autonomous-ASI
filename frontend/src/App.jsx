@@ -231,7 +231,7 @@ function App() {
   // Track WorkflowPanel collapse state for sliding boost buttons
   const [workflowPanelCollapsed, setWorkflowPanelCollapsed] = useState(() => {
     const savedState = localStorage.getItem('workflow_panel_collapsed');
-    return savedState === 'true';
+    return savedState !== 'false';
   });
 
   // Update notice banner state (dismissible per session, re-appears on restart)
@@ -2039,7 +2039,7 @@ function App() {
   useEffect(() => {
     const handleStorageChange = () => {
       const savedState = localStorage.getItem('workflow_panel_collapsed');
-      setWorkflowPanelCollapsed(savedState === 'true');
+      setWorkflowPanelCollapsed(savedState !== 'false');
     };
     
     const interval = setInterval(handleStorageChange, 500);

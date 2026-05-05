@@ -16,7 +16,7 @@ import aiofiles
 
 from backend.shared.config import system_config
 from backend.shared.models import FailedProofCandidate, ProofCandidate, ProofRecord
-from backend.shared.path_safety import validate_single_path_component
+from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.autonomous.prompts.proof_prompts import format_failure_hints_for_injection
 
 logger = logging.getLogger(__name__)
@@ -768,20 +768,23 @@ class ProofDatabase:
         if session_id == "legacy":
             proofs_dir = Path(system_config.data_dir) / "proofs"
         else:
-            proofs_dir = Path(system_config.auto_sessions_base_dir) / validate_single_path_component(session_id, "session ID") / "proofs"
+            safe_session = validate_single_path_component(session_id, "session ID")
+            proofs_dir = resolve_path_within_root(
+                Path(system_config.auto_sessions_base_dir), safe_session, "proofs"
+            )
 
         if not proofs_dir.exists():
             return None
 
         safe_id = validate_single_path_component(proof_id, "proof ID")
-        record_path = proofs_dir / f"proof_{safe_id}.json"
-        lean_path = proofs_dir / f"proof_{safe_id}_lean.lean"
+        record_path = resolve_path_within_root(proofs_dir, f"proof_{safe_id}.json")
+        lean_path = resolve_path_within_root(proofs_dir, f"proof_{safe_id}_lean.lean")
 
         if not record_path.exists():
             return None
 
         try:
-            async with aiofiles.open(record_path, "r", encoding="utf-8") as handle:
+            async with aiofiles.open(str(record_path), "r", encoding="utf-8") as handle:
                 proof_data = json.loads(await handle.read())
         except Exception as exc:
             logger.error("Failed to read proof %s from session %s: %s", proof_id, session_id, exc)
@@ -790,7 +793,7 @@ class ProofDatabase:
         lean_code = ""
         if lean_path.exists():
             try:
-                async with aiofiles.open(lean_path, "r", encoding="utf-8") as handle:
+                async with aiofiles.open(str(lean_path), "r", encoding="utf-8") as handle:
                     lean_code = await handle.read()
             except Exception:
                 lean_code = str(proof_data.get("lean_code", "") or "")
