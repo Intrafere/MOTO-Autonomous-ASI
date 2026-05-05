@@ -359,4 +359,4 @@ async def generate_pdf(req: PDFRequest):
         )
     except Exception as e:
         logger.error(f"PDF generation failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="PDF generation failed")

@@ -683,7 +683,7 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
         import traceback
         error_details = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         logger.error(f"Failed to start autonomous research: {error_details}")
-        raise HTTPException(status_code=500, detail=f"Failed to start autonomous research: {e}")
+        raise HTTPException(status_code=500, detail="Failed to start autonomous research")
 
 
 @router.post("/stop")
@@ -710,7 +710,7 @@ async def stop_autonomous_research():
         
     except Exception as e:
         logger.error(f"Failed to stop autonomous research: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/clear")
@@ -768,7 +768,7 @@ async def clear_autonomous_research(confirm: bool = False):
         logger.error(f"Failed to clear autonomous research data: {error_details}")
         raise HTTPException(
             status_code=500, 
-            detail=f"Failed to clear autonomous research data: {e}"
+            detail="Failed to clear autonomous research data"
         )
 
 
@@ -844,7 +844,7 @@ async def get_autonomous_status():
         
     except Exception as e:
         logger.error(f"Failed to get autonomous status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/brainstorms")
@@ -870,7 +870,7 @@ async def get_all_brainstorms():
         
     except Exception as e:
         logger.error(f"Failed to get brainstorms: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/papers")
@@ -926,7 +926,7 @@ async def get_all_papers():
         
     except Exception as e:
         logger.error(f"Failed to get papers: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/brainstorm/{topic_id}")
@@ -959,7 +959,7 @@ async def get_brainstorm(topic_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get brainstorm {topic_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/paper/{paper_id}")
@@ -995,7 +995,7 @@ async def get_paper(paper_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get paper {paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/paper-history")
@@ -1010,7 +1010,7 @@ async def get_paper_history():
         }
     except Exception as e:
         logger.error(f"Failed to get Stage 2 paper history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/paper-history/{session_id}/{paper_id}")
@@ -1032,7 +1032,7 @@ async def get_history_paper(session_id: str, paper_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get history paper {session_id}/{paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/current-paper-progress")
@@ -1123,7 +1123,7 @@ async def get_current_paper_progress():
         
     except Exception as e:
         logger.error(f"Failed to get current paper progress: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/stats")
@@ -1140,7 +1140,7 @@ async def get_stats():
         
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/sessions")
@@ -1162,7 +1162,7 @@ async def list_sessions():
         
     except Exception as e:
         logger.error(f"Failed to list sessions: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/current-session")
@@ -1184,7 +1184,7 @@ async def get_current_session():
         
     except Exception as e:
         logger.error(f"Failed to get current session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/force-paper-writing")
@@ -1248,7 +1248,7 @@ async def force_paper_writing():
         raise
     except Exception as e:
         logger.error(f"Failed to force paper writing: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/skip-critique")
@@ -1282,7 +1282,7 @@ async def skip_critique():
         raise
     except Exception as e:
         logger.error(f"Failed to skip critique: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/reset-current-paper")
@@ -1321,7 +1321,7 @@ async def reset_current_paper(confirm: bool = False):
         }
     except Exception as e:
         logger.error(f"Failed to reset paper: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/force-tier3")
@@ -1425,7 +1425,7 @@ async def force_tier3(mode: str = "complete_current"):
         raise
     except Exception as e:
         logger.error(f"Failed to force Tier 3: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/save-current-compiler-paper")
@@ -1505,7 +1505,7 @@ async def save_current_compiler_paper():
         
     except Exception as e:
         logger.error(f"Failed to save current compiler paper: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/brainstorm/{topic_id}")
@@ -1568,7 +1568,7 @@ async def delete_brainstorm(topic_id: str, confirm: bool = False):
         raise
     except Exception as e:
         logger.error(f"Failed to delete brainstorm {topic_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/paper/{paper_id}")
@@ -1597,7 +1597,7 @@ async def delete_paper(paper_id: str, confirm: bool = False):
         raise
     except Exception as e:
         logger.error(f"Failed to delete paper {paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/paper-history/{session_id}/{paper_id}")
@@ -1631,7 +1631,7 @@ async def delete_history_paper(session_id: str, paper_id: str, confirm: bool = F
         raise
     except Exception as e:
         logger.error(f"Failed to delete history paper {session_id}/{paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -1699,7 +1699,7 @@ async def get_tier3_status():
         
     except Exception as e:
         logger.error(f"Failed to get Tier 3 status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/tier3/final-answer")
@@ -1784,7 +1784,7 @@ async def get_final_answer():
         
     except Exception as e:
         logger.error(f"Failed to get final answer: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/tier3/volume-progress")
@@ -1839,7 +1839,7 @@ async def get_volume_progress():
         
     except Exception as e:
         logger.error(f"Failed to get volume progress: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/tier3/rejections")
@@ -1861,7 +1861,7 @@ async def get_tier3_rejections(phase: str = None):
         
     except Exception as e:
         logger.error(f"Failed to get Tier 3 rejections: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/tier3/clear")
@@ -1903,7 +1903,7 @@ async def clear_tier3_data(confirm: bool = False):
         raise
     except Exception as e:
         logger.error(f"Failed to clear Tier 3 data: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -1938,7 +1938,7 @@ async def get_final_answer_library():
         }
     except Exception as e:
         logger.error(f"Failed to get final answer library: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/final-answer-library/{answer_id}")
@@ -1972,7 +1972,7 @@ async def get_final_answer_by_id(answer_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get final answer {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # =============================================================================
@@ -1996,7 +1996,7 @@ async def get_final_answer_archived_papers(answer_id: str):
         return {"papers": papers}
     except Exception as e:
         logger.error(f"Failed to get archived papers for {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/final-answer/{answer_id}/archive/papers/{paper_id}")
@@ -2022,7 +2022,7 @@ async def get_final_answer_archived_paper(answer_id: str, paper_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get archived paper {paper_id} for {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/final-answer/{answer_id}/archive/brainstorms")
@@ -2042,7 +2042,7 @@ async def get_final_answer_archived_brainstorms(answer_id: str):
         return {"brainstorms": brainstorms}
     except Exception as e:
         logger.error(f"Failed to get archived brainstorms for {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/final-answer/{answer_id}/archive/brainstorms/{topic_id}")
@@ -2068,7 +2068,7 @@ async def get_final_answer_archived_brainstorm(answer_id: str, topic_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get archived brainstorm {topic_id} for {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -2117,7 +2117,7 @@ async def request_paper_critique(paper_id: str, request: CritiqueRequest = None)
         raise
     except Exception as e:
         logger.error(f"Failed to request paper critique for {paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/paper/{paper_id}/critiques")
@@ -2148,7 +2148,7 @@ async def get_paper_critiques(paper_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get critiques for paper {paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/paper/{paper_id}/critiques")
@@ -2192,7 +2192,7 @@ async def delete_paper_critiques(paper_id: str, confirm: bool = False):
         raise
     except Exception as e:
         logger.error(f"Failed to delete critiques for paper {paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -2234,7 +2234,7 @@ async def request_history_paper_critique(
         raise
     except Exception as e:
         logger.error(f"Failed to request history critique for {session_id}/{paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/paper-history/{session_id}/{paper_id}/critiques")
@@ -2258,7 +2258,7 @@ async def get_history_paper_critiques(session_id: str, paper_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get history critiques for {session_id}/{paper_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================================
@@ -2449,7 +2449,7 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         raise
     except Exception as e:
         logger.error(f"Failed to request final answer critique for {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/final-answer-library/{answer_id}/critiques")
@@ -2490,7 +2490,7 @@ async def get_final_answer_critiques(answer_id: str):
         raise
     except Exception as e:
         logger.error(f"Failed to get critiques for final answer {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.delete("/final-answer-library/{answer_id}/critiques")
@@ -2535,7 +2535,7 @@ async def delete_final_answer_critiques(answer_id: str, confirm: bool = False):
         raise
     except Exception as e:
         logger.error(f"Failed to delete critiques for final answer {answer_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/default-critique-prompt")
@@ -2579,7 +2579,7 @@ async def get_autonomous_api_logs(limit: int = 100):
         }
     except Exception as e:
         logger.error(f"Failed to get autonomous API logs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/api-logs/clear")
@@ -2600,7 +2600,7 @@ async def clear_autonomous_api_logs():
         }
     except Exception as e:
         logger.error(f"Failed to clear autonomous API logs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/api-logs/stats")
@@ -2620,4 +2620,4 @@ async def get_autonomous_api_stats():
         }
     except Exception as e:
         logger.error(f"Failed to get autonomous API stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

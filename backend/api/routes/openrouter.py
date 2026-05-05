@@ -179,12 +179,12 @@ async def set_api_key(request: SetApiKeyRequest) -> Dict[str, Any]:
             
     except SecretStoreError as e:
         logger.error(f"Failed to persist OpenRouter API key securely: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to set OpenRouter API key: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to validate API key: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to validate API key")
 
 
 @router.delete("/api/openrouter/api-key")
@@ -218,10 +218,10 @@ async def clear_api_key() -> Dict[str, Any]:
         }
     except SecretStoreError as e:
         logger.error(f"Failed to clear OpenRouter API key from secure storage: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     except Exception as e:
         logger.error(f"Failed to clear OpenRouter API key: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to clear API key: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to clear API key")
 
 
 @router.get("/api/openrouter/api-key-status")
@@ -285,7 +285,7 @@ async def get_models(api_key: Optional[str] = None, free_only: bool = False) -> 
         raise
     except Exception as e:
         logger.error(f"Failed to fetch OpenRouter models: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch models: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch models")
 
 
 @router.get("/api/openrouter/providers/{model_id:path}")
@@ -341,7 +341,7 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
         raise
     except Exception as e:
         logger.error(f"Failed to fetch providers for model {model_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch providers: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch providers")
 
 
 @router.get("/api/model-cache")
@@ -397,7 +397,7 @@ async def set_free_model_settings(request: FreeModelSettings) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to update free model settings: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/api/openrouter/test-connection")
@@ -470,4 +470,4 @@ async def reset_credit_exhaustion() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to reset credit exhaustion: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to reset: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to reset")

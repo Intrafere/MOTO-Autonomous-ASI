@@ -73,7 +73,7 @@ async def get_workflow_predictions() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get workflow predictions: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get predictions: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get predictions")
 
 
 @router.get("/api/workflow/history")
@@ -99,7 +99,7 @@ async def get_workflow_history(limit: int = 50) -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"Failed to get workflow history: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get history")
 
 
 @router.get("/api/token-stats")
