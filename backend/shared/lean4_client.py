@@ -103,6 +103,11 @@ _LEAN_WORKSPACE_ERROR_MARKERS: tuple[str, ...] = (
     "imports are out of date",
     "invalid or corrupt .olean",
     "invalid or corrupt olean",
+    "setup-file",
+)
+
+_LEAN_WORKSPACE_COMBINED_MARKERS: tuple[tuple[str, ...], ...] = (
+    ("no such file or directory", ".lake"),
 )
 
 # Markdown fence markers the LLM occasionally emits inside the `lean_code`
@@ -364,9 +369,13 @@ class Lean4Client:
     def _is_workspace_infrastructure_error(output: str) -> bool:
         text = output or ""
         lowered = text.lower()
-        return bool(_OLEAN_OBJECT_FILE_MISSING_RE.search(text)) or any(
-            marker in lowered for marker in _LEAN_WORKSPACE_ERROR_MARKERS
-        )
+        if bool(_OLEAN_OBJECT_FILE_MISSING_RE.search(text)):
+            return True
+        if any(marker in lowered for marker in _LEAN_WORKSPACE_ERROR_MARKERS):
+            return True
+        if any(all(part in lowered for part in combo) for combo in _LEAN_WORKSPACE_COMBINED_MARKERS):
+            return True
+        return False
 
     @staticmethod
     def _format_workspace_infrastructure_error(output: str) -> str:
