@@ -7,10 +7,6 @@ const HOURLY_AUTO_OPEN_INTERVAL_SECONDS = 3600;
 const WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY = 'workflow_panel_last_auto_open_hour';
 
 const formatNumber = (n) => n.toLocaleString();
-const getStoredAutoOpenHour = () => {
-  const savedHour = Number.parseInt(localStorage.getItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY) || '0', 10);
-  return Number.isFinite(savedHour) && savedHour > 0 ? savedHour : 0;
-};
 
 const formatTime = (totalSeconds) => {
   const h = Math.floor(totalSeconds / 3600);
@@ -20,7 +16,10 @@ const formatTime = (totalSeconds) => {
 };
 
 export default function WorkflowPanel({ isRunning }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    const savedState = localStorage.getItem('workflow_panel_collapsed');
+    return savedState === 'true';
+  });
   const [mode, setMode] = useState('idle');
   
   // Boost controls state
@@ -38,7 +37,7 @@ export default function WorkflowPanel({ isRunning }) {
   const [localElapsed, setLocalElapsed] = useState(0);
   const lastSyncRef = useRef(Date.now());
   const hasElapsedSyncRef = useRef(false);
-  const lastAutoOpenedHourRef = useRef(getStoredAutoOpenHour());
+  const lastAutoOpenedHourRef = useRef(0);
 
   const expandPanel = useCallback(() => {
     setCollapsed(false);
@@ -77,21 +76,18 @@ export default function WorkflowPanel({ isRunning }) {
   }, [fetchBoostStatus]);
 
   useEffect(() => {
-    if (boostEnabled) {
+    if (boostEnabled && isRunning) {
       expandPanel();
     }
-  }, [boostEnabled, expandPanel]);
+  }, [boostEnabled, expandPanel, isRunning]);
 
+  // Clear stale auto-open state when a new workflow session begins
   useEffect(() => {
-    if (!hasElapsedSyncRef.current) {
-      return;
-    }
-
-    if (localElapsed < 60 && lastAutoOpenedHourRef.current !== 0) {
+    if (isRunning) {
       lastAutoOpenedHourRef.current = 0;
-      localStorage.setItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY, '0');
+      localStorage.removeItem(WORKFLOW_PANEL_AUTO_OPEN_HOUR_KEY);
     }
-  }, [localElapsed]);
+  }, [isRunning]);
 
   useEffect(() => {
     if (!isRunning || !hasElapsedSyncRef.current) {
@@ -262,14 +258,6 @@ export default function WorkflowPanel({ isRunning }) {
       websocket.off('boost_always_prefer_updated', handleAlwaysPreferUpdated);
     };
   }, [isRunning, fetchBoostStatus, expandPanel]);
-
-  // Load collapsed state from localStorage
-  useEffect(() => {
-    const savedState = localStorage.getItem('workflow_panel_collapsed');
-    if (savedState !== null) {
-      setCollapsed(savedState === 'true');
-    }
-  }, []);
 
   const toggleCollapse = () => {
     const newState = !collapsed;
