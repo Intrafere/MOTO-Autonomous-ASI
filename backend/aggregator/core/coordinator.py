@@ -642,7 +642,7 @@ class Coordinator:
                 if self.broadcast_callback:
                     await self.broadcast_callback("free_models_exhausted", {
                         "role_id": "aggregator_validator",
-                        "message": str(e),
+                        "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except Exception as e:
@@ -744,7 +744,7 @@ class Coordinator:
                 if self.broadcast_callback:
                     await self.broadcast_callback("free_models_exhausted", {
                         "role_id": "aggregator_single_model",
-                        "message": str(e),
+                        "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             except Exception as e:
@@ -1024,7 +1024,7 @@ class Coordinator:
             logger.error(f"Cleanup review failed: {e}", exc_info=True)
             await self._broadcast("cleanup_review_error", {
                 "review_number": self.cleanup_reviews_performed,
-                "error": str(e)
+                "error": "Cleanup review encountered an internal error"
             })
     
     async def _on_training_update(self) -> None:
@@ -1110,7 +1110,7 @@ class Coordinator:
         except Exception as e:
             logger.error(f"Incremental re-chunking FAILED: {e}", exc_info=True)
             await self._broadcast("rechunk_error", {
-                "error": str(e),
+                "error": "Incremental re-chunking failed",
                 "message": "Incremental re-chunking failed but system continues"
             })
         finally:

@@ -80,7 +80,7 @@ async def check_lm_studio_availability() -> Dict[str, Any]:
             "has_models": False,
             "model_count": 0,
             "models": [],
-            "error": str(e)
+            "error": "Failed to check LM Studio availability"
         }
 
 
@@ -436,7 +436,7 @@ async def test_connection(request: SetApiKeyRequest) -> Dict[str, Any]:
             "success": True,  # Endpoint worked
             "connected": False,
             "model_count": 0,
-            "message": f"Failed to connect: {str(e)}"
+            "message": "Failed to connect to OpenRouter"
         }
 
 

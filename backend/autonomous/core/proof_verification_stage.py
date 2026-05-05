@@ -797,7 +797,7 @@ class ProofVerificationStage:
                     "novel_count": result.novel_count,
                     "verified_count": result.verified_count,
                     "total_candidates": result.total_candidates,
-                    "message": str(exc),
+                    "message": "Proof verification encountered an error",
                 },
             )
             return result

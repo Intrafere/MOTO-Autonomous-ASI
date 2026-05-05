@@ -1996,7 +1996,7 @@ class AutonomousCoordinator:
                 logger.warning(f"AutonomousCoordinator: all free models exhausted: {e}")
                 await self._broadcast("free_models_exhausted", {
                     "role_id": "autonomous",
-                    "message": str(e),
+                    "message": "All free models exhausted, waiting to retry",
                 })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
 
@@ -2399,7 +2399,7 @@ class AutonomousCoordinator:
                 logger.warning(f"Resumed research: all free models exhausted: {e}")
                 await self._broadcast("free_models_exhausted", {
                     "role_id": "autonomous_resumed",
-                    "message": str(e),
+                    "message": "All free models exhausted, waiting to retry",
                 })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
 
@@ -3642,8 +3642,8 @@ class AutonomousCoordinator:
             return {"success": False, "result": "error", "message": "Invalid mode or state"}
             
         except Exception as e:
-            logger.error(f"Error forcing Tier 3: {e}")
-            return {"success": False, "result": "error", "message": str(e)}
+            logger.error(f"Error forcing Tier 3: {e}", exc_info=True)
+            return {"success": False, "result": "error", "message": "An internal error occurred during Tier 3 processing"}
     
     def _should_run_completion_review(self) -> bool:
         """Check if completion review should run.

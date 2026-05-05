@@ -559,7 +559,7 @@ class APIClientManager:
                     "error_type": "privacy_policy",
                     "model": boost_model,
                     "role_id": role_id,
-                    "message": str(e),
+                    "message": "Model requires privacy policy acceptance",
                     "solution_url": "https://openrouter.ai/settings/privacy",
                     "solution_text": (
                         "To use free models on OpenRouter:\n\n"
@@ -616,7 +616,7 @@ class APIClientManager:
                 logger.warning(f"Boost credits exhausted for task {task_id}, using primary model")
                 await self._broadcast("boost_credits_exhausted", {
                     "task_id": task_id,
-                    "message": str(e)
+                    "message": "Boost credits exhausted, falling back to primary model"
                 })
                 # Continue to primary model routing below
                 
@@ -874,7 +874,7 @@ class APIClientManager:
                         "error_type": "privacy_policy",
                         "model": openrouter_model,
                         "role_id": role_id,
-                        "message": str(e),
+                        "message": "Model requires privacy policy acceptance",
                         "solution_url": "https://openrouter.ai/settings/privacy",
                         "solution_text": (
                             "To use free models on OpenRouter:\n\n"
@@ -966,7 +966,7 @@ class APIClientManager:
                     await self._broadcast("openrouter_fallback", {
                         "role_id": role_id,
                         "reason": "credit_exhaustion",
-                        "message": str(e),
+                        "message": "Credits exhausted, falling back to alternative model",
                         "fallback_model": fallback_model
                     })
                     

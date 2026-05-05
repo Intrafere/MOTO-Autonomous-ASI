@@ -707,7 +707,7 @@ class CompilerCoordinator:
             logger.warning(f"Compiler: all free models exhausted: {e}")
             await self._broadcast("free_models_exhausted", {
                 "role_id": "compiler",
-                "message": str(e),
+                "message": "All free models exhausted, waiting to retry",
             })
             await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             if self.is_running:
@@ -716,8 +716,7 @@ class CompilerCoordinator:
             logger.error(f"Compiler workflow error: {e}", exc_info=True)
             self.is_running = False
             await self._broadcast("compiler_error", {
-                "error": str(e),
-                "traceback": traceback.format_exc(),
+                "error": "Compiler workflow encountered an internal error",
                 "mode": self.current_mode,
                 "total_submissions": self.total_submissions
             })

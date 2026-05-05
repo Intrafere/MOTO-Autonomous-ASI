@@ -753,12 +753,12 @@ async def clear_autonomous_research(confirm: bool = False):
                 logger.error(f"Critical errors during clear: {error_msg}")
                 raise HTTPException(
                     status_code=500, 
-                    detail=f"Failed to clear critical data (brainstorms/papers/RAG). Error: {error_msg}"
+                    detail="Failed to clear critical data (brainstorms/papers/RAG)"
                 )
             else:
                 # Generic RuntimeError - treat as failure
                 logger.error(f"Error during clear: {error_msg}")
-                raise HTTPException(status_code=500, detail=error_msg)
+                raise HTTPException(status_code=500, detail="Failed to clear autonomous research data")
         
     except HTTPException:
         raise
@@ -1406,7 +1406,7 @@ async def force_tier3(mode: str = "complete_current"):
             # Actual failure to initiate/run Tier 3
             raise HTTPException(
                 status_code=500,
-                detail=result.get("message", "Failed to trigger Tier 3 final answer generation")
+                detail="Failed to trigger Tier 3 final answer generation"
             )
         
         # Success cases: "initiated", "no_answer_known", or "complete"
