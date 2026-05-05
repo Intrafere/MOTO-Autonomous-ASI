@@ -32,6 +32,8 @@ export default function WorkflowPanel({ isRunning }) {
   const [showPerModel, setShowPerModel] = useState(false);
   const [localElapsed, setLocalElapsed] = useState(0);
   const lastSyncRef = useRef(Date.now());
+  const hasElapsedSyncRef = useRef(false);
+  const lastAutoOpenedHourRef = useRef(0);
 
   // Auto-open: pop open exactly once, 10 minutes after user presses Start.
   // No persistence. Resets every time isRunning goes true.
@@ -128,10 +130,13 @@ export default function WorkflowPanel({ isRunning }) {
 
   // Token stats: initial fetch on mount and when isRunning changes
   useEffect(() => {
+    hasElapsedSyncRef.current = false;
+
     const fetchTokenStats = async () => {
       try {
         const resp = await workflowAPI.getTokenStats();
         if (resp.success) {
+          hasElapsedSyncRef.current = true;
           setTokenStats(resp);
           setLocalElapsed(resp.elapsed_seconds || 0);
           lastSyncRef.current = Date.now();
@@ -144,6 +149,7 @@ export default function WorkflowPanel({ isRunning }) {
   // Token stats: listen for real-time WebSocket updates
   useEffect(() => {
     const handleTokenUpdate = (data) => {
+      hasElapsedSyncRef.current = true;
       setTokenStats(data);
       setLocalElapsed(data.elapsed_seconds || 0);
       lastSyncRef.current = Date.now();
