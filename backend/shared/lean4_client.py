@@ -304,7 +304,7 @@ class Lean4Client:
         args: list[str],
         *,
         cwd: Path,
-        timeout: int,
+        timeout: Optional[int] = None,
     ) -> tuple[int, str, str]:
         process = await asyncio.create_subprocess_exec(
             *args,
@@ -313,7 +313,10 @@ class Lean4Client:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            if timeout is not None:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            else:
+                stdout_bytes, stderr_bytes = await process.communicate()
         except asyncio.CancelledError:
             process.kill()
             await process.communicate()
@@ -488,10 +491,10 @@ class Lean4Client:
         if needs_bootstrap or not self._workspace_ready:
             logger.info("Bootstrapping Lean 4 workspace at %s", self.workspace_dir)
 
+            # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
             update_rc, update_stdout, update_stderr = await self._run_process(
                 [lake_cmd, "update"],
                 cwd=self.workspace_dir,
-                timeout=max(system_config.lean4_proof_timeout, 120),
             )
             if update_rc != 0:
                 combined_update_output = "\n".join(
@@ -503,10 +506,10 @@ class Lean4Client:
                         "lake update failed due to stale .lake state; wiping .lake directory and retrying."
                     )
                     self._wipe_lake_directory()
+                    # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
                     update_rc, update_stdout, update_stderr = await self._run_process(
                         [lake_cmd, "update"],
                         cwd=self.workspace_dir,
-                        timeout=max(system_config.lean4_proof_timeout, 120),
                     )
                 if update_rc != 0:
                     self._mark_workspace_unhealthy(update_stderr or update_stdout)
@@ -528,10 +531,10 @@ class Lean4Client:
                 logger.info(
                     "Aligned workspace lean-toolchain with Mathlib; re-running lake update."
                 )
+                # NO TIMEOUT: lake update clones the multi-GB Mathlib repo. Do NOT add a timeout here.
                 update_rc, update_stdout, update_stderr = await self._run_process(
                     [lake_cmd, "update"],
                     cwd=self.workspace_dir,
-                    timeout=max(system_config.lean4_proof_timeout, 120),
                 )
                 if update_rc != 0:
                     self._mark_workspace_unhealthy(update_stderr or update_stdout)
@@ -564,13 +567,14 @@ class Lean4Client:
         lake_cmd: str,
         cwd: Path,
     ) -> tuple[int, str, str]:
-        """Fetch Mathlib's cache, retrying once after pruning corrupt downloads."""
-        timeout = max(system_config.lean4_proof_timeout, 600)
+        """Fetch Mathlib's cache, retrying once after pruning corrupt downloads.
+
+        NO TIMEOUT: This downloads ~6 GB of prebuilt olean files. Do NOT add a timeout.
+        """
         cache_args = [lake_cmd, "exe", "cache", "get"]
         cache_rc, cache_stdout, cache_stderr = await self._run_process(
             cache_args,
             cwd=cwd,
-            timeout=timeout,
         )
         if cache_rc == 0:
             return cache_rc, cache_stdout, cache_stderr
@@ -593,7 +597,6 @@ class Lean4Client:
         return await self._run_process(
             cache_args,
             cwd=cwd,
-            timeout=timeout,
         )
 
     @staticmethod
