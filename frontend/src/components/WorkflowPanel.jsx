@@ -113,6 +113,12 @@ export default function WorkflowPanel({ isRunning }) {
     }
   }, [boostNextCount, isEditingBoostNext]);
 
+  useEffect(() => {
+    if (!isEditingBoostNext) {
+      setBoostNextInput(boostNextCount > 0 ? boostNextCount.toString() : '');
+    }
+  }, [boostNextCount, isEditingBoostNext]);
+
   // Handle setting boost next count
   const handleSetBoostNextCount = async () => {
     const count = parseInt(boostNextInput, 10);

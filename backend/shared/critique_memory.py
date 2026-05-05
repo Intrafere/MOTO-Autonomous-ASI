@@ -118,6 +118,69 @@ def _resolve_trusted_critiques_dir(
     return _resolve_session_critiques_dir(candidate_dir, paper_type)
 
 
+def _get_legacy_critiques_dir(paper_type: PaperType) -> Path:
+    """Return the trusted legacy directory for a critique storage type."""
+    data_dir = _get_legacy_data_dir()
+
+    if paper_type == "autonomous_paper":
+        return resolve_path_within_root(data_dir, "auto_papers")
+
+    if paper_type == "final_answer":
+        return resolve_path_within_root(data_dir, "auto_final_answer")
+
+    if paper_type == "compiler_paper":
+        return data_dir
+
+    raise ValueError(f"Unknown paper_type: {paper_type}")
+
+
+def _resolve_session_critiques_dir(base_dir: Path, paper_type: PaperType) -> Path:
+    """
+    Rebuild a session-aware critique directory from validated components.
+
+    This prevents callers from passing arbitrary absolute paths into critique
+    file operations. Only `<session_id>/papers` and `<session_id>/final_answer`
+    directories under the trusted sessions root are allowed.
+    """
+    sessions_root = Path(system_config.auto_sessions_base_dir)
+    candidate_dir = Path(base_dir)
+    expected_leaf = "papers" if paper_type == "autonomous_paper" else "final_answer"
+
+    try:
+        relative_dir = candidate_dir.resolve(strict=False).relative_to(
+            sessions_root.resolve(strict=False)
+        )
+    except ValueError as exc:
+        raise ValueError(f"Untrusted critique storage directory: {base_dir}") from exc
+
+    if len(relative_dir.parts) != 2 or relative_dir.parts[1] != expected_leaf:
+        raise ValueError(f"Untrusted critique storage directory: {base_dir}")
+
+    safe_session_id = validate_single_path_component(relative_dir.parts[0], "session ID")
+    return resolve_path_within_root(sessions_root, safe_session_id, expected_leaf)
+
+
+def _resolve_trusted_critiques_dir(
+    paper_type: PaperType,
+    base_dir: Optional[Path] = None,
+) -> Path:
+    """
+    Resolve critique storage to a trusted legacy or session-scoped directory.
+    """
+    if paper_type == "compiler_paper":
+        return _get_legacy_critiques_dir(paper_type)
+
+    legacy_dir = _get_legacy_critiques_dir(paper_type)
+    if base_dir is None:
+        return legacy_dir
+
+    candidate_dir = Path(base_dir)
+    if candidate_dir.resolve(strict=False) == legacy_dir.resolve(strict=False):
+        return legacy_dir
+
+    return _resolve_session_critiques_dir(candidate_dir, paper_type)
+
+
 def _get_critiques_file_path(
     paper_type: PaperType,
     paper_id: Optional[str] = None,

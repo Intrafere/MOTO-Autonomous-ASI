@@ -55,6 +55,17 @@ Tool budget: up to 20 Wolfram Alpha calls for this submission. If you do not nee
 When you use the tool, incorporate only relevant verified results into your final JSON `new_string` and explain in `reasoning` how the Wolfram result informed the content. The system records the full audit trail separately."""
 
 
+CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES:
+- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
+- Theoretical claims must be supported by sound derivation, proof, or explicit assumptions inside the paper.
+- Literature claims must include explicit in-text citations identifying the external source.
+- Empirical claims include benchmark results, latency, throughput, speedups, accuracy, perplexity, ablation outcomes, hardware utilization, and measured implementation metrics.
+- Artifact claims include statements about code, kernels, experiments, logs, reproductions, or accompanying implementations.
+- Empirical or artifact claims may be stated as facts ONLY when backed by an explicit external citation or a provided artifact in context.
+- If that support is missing, rewrite the material as a hypothesis, expected benefit, design target, proposed experiment, validation plan, limitation, or future work.
+- NEVER invent citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts."""
+
+
 # =============================================================================
 # PHASE-SPECIFIC CONSTRUCTION PROMPTS
 # =============================================================================

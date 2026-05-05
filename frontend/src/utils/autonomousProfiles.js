@@ -168,12 +168,12 @@ export const RECOMMENDED_PROFILES = {
       },
     ],
     validator: {
-      modelId: 'x-ai/grok-4.1-fast',
+      modelId: 'qwen/qwen3.5-flash-02-23',
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,
-      contextWindow: 2000000,
-      maxOutputTokens: 30000,
+      contextWindow: 1048576,
+      maxOutputTokens: 65500,
     },
     highContext: {
       modelId: 'moonshotai/kimi-k2.6',

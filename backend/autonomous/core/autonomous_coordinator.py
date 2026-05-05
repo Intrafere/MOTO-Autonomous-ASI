@@ -1455,6 +1455,9 @@ class AutonomousCoordinator:
         # Reset free model manager state for fresh start
         free_model_manager.reset()
         
+        # Reset free model manager state for fresh start
+        free_model_manager.reset()
+        
         # Set up autonomous API logging callback
         async def log_callback(task_id, role_id, model, provider, prompt, response, 
                               tokens_used, duration_ms, success, error, phase):
