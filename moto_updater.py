@@ -37,7 +37,6 @@ _DEFAULT_PRESERVED_ROOTS = {
     "backend/data",
     "backend/logs",
     "frontend/node_modules",
-    "frontend/dist",
     ".venv",
     "venv",
     "env",

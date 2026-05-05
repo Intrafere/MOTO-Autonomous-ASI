@@ -8,10 +8,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 from fastapi import APIRouter
 
@@ -28,6 +29,17 @@ _pull_state: Dict[str, Any] = {
 }
 
 
+def _parse_semver(version_str: str) -> Tuple[int, ...]:
+    """Extract numeric version tuple from a semver string (e.g. '1.0.7' -> (1,0,7))."""
+    parts = re.findall(r"\d+", version_str or "")
+    return tuple(int(p) for p in parts) if parts else (0,)
+
+
+def _is_downgrade(local_version: str, remote_version: str) -> bool:
+    """Return True if the remote version is strictly older than local."""
+    return _parse_semver(remote_version) < _parse_semver(local_version)
+
+
 def _detect_install_kind() -> str:
     """Classify install as 'git' or 'zip' based on .git presence."""
     if (_REPO_ROOT / ".git").exists():
@@ -36,13 +48,41 @@ def _detect_install_kind() -> str:
 
 
 async def _run_git_pull() -> None:
-    """Execute git pull for git-clone installs."""
+    """Execute git pull for git-clone installs, pulling from the configured update_channel."""
+    import sys
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from moto_updater import load_local_manifest, fetch_remote_manifest, fetch_branch_head_fallback
+
     global _pull_state
     _pull_state = {"status": "running", "output_lines": [], "returncode": None, "install_kind": "git"}
 
     try:
+        local_manifest = load_local_manifest()
+        channel = local_manifest.update_channel or "main"
+
+        try:
+            remote_manifest = fetch_remote_manifest(local_manifest)
+        except Exception:
+            remote_manifest = fetch_branch_head_fallback(local_manifest)
+
+        if remote_manifest and _is_downgrade(local_manifest.version, remote_manifest.version):
+            _pull_state["output_lines"].append(
+                f"Refused: remote {remote_manifest.version} is older than local {local_manifest.version}. "
+                f"Downgrades are not supported via the updater."
+            )
+            _pull_state["returncode"] = 1
+            _pull_state["status"] = "error"
+            return
+
+        if remote_manifest and remote_manifest.build_commit == local_manifest.build_commit:
+            _pull_state["output_lines"].append("Already up to date.")
+            _pull_state["returncode"] = 0
+            _pull_state["status"] = "done"
+            return
+
         proc = await asyncio.create_subprocess_exec(
-            "git", "pull", "origin", "main",
+            "git", "pull", "origin", channel,
             cwd=str(_REPO_ROOT),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -100,6 +140,12 @@ def _run_zip_update_sync(state_lines: list) -> None:
     if remote_manifest.build_commit == local_manifest.build_commit:
         state_lines.append("Already up to date.")
         return
+
+    if _is_downgrade(local_manifest.version, remote_manifest.version):
+        raise RuntimeError(
+            f"Refused: remote {remote_manifest.version} is older than local "
+            f"{local_manifest.version}. Downgrades are not supported via the updater."
+        )
 
     archive_url = archive_url_for_manifest(remote_manifest)
     state_lines.append(f"Downloading update from {archive_url}...")
