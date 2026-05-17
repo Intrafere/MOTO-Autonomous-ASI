@@ -3,6 +3,8 @@ PDF download route - uses Playwright (headless Chromium) for full-fidelity rende
 Runs in a thread pool so the FastAPI event loop is never blocked.
 """
 import asyncio
+from html import escape
+from html.parser import HTMLParser
 import logging
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
@@ -46,6 +48,140 @@ class PDFRequest(BaseModel):
     filename: str = "document"
 
 
+_ALLOWED_PDF_TAGS = {
+    "div", "span", "p", "br", "hr",
+    "strong", "b", "em", "i", "u", "s", "sub", "sup", "small",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li", "dl", "dt", "dd",
+    "table", "thead", "tbody", "tr", "th", "td",
+    "math", "semantics", "mrow", "mi", "mo", "mn", "msup", "msub",
+    "mfrac", "mroot", "msqrt", "mtext", "mspace", "mtable", "mtr", "mtd",
+    "annotation", "annotation-xml",
+    "svg", "path", "line", "rect", "circle", "g", "use", "defs", "clippath",
+}
+_VOID_PDF_TAGS = {"br", "hr", "path", "line", "rect", "circle", "use"}
+_DROP_CONTENT_TAGS = {"script", "style", "iframe", "object", "embed", "form", "textarea", "select"}
+_ALLOWED_PDF_ATTRS = {
+    "class", "id", "title", "style",
+    "mathvariant", "encoding", "xmlns", "displaystyle", "scriptlevel",
+    "columnalign", "rowalign", "columnspacing", "rowspacing", "stretchy",
+    "symmetric", "fence", "separator", "lspace", "rspace", "accent",
+    "accentunder", "movablelimits", "minsize", "maxsize", "width", "height",
+    "d", "viewbox", "preserveaspectratio", "fill", "stroke", "stroke-width",
+    "transform", "x", "y", "dx", "dy", "x1", "y1", "x2", "y2", "r", "cx", "cy",
+    "href", "xlink:href", "clip-path",
+}
+_FORBIDDEN_STYLE_TOKENS = ("url(", "expression", "@import", "behavior:")
+
+
+class _PdfHtmlSanitizer(HTMLParser):
+    """Small allowlist sanitizer for already-rendered LaTeX/KaTeX HTML."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._drop_content_depth = 0
+
+    @staticmethod
+    def _is_safe_attr(name: str, value: str) -> bool:
+        attr = name.lower()
+        if attr not in _ALLOWED_PDF_ATTRS or attr.startswith("on"):
+            return False
+        lowered_value = (value or "").strip().lower()
+        if attr == "style":
+            return not any(token in lowered_value for token in _FORBIDDEN_STYLE_TOKENS)
+        if attr in {"href", "xlink:href"}:
+            return lowered_value.startswith("#") or lowered_value.startswith("data:image/")
+        return True
+
+    def _append_start_tag(self, tag: str, attrs, *, self_closing: bool = False) -> None:
+        normalized_tag = tag.lower()
+        if normalized_tag not in _ALLOWED_PDF_TAGS:
+            if normalized_tag in _DROP_CONTENT_TAGS and not self_closing:
+                self._drop_content_depth += 1
+            return
+
+        rendered_attrs = []
+        for name, value in attrs:
+            attr_name = (name or "").lower()
+            attr_value = "" if value is None else str(value)
+            if self._is_safe_attr(attr_name, attr_value):
+                rendered_attrs.append(f'{attr_name}="{escape(attr_value, quote=True)}"')
+
+        suffix = " /" if self_closing and normalized_tag not in _VOID_PDF_TAGS else ""
+        attr_text = f" {' '.join(rendered_attrs)}" if rendered_attrs else ""
+        self._parts.append(f"<{normalized_tag}{attr_text}{suffix}>")
+
+    def handle_starttag(self, tag, attrs) -> None:
+        self._append_start_tag(tag, attrs)
+
+    def handle_startendtag(self, tag, attrs) -> None:
+        self._append_start_tag(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag) -> None:
+        normalized_tag = tag.lower()
+        if normalized_tag in _DROP_CONTENT_TAGS and self._drop_content_depth > 0:
+            self._drop_content_depth -= 1
+            return
+        if normalized_tag in _ALLOWED_PDF_TAGS and normalized_tag not in _VOID_PDF_TAGS:
+            self._parts.append(f"</{normalized_tag}>")
+
+    def handle_data(self, data) -> None:
+        if self._drop_content_depth > 0:
+            return
+        self._parts.append(escape(data or ""))
+
+    def handle_entityref(self, name) -> None:
+        if self._drop_content_depth > 0:
+            return
+        self._parts.append(f"&{name};")
+
+    def handle_charref(self, name) -> None:
+        if self._drop_content_depth > 0:
+            return
+        self._parts.append(f"&#{name};")
+
+    def get_html(self) -> str:
+        return "".join(self._parts)
+
+
+def _sanitize_pdf_html(html_body: str) -> str:
+    sanitizer = _PdfHtmlSanitizer()
+    sanitizer.feed(html_body or "")
+    sanitizer.close()
+    return sanitizer.get_html()
+
+
+def _encoded_size(value: Optional[str]) -> int:
+    return len((value or "").encode("utf-8"))
+
+
+def _validate_pdf_request_size(req: PDFRequest) -> None:
+    html_size = _encoded_size(req.html_body)
+    if html_size > system_config.pdf_max_html_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"html_body exceeds PDF limit of {system_config.pdf_max_html_bytes} bytes",
+        )
+
+    outline_size = _encoded_size(req.outline)
+    if outline_size > system_config.pdf_max_outline_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"outline exceeds PDF limit of {system_config.pdf_max_outline_bytes} bytes",
+        )
+
+    metadata_size = sum(
+        _encoded_size(value)
+        for value in (req.title, req.date, req.models, req.filename)
+    )
+    if metadata_size > system_config.pdf_max_metadata_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF metadata exceeds limit of {system_config.pdf_max_metadata_bytes} bytes",
+        )
+
+
 def _build_html_document(req: PDFRequest) -> str:
     """
     Wrap the rendered HTML body in a complete standalone HTML document
@@ -56,9 +192,9 @@ def _build_html_document(req: PDFRequest) -> str:
     if req.word_count:
         meta_parts.append(f"Word Count: {req.word_count:,}")
     if req.date:
-        meta_parts.append(f"Generated: {req.date}")
+        meta_parts.append(f"Generated: {_escape_html(req.date)}")
     if req.models:
-        meta_parts.append(f"AI Models: {req.models}")
+        meta_parts.append(f"AI Models: {_escape_html(req.models)}")
     meta_line = " &nbsp;|&nbsp; ".join(meta_parts) if meta_parts else ""
 
     outline_section = ""
@@ -293,10 +429,18 @@ def _generate_pdf_sync(html: str) -> bytes:
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            args=["--disable-dev-shm-usage"]
         )
+        context = None
         try:
-            page = browser.new_page()
+            context = browser.new_context(java_script_enabled=False)
+            page = context.new_page()
+            page.route(
+                "**/*",
+                lambda route: route.continue_()
+                if route.request.url.startswith(("data:", "blob:", "about:"))
+                else route.abort(),
+            )
             page.set_content(html, wait_until="load", timeout=60000)
             pdf_bytes = page.pdf(
                 format="A4",
@@ -305,6 +449,11 @@ def _generate_pdf_sync(html: str) -> bytes:
             )
             return pdf_bytes
         finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
             browser.close()
 
 
@@ -329,7 +478,10 @@ async def generate_pdf(req: PDFRequest):
         raise HTTPException(status_code=400, detail="html_body is required and cannot be empty")
 
     try:
-        html_document = _build_html_document(req)
+        _validate_pdf_request_size(req)
+        sanitized_body = _sanitize_pdf_html(req.html_body)
+        sanitized_request = req.model_copy(update={"html_body": sanitized_body})
+        html_document = _build_html_document(sanitized_request)
 
         loop = asyncio.get_running_loop()
         pdf_bytes = await loop.run_in_executor(None, _generate_pdf_sync, html_document)

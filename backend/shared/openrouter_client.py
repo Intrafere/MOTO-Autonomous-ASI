@@ -8,10 +8,36 @@ import httpx
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import List, Dict, Any, Optional
 
+from backend.shared.config import system_config
+
 logger = logging.getLogger(__name__)
+
+
+_PROVIDER_SECRET_PATTERNS = (
+    re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
+    re.compile(r'("(?:api[_-]?key|appid|authorization|token|secret)"\s*:\s*)"[^"]*"', re.IGNORECASE),
+    re.compile(r"((?:api[_-]?key|appid|authorization|token|secret)\s*[=:]\s*)[^\s,&}]+", re.IGNORECASE),
+)
+
+
+def sanitize_provider_error_text(value: Any, max_chars: int = 500) -> str:
+    """Return a capped provider error preview with obvious secrets/body fields redacted."""
+    text = str(value or "")
+    for pattern in _PROVIDER_SECRET_PATTERNS:
+        text = pattern.sub(lambda match: f"{match.group(1) if match.lastindex else 'Bearer '}[redacted]", text)
+
+    # Provider error pages occasionally echo request JSON. Drop large message
+    # arrays rather than persisting prompt/user-file content in local logs.
+    text = re.sub(r'("messages"\s*:\s*)\[[\s\S]*?\]', r'\1[redacted]', text, flags=re.IGNORECASE)
+    text = re.sub(r'("prompt"\s*:\s*)"[\s\S]*?"', r'\1"[redacted]"', text, flags=re.IGNORECASE)
+
+    if len(text) > max_chars:
+        return text[:max_chars] + "...[truncated]"
+    return text
 
 
 class OpenRouterClient:
@@ -21,6 +47,9 @@ class OpenRouterClient:
     MAX_RETRIES = 3
     RETRY_DELAY = 2.0  # seconds
     RATE_LIMIT_COOLDOWN = 3600.0  # 1 hour in seconds
+    AUTO_IGNORED_PROVIDERS = ("Venice",)
+    HIGHEST_REASONING_EFFORT = "xhigh"
+    REASONING_EFFORT_LEVELS = {"xhigh", "high", "medium", "low", "minimal", "none"}
     
     # Per-model semaphores for rate limiting
     _model_semaphores: Dict[str, asyncio.Semaphore] = {}
@@ -50,7 +79,7 @@ class OpenRouterClient:
     async def _get_model_semaphore(self, model: str) -> asyncio.Semaphore:
         """
         Get or create semaphore for a specific model.
-        Each model gets its own semaphore (limit=1) to prevent concurrent requests.
+        Each model gets its own semaphore to bound concurrent requests.
         
         Args:
             model: Model name/identifier
@@ -60,8 +89,9 @@ class OpenRouterClient:
         """
         async with self._semaphore_lock:
             if model not in self._model_semaphores:
-                self._model_semaphores[model] = asyncio.Semaphore(1)
-                logger.debug(f"Created semaphore for OpenRouter model: {model}")
+                limit = max(1, int(system_config.max_model_concurrency_per_model or 1))
+                self._model_semaphores[model] = asyncio.Semaphore(limit)
+                logger.debug(f"Created semaphore for OpenRouter model: {model} (limit={limit})")
             return self._model_semaphores[model]
     
     def _is_free_model(self, model: str) -> bool:
@@ -329,6 +359,7 @@ class OpenRouterClient:
         max_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, str]] = None,
         provider: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
@@ -342,6 +373,7 @@ class OpenRouterClient:
             max_tokens: Maximum tokens to generate
             response_format: Optional response format constraints
             provider: Optional specific provider to use (None lets OpenRouter choose)
+            reasoning_effort: Optional OpenRouter reasoning effort (auto/xhigh/high/medium/low/minimal/none).
             tools: Optional OpenAI-compatible tool schemas the model may call.
             tool_choice: Optional tool-choice directive (e.g. "auto", "none",
                 or ``{"type": "function", "function": {"name": "..."}}``).
@@ -355,7 +387,7 @@ class OpenRouterClient:
         """
         model_semaphore = await self._get_model_semaphore(model)
         
-        # ACQUIRE THIS MODEL'S SEMAPHORE to prevent concurrent requests
+        # Bound same-model parallelism so multi-submitter phases can overlap without unbounded fanout.
         async with model_semaphore:
             return await self._execute_completion_request(
                 model,
@@ -364,6 +396,7 @@ class OpenRouterClient:
                 max_tokens,
                 response_format,
                 provider,
+                reasoning_effort,
                 tools=tools,
                 tool_choice=tool_choice,
             )
@@ -392,6 +425,31 @@ class OpenRouterClient:
         ]
         
         return any(pattern in model_lower for pattern in reasoning_model_patterns)
+
+    def _build_reasoning_config(self, reasoning_effort: Optional[str]) -> Optional[Dict[str, str]]:
+        """
+        Build OpenRouter's normalized reasoning config.
+
+        ``auto`` intentionally means maximum reasoning for this app: OpenRouter
+        maps the normalized effort field onto provider-specific reasoning knobs
+        where supported and ignores unsupported parameters by default.
+        """
+        if reasoning_effort is None:
+            return None
+
+        effort = str(reasoning_effort).strip().lower()
+        if not effort:
+            return None
+        if effort in {"auto", "max", "maximum", "highest"}:
+            effort = self.HIGHEST_REASONING_EFFORT
+        elif effort in {"off", "disabled", "disable"}:
+            effort = "none"
+
+        if effort not in self.REASONING_EFFORT_LEVELS:
+            logger.warning("Unknown OpenRouter reasoning effort '%s'; defaulting to max", reasoning_effort)
+            effort = self.HIGHEST_REASONING_EFFORT
+
+        return {"effort": effort}
     
     async def _execute_completion_request(
         self,
@@ -401,6 +459,7 @@ class OpenRouterClient:
         max_tokens: Optional[int],
         response_format: Optional[Dict[str, str]],
         provider: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
@@ -433,15 +492,17 @@ class OpenRouterClient:
         else:
             logger.debug(f"Skipping temperature parameter for reasoning model: {model}")
         
-        # Set max_tokens if provided
-        if max_tokens is None:
-            max_tokens = 25000  # Default for reasoning models
-            logger.debug(f"Auto-limiting max_tokens to {max_tokens}")
-        
-        payload["max_tokens"] = max_tokens
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        else:
+            logger.debug("No max_tokens supplied; letting OpenRouter/model defaults apply")
         
         if response_format:
             payload["response_format"] = response_format
+
+        reasoning_config = self._build_reasoning_config(reasoning_effort)
+        if reasoning_config:
+            payload["reasoning"] = reasoning_config
         
         # OpenAI-compatible tool calling: pass tools + tool_choice straight
         # through to OpenRouter. Providers that do not support tools tend to
@@ -454,8 +515,16 @@ class OpenRouterClient:
         
         # Add provider routing if specified
         if provider:
-            payload["provider"] = {"order": [provider]}
+            payload["provider"] = {
+                "order": [provider],
+                "allow_fallbacks": False,
+            }
             logger.debug(f"Using specific provider: {provider}")
+        elif self.AUTO_IGNORED_PROVIDERS:
+            payload["provider"] = {
+                "ignore": list(self.AUTO_IGNORED_PROVIDERS),
+            }
+            logger.debug(f"Ignoring weak OpenRouter auto-routing providers: {self.AUTO_IGNORED_PROVIDERS}")
         
         # NOTE: Stop sequences were removed because they caused premature truncation
         # with certain models (e.g., Grok 4.1). Models will now generate until max_tokens
@@ -472,7 +541,7 @@ class OpenRouterClient:
                 
                 # Check for credit exhaustion (402 Payment Required)
                 if response.status_code == 402:
-                    error_text = response.text
+                    error_text = sanitize_provider_error_text(response.text)
                     logger.error(
                         f"OpenRouter credit exhaustion detected (402): {error_text}"
                     )
@@ -496,7 +565,7 @@ class OpenRouterClient:
                         body_text = response.text or ""
                     except Exception:
                         body_text = ""
-                    body_preview = body_text[:500]
+                    body_preview = sanitize_provider_error_text(body_text)
                     content_type = response.headers.get("content-type", "") if hasattr(response, "headers") else ""
                     logger.error(
                         f"OpenRouter returned non-JSON body (status={response.status_code}, "
@@ -529,7 +598,7 @@ class OpenRouterClient:
                 raise
                 
             except httpx.HTTPStatusError as e:
-                error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
+                error_detail = sanitize_provider_error_text(e.response.text if hasattr(e.response, 'text') else str(e))
                 
                 # Check for rate limit (429 Too Many Requests)
                 if e.response.status_code == 429:
@@ -667,7 +736,7 @@ class OpenRouterClient:
             
             # Check for credit exhaustion (402 Payment Required)
             if response.status_code == 402:
-                error_text = response.text
+                error_text = sanitize_provider_error_text(response.text)
                 logger.error(f"OpenRouter credit exhaustion for embeddings (402): {error_text}")
                 raise CreditExhaustionError("OpenRouter credits exhausted for embeddings")
             
@@ -680,7 +749,7 @@ class OpenRouterClient:
                     body_text = response.text or ""
                 except Exception:
                     body_text = ""
-                body_preview = body_text[:500]
+                body_preview = sanitize_provider_error_text(body_text)
                 content_type = response.headers.get("content-type", "") if hasattr(response, "headers") else ""
                 logger.error(
                     f"OpenRouter embeddings returned non-JSON body (status={response.status_code}, "
@@ -712,7 +781,7 @@ class OpenRouterClient:
             raise
         
         except httpx.HTTPStatusError as e:
-            error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
+            error_detail = sanitize_provider_error_text(e.response.text if hasattr(e.response, 'text') else str(e))
             
             # Check for rate limit (429 Too Many Requests)
             if e.response.status_code == 429:

@@ -166,7 +166,9 @@ class RAGManager:
         query: str,
         chunk_size: int = 512,
         max_tokens: int = None,
-        exclude_sources: Optional[List[str]] = None
+        exclude_sources: Optional[List[str]] = None,
+        include_sources: Optional[List[str]] = None,
+        include_source_prefixes: Optional[List[str]] = None
     ) -> ContextPack:
         """
         4-stage retrieval pipeline.
@@ -176,6 +178,8 @@ class RAGManager:
             chunk_size: Chunk size to retrieve from
             max_tokens: Maximum tokens in result
             exclude_sources: Source names to skip during packing (already direct-injected)
+            include_sources: Optional source allowlist for scoped retrieval
+            include_source_prefixes: Optional source-name prefixes for scoped retrieval
         
         Returns:
             ContextPack with retrieved context
@@ -189,7 +193,18 @@ class RAGManager:
         
         # Stage B: Hybrid Recall (BM25 + Vector)
         logger.debug(f"RAG Stage 2/4: Hybrid recall (BM25 + Vector) with chunk_size={chunk_size}")
-        candidates = await self._hybrid_recall(queries, chunk_size)
+        if include_sources or include_source_prefixes:
+            logger.info(
+                "RAG Stage 2/4: Restricting retrieval scope to sources=%s prefixes=%s",
+                include_sources or [],
+                include_source_prefixes or [],
+            )
+        candidates = await self._hybrid_recall(
+            queries,
+            chunk_size,
+            include_sources=include_sources,
+            include_source_prefixes=include_source_prefixes,
+        )
         logger.debug(f"RAG Stage 2/4 complete: Retrieved {len(candidates)} candidate chunks")
         
         # Stage C: Reranking + MMR
@@ -213,14 +228,19 @@ class RAGManager:
         
         texts = [chunk.text for chunk in chunks]
 
+        embeddings = None
+        lock_acquired = False
         if system_config.generic_mode:
             embeddings = await api_client_manager.get_embeddings(texts)
             await rag_operation_lock.acquire(f"RAGManager add_chunks write (size={chunk_size})")
+            lock_acquired = True
         else:
             await rag_operation_lock.acquire(f"RAGManager add_chunks (size={chunk_size})")
-            embeddings = await api_client_manager.get_embeddings(texts)
-
+            lock_acquired = True
         try:
+            if embeddings is None:
+                embeddings = await api_client_manager.get_embeddings(texts)
+
             # Update chunks with embeddings and tokens
             for chunk, embedding in zip(chunks, embeddings):
                 chunk.embedding = embedding
@@ -229,7 +249,8 @@ class RAGManager:
             # ChromaDB writes stay under the global RAG lock in both modes.
             collection = self.collections[chunk_size]
             try:
-                collection.add(
+                await asyncio.to_thread(
+                    collection.add,
                     ids=[chunk.chunk_id for chunk in chunks],
                     embeddings=embeddings,
                     documents=texts,
@@ -247,7 +268,8 @@ class RAGManager:
             # Invalidate BM25 index for this size
             self.bm25_index[chunk_size] = None
         finally:
-            rag_operation_lock.release()
+            if lock_acquired:
+                rag_operation_lock.release()
     
     async def _rewrite_query(self, query: str) -> List[str]:
         """Stage A: Expand query into semantic variants."""
@@ -283,18 +305,31 @@ class RAGManager:
     async def _hybrid_recall(
         self,
         queries: List[str],
-        chunk_size: int
+        chunk_size: int,
+        include_sources: Optional[List[str]] = None,
+        include_source_prefixes: Optional[List[str]] = None
     ) -> List[Tuple[DocumentChunk, float]]:
         """Stage B: Hybrid BM25 + Vector search."""
-        chunks = self.chunks_by_size[chunk_size]
+        # Work from a stable snapshot so threaded scoring does not race with
+        # concurrent RAG add/remove operations mutating the live chunk lists.
+        chunks = list(self._filter_chunks_by_source_scope(
+            self.chunks_by_size[chunk_size],
+            include_sources=include_sources,
+            include_source_prefixes=include_source_prefixes,
+        ))
         if not chunks:
             return []
         
         # Vector search
-        vector_results = await self._vector_search(queries, chunk_size)
+        vector_results = await self._vector_search(queries, chunk_size, candidate_chunks=chunks)
         
         # BM25 search
-        bm25_results = self._bm25_search(queries, chunk_size)
+        bm25_results = await asyncio.to_thread(
+            self._bm25_search,
+            queries,
+            chunk_size,
+            chunks,
+        )
         
         # Combine and deduplicate
         combined = {}
@@ -315,17 +350,26 @@ class RAGManager:
     async def _vector_search(
         self,
         queries: List[str],
-        chunk_size: int
+        chunk_size: int,
+        candidate_chunks: Optional[List[DocumentChunk]] = None
     ) -> List[Tuple[DocumentChunk, float]]:
         """Vector similarity search with retry logic for HNSW index race conditions."""
         collection = self.collections[chunk_size]
-        chunks = self.chunks_by_size[chunk_size]
+        chunks = candidate_chunks if candidate_chunks is not None else self.chunks_by_size[chunk_size]
         
         if not chunks:
             return []
         
         query_embeddings = await api_client_manager.get_embeddings(queries)
+        if candidate_chunks is not None and len(candidate_chunks) != len(self.chunks_by_size[chunk_size]):
+            return await asyncio.to_thread(
+                self._score_vector_candidates,
+                query_embeddings,
+                chunks,
+            )
+
         all_results = []
+        chunk_by_id = {chunk.chunk_id: chunk for chunk in chunks}
         for query_embedding in query_embeddings:
             # Search with retry logic for transient HNSW errors during concurrent writes
             max_retries = 3
@@ -334,7 +378,8 @@ class RAGManager:
             
             for attempt in range(max_retries):
                 try:
-                    results = collection.query(
+                    results = await asyncio.to_thread(
+                        collection.query,
                         query_embeddings=[query_embedding],
                         n_results=min(rag_config.hybrid_recall_top_k, len(chunks))
                     )
@@ -359,7 +404,7 @@ class RAGManager:
             
             # Map back to chunks
             for chunk_id, distance in zip(results['ids'][0], results['distances'][0]):
-                chunk = next((c for c in chunks if c.chunk_id == chunk_id), None)
+                chunk = chunk_by_id.get(chunk_id)
                 if chunk:
                     # Convert distance to similarity (cosine distance -> similarity)
                     similarity = 1.0 - distance
@@ -374,23 +419,43 @@ class RAGManager:
                 unique_results.append((chunk, score))
         
         return unique_results[:rag_config.hybrid_recall_top_k]
+
+    def _score_vector_candidates(
+        self,
+        query_embeddings: List[List[float]],
+        chunks: List[DocumentChunk],
+    ) -> List[Tuple[DocumentChunk, float]]:
+        """Score a scoped chunk snapshot in memory without blocking the event loop."""
+        scored: List[Tuple[DocumentChunk, float]] = []
+        for query_embedding in query_embeddings:
+            for chunk in chunks:
+                if not chunk.embedding:
+                    continue
+                scored.append((chunk, self._cosine_similarity(query_embedding, chunk.embedding)))
+
+        seen = set()
+        unique_results = []
+        for chunk, score in sorted(scored, key=lambda x: x[1], reverse=True):
+            if chunk.chunk_id in seen:
+                continue
+            seen.add(chunk.chunk_id)
+            unique_results.append((chunk, score))
+        return unique_results[:rag_config.hybrid_recall_top_k]
     
     def _bm25_search(
         self,
         queries: List[str],
-        chunk_size: int
+        chunk_size: int,
+        candidate_chunks: Optional[List[DocumentChunk]] = None
     ) -> List[Tuple[DocumentChunk, float]]:
         """BM25 lexical search."""
-        chunks = self.chunks_by_size[chunk_size]
+        chunks = list(candidate_chunks) if candidate_chunks is not None else list(self.chunks_by_size[chunk_size])
         if not chunks:
             return []
         
-        # Build or get BM25 index
-        if self.bm25_index[chunk_size] is None:
-            corpus = [chunk.tokens for chunk in chunks]
-            self.bm25_index[chunk_size] = BM25Okapi(corpus)
-        
-        bm25 = self.bm25_index[chunk_size]
+        # Build a local index for the snapshot. This runs in a worker thread
+        # and intentionally does not mutate self.bm25_index across threads.
+        bm25 = BM25Okapi([chunk.tokens for chunk in chunks])
         
         all_scores = np.zeros(len(chunks))
         for query in queries:
@@ -407,6 +472,25 @@ class RAGManager:
         results = [(chunks[i], float(all_scores[i])) for i in top_indices if all_scores[i] > 0]
         
         return results
+
+    @staticmethod
+    def _filter_chunks_by_source_scope(
+        chunks: List[DocumentChunk],
+        *,
+        include_sources: Optional[List[str]] = None,
+        include_source_prefixes: Optional[List[str]] = None
+    ) -> List[DocumentChunk]:
+        """Limit chunks to an explicit source allowlist and/or source prefixes."""
+        include_set = {source for source in (include_sources or []) if source}
+        prefixes = tuple(prefix for prefix in (include_source_prefixes or []) if prefix)
+        if not include_set and not prefixes:
+            return chunks
+
+        scoped = []
+        for chunk in chunks:
+            if chunk.source_file in include_set or (prefixes and chunk.source_file.startswith(prefixes)):
+                scoped.append(chunk)
+        return scoped
     
     def _rerank_and_diversify(
         self,
@@ -610,7 +694,7 @@ class RAGManager:
             if evict_ids:
                 collection = self.collections[chunk_size]
                 try:
-                    collection.delete(ids=evict_ids)
+                    await asyncio.to_thread(collection.delete, ids=evict_ids)
                 except Exception as e:
                     logger.error(f"ChromaDB delete during chunk cap enforcement (size={chunk_size}): {e}")
 
@@ -659,9 +743,9 @@ class RAGManager:
             # Remove from ChromaDB
             collection = self.collections[chunk_size]
             # Get IDs for this source
-            results = collection.get(where={"source_file": source_name})
+            results = await asyncio.to_thread(collection.get, where={"source_file": source_name})
             if results['ids']:
-                collection.delete(ids=results['ids'])
+                await asyncio.to_thread(collection.delete, ids=results['ids'])
             
             # Invalidate BM25
             self.bm25_index[chunk_size] = None

@@ -18,6 +18,8 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   const [showLibraryTooltip, setShowLibraryTooltip] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteAllPrunedConfirm, setDeleteAllPrunedConfirm] = useState(false);
+  const [deletingAllPruned, setDeletingAllPruned] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   
   // Critique modal state
@@ -97,6 +99,21 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
       alert(`Failed to delete paper: ${error.message}`);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleDeleteAllPrunedConfirm = async () => {
+    if (!api.deleteAllPrunedPapers) return;
+    setDeletingAllPruned(true);
+    try {
+      await api.deleteAllPrunedPapers();
+      setDeleteAllPrunedConfirm(false);
+      onRefresh();
+    } catch (error) {
+      console.error('Failed to delete pruned papers:', error);
+      alert(`Failed to delete pruned papers: ${error.message}`);
+    } finally {
+      setDeletingAllPruned(false);
     }
   };
 
@@ -206,6 +223,33 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
         <div className="paper-library-pruned-counter">
           Pruned Papers: {archivedCount}
         </div>
+        {archivedCount > 0 && api.deleteAllPrunedPapers && (
+          <div className="paper-library-pruned-actions">
+            {deleteAllPrunedConfirm ? (
+              <div className="delete-confirm-inline">
+                <span>Delete all pruned papers permanently?</span>
+                <button
+                  className="btn-delete-confirm"
+                  onClick={handleDeleteAllPrunedConfirm}
+                  disabled={deletingAllPruned}
+                >
+                  {deletingAllPruned ? 'Deleting...' : 'Yes'}
+                </button>
+                <button
+                  className="btn-delete-cancel"
+                  onClick={() => setDeleteAllPrunedConfirm(false)}
+                  disabled={deletingAllPruned}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button className="btn-delete-paper" onClick={() => setDeleteAllPrunedConfirm(true)}>
+                Delete All Pruned Papers
+              </button>
+            )}
+          </div>
+        )}
         <div className="auto-empty-state">
           No papers completed yet. Autonomous research will generate papers from brainstorm databases.
         </div>
@@ -255,6 +299,33 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
       <div className="paper-library-pruned-counter">
         Pruned Papers: {archivedCount}
       </div>
+      {archivedCount > 0 && api.deleteAllPrunedPapers && (
+        <div className="paper-library-pruned-actions">
+          {deleteAllPrunedConfirm ? (
+            <div className="delete-confirm-inline">
+              <span>Delete all pruned papers permanently?</span>
+              <button
+                className="btn-delete-confirm"
+                onClick={handleDeleteAllPrunedConfirm}
+                disabled={deletingAllPruned}
+              >
+                {deletingAllPruned ? 'Deleting...' : 'Yes'}
+              </button>
+              <button
+                className="btn-delete-cancel"
+                onClick={() => setDeleteAllPrunedConfirm(false)}
+                disabled={deletingAllPruned}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button className="btn-delete-paper" onClick={() => setDeleteAllPrunedConfirm(true)}>
+              Delete All Pruned Papers
+            </button>
+          )}
+        </div>
+      )}
 
       {proofActionMessage && (
         <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
@@ -374,7 +445,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
                   
                   {deleteConfirm === paper.paper_id ? (
                     <div className="delete-confirm-inline" onClick={(e) => e.stopPropagation()}>
-                      <span>Delete this paper?</span>
+                      <span>Prune this paper from model context?</span>
                       <button 
                         className="btn-delete-confirm" 
                         onClick={() => handleDeleteConfirm(paper.paper_id)}
@@ -394,9 +465,9 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
                     <button
                       className="btn-delete-paper"
                       onClick={(e) => handleDeleteClick(e, paper.paper_id)}
-                      title="Delete this paper"
+                      title="Prune this paper from future model context"
                     >
-                      Delete
+                      Prune
                     </button>
                   )}
                 </div>

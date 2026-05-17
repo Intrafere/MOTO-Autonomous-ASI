@@ -13,6 +13,12 @@ EMPIRICAL_PROVENANCE_VALIDATION_RULES = """EMPIRICAL PROVENANCE RULES:
 - If a submission offers an unsupported benchmark-style idea that is still useful, it must be framed as a proposed experiment, hypothesis, expected benefit, or future-work direction rather than as a completed result.
 - NEVER accept invented citations, fabricated experiments, fake benchmark numbers, or nonexistent code artifacts."""
 
+LEAN_VERIFIED_SUBMISSION_RULES = """LEAN 4 VERIFIED SUBMISSION RULES:
+- A submission containing [LEAN 4 VERIFIED BRAINSTORM PROOF] has already passed Lean 4 and MOTO integrity/statement-alignment checks before this validator call.
+- Do NOT reject such a submission by re-litigating Lean syntax or proof-checker correctness.
+- Still judge whether the verified theorem/proof is useful, non-redundant, relevant to the user's goal, and strong enough to add to the brainstorm database.
+- Reject Lean-verified proofs that are trivial, irrelevant, already covered, or not a useful brainstorm addition despite being formally verified."""
+
 
 def get_validator_system_prompt() -> str:
     """Get system prompt for validator agent."""
@@ -29,7 +35,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-""" + EMPIRICAL_PROVENANCE_VALIDATION_RULES + """
+""" + EMPIRICAL_PROVENANCE_VALIDATION_RULES + "\n\n" + LEAN_VERIFIED_SUBMISSION_RULES + """
 
  The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
  
@@ -38,13 +44,25 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 ---
 
 YOUR TASK:
-Tell me if the addition of the new submission increases potential solution availability in a significant way and/or provides a valuable solution space-constraint that narrows where we need to search in a significant way.
+Decide whether this submission provides the strongest rigorous progress currently justified toward solving the user's problem, with highest priority given to direct solutions, direct partial solutions, impossibility results, exact reductions, or sharp constraints.
 
-Essentially, you are evaluating whether the knowledge base becomes more useful toward finding mathematical solutions with this submission added than it was without it.
+Essentially, you are evaluating whether the knowledge base becomes more useful toward directly answering the user's mathematical prompt with this submission added than it was without it.
 
-CRITICAL: You are NOT generating solutions yourself - you are assessing if there are new solutions POTENTIALLY available if we add this submission to the knowledge base, or if the solution space becomes stronger in any way.
+CRITICAL: You are NOT generating solutions yourself. You are judging whether this submission directly solves, partially solves, refutes, or materially enables the user's problem better than the current knowledge base does.
+
+DIRECT-SOLUTION PREFERENCE:
+- If the submission directly resolves the user's problem, a clearly necessary subproblem, or proves a meaningful impossibility/limitation result, that is the strongest kind of acceptance case
+- If no direct resolution is available, accept supportive material only when it materially increases the chance of a later direct answer
+- Do not reward breadth, novelty, or interesting side observations over a stronger direct result
+
+META-PHASE EXCEPTION:
+If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate the submission as the requested candidate artifact, not as a direct solution:
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at a strong direct-answer path
+- PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
+- Do NOT reject these meta-phase submissions merely because they are questions or titles rather than mathematical solutions
 
 EVALUATION CRITERIA - Consider:
+- Does the submission directly answer, partially answer, refute, or sharply constrain the user's problem or a necessary subproblem?
 - Does the submission add genuinely new information or perspectives beyond what is already accepted?
 - Does the submission connect existing mathematical concepts in novel ways?
 - Does the submission provide concrete methods, theorems, proofs, or mathematical techniques?
@@ -57,9 +75,9 @@ EVALUATION CRITERIA - Consider:
 
 VALIDATION DECISION RULES:
 A submission should be ACCEPTED if it:
-1. Increases potential solution availability in a significant way, OR
-2. Provides valuable solution space constraints that narrow where to search, OR
-3. Offers novel mathematical insights not present in existing accepted submissions, OR
+1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
+2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
 A submission should be REJECTED if it:
@@ -71,8 +89,9 @@ A submission should be REJECTED if it:
 6. Contains logical fallacies or mathematically unsound reasoning
 7. Presents claims as proven without proper mathematical justification
 8. Presents unsupported empirical, benchmark, hardware, or artifact claims as established fact
+9. Is merely tangential or exploratory when a more direct, rigorous contribution was available from the same content
 
-Ask yourself: "Does adding this submission to our knowledge base make us more capable of solving the user's mathematical prompt than we were without it?"
+Ask yourself: "Does adding this submission make us more capable of directly answering the user's mathematical prompt than we were without it, and is this the strongest justified kind of progress?"
 
 REJECTION FEEDBACK FORMAT:
 If rejecting, your "summary" field must provide CONCRETE, ACTIONABLE guidance using this structure:
@@ -199,7 +218,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-""" + EMPIRICAL_PROVENANCE_VALIDATION_RULES + """
+""" + EMPIRICAL_PROVENANCE_VALIDATION_RULES + "\n\n" + LEAN_VERIFIED_SUBMISSION_RULES + """
 
  The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
  
@@ -211,11 +230,23 @@ YOUR TASK:
 Evaluate EACH submission INDEPENDENTLY to determine if it would make a valuable cumulative addition to the shared knowledge base.
 
 CRITICAL - INDEPENDENT ASSESSMENT:
-For EACH submission, ask: "Does THIS submission increase potential solution availability or provide valuable constraints, considering ONLY the existing database (not the other submission in this batch)?"
+For EACH submission, ask: "Does THIS submission provide the strongest rigorous direct progress currently justified toward the user's problem, considering ONLY the existing database (not the other submission in this batch)?"
 
-Essentially, you are evaluating whether the training database becomes more useful toward finding mathematical solutions with each submission added than it was without it.
+Essentially, you are evaluating whether the training database becomes more useful toward directly answering the user's mathematical prompt with each submission added than it was without it.
+
+DIRECT-SOLUTION PREFERENCE:
+- Prefer submissions that directly solve, partially solve, refute, or sharply constrain the problem
+- Accept supportive material only when it materially enables a later direct answer and no stronger direct step is currently justified
+- Do not prefer broader or more novel side ideas over a stronger direct result
+
+META-PHASE EXCEPTION:
+If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate each submission as the requested candidate artifact, not as a direct solution:
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at a strong direct-answer path
+- PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
+- Do NOT reject these meta-phase submissions merely because they are questions or titles rather than mathematical solutions
 
 EVALUATION CRITERIA (Apply to EACH submission independently):
+- Does the submission directly answer, partially answer, refute, or sharply constrain the user's problem or a necessary subproblem?
 - Does the submission add genuinely new information or perspectives beyond what is already accepted?
 - Does the submission connect existing mathematical concepts in novel ways?
 - Does the submission provide concrete methods, theorems, proofs, or mathematical techniques?
@@ -227,9 +258,9 @@ EVALUATION CRITERIA (Apply to EACH submission independently):
 
 VALIDATION DECISION RULES (for each submission):
 A submission should be ACCEPTED if it:
-1. Increases potential solution availability in a significant way, OR
-2. Provides valuable solution space constraints that narrow where to search, OR
-3. Offers novel mathematical insights not present in existing accepted submissions, OR
+1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
+2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
 A submission should be REJECTED if it:
@@ -239,6 +270,7 @@ A submission should be REJECTED if it:
 4. Is too vague or generic to be actionable
 5. Contains logical fallacies or mathematically unsound reasoning
 6. Presents unsupported empirical, benchmark, hardware, or artifact claims as established fact
+7. Is merely tangential or exploratory when a more direct, rigorous contribution was available from the same content
 
 CRITICAL - INTRA-BATCH REDUNDANCY PREVENTION:
 You must make TWO SEPARATE, INDEPENDENT decisions first - one for each submission.
@@ -422,7 +454,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-""" + EMPIRICAL_PROVENANCE_VALIDATION_RULES + """
+""" + EMPIRICAL_PROVENANCE_VALIDATION_RULES + "\n\n" + LEAN_VERIFIED_SUBMISSION_RULES + """
 
  The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
  
@@ -434,11 +466,23 @@ YOUR TASK:
 Evaluate EACH submission INDEPENDENTLY to determine if it would make a valuable cumulative addition to the shared knowledge base.
 
 CRITICAL - INDEPENDENT ASSESSMENT:
-For EACH of the three submissions, ask: "Does THIS submission increase potential solution availability or provide valuable constraints, considering ONLY the existing database (not the other submissions in this batch)?"
+For EACH of the three submissions, ask: "Does THIS submission provide the strongest rigorous direct progress currently justified toward the user's problem, considering ONLY the existing database (not the other submissions in this batch)?"
 
-Essentially, you are evaluating whether the training database becomes more useful toward finding mathematical solutions with each submission added than it was without it.
+Essentially, you are evaluating whether the training database becomes more useful toward directly answering the user's mathematical prompt with each submission added than it was without it.
+
+DIRECT-SOLUTION PREFERENCE:
+- Prefer submissions that directly solve, partially solve, refute, or sharply constrain the problem
+- Accept supportive material only when it materially enables a later direct answer and no stronger direct step is currently justified
+- Do not prefer broader or more novel side ideas over a stronger direct result
+
+META-PHASE EXCEPTION:
+If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate each submission as the requested candidate artifact, not as a direct solution:
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at a strong direct-answer path
+- PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
+- Do NOT reject these meta-phase submissions merely because they are questions or titles rather than mathematical solutions
 
 EVALUATION CRITERIA (Apply to EACH submission independently):
+- Does the submission directly answer, partially answer, refute, or sharply constrain the user's problem or a necessary subproblem?
 - Does the submission add genuinely new information or perspectives beyond what is already accepted?
 - Does the submission connect existing mathematical concepts in novel ways?
 - Does the submission provide concrete methods, theorems, proofs, or mathematical techniques?
@@ -450,9 +494,9 @@ EVALUATION CRITERIA (Apply to EACH submission independently):
 
 VALIDATION DECISION RULES (for each submission):
 A submission should be ACCEPTED if it:
-1. Increases potential solution availability in a significant way, OR
-2. Provides valuable solution space constraints that narrow where to search, OR
-3. Offers novel mathematical insights not present in existing accepted submissions, OR
+1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
+2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
 A submission should be REJECTED if it:
@@ -462,6 +506,7 @@ A submission should be REJECTED if it:
 4. Is too vague or generic to be actionable
 5. Contains logical fallacies or mathematically unsound reasoning
 6. Presents unsupported empirical, benchmark, hardware, or artifact claims as established fact
+7. Is merely tangential or exploratory when a more direct, rigorous contribution was available from the same content
 
 CRITICAL - INTRA-BATCH REDUNDANCY PREVENTION:
 You must make THREE SEPARATE, INDEPENDENT decisions first - one for each submission.
@@ -708,10 +753,11 @@ REASONS FOR REMOVAL - A submission should be removed if it:
 6. Contains unsupported empirical or artifact claims presented as established fact
 
 REASONS TO KEEP - A submission should be kept if it:
-1. Provides ANY unique information not covered elsewhere
-2. Offers a different perspective or approach even if related to other content
-3. Contains specific mathematical details, proofs, or techniques
-4. Contributes to solution diversity in any meaningful way
+1. Directly answers, partially answers, refutes, or sharply constrains the user's problem better than alternatives
+2. Provides ANY unique information not covered elsewhere
+3. Offers a different perspective or approach even if related to other content
+4. Contains specific mathematical details, proofs, or techniques
+5. Contributes to solution diversity in any meaningful way
 
 CONSERVATIVE APPROACH:
 - When in doubt, DO NOT recommend removal
@@ -720,6 +766,9 @@ CONSERVATIVE APPROACH:
 
 CRITICAL SELECTION RULE:
 When multiple submissions are redundant with each other, you MUST select the WEAKEST one for removal - the one that provides the LEAST unique value. NEVER remove a more complete submission in favor of keeping a less complete one.
+
+DIRECT-SOLUTION PRIORITY:
+If overlapping submissions differ in how directly they answer the user's problem, keep the one that provides the strongest rigorous direct resolution or sharpest justified constraint. Remove the more indirect auxiliary submission first when all else is equal.
 
 Output your decision ONLY as JSON in this exact format:
 {
@@ -850,12 +899,14 @@ APPROVE REMOVAL (decision: "accept") if:
 2. The reasoning for removal is sound and well-justified
 3. The database would be objectively better without this submission
 4. The unique value claimed by the submission is truly covered elsewhere
+5. Any more direct or stronger resolution in the database is preserved while the weaker, more auxiliary submission is the one being removed
 
 REJECT REMOVAL (decision: "reject") if:
 1. The submission provides ANY unique value not covered elsewhere
 2. The reasoning for removal is weak or unconvincing
 3. There is ANY doubt about whether the content is truly redundant
 4. Removing would reduce solution diversity or coverage
+5. The proposed removal would discard a more direct answer, stronger impossibility result, or sharper constraint than the alternatives being kept
 
 CONSERVATIVE DEFAULT:
 - If uncertain, REJECT the removal (keep the submission)

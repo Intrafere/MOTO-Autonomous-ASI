@@ -1,4 +1,10 @@
 import { loadModelCache, getModelApiId } from './modelCache';
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_OPENROUTER_REASONING_EFFORT,
+  normalizeOpenRouterReasoningEffort,
+} from './openRouterSelection';
 
 export const AUTONOMOUS_SETTINGS_STORAGE_KEY = 'autonomous_research_settings';
 export const AUTONOMOUS_PROFILES_STORAGE_KEY = 'autonomous_research_profiles';
@@ -8,11 +14,9 @@ export const RECOMMENDED_PROFILE_KEY = 'recommended_slower_affordable_higher_kno
 export const RECOMMENDED_ALTERNATE_PROFILE_KEY = 'recommended_fast_affordable_mid';
 export const RECOMMENDED_LAB_FAST_PROFILE_KEY = 'recommended_lab_fast_costly_extra_high';
 export const RECOMMENDED_LAB_MAX_PROFILE_KEY = 'recommended_lab_slow_costly_max';
-export const RECOMMENDED_ENTRY_LAB_PROFILE_KEY = 'recommended_entry_lab_fast_less_affordable';
 export const RECOMMENDED_PROFILE_KEYS = [
-  RECOMMENDED_PROFILE_KEY,
   RECOMMENDED_ALTERNATE_PROFILE_KEY,
-  RECOMMENDED_ENTRY_LAB_PROFILE_KEY,
+  RECOMMENDED_PROFILE_KEY,
   RECOMMENDED_LAB_FAST_PROFILE_KEY,
   RECOMMENDED_LAB_MAX_PROFILE_KEY,
 ];
@@ -22,9 +26,11 @@ const DEFAULT_SUBMITTER_CONFIG = {
   provider: 'lm_studio',
   modelId: '',
   openrouterProvider: null,
+  openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
   lmStudioFallbackId: null,
-  contextWindow: 131072,
-  maxOutputTokens: 25000,
+  contextWindow: DEFAULT_CONTEXT_WINDOW,
+  maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  superchargeEnabled: false,
 };
 
 // NOTE: DEFAULT_OPENROUTER_SUBMITTER_CONFIGS and DEFAULT_LOCAL_CONFIG are derived
@@ -32,31 +38,48 @@ const DEFAULT_SUBMITTER_CONFIG = {
 // startup configuration and the selectable recommended profile stay in sync.
 // Update the recommended profile below to change what a fresh install runs with.
 
+const GEMINI_FLASH_LATEST_PROFILE_CONFIG = {
+  modelId: '~google/gemini-flash-latest',
+  provider: 'openrouter',
+  openrouterProvider: null,
+  lmStudioFallbackId: null,
+  contextWindow: 1048576,
+  maxOutputTokens: 65536,
+};
+
 const DEFAULT_LM_LOCAL_CONFIG = {
   validator_provider: 'lm_studio',
   validator_model: '',
   validator_openrouter_provider: null,
+  validator_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
   validator_lm_studio_fallback: null,
-  validator_context_window: 131072,
-  validator_max_tokens: 25000,
+  validator_context_window: DEFAULT_CONTEXT_WINDOW,
+  validator_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  validator_supercharge_enabled: false,
   high_context_provider: 'lm_studio',
   high_context_model: '',
   high_context_openrouter_provider: null,
+  high_context_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
   high_context_lm_studio_fallback: null,
-  high_context_context_window: 131072,
-  high_context_max_tokens: 25000,
+  high_context_context_window: DEFAULT_CONTEXT_WINDOW,
+  high_context_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  high_context_supercharge_enabled: false,
   high_param_provider: 'lm_studio',
   high_param_model: '',
   high_param_openrouter_provider: null,
+  high_param_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
   high_param_lm_studio_fallback: null,
-  high_param_context_window: 131072,
-  high_param_max_tokens: 25000,
+  high_param_context_window: DEFAULT_CONTEXT_WINDOW,
+  high_param_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  high_param_supercharge_enabled: false,
   critique_submitter_provider: 'lm_studio',
   critique_submitter_model: '',
   critique_submitter_openrouter_provider: null,
+  critique_submitter_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
   critique_submitter_lm_studio_fallback: null,
-  critique_submitter_context_window: 131072,
-  critique_submitter_max_tokens: 25000,
+  critique_submitter_context_window: DEFAULT_CONTEXT_WINDOW,
+  critique_submitter_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  critique_submitter_supercharge_enabled: false,
 };
 
 const createDefaultSubmitterConfigs = (modelId = '') => (
@@ -168,12 +191,7 @@ export const RECOMMENDED_PROFILES = {
       },
     ],
     validator: {
-      modelId: 'qwen/qwen3.5-flash-02-23',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
+      ...GEMINI_FLASH_LATEST_PROFILE_CONFIG,
     },
     highContext: {
       modelId: 'moonshotai/kimi-k2.6',
@@ -190,68 +208,6 @@ export const RECOMMENDED_PROFILES = {
       lmStudioFallbackId: null,
       contextWindow: 1048576,
       maxOutputTokens: 65500,
-    },
-    critique: {
-      modelId: 'google/gemini-3.1-pro-preview',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
-    },
-  },
-  [RECOMMENDED_ENTRY_LAB_PROFILE_KEY]: {
-    name: 'Fast, less affordable, higher knowledge',
-    numSubmitters: 3,
-    submitters: [
-      {
-        modelId: 'x-ai/grok-4.3',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 1000000,
-        maxOutputTokens: 128000,
-      },
-      {
-        modelId: 'moonshotai/kimi-k2.6',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 262000,
-        maxOutputTokens: 40000,
-      },
-      {
-        modelId: 'x-ai/grok-4.3',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 1000000,
-        maxOutputTokens: 128000,
-      },
-    ],
-    validator: {
-      modelId: 'x-ai/grok-4.1-fast',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 2000000,
-      maxOutputTokens: 30000,
-    },
-    highContext: {
-      modelId: 'x-ai/grok-4.3',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1000000,
-      maxOutputTokens: 128000,
-    },
-    highParam: {
-      modelId: 'x-ai/grok-4.3',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1000000,
-      maxOutputTokens: 128000,
     },
     critique: {
       modelId: 'google/gemini-3.1-pro-preview',
@@ -292,12 +248,7 @@ export const RECOMMENDED_PROFILES = {
       },
     ],
     validator: {
-      modelId: 'x-ai/grok-4.1-fast',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 2000000,
-      maxOutputTokens: 30000,
+      ...GEMINI_FLASH_LATEST_PROFILE_CONFIG,
     },
     highContext: {
       modelId: 'openai/gpt-5.5',
@@ -420,27 +371,35 @@ const DEFAULT_LOCAL_CONFIG = {
   validator_provider: DEFAULT_RECOMMENDED_PROFILE.validator.provider || 'openrouter',
   validator_model: DEFAULT_RECOMMENDED_PROFILE.validator.modelId || '',
   validator_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.validator.openrouterProvider || null,
+  validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.validator.openrouterReasoningEffort),
   validator_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.validator.lmStudioFallbackId || null,
   validator_context_window: DEFAULT_RECOMMENDED_PROFILE.validator.contextWindow,
   validator_max_tokens: DEFAULT_RECOMMENDED_PROFILE.validator.maxOutputTokens,
+  validator_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.validator.superchargeEnabled),
   high_context_provider: DEFAULT_RECOMMENDED_PROFILE.highContext.provider || 'openrouter',
   high_context_model: DEFAULT_RECOMMENDED_PROFILE.highContext.modelId || '',
   high_context_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.highContext.openrouterProvider || null,
+  high_context_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.highContext.openrouterReasoningEffort),
   high_context_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.highContext.lmStudioFallbackId || null,
   high_context_context_window: DEFAULT_RECOMMENDED_PROFILE.highContext.contextWindow,
   high_context_max_tokens: DEFAULT_RECOMMENDED_PROFILE.highContext.maxOutputTokens,
+  high_context_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.highContext.superchargeEnabled),
   high_param_provider: DEFAULT_RECOMMENDED_PROFILE.highParam.provider || 'openrouter',
   high_param_model: DEFAULT_RECOMMENDED_PROFILE.highParam.modelId || '',
   high_param_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.highParam.openrouterProvider || null,
+  high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.highParam.openrouterReasoningEffort),
   high_param_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.highParam.lmStudioFallbackId || null,
   high_param_context_window: DEFAULT_RECOMMENDED_PROFILE.highParam.contextWindow,
   high_param_max_tokens: DEFAULT_RECOMMENDED_PROFILE.highParam.maxOutputTokens,
+  high_param_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.highParam.superchargeEnabled),
   critique_submitter_provider: DEFAULT_RECOMMENDED_PROFILE.critique.provider || 'openrouter',
   critique_submitter_model: DEFAULT_RECOMMENDED_PROFILE.critique.modelId || '',
   critique_submitter_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.critique.openrouterProvider || null,
+  critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.critique.openrouterReasoningEffort),
   critique_submitter_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.critique.lmStudioFallbackId || null,
   critique_submitter_context_window: DEFAULT_RECOMMENDED_PROFILE.critique.contextWindow,
   critique_submitter_max_tokens: DEFAULT_RECOMMENDED_PROFILE.critique.maxOutputTokens,
+  critique_submitter_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.critique.superchargeEnabled),
 };
 
 const DEFAULT_AUTONOMOUS_SETTINGS = {
@@ -461,6 +420,7 @@ function normalizeStoredSettings(settings = {}) {
         ...DEFAULT_SUBMITTER_CONFIG,
         ...cfg,
         submitterId: cfg.submitterId || index + 1,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort),
       }))
     : DEFAULT_AUTONOMOUS_SETTINGS.submitterConfigs;
 
@@ -472,6 +432,10 @@ function normalizeStoredSettings(settings = {}) {
     localConfig: {
       ...DEFAULT_LOCAL_CONFIG,
       ...(settings.localConfig || {}),
+      validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(settings.localConfig?.validator_openrouter_reasoning_effort),
+      high_context_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(settings.localConfig?.high_context_openrouter_reasoning_effort),
+      high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(settings.localConfig?.high_param_openrouter_reasoning_effort),
+      critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(settings.localConfig?.critique_submitter_openrouter_reasoning_effort),
     },
     freeOnly: settings.freeOnly ?? DEFAULT_AUTONOMOUS_SETTINGS.freeOnly,
     freeModelLooping: settings.freeModelLooping ?? DEFAULT_AUTONOMOUS_SETTINGS.freeModelLooping,
@@ -507,31 +471,43 @@ export function settingsToAutonomousConfig(settings) {
   const localConfig = normalized.localConfig || {};
 
   return {
-    submitter_configs: normalized.submitterConfigs.slice(0, normalized.numSubmitters),
+    submitter_configs: normalized.submitterConfigs.slice(0, normalized.numSubmitters).map(cfg => ({
+      ...cfg,
+      openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort),
+      supercharge_enabled: Boolean(cfg.superchargeEnabled),
+    })),
     validator_provider: localConfig.validator_provider,
     validator_model: localConfig.validator_model,
     validator_openrouter_provider: localConfig.validator_openrouter_provider,
+    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort),
     validator_lm_studio_fallback: localConfig.validator_lm_studio_fallback,
     validator_context_window: localConfig.validator_context_window,
     validator_max_tokens: localConfig.validator_max_tokens,
+    validator_supercharge_enabled: Boolean(localConfig.validator_supercharge_enabled),
     high_context_provider: localConfig.high_context_provider,
     high_context_model: localConfig.high_context_model,
     high_context_openrouter_provider: localConfig.high_context_openrouter_provider,
+    high_context_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_context_openrouter_reasoning_effort),
     high_context_lm_studio_fallback: localConfig.high_context_lm_studio_fallback,
     high_context_context_window: localConfig.high_context_context_window,
     high_context_max_tokens: localConfig.high_context_max_tokens,
+    high_context_supercharge_enabled: Boolean(localConfig.high_context_supercharge_enabled),
     high_param_provider: localConfig.high_param_provider,
     high_param_model: localConfig.high_param_model,
     high_param_openrouter_provider: localConfig.high_param_openrouter_provider,
+    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
     high_param_lm_studio_fallback: localConfig.high_param_lm_studio_fallback,
     high_param_context_window: localConfig.high_param_context_window,
     high_param_max_tokens: localConfig.high_param_max_tokens,
+    high_param_supercharge_enabled: Boolean(localConfig.high_param_supercharge_enabled),
     critique_submitter_provider: localConfig.critique_submitter_provider,
     critique_submitter_model: localConfig.critique_submitter_model,
     critique_submitter_openrouter_provider: localConfig.critique_submitter_openrouter_provider,
+    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.critique_submitter_openrouter_reasoning_effort),
     critique_submitter_lm_studio_fallback: localConfig.critique_submitter_lm_studio_fallback,
     critique_submitter_context_window: localConfig.critique_submitter_context_window,
     critique_submitter_max_tokens: localConfig.critique_submitter_max_tokens,
+    critique_submitter_supercharge_enabled: Boolean(localConfig.critique_submitter_supercharge_enabled),
     tier3_enabled: normalized.tier3Enabled ?? false,
   };
 }
@@ -589,9 +565,11 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
       ? convertToApiId(submitterProfile.modelId || '')
       : (submitterProfile.modelId || ''),
     openrouterProvider: submitterProfile.openrouterProvider || null,
+    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(submitterProfile.openrouterReasoningEffort),
     lmStudioFallbackId: isRecommended ? null : (submitterProfile.lmStudioFallbackId || null),
     contextWindow: submitterProfile.contextWindow,
     maxOutputTokens: submitterProfile.maxOutputTokens,
+    superchargeEnabled: Boolean(submitterProfile.superchargeEnabled),
   }));
 
   const getModelId = (roleProfile = {}) => (
@@ -601,6 +579,7 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
   );
 
   const getOpenRouterProvider = (roleProfile = {}) => roleProfile.openrouterProvider || null;
+  const getOpenRouterReasoningEffort = (roleProfile = {}) => normalizeOpenRouterReasoningEffort(roleProfile.openrouterReasoningEffort);
 
   const currentSettings = getStoredAutonomousSettings();
   const nextSettings = persistAutonomousSettings({
@@ -612,27 +591,35 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
       validator_provider: isRecommended ? 'openrouter' : (profile.validator.provider || 'openrouter'),
       validator_model: getModelId(profile.validator),
       validator_openrouter_provider: getOpenRouterProvider(profile.validator),
+      validator_openrouter_reasoning_effort: getOpenRouterReasoningEffort(profile.validator),
       validator_lm_studio_fallback: isRecommended ? null : (profile.validator.lmStudioFallbackId || null),
       validator_context_window: profile.validator.contextWindow,
       validator_max_tokens: profile.validator.maxOutputTokens,
+      validator_supercharge_enabled: Boolean(profile.validator.superchargeEnabled),
       high_context_provider: isRecommended ? 'openrouter' : (profile.highContext.provider || 'openrouter'),
       high_context_model: getModelId(profile.highContext),
       high_context_openrouter_provider: getOpenRouterProvider(profile.highContext),
+      high_context_openrouter_reasoning_effort: getOpenRouterReasoningEffort(profile.highContext),
       high_context_lm_studio_fallback: isRecommended ? null : (profile.highContext.lmStudioFallbackId || null),
       high_context_context_window: profile.highContext.contextWindow,
       high_context_max_tokens: profile.highContext.maxOutputTokens,
+      high_context_supercharge_enabled: Boolean(profile.highContext.superchargeEnabled),
       high_param_provider: isRecommended ? 'openrouter' : (profile.highParam.provider || 'openrouter'),
       high_param_model: getModelId(profile.highParam),
       high_param_openrouter_provider: getOpenRouterProvider(profile.highParam),
+      high_param_openrouter_reasoning_effort: getOpenRouterReasoningEffort(profile.highParam),
       high_param_lm_studio_fallback: isRecommended ? null : (profile.highParam.lmStudioFallbackId || null),
       high_param_context_window: profile.highParam.contextWindow,
       high_param_max_tokens: profile.highParam.maxOutputTokens,
+      high_param_supercharge_enabled: Boolean(profile.highParam.superchargeEnabled),
       critique_submitter_provider: isRecommended ? 'openrouter' : (profile.critique.provider || 'openrouter'),
       critique_submitter_model: getModelId(profile.critique),
       critique_submitter_openrouter_provider: getOpenRouterProvider(profile.critique),
+      critique_submitter_openrouter_reasoning_effort: getOpenRouterReasoningEffort(profile.critique),
       critique_submitter_lm_studio_fallback: isRecommended ? null : (profile.critique.lmStudioFallbackId || null),
       critique_submitter_context_window: profile.critique.contextWindow,
       critique_submitter_max_tokens: profile.critique.maxOutputTokens,
+      critique_submitter_supercharge_enabled: Boolean(profile.critique.superchargeEnabled),
     },
     selectedProfile: profileKey,
   });

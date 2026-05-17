@@ -35,6 +35,10 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 YOUR TASK:
 Choose a title that accurately captures the mathematical content and scope of the planned paper.
 
+DIRECT-SOLUTION PREFERENCE:
+- When the paper reaches a direct conclusion, theorem, impossibility result, or explicit construction, let the title foreground that result rather than sounding like generic exploration
+- Prefer titles that make the paper's answer-bearing content clear, while staying accurate to the actual scope
+
 IMPORTANT CLARIFICATION:
 - The brainstorm submissions are the SOURCE MATERIAL for your paper
 - Your title SHOULD reflect what's in the brainstorm - that's expected and correct!
@@ -47,6 +51,7 @@ TITLE CRITERIA:
 - Is professional and suitable for a mathematical research paper
 - Differentiates from EXISTING COMPLETED PAPERS from the same brainstorm (if any exist - check the list below)
 - Avoids being overly broad or generic
+- Makes the paper's strongest direct contribution clear when the content justifies it
 
 TITLE STYLE:
 - Use standard mathematical paper title conventions
@@ -139,6 +144,7 @@ ACCEPT the title if:
 - It follows mathematical paper title conventions
 - The reasoning is sound
 - If "EXISTING PAPERS FROM THIS BRAINSTORM: None" - there's nothing to differentiate from, so accept if other criteria are met
+- It makes any justified direct conclusion or core result clear rather than sounding needlessly exploratory
 
 REJECT the title if:
 - It is too similar to an EXISTING COMPLETED PAPER from the same brainstorm (NOT brainstorm submissions - those are the source material!)
@@ -146,6 +152,7 @@ REJECT the title if:
 - It is too vague or generic
 - It doesn't follow professional conventions
 - The reasoning is flawed
+- It obscures a clear direct result behind generic exploratory wording
 
 DO NOT REJECT simply because the title reflects brainstorm submission content - that is the INTENDED behavior.
 

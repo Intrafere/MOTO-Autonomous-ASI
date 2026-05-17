@@ -217,6 +217,101 @@
   margin-left: 0.5rem;
 }
 
+/* Proof strength badge */
+.ps-badge-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  z-index: 1000;
+}
+
+.ps-badge-anchor--model {
+  position: absolute;
+  top: 2.3rem;
+  right: 0.35rem;
+  z-index: 4;
+}
+
+.ps-badge-anchor--model-only {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  z-index: 4;
+}
+
+.ps-badge {
+  padding: 0.15rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.58rem;
+  font-weight: 800;
+  line-height: 1;
+  color: #2c1700;
+  letter-spacing: 0.04em;
+  background:
+    linear-gradient(120deg, rgba(255, 255, 255, 0.72) 0%, rgba(255, 255, 255, 0.22) 18%, rgba(255, 255, 255, 0.02) 34%),
+    linear-gradient(135deg, #fff7bf 0%, #ffe27a 18%, #ffc93b 46%, #d58d00 100%);
+  box-shadow:
+    0 0 0 1px rgba(255, 219, 96, 0.78),
+    0 0 12px rgba(255, 200, 40, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(120, 70, 0, 0.2);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+  user-select: none;
+  cursor: default;
+}
+
+.ps-badge-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 7px);
+  width: min(310px, 70vw);
+  background: #241700;
+  border: 1px solid rgba(255, 219, 96, 0.62);
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+  color: #ffe9a8;
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.45;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  white-space: normal;
+  text-transform: none;
+  letter-spacing: normal;
+  text-shadow: none;
+  z-index: 100000;
+}
+
+.ps-badge-anchor--role .ps-badge-tooltip {
+  left: 0;
+  right: auto;
+  width: min(330px, 48vw);
+}
+
+.ps-badge-anchor--leaderboard .ps-badge-tooltip {
+  right: 0;
+  width: 235px;
+  max-width: calc(322px - 3rem);
+}
+
+.ps-badge-anchor:hover .ps-badge-tooltip,
+.ps-badge-anchor:focus .ps-badge-tooltip {
+  display: block;
+}
+
+.ps-badge-anchor:hover,
+.ps-badge-anchor:focus {
+  z-index: 100000;
+}
+
+.role-title-with-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 /* Apply-to-all button */
 .btn-apply-all {
   font-size: 0.8rem;
@@ -244,6 +339,25 @@
 .settings-checkbox-label input[type="checkbox"] {
   margin-right: 0.5rem;
   cursor: pointer;
+}
+
+.settings-developer-mode-hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.settings-row--inline-checkbox {
+  grid-template-columns: 1fr;
+}
+
+.settings-checkbox-label--supercharge {
+  gap: 0.5rem;
+  width: fit-content;
+}
+
+.settings-checkbox-label--supercharge input[type="checkbox"] {
+  margin-right: 0;
 }
 
 .settings-checkbox-label--stacked {

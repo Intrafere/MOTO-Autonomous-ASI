@@ -46,7 +46,7 @@ Validator processes 1, 2, or 3 submissions simultaneously using batch-specific p
 
 **Submission context injection**: Direct inject if fits. If too large: RAG the submission as file, keep user prompt direct. If user prompt + RAG'd submission still too large: RAG all user-prompt files. If user prompt itself too large after all RAG: halt with error + diagnostic.
 
-**Hosted upload enforcement (generic mode)**: Server-side validation of `.txt` only, 5 MB max, filename sanitization, path traversal rejection. Applied in both modes but critical for hosted sandboxes where the control plane proxies uploads.
+**Upload/path enforcement**: Server-side validation of `.txt` only, 5 MB max, filename sanitization, path traversal rejection. Upload responses return logical filenames, not absolute host paths. Public Aggregator starts resolve `uploaded_files` only under `user_uploads`; internal autonomous reference-paper context may opt into trusted data-root file references via an explicit coordinator flag.
 
 ## Context Allocation
 
@@ -66,16 +66,21 @@ No context carryover between prompts (only system-intended DB/submission transfe
 
 User selects model per role. Multiple roles can share a model. Models load with user-set context sizes.
 
+Per-role Supercharge is optional. When enabled for a submitter or validator, `api_client_manager.generate_completion()` runs 4 parallel full answer attempts for that role call, then a 5th same-model synthesis call and returns only the synthesis result. Supercharge candidate attempts intentionally use temperatures `[0.0, 0.2, 0.4, 0.8]` to diversify parallel outputs; synthesis remains `0.0`. Candidate attempts are sanitized to reusable visible answer text before synthesis; private thought/channel/control transcript text must never be fed back as feedback, brainstorm memory, or synthesis context. The synthesis prompt frames candidates as optional working material: the model may use one, combine several, ignore all, or write a stronger new answer, while preserving the original role output contract. If Boost applies to that role/task, all internal Supercharge calls use the Boost config first. Tool-call requests bypass Supercharge.
+
+Parallel brainstorm submitter lanes intentionally use temperatures `[0.0, 0.1, ..., 0.9]` by submitter index so every parallel set includes a deterministic lane and increasing exploration lanes. This applies only to parallel submitter generation. Validators, compiler roles, JSON retries, and single-model sequential submitters remain `0.0`.
+
 ## Single-Model Mode
 When ALL submitters AND validator use the same model → single-model mode:
 - Submitters run SEQUENTIALLY (S1 → S2 → ... → Sn)
 - Validator processes all queued submissions after each full submitter round
 - Prevents queue overflow from parallel tasks flooding when LLM completes
+- Exception: if LM Studio reports multiple loaded same-base numeric `:#` instances for that model, submitters may still run in parallel while the LM Studio client routes independent calls to idle sibling instances.
 - Boost does NOT affect single-model detection (routing only, not model config)
 
 ## Multi-Submitter Configuration
 
-Per-submitter: provider (LM Studio / OpenRouter in default mode; OpenRouter only in generic mode), model, OpenRouter host provider, LM Studio fallback (default mode only), context window, max output tokens. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
+Per-submitter: provider (LM Studio / OpenRouter in default mode; OpenRouter only in generic mode), model, OpenRouter host provider, LM Studio fallback (default mode only), context window, max output tokens, and Supercharge checkbox. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
 
 OpenRouter auto-fill rule: selecting an OpenRouter model auto-fills from endpoint metadata only. Context window uses the smallest relevant host `context_length`; max output tokens use `min(20% of that host context, smallest relevant host max_completion_tokens)`. If `max_prompt_tokens` is available, shrink usable context to respect it. If endpoint caps are incomplete, preserve current values (no guessing).
 
@@ -89,7 +94,7 @@ Accepted submissions database: never truncated. Live preview shows exact non-tru
 
 Every 7th acceptance (`total_acceptances % 7 == 0`, minimum 7 before first review):
 
-**Phase 1**: Validator reviews ALL accepted submissions, identifies AT MOST ONE for removal (redundant, contradicted, superseded, or provides no unique value).
+**Phase 1**: Validator reviews the accepted-submissions database and identifies AT MOST ONE for removal (redundant, contradicted, superseded, or provides no unique value). If the complete database fits, it is direct-injected in full. If it does not fit, cleanup must use the normal direct-first/RAG fallback path instead of skipping or truncating; the review is then evidence-bounded by retrieved context.
 
 **Phase 2** (only if removal proposed): Validator self-validates its removal proposal. Conservative default: if uncertain, reject removal. If validated: execute removal + full RAG rebuild (all shared-training sources are dropped and re-indexed from the post-removal file so deleted content is no longer retrievable).
 

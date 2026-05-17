@@ -30,6 +30,7 @@ function truncateAbstract(abstract, maxLength = 220) {
 
 export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
   const [papers, setPapers] = useState([]);
+  const [prunedPapers, setPrunedPapers] = useState([]);
   const [finalAnswers, setFinalAnswers] = useState([]);
   const [sessionsResponse, setSessionsResponse] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -40,6 +41,8 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [deleteAllPrunedConfirm, setDeleteAllPrunedConfirm] = useState(false);
+  const [deletingAllPruned, setDeletingAllPruned] = useState(false);
   const [generatingPdfId, setGeneratingPdfId] = useState(null);
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
   const [critiquePaper, setCritiquePaper] = useState(null);
@@ -88,8 +91,9 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
       setLoading(true);
       setError(null);
 
-      const [papersResult, sessionsResult, finalAnswersResult] = await Promise.allSettled([
+      const [papersResult, prunedPapersResult, sessionsResult, finalAnswersResult] = await Promise.allSettled([
         autonomousAPI.getPaperHistory(),
+        autonomousAPI.getPrunedPaperHistory(),
         autonomousAPI.getSessions(),
         fetch('/api/auto-research/final-answer-library').then(async (response) => {
           if (!response.ok) {
@@ -103,7 +107,16 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
         throw papersResult.reason;
       }
 
-      setPapers(papersResult.value.papers || []);
+      const activePapers = papersResult.value.papers || [];
+      const prunedHistoryPapers = prunedPapersResult.status === 'fulfilled'
+        ? (prunedPapersResult.value.papers || [])
+        : [];
+      setPrunedPapers(prunedHistoryPapers);
+      setPapers([...activePapers, ...prunedHistoryPapers]);
+
+      if (prunedPapersResult.status !== 'fulfilled') {
+        console.warn('Stage 2 history: failed to load pruned paper history', prunedPapersResult.reason);
+      }
 
       if (sessionsResult.status === 'fulfilled') {
         setSessionsResponse(sessionsResult.value);
@@ -187,7 +200,9 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
     setLoadingContentId(paper.history_id);
 
     try {
-      const data = await autonomousAPI.getHistoryPaper(paper.session_id, paper.paper_id);
+      const data = paper.is_pruned
+        ? await autonomousAPI.getPrunedHistoryPaper(paper.session_id, paper.paper_id)
+        : await autonomousAPI.getHistoryPaper(paper.session_id, paper.paper_id);
       setExpandedContent(data);
     } catch (err) {
       console.error('Failed to load history paper content:', err);
@@ -210,7 +225,8 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
       return;
     }
 
-    const filename = sanitizeFilename(`${paper.session_id}_${paper.paper_id}_${paper.title}`);
+    const filenamePrefix = paper.is_pruned ? 'pruned_' : '';
+    const filename = sanitizeFilename(`${filenamePrefix}${paper.session_id}_${paper.paper_id}_${paper.title}`);
     downloadRawText(
       expandedContent.content || '',
       filename,
@@ -226,7 +242,8 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
       return;
     }
 
-    const filename = sanitizeFilename(`${paper.session_id}_${paper.paper_id}_${paper.title}`);
+    const filenamePrefix = paper.is_pruned ? 'pruned_' : '';
+    const filename = sanitizeFilename(`${filenamePrefix}${paper.session_id}_${paper.paper_id}_${paper.title}`);
     const metadata = {
       title: expandedContent.title || paper.title,
       wordCount: paper.word_count,
@@ -290,6 +307,24 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
     }
   };
 
+  const handleDeleteAllPrunedConfirm = async () => {
+    setDeletingAllPruned(true);
+    try {
+      const sessionIds = Array.from(new Set(prunedPapers.map((paper) => paper.session_id)));
+      await Promise.all(sessionIds.map((sessionId) => autonomousAPI.deleteAllPrunedPapers(sessionId)));
+      setDeleteAllPrunedConfirm(false);
+      await loadPaperHistory();
+      if (onCurrentSessionDataChanged) {
+        await onCurrentSessionDataChanged();
+      }
+    } catch (err) {
+      console.error('Failed to delete pruned papers:', err);
+      alert(`Failed to delete pruned papers: ${err.message}`);
+    } finally {
+      setDeletingAllPruned(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="final-answer-library stage2-paper-history">
@@ -326,10 +361,13 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
     <div className="final-answer-library stage2-paper-history">
       <div className="library-header">
         <h2>Stage 2 Final Answer History</h2>
-        <p>Browse completed Stage 2 papers from all autonomous research sessions. This history excludes pruned and archived papers.</p>
+        <p>Browse completed Stage 2 papers from all autonomous research sessions. Pruned papers are preserved here for user review but are excluded from model context.</p>
         <div className="library-stats">
           <span className="stat-badge">
-            {papers.length} {papers.length === 1 ? 'Paper' : 'Papers'}
+            {papers.filter((paper) => !paper.is_pruned).length} Active {papers.filter((paper) => !paper.is_pruned).length === 1 ? 'Paper' : 'Papers'}
+          </span>
+          <span className="stat-badge stat-badge--pruned">
+            {prunedPapers.length} Pruned {prunedPapers.length === 1 ? 'Paper' : 'Papers'}
           </span>
           <span className="stat-badge">
             {runGroups.length} {runGroups.length === 1 ? 'Research Run' : 'Research Runs'}
@@ -354,6 +392,37 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
           onChange={(e) => setSearchTerm(e.target.value)}
           className="search-input"
         />
+        {prunedPapers.length > 0 && (
+          <div className="pruned-delete-control">
+            {deleteAllPrunedConfirm ? (
+              <div className="delete-confirm-inline">
+                <span>Delete all pruned papers permanently?</span>
+                <button
+                  className="btn-delete-confirm"
+                  onClick={handleDeleteAllPrunedConfirm}
+                  disabled={deletingAllPruned}
+                >
+                  {deletingAllPruned ? 'Deleting...' : 'Yes'}
+                </button>
+                <button
+                  className="btn-delete-cancel"
+                  onClick={() => setDeleteAllPrunedConfirm(false)}
+                  disabled={deletingAllPruned}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                className="btn-delete-paper"
+                onClick={() => setDeleteAllPrunedConfirm(true)}
+                title="Permanently delete all pruned paper files"
+              >
+                Delete All Pruned Papers
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {visibleRunGroups.length === 0 ? (
@@ -363,7 +432,7 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
           <p>
             {searchTerm
               ? 'Try adjusting your search.'
-              : 'Completed non-archived Stage 2 papers will appear here.'}
+              : 'Completed and pruned Stage 2 papers will appear here.'}
           </p>
         </div>
       ) : (
@@ -409,7 +478,7 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
                   {runGroup.visibleStage2Papers.map((paper) => (
                     <div
                       key={paper.history_id}
-                      className={`paper-card stage2-history-card ${expandedId === paper.history_id ? 'expanded' : ''}`}
+                      className={`paper-card stage2-history-card ${paper.is_pruned ? 'stage2-history-card--pruned' : ''} ${expandedId === paper.history_id ? 'expanded' : ''}`}
                       onClick={() => handleCardClick(paper)}
                     >
                       <div className="paper-card-header">
@@ -418,6 +487,9 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
                           <span className="stage2-history-session-badge">
                             {paper.session_id === 'legacy' ? 'Legacy' : paper.session_id}
                           </span>
+                          {paper.is_pruned && (
+                            <span className="stage2-history-pruned-badge">Pruned Paper</span>
+                          )}
                         </div>
                         <span className="paper-word-count">{paper.word_count?.toLocaleString()} words</span>
                       </div>
@@ -439,6 +511,12 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
                         {truncateAbstract(paper.abstract)}
                       </div>
 
+                      {paper.is_pruned && (
+                        <div className="stage2-history-pruned-note">
+                          {paper.pruned_note || 'The system decided autonomously that this paper hurt context cumulation.'}
+                        </div>
+                      )}
+
                       <div className="stage2-history-prompt">
                         <strong>Research Question:</strong> {paper.user_prompt}
                       </div>
@@ -457,7 +535,7 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
                       {expandedId === paper.history_id && (
                         <>
                           <div className="paper-actions">
-                            {(() => {
+                            {!paper.is_pruned && (() => {
                               const proofCheckState = getSourceState('paper', paper.history_id);
                               const proofCheckLabel = proofCheckState?.status === 'queued'
                                 ? 'Queueing Proof Check...'
@@ -497,27 +575,29 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
                               Download Raw
                             </button>
 
-                            <button
-                              className="btn-critique"
-                              onClick={(e) => handleOpenCritique(e, paper)}
-                              title="Ask validator to critique this paper"
-                              style={{
-                                background: 'linear-gradient(135deg, #1eff1c 0%, #0fcc0d 100%)',
-                                border: 'none',
-                                color: '#0b2e0b',
-                                padding: '0.35rem 0.7rem',
-                                borderRadius: '4px',
-                                cursor: 'pointer',
-                                fontWeight: '500',
-                                fontSize: '0.75rem',
-                              }}
-                            >
-                              ⭐ Critique
-                            </button>
+                            {!paper.is_pruned && (
+                              <button
+                                className="btn-critique"
+                                onClick={(e) => handleOpenCritique(e, paper)}
+                                title="Ask validator to critique this paper"
+                                style={{
+                                  background: 'linear-gradient(135deg, #1eff1c 0%, #0fcc0d 100%)',
+                                  border: 'none',
+                                  color: '#0b2e0b',
+                                  padding: '0.35rem 0.7rem',
+                                  borderRadius: '4px',
+                                  cursor: 'pointer',
+                                  fontWeight: '500',
+                                  fontSize: '0.75rem',
+                                }}
+                              >
+                                ⭐ Critique
+                              </button>
+                            )}
 
-                            {deleteConfirmId === paper.history_id ? (
+                            {!paper.is_pruned && (deleteConfirmId === paper.history_id ? (
                               <div className="delete-confirm-inline" onClick={(e) => e.stopPropagation()}>
-                                <span>Delete this paper?</span>
+                                <span>Prune this paper from model context?</span>
                                 <button
                                   className="btn-delete-confirm"
                                   onClick={() => handleDeleteConfirm(paper)}
@@ -537,11 +617,11 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
                               <button
                                 className="btn-delete-paper"
                                 onClick={(e) => handleDeleteClick(e, paper)}
-                                title="Delete this paper"
+                                title="Prune this paper from future model context"
                               >
-                                Delete
+                                Prune
                               </button>
-                            )}
+                            ))}
                           </div>
 
                           <div className="paper-full-content">

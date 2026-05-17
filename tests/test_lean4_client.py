@@ -27,7 +27,7 @@ class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
             client = Lean4Client(lean_path=str(root / "lean.exe"), workspace_dir=str(workspace))
             calls: list[list[str]] = []
 
-            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int) -> tuple[int, str, str]:
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
                 calls.append(args)
                 if args[1:] == ["update"]:
                     return 0, "updated", ""
@@ -49,6 +49,7 @@ class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
                     ["update"],
                     ["exe", "cache", "get"],
                     ["exe", "cache", "get"],
+                    ["env", str(root / "lean.exe"), "MOTOProofWorkspace.lean"],
                 ],
             )
 
@@ -63,7 +64,7 @@ class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
             client = Lean4Client(lean_path=str(root / "lean.exe"), workspace_dir=str(workspace))
             calls: list[list[str]] = []
 
-            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int) -> tuple[int, str, str]:
+            async def fake_run_process(args: list[str], *, cwd: Path, timeout: int | None = None) -> tuple[int, str, str]:
                 calls.append(args)
                 await asyncio.sleep(0.01)
                 return 0, "ok", ""
@@ -78,6 +79,7 @@ class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
                 [
                     ["update"],
                     ["exe", "cache", "get"],
+                    ["env", str(root / "lean.exe"), "MOTOProofWorkspace.lean"],
                 ],
             )
 

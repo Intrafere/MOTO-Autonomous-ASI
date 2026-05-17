@@ -13,6 +13,7 @@ from backend.autonomous.prompts.proof_prompts import build_lemma_search_prompt
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.lean4_client import get_lean4_client
+from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.models import MathlibLemmaHint, ProofCandidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.utils import count_tokens
@@ -295,6 +296,8 @@ class MathlibLemmaSearchAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as exc:
+            if is_non_retryable_model_error(exc):
+                raise
             logger.warning(
                 "MathlibLemmaSearchAgent failed for theorem %s: %s",
                 theorem_candidate.theorem_id,

@@ -33,12 +33,17 @@ async def get_workflow_predictions() -> Dict[str, Any]:
         from backend.aggregator.core.coordinator import coordinator
         from backend.compiler.core.compiler_coordinator import compiler_coordinator
         from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
+        from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
         
         # Determine which coordinator is active and return its workflow
         tasks = []
         mode = "idle"
         
-        if autonomous_coordinator._running:
+        if leanoj_coordinator.is_active:
+            mode = "leanoj"
+            tasks = [task.model_dump(mode="json") for task in leanoj_coordinator.workflow_tasks]
+            logger.debug(f"Returning {len(tasks)} tasks from LeanOJ coordinator")
+        elif autonomous_coordinator._running:
             mode = "autonomous"
             # For autonomous mode, check which sub-coordinator is active
             if autonomous_coordinator._brainstorm_aggregator and autonomous_coordinator._brainstorm_aggregator.is_running:

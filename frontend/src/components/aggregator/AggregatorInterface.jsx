@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../../utils/openRouterSelection';
 import TextFileUploader from '../TextFileUploader';
 import '../settings-common.css';
 
@@ -8,6 +9,8 @@ export default function AggregatorInterface({
   setConfig,
   capabilities,
   anyWorkflowRunning = false,
+  onWorkflowRunningChange = null,
+  developerModeEnabled = false,
 }) {
   const [isRunning, setIsRunning] = useState(false);
   const [status, setStatus] = useState(null);
@@ -25,6 +28,9 @@ export default function AggregatorInterface({
       const data = await api.getStatus();
       setStatus(data);
       setIsRunning(data.is_running);
+      if (data.is_running) {
+        onWorkflowRunningChange?.(true);
+      }
     } catch (error) {
       console.error('Failed to fetch status:', error);
     }
@@ -89,9 +95,11 @@ export default function AggregatorInterface({
         provider: lmStudioEnabled ? (s.provider || 'lm_studio') : 'openrouter',
         model_id: s.modelId,
         openrouter_provider: s.openrouterProvider || null,
+        openrouter_reasoning_effort: s.openrouterReasoningEffort || 'auto',
         lm_studio_fallback_id: lmStudioEnabled ? (s.lmStudioFallbackId || null) : null,
         context_window: s.contextWindow,
-        max_output_tokens: s.maxOutputTokens
+        max_output_tokens: s.maxOutputTokens,
+        supercharge_enabled: developerModeEnabled && Boolean(s.superchargeEnabled)
       }));
 
       await api.startAggregator({
@@ -101,12 +109,15 @@ export default function AggregatorInterface({
         validator_provider: lmStudioEnabled ? (config.validatorProvider || 'lm_studio') : 'openrouter',
         validator_model: config.validatorModel,
         validator_openrouter_provider: config.validatorOpenrouterProvider || null,
+        validator_openrouter_reasoning_effort: config.validatorOpenrouterReasoningEffort || 'auto',
         validator_lm_studio_fallback: lmStudioEnabled ? (config.validatorLmStudioFallback || null) : null,
         validator_context_size: config.validatorContextSize,
-        validator_max_output_tokens: config.validatorMaxOutput || 25000,
+        validator_max_output_tokens: config.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        validator_supercharge_enabled: developerModeEnabled && Boolean(config.validatorSuperchargeEnabled),
         uploaded_files: config.uploadedFiles,
       });
       setIsRunning(true);
+      onWorkflowRunningChange?.(true);
     } catch (error) {
       console.error('Failed to start aggregator:', error);
       alert(`Failed to start aggregator: ${error.details || error.message}`);
@@ -117,6 +128,7 @@ export default function AggregatorInterface({
     try {
       await api.stopAggregator();
       setIsRunning(false);
+      onWorkflowRunningChange?.(false);
     } catch (error) {
       console.error('Failed to stop aggregator:', error);
       alert('Failed to stop aggregator');
@@ -124,7 +136,7 @@ export default function AggregatorInterface({
   };
 
   return (
-    <div>
+    <div className={`workflow-main-interface aggregator-interface ${isRunning ? 'workflow-main-interface--running' : ''}`}>
       <h1>Aggregator Interface</h1>
       
       <div className="metric-card">

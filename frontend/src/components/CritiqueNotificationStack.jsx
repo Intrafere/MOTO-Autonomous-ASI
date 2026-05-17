@@ -41,12 +41,12 @@ function getRatingColor(rating) {
  * - Max 3 notifications (FIFO queue)
  * - Click to open critique modal
  * - X button to dismiss
- * - Persists across screens (not localStorage)
+ * - Seen notification keys are tracked by the parent to avoid replay loops
  * 
  * Props:
- * - notifications: Array of notification objects { id, paper_id, paper_title, average_rating, timestamp }
+ * - notifications: Array of notification objects { id, paper_id, paper_title, average_rating, timestamp, seenKey }
  * - onDismiss: (id) => void - callback when notification is dismissed
- * - onClickNotification: (paper_id, paper_title) => void - callback when notification is clicked
+ * - onClickNotification: (paper_id, paper_title, seenKey) => void - callback when notification is clicked
  */
 export default function CritiqueNotificationStack({ notifications, onDismiss, onClickNotification, panelCollapsed }) {
   if (!notifications || notifications.length === 0) {
@@ -98,7 +98,7 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
   };
 
   const handleClick = () => {
-    onClickNotification(notification.paper_id, notification.paper_title);
+    onClickNotification(notification.paper_id, notification.paper_title, notification.seenKey);
   };
 
   return (

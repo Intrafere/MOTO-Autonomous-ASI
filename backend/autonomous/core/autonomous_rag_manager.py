@@ -222,6 +222,10 @@ class AutonomousRAGManager:
         for paper_id in paper_ids:
             content = await paper_library.get_paper_content(paper_id, strip_proofs=True)
             metadata = await paper_library.get_metadata(paper_id)
+
+            if metadata and metadata.status != "complete":
+                logger.info(f"Skipping non-complete reference paper {paper_id} ({metadata.status})")
+                continue
             
             if content and metadata:
                 paper_tokens = count_tokens(content)
@@ -522,6 +526,20 @@ class AutonomousRAGManager:
                 logger.info(f"Removed brainstorm {topic_id} from RAG")
             except Exception as e:
                 logger.error(f"Failed to remove brainstorm {topic_id} from RAG: {e}")
+
+    async def remove_paper_from_rag(self, paper_id: str) -> None:
+        """Remove a pruned paper from any active paper RAG sources."""
+        self._papers_indexed.discard(paper_id)
+        for source_name in (
+            f"reference_paper_{paper_id}",
+            f"reference_paper_{paper_id}.txt",
+            f"prior_paper_{paper_id}.txt",
+        ):
+            try:
+                await rag_manager.remove_document(source_name)
+                logger.info(f"Removed pruned paper RAG source {source_name}")
+            except Exception as e:
+                logger.debug(f"Reference paper RAG source {source_name} not removed: {e}")
 
 
 # Global instance

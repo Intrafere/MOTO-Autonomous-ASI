@@ -15,9 +15,10 @@ import httpx
 import asyncio
 import time
 import os
+import re
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from backend.shared.config import rag_config, system_config
 import logging
 
@@ -27,8 +28,23 @@ logger = logging.getLogger(__name__)
 Path(system_config.logs_dir).mkdir(parents=True, exist_ok=True)
 
 
+def _sanitize_lm_studio_error_text(value: Any, max_chars: int = 500) -> str:
+    """Return a bounded LM Studio diagnostic without echoed prompts or secrets."""
+    text = str(value or "")
+    text = re.sub(r"(Bearer\s+)[A-Za-z0-9._~+\-/=]+", r"\1[redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r'("api[_-]?key"\s*:\s*)"[^"]*"', r'\1"[redacted]"', text, flags=re.IGNORECASE)
+    text = re.sub(r'("messages"\s*:\s*)\[[\s\S]*?\]', r'\1[redacted]', text, flags=re.IGNORECASE)
+    text = re.sub(r'("prompt"\s*:\s*)"[\s\S]*?"', r'\1"[redacted]"', text, flags=re.IGNORECASE)
+    if len(text) > max_chars:
+        return text[:max_chars] + "...[truncated]"
+    return text
+
+
 class LMStudioClient:
     """Client for LM Studio API."""
+    ROUTING_METADATA_KEY = "_moto_lm_studio_routing"
+    INSTANCE_REGISTRY_TTL_SECONDS = 5.0
+    _NUMERIC_INSTANCE_SUFFIX_RE = re.compile(r"^(?P<base>.+):(?P<instance>\d+)$")
     
     # Embedding performance settings
     EMBEDDING_BATCH_SIZE = 100  # Process embeddings in batches of 100
@@ -56,11 +72,76 @@ class LMStudioClient:
                 keepalive_expiry=30.0
             )
         )
+        self._loaded_instance_groups: Dict[str, List[str]] = {}
+        self._loaded_instance_cache_at = 0.0
+        self._instance_registry_lock = asyncio.Lock()
+        self._inflight_by_model: Dict[str, int] = {}
+        self._inflight_lock = asyncio.Lock()
+
+    @classmethod
+    def split_numeric_instance_suffix(cls, model: str) -> Tuple[str, Optional[int]]:
+        """Split LM Studio's final numeric `:#` instance suffix, if present."""
+        model_id = (model or "").strip()
+        match = cls._NUMERIC_INSTANCE_SUFFIX_RE.match(model_id)
+        if not match:
+            return model_id, None
+        return match.group("base"), int(match.group("instance"))
+
+    @classmethod
+    def normalize_instance_base(cls, model: str) -> str:
+        """Return the same-base model key used to group LM Studio sibling instances."""
+        base, _ = cls.split_numeric_instance_suffix(model)
+        return base
+
+    @classmethod
+    def has_numeric_instance_suffix(cls, model: str) -> bool:
+        """Return True only for LM Studio-style numeric instance IDs like `model:2`."""
+        _, instance = cls.split_numeric_instance_suffix(model)
+        return instance is not None
+
+    @classmethod
+    def build_instance_groups(cls, loaded_models: List[str]) -> Dict[str, List[str]]:
+        """Group loaded LM Studio model IDs by same-base instance family."""
+        groups: Dict[str, List[str]] = {}
+        for model in loaded_models or []:
+            model_id = (model or "").strip()
+            if not model_id:
+                continue
+            base = cls.normalize_instance_base(model_id)
+            groups.setdefault(base, []).append(model_id)
+
+        for base, models in groups.items():
+            groups[base] = sorted(
+                dict.fromkeys(models),
+                key=lambda item: (
+                    cls.split_numeric_instance_suffix(item)[1]
+                    if cls.split_numeric_instance_suffix(item)[1] is not None
+                    else 0,
+                    item,
+                ),
+            )
+        return groups
+
+    @classmethod
+    def get_sibling_instances_from_loaded(cls, model: str, loaded_models: List[str]) -> List[str]:
+        """Return same-base loaded instances for a requested model."""
+        base = cls.normalize_instance_base(model)
+        siblings = cls.build_instance_groups(loaded_models).get(base, [])
+        if len(siblings) < 2:
+            return []
+        if not any(cls.has_numeric_instance_suffix(candidate) for candidate in siblings):
+            return []
+        return siblings
+
+    @classmethod
+    def count_sibling_instances_from_loaded(cls, model: str, loaded_models: List[str]) -> int:
+        """Count same-base loaded LM Studio instances for scheduler decisions."""
+        return len(cls.get_sibling_instances_from_loaded(model, loaded_models))
     
     async def _get_model_semaphore(self, model: str) -> asyncio.Semaphore:
         """
         Get or create semaphore for a specific model.
-        Each model gets its own semaphore (limit=1) to prevent concurrent requests.
+        Each model gets its own semaphore to bound concurrent requests.
         Different models can run in parallel.
         
         Args:
@@ -71,8 +152,9 @@ class LMStudioClient:
         """
         async with self._semaphore_lock:
             if model not in self._model_semaphores:
-                self._model_semaphores[model] = asyncio.Semaphore(1)
-                logger.debug(f"Created semaphore for model: {model}")
+                limit = max(1, int(system_config.max_model_concurrency_per_model or 1))
+                self._model_semaphores[model] = asyncio.Semaphore(limit)
+                logger.debug(f"Created semaphore for model: {model} (limit={limit})")
             return self._model_semaphores[model]
     
     async def list_models(self) -> List[Dict[str, Any]]:
@@ -151,6 +233,142 @@ class LMStudioClient:
         except Exception as e:
             logger.error(f"Failed to get loaded models: {e}")
             return []
+
+    async def get_loaded_instance_groups(self, force_refresh: bool = False) -> Dict[str, List[str]]:
+        """Return cached same-base groups for loaded LM Studio instances."""
+        now = time.monotonic()
+        async with self._instance_registry_lock:
+            cache_is_fresh = (
+                not force_refresh
+                and self._loaded_instance_cache_at > 0
+                and now - self._loaded_instance_cache_at < self.INSTANCE_REGISTRY_TTL_SECONDS
+            )
+            if cache_is_fresh:
+                return {base: list(models) for base, models in self._loaded_instance_groups.items()}
+
+            try:
+                loaded_models = await self.get_loaded_models()
+            except Exception as exc:
+                logger.debug(f"LM Studio instance registry refresh failed: {exc}")
+                loaded_models = []
+
+            self._loaded_instance_groups = self.build_instance_groups(loaded_models)
+            self._loaded_instance_cache_at = time.monotonic()
+            return {base: list(models) for base, models in self._loaded_instance_groups.items()}
+
+    async def count_loaded_sibling_instances(self, model: str, loaded_models: Optional[List[str]] = None) -> int:
+        """Count loaded same-base instances for a requested model."""
+        if loaded_models is not None:
+            return self.count_sibling_instances_from_loaded(model, loaded_models)
+        groups = await self.get_loaded_instance_groups()
+        siblings = groups.get(self.normalize_instance_base(model), [])
+        if len(siblings) < 2:
+            return 0
+        if not any(self.has_numeric_instance_suffix(candidate) for candidate in siblings):
+            return 0
+        return len(siblings)
+
+    @classmethod
+    def extract_routing_metadata(cls, response: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Return LM Studio instance-routing metadata attached to a response."""
+        if not isinstance(response, dict):
+            return {}
+        metadata = response.get(cls.ROUTING_METADATA_KEY)
+        if isinstance(metadata, dict):
+            return metadata.copy()
+        return {}
+
+    def _attach_routing_metadata(
+        self,
+        response: Dict[str, Any],
+        *,
+        requested_model: str,
+        actual_model: str,
+        sibling_instances: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Attach requested/actual LM Studio instance details to a response."""
+        if not isinstance(response, dict):
+            return response
+        base_model = self.normalize_instance_base(requested_model)
+        response[self.ROUTING_METADATA_KEY] = {
+            "requested_model": requested_model,
+            "actual_model": actual_model,
+            "base_model": base_model,
+            "shared_instance": actual_model != requested_model,
+            "sibling_instances": list(sibling_instances or []),
+        }
+        return response
+
+    async def _select_completion_model(self, requested_model: str) -> Tuple[str, List[str]]:
+        """
+        Choose an idle same-base LM Studio instance for a completion.
+
+        Discovery failures are fail-closed: return the requested model.
+        """
+        groups = await self.get_loaded_instance_groups()
+        base_model = self.normalize_instance_base(requested_model)
+        siblings = groups.get(base_model, [])
+        if len(siblings) < 2 or not any(self.has_numeric_instance_suffix(candidate) for candidate in siblings):
+            siblings = []
+
+        # If discovery found loaded siblings for this base, only dispatch to
+        # those concrete loaded IDs. This also supports callers configured with
+        # the unsuffixed base model while LM Studio exposes `base:1`, `base:2`.
+        candidates = siblings or [requested_model]
+
+        requested_base = self.normalize_instance_base(requested_model)
+        candidates = [
+            candidate
+            for candidate in dict.fromkeys(candidates)
+            if self.normalize_instance_base(candidate) == requested_base
+        ]
+        if not candidates:
+            candidates = [requested_model]
+
+        async with self._inflight_lock:
+            idle_candidates = [
+                candidate
+                for candidate in candidates
+                if self._inflight_by_model.get(candidate, 0) <= 0
+            ]
+            if idle_candidates:
+                selected_model = min(
+                    idle_candidates,
+                    key=lambda candidate: (
+                        candidate != requested_model,
+                        self.split_numeric_instance_suffix(candidate)[1]
+                        if self.split_numeric_instance_suffix(candidate)[1] is not None
+                        else 0,
+                        candidate,
+                    ),
+                )
+            elif requested_model in candidates:
+                selected_model = requested_model
+            else:
+                # Unsuffixed configs may only have concrete loaded `base:#`
+                # instances. If they are all busy, queue on the least-loaded
+                # concrete instance rather than sending an unloaded base ID.
+                selected_model = min(
+                    candidates,
+                    key=lambda candidate: (
+                        self._inflight_by_model.get(candidate, 0),
+                        self.split_numeric_instance_suffix(candidate)[1]
+                        if self.split_numeric_instance_suffix(candidate)[1] is not None
+                        else 0,
+                        candidate,
+                    ),
+                )
+            self._inflight_by_model[selected_model] = self._inflight_by_model.get(selected_model, 0) + 1
+            return selected_model, siblings
+
+    async def _release_completion_model(self, actual_model: str) -> None:
+        """Release in-flight accounting for a selected LM Studio instance."""
+        async with self._inflight_lock:
+            current = self._inflight_by_model.get(actual_model, 0)
+            if current <= 1:
+                self._inflight_by_model.pop(actual_model, None)
+            else:
+                self._inflight_by_model[actual_model] = current - 1
     
     async def generate_completion(
         self,
@@ -171,22 +389,39 @@ class LMStudioClient:
             tools: Optional OpenAI-compatible tool schemas (LM Studio 0.3+).
             tool_choice: Optional tool-choice directive.
         """
+        requested_model = model
         # Get model-specific semaphore (allows different models to run in parallel)
         if skip_semaphore:
             # Direct execution without semaphore
-            return await self._execute_completion_request(
+            response = await self._execute_completion_request(
                 model, messages, temperature, max_tokens, response_format,
                 tools=tools, tool_choice=tool_choice,
             )
-        
-        model_semaphore = await self._get_model_semaphore(model)
-        
-        # ACQUIRE THIS MODEL'S SEMAPHORE to prevent concurrent requests to same model
-        async with model_semaphore:
-            return await self._execute_completion_request(
-                model, messages, temperature, max_tokens, response_format,
-                tools=tools, tool_choice=tool_choice,
+            return self._attach_routing_metadata(
+                response,
+                requested_model=requested_model,
+                actual_model=model,
+                sibling_instances=[],
             )
+        
+        actual_model, sibling_instances = await self._select_completion_model(requested_model)
+        model_semaphore = await self._get_model_semaphore(actual_model)
+        
+        # Bound same-model parallelism so multi-submitter phases can overlap without unbounded fanout.
+        try:
+            async with model_semaphore:
+                response = await self._execute_completion_request(
+                    actual_model, messages, temperature, max_tokens, response_format,
+                    tools=tools, tool_choice=tool_choice,
+                )
+                return self._attach_routing_metadata(
+                    response,
+                    requested_model=requested_model,
+                    actual_model=actual_model,
+                    sibling_instances=sibling_instances,
+                )
+        finally:
+            await self._release_completion_model(actual_model)
     
     async def _execute_completion_request(
         self,
@@ -247,7 +482,8 @@ class LMStudioClient:
                 
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 400:
-                    error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
+                    raw_error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
+                    error_detail = _sanitize_lm_studio_error_text(raw_error_detail)
                     logger.error(
                         f"LM Studio 400 Bad Request (attempt {attempt + 1}/{max_retries + 1}): "
                         f"model={model}, approx_tokens={approx_tokens}, "
@@ -444,7 +680,7 @@ class LMStudioClient:
             logger.error(f"Failed to connect to LM Studio: {e}")
             return False
     
-    async def check_availability(self) -> Dict[str, Any]:
+    async def check_availability(self, include_cli_models: bool = False) -> Dict[str, Any]:
         """
         Check if LM Studio server is reachable and has models loaded.
         
@@ -472,13 +708,9 @@ class LMStudioClient:
             # Server is reachable
             result["available"] = True
 
-            # Extract models from the /v1/models response as a reliable fallback.
-            # The `lms ps` CLI is preferred (it returns instance IDs), but the CLI
-            # may be missing from PATH or slow/timing out during startup while
-            # nomic is still loading. In either case we must NOT downgrade a
-            # successful /v1/models response to "no models" — that produces a
-            # phantom "LM Studio Offline" state even though embedding calls
-            # are succeeding.
+            # Extract models from the /v1/models response. Routine availability
+            # checks use HTTP only; the `lms ps` CLI can hang or crash under load
+            # on Windows, so reserve it for explicit diagnostics.
             http_models: List[str] = []
             try:
                 data = response.json()
@@ -490,7 +722,7 @@ class LMStudioClient:
             except Exception as parse_err:
                 logger.debug(f"Could not parse /v1/models response body: {parse_err}")
 
-            cli_models = await self.get_loaded_models()
+            cli_models = await self.get_loaded_models() if include_cli_models else []
 
             if cli_models:
                 models = cli_models
@@ -557,7 +789,6 @@ class LMStudioClient:
                 "completion_tokens": completion_tokens,
                 "prompt_tokens": prompt_tokens,
                 "content_length": len(content),
-                "content_preview": content[:100] if content else "(empty)"
             }
             
             # Check 1: Empty or whitespace-only response
@@ -581,11 +812,15 @@ class LMStudioClient:
                 
                 sanitized_content = sanitize_json_response(content)
                 parsed_json = json.loads(sanitized_content)
-                logger.info(f"Model '{model_name}' produced valid JSON: {parsed_json}")
+                logger.info(
+                    "Model '%s' produced valid JSON with keys: %s",
+                    model_name,
+                    sorted(parsed_json.keys()) if isinstance(parsed_json, dict) else type(parsed_json).__name__,
+                )
             except json.JSONDecodeError as json_err:
                 error = f"Model '{model_name}' FAILED to produce valid JSON: {json_err}"
                 logger.error(f"Compatibility test FAILED: {error}")
-                logger.error(f"Response content: {content}")
+                logger.error("Response content redacted (length=%d)", len(content or ""))
                 logger.error(f"Details: {details}")
                 return (False, error, details)
             

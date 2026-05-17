@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+DEFAULT_CONTEXT_WINDOW = 131072
+DEFAULT_MAX_OUTPUT_TOKENS = 25000
+DEFAULT_OPENROUTER_REASONING_EFFORT = "auto"
+OpenRouterReasoningEffort = Literal["auto", "xhigh", "high", "medium", "low", "minimal", "none"]
 
 
 class DocumentChunk(BaseModel):
@@ -105,9 +110,11 @@ class ModelConfig(BaseModel):
     model_id: str
     openrouter_model_id: Optional[str] = None  # For OpenRouter (different naming)
     openrouter_provider: Optional[str] = None  # Specific OpenRouter provider (e.g., "Anthropic")
+    openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     lm_studio_fallback_id: Optional[str] = None  # Fallback LM Studio model if OpenRouter fails
-    context_window: int = 131072
-    max_output_tokens: int = 25000
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    supercharge_enabled: bool = False
 
 
 class BoostConfig(BaseModel):
@@ -116,8 +123,9 @@ class BoostConfig(BaseModel):
     openrouter_api_key: str = ""
     boost_model_id: str = ""  # OpenRouter model to use for boost
     boost_provider: Optional[str] = None  # Specific provider, or None to let OpenRouter choose
-    boost_context_window: int = 131072
-    boost_max_output_tokens: int = 25000
+    boost_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    boost_context_window: int = DEFAULT_CONTEXT_WINDOW
+    boost_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
 
 
 class FreeModelSettings(BaseModel):
@@ -144,9 +152,11 @@ class SubmitterConfig(BaseModel):
     provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     model_id: str  # LM Studio model OR OpenRouter model based on provider
     openrouter_provider: Optional[str] = None  # Specific OpenRouter provider (e.g., "Anthropic")
+    openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     lm_studio_fallback_id: Optional[str] = None  # Fallback LM Studio model if OpenRouter fails
-    context_window: int = 131072
-    max_output_tokens: int = 25000
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    supercharge_enabled: bool = False
 
 
 class AggregatorStartRequest(BaseModel):
@@ -157,9 +167,11 @@ class AggregatorStartRequest(BaseModel):
     validator_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     validator_model: str  # LM Studio model OR OpenRouter model based on provider
     validator_openrouter_provider: Optional[str] = None  # Specific OpenRouter provider
+    validator_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     validator_lm_studio_fallback: Optional[str] = None  # Fallback if OpenRouter fails
-    validator_context_size: int = 131072
-    validator_max_output_tokens: int = 25000
+    validator_context_size: int = DEFAULT_CONTEXT_WINDOW
+    validator_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    validator_supercharge_enabled: bool = False
     uploaded_files: List[str] = Field(default_factory=list)
 
 
@@ -280,30 +292,38 @@ class CompilerStartRequest(BaseModel):
     validator_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     validator_model: str
     validator_openrouter_provider: Optional[str] = None
+    validator_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     validator_lm_studio_fallback: Optional[str] = None
-    validator_context_size: int = 131072
-    validator_max_output_tokens: int = 25000
+    validator_context_size: int = DEFAULT_CONTEXT_WINDOW
+    validator_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    validator_supercharge_enabled: bool = False
     # High-context submitter config
     high_context_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     high_context_model: str
     high_context_openrouter_provider: Optional[str] = None
+    high_context_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     high_context_lm_studio_fallback: Optional[str] = None
-    high_context_context_size: int = 131072
-    high_context_max_output_tokens: int = 25000
+    high_context_context_size: int = DEFAULT_CONTEXT_WINDOW
+    high_context_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    high_context_supercharge_enabled: bool = False
     # High-param submitter config
     high_param_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     high_param_model: str
     high_param_openrouter_provider: Optional[str] = None
+    high_param_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     high_param_lm_studio_fallback: Optional[str] = None
-    high_param_context_size: int = 131072
-    high_param_max_output_tokens: int = 25000
+    high_param_context_size: int = DEFAULT_CONTEXT_WINDOW
+    high_param_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    high_param_supercharge_enabled: bool = False
     # Critique submitter config
     critique_submitter_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     critique_submitter_model: str
     critique_submitter_openrouter_provider: Optional[str] = None
+    critique_submitter_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     critique_submitter_lm_studio_fallback: Optional[str] = None
-    critique_submitter_context_window: int = 131072
-    critique_submitter_max_tokens: int = 25000
+    critique_submitter_context_window: int = DEFAULT_CONTEXT_WINDOW
+    critique_submitter_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    critique_submitter_supercharge_enabled: bool = False
 
 
 # ============================================================================
@@ -331,7 +351,7 @@ class PaperMetadata(BaseModel):
     word_count: int = 0
     source_brainstorm_ids: List[str] = Field(default_factory=list)
     referenced_papers: List[str] = Field(default_factory=list)
-    status: Literal["in_progress", "complete", "archived"] = "complete"
+    status: Literal["in_progress", "complete", "archived", "pruned"] = "complete"
     created_at: datetime = Field(default_factory=datetime.now)
     # Per-paper model tracking: model_id -> API call count
     model_usage: Optional[Dict[str, int]] = None
@@ -339,6 +359,10 @@ class PaperMetadata(BaseModel):
     generation_date: Optional[datetime] = None
     # Wolfram Alpha verification count (tracked separately from LLM API calls)
     wolfram_calls: Optional[int] = None
+    # Pruned papers are preserved for users but excluded from all model context.
+    pruned_at: Optional[datetime] = None
+    pruned_reason: Optional[str] = None
+    pruned_by: Optional[Literal["system", "user", "legacy"]] = None
 
 
 class TopicSelectionSubmission(BaseModel):
@@ -422,6 +446,7 @@ class AutonomousResearchState(BaseModel):
     total_brainstorms_completed: int = 0
     total_papers_completed: int = 0
     total_papers_archived: int = 0
+    total_papers_pruned: int = 0
     total_submissions_accepted: int = 0
     total_submissions_rejected: int = 0
     topic_selection_rejections: int = 0
@@ -438,30 +463,38 @@ class AutonomousResearchStartRequest(BaseModel):
     validator_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     validator_model: str
     validator_openrouter_provider: Optional[str] = None
+    validator_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     validator_lm_studio_fallback: Optional[str] = None
-    validator_context_window: int = 131072
-    validator_max_tokens: int = 25000
+    validator_context_window: int = DEFAULT_CONTEXT_WINDOW
+    validator_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    validator_supercharge_enabled: bool = False
     # Compiler high-context settings (separate from aggregator submitters)
     high_context_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     high_context_model: str = ""  # Empty string allowed, will use submitter model as fallback
     high_context_openrouter_provider: Optional[str] = None
+    high_context_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     high_context_lm_studio_fallback: Optional[str] = None
-    high_context_context_window: int = 131072
-    high_context_max_tokens: int = 25000
+    high_context_context_window: int = DEFAULT_CONTEXT_WINDOW
+    high_context_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    high_context_supercharge_enabled: bool = False
     # Compiler high-param settings
     high_param_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     high_param_model: str = ""  # Empty string allowed, will use submitter model as fallback
     high_param_openrouter_provider: Optional[str] = None
+    high_param_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     high_param_lm_studio_fallback: Optional[str] = None
-    high_param_context_window: int = 131072
-    high_param_max_tokens: int = 25000
+    high_param_context_window: int = DEFAULT_CONTEXT_WINDOW
+    high_param_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    high_param_supercharge_enabled: bool = False
     # Critique submitter settings
     critique_submitter_provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     critique_submitter_model: str = ""  # For critique generation and rewrite decisions (uses high_context if empty)
     critique_submitter_openrouter_provider: Optional[str] = None
+    critique_submitter_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     critique_submitter_lm_studio_fallback: Optional[str] = None
-    critique_submitter_context_window: int = 131072
-    critique_submitter_max_tokens: int = 25000
+    critique_submitter_context_window: int = DEFAULT_CONTEXT_WINDOW
+    critique_submitter_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    critique_submitter_supercharge_enabled: bool = False
     # Tier 3 Final Answer settings
     tier3_enabled: bool = False  # Default OFF — system stops at Tier 2 paper library
 
@@ -520,9 +553,11 @@ class ProofRoleConfigSnapshot(BaseModel):
     provider: Literal["lm_studio", "openrouter"] = "lm_studio"
     model_id: str = ""
     openrouter_provider: Optional[str] = None
+    openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     lm_studio_fallback_id: Optional[str] = None
-    context_window: int = 131072
-    max_output_tokens: int = 25000
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    supercharge_enabled: bool = False
 
 
 class ProofRuntimeConfigSnapshot(BaseModel):
@@ -555,7 +590,9 @@ class ProofAttemptFeedback(BaseModel):
     reasoning: str = ""
     lean_code: str = ""
     error_output: str = ""
+    diagnostic_output: str = ""
     goal_states: str = ""
+    raw_stderr: str = ""
     strategy: Literal["full_script", "tactic_script"] = "full_script"
     tactic_trace: List[str] = Field(default_factory=list)
     success: bool = False
@@ -568,7 +605,7 @@ class ProofRecord(BaseModel):
     theorem_statement: str
     theorem_name: str = ""
     formal_sketch: str = ""
-    source_type: Literal["brainstorm", "paper"]
+    source_type: Literal["brainstorm", "paper", "leanoj_subproof", "leanoj_final"]
     source_id: str
     source_title: str = ""
     solver: str = "Lean 4"
@@ -610,17 +647,141 @@ class ProofCheckRequest(BaseModel):
     """Request body for manually triggering a proof check."""
     source_type: Literal["brainstorm", "paper"]
     source_id: str
+    proof_runtime_config: Optional[Dict[str, Any]] = None
 
 
 class ProofSettingsUpdateRequest(BaseModel):
     """Request body for updating runtime Lean 4 proof settings."""
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool
     timeout: int = Field(default=120, ge=10, le=3600)
     lean4_lsp_enabled: Optional[bool] = None
     lean4_lsp_idle_timeout: Optional[int] = Field(default=None, ge=60, le=7200)
     smt_enabled: Optional[bool] = None
-    z3_path: Optional[str] = None
     smt_timeout: Optional[int] = Field(default=None, ge=1, le=600)
+
+
+# ============================================================================
+# LEANOJ PROOF SOLVER MODELS
+# ============================================================================
+
+
+class LeanOJRoleConfig(BaseModel):
+    """Model/runtime configuration for one LeanOJ proof-solver role."""
+    provider: Literal["lm_studio", "openrouter"] = "lm_studio"
+    model_id: str = ""
+    openrouter_provider: Optional[str] = None
+    openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    lm_studio_fallback_id: Optional[str] = None
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    supercharge_enabled: bool = False
+
+
+class LeanOJStartRequest(BaseModel):
+    """Request to start the LeanOJ proof-solver mode."""
+    user_prompt: str
+    lean_template: str
+    topic_generator: LeanOJRoleConfig
+    topic_validator: LeanOJRoleConfig
+    brainstorm_submitters: List[LeanOJRoleConfig] = Field(default_factory=list, min_length=1, max_length=10)
+    brainstorm_validator: LeanOJRoleConfig
+    path_decider: LeanOJRoleConfig = Field(default_factory=LeanOJRoleConfig)
+    final_solver: LeanOJRoleConfig
+    max_initial_brainstorm_accepts: int = Field(default=30, ge=1, le=200)
+    max_recursive_brainstorm_accepts: int = Field(default=10, ge=1, le=100)
+    final_attempts_per_cycle: int = Field(default=30, ge=30, le=200)
+
+
+class LeanOJAttemptRecord(BaseModel):
+    """One Lean 4 attempt made by the LeanOJ solver."""
+    attempt: int
+    target: Literal["subproof", "final"]
+    request: str = ""
+    lean_code: str = ""
+    success: bool = False
+    error_output: str = ""
+    reasoning: str = ""
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class LeanOJSubproofRecord(BaseModel):
+    """Verified or exhausted subproof produced during one LeanOJ run."""
+    subproof_id: str
+    request: str
+    role: str = ""
+    theorem_or_lemma: str = ""
+    verified: bool = False
+    lean_code: str = ""
+    lean_feedback: str = ""
+    attempts_used: int = 0
+    error_summary: str = ""
+    proof_id: str = ""
+    novel: bool = False
+    novelty_tier: str = "not_novel"
+    novelty_reasoning: str = ""
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class LeanOJState(BaseModel):
+    """Current state snapshot for LeanOJ proof-solver mode."""
+    is_running: bool = False
+    phase: Literal[
+        "idle",
+        "initial_topic_candidates",
+        "initial_brainstorm",
+        "path_decision",
+        "recursive_brainstorm",
+        "proof_storm",
+        "final_proof_loop",
+        "verified",
+        "stopped",
+        "error",
+    ] = "idle"
+    last_active_phase: str = ""
+    active_brainstorm_phase: str = ""
+    active_brainstorm_start_count: int = 0
+    session_id: str = ""
+    selected_topic: str = ""
+    current_path_decision: str = ""
+    accepted_brainstorm_count: int = 0
+    rejected_brainstorm_count: int = 0
+    brainstorm_acceptance_events: int = 0
+    active_brainstorm_last_sufficiency_check_count: int = 0
+    active_brainstorm_last_prune_review_count: int = 0
+    brainstorm_prune_reviews_performed: int = 0
+    brainstorm_prune_operations_applied: int = 0
+    recursive_cycle_count: int = 0
+    verified_subproofs: List[LeanOJSubproofRecord] = Field(default_factory=list)
+    failed_subproofs: List[LeanOJSubproofRecord] = Field(default_factory=list)
+    final_attempt_count: int = 0
+    final_solution: str = ""
+    final_proof_id: str = ""
+    final_novel: bool = False
+    final_novelty_tier: str = "not_novel"
+    final_novelty_reasoning: str = ""
+    master_proof_initialized: bool = False
+    master_proof_version: int = 0
+    master_proof_hash: str = ""
+    master_proof_line_count: int = 0
+    master_proof_char_count: int = 0
+    master_proof_last_edit_summary: str = ""
+    master_proof_last_stuck_reason: str = ""
+    master_proof_old_attempt_before_redo_version: int = 0
+    master_proof_old_attempt_before_redo_hash: str = ""
+    master_proof_old_attempt_before_redo_line_count: int = 0
+    master_proof_old_attempt_before_redo_char_count: int = 0
+    master_proof_old_attempt_before_redo_summary: str = ""
+    master_proof_old_attempt_before_redo_validator_justification: str = ""
+    master_proof_old_attempt_before_redo_apparent_issue: str = ""
+    master_proof_last_shortening_approval_justification: str = ""
+    master_proof_last_shortening_apparent_issue: str = ""
+    last_error: str = ""
+    skip_brainstorm_requested: bool = False
+    force_brainstorm_requested: bool = False
+    user_forced_final_cycle: bool = False
+    updated_at: datetime = Field(default_factory=datetime.now)
 
 
 # ============================================================================
@@ -830,3 +991,5 @@ class CritiqueRequest(BaseModel):
     validator_max_tokens: Optional[int] = None
     validator_provider: Optional[str] = None  # "lm_studio" or "openrouter"
     validator_openrouter_provider: Optional[str] = None  # Specific provider like "Anthropic"
+    validator_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    validator_supercharge_enabled: bool = False

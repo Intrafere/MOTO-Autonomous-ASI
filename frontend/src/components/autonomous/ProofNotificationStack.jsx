@@ -14,6 +14,16 @@ function truncate(text, maxLength = 120) {
 }
 
 const TIER_STYLES = {
+  major_mathematical_discovery: {
+    borderColor: '#f8fafc',
+    glowColor: 'rgba(226, 232, 240, 0.55)',
+    glowInset: 'rgba(255, 255, 255, 0.32)',
+    labelColor: '#f8fafc',
+    background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.96), rgba(226, 232, 240, 0.16))',
+    label: 'Congratulations!\nMajor Mathematical Discovery Found!',
+    subLabel:
+      'Your validator deemed this may be competitive for a major prize or medal in a related field.',
+  },
   novel_formulation: {
     borderColor: '#cd7f32',
     glowColor: 'rgba(205, 127, 50, 0.35)',
@@ -37,7 +47,7 @@ const TIER_STYLES = {
     glowColor: 'rgba(255, 214, 92, 0.35)',
     glowInset: 'rgba(255, 194, 57, 0.25)',
     labelColor: '#ffd65c',
-    label: 'Congratulations!\nMathematical Discovery Found!',
+    label: 'Minor Mathematical Discovery Found!',
     subLabel:
       'Your validator has determined this proof is a mathematical discovery or a novel alternative proof that changes our understanding.',
   },
@@ -85,7 +95,7 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
               textAlign: 'left',
               borderRadius: scalePx(14),
               border: `1.5px solid ${tier.borderColor}`,
-              background: 'linear-gradient(135deg, rgba(8, 35, 22, 0.96), rgba(15, 23, 42, 0.96))',
+              background: tier.background || 'linear-gradient(135deg, rgba(8, 35, 22, 0.96), rgba(15, 23, 42, 0.96))',
               boxShadow: `0 16px 36px rgba(0, 0, 0, 0.35), 0 0 12px ${tier.glowColor}, inset 0 0 0 1px ${tier.glowInset}`,
               padding: `${scalePx(14)} ${scalePx(14)} ${scalePx(12)} ${scalePx(14)}`,
               color: '#f8fafc',

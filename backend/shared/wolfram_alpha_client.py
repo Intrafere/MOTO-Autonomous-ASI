@@ -48,12 +48,12 @@ class WolframAlphaClient:
                 "i": question
             }
             
-            logger.info(f"Querying Wolfram Alpha: {question[:100]}")
+            logger.info("Querying Wolfram Alpha (query_len=%d)", len(question or ""))
             response = await self.client.get(self.BASE_URL, params=params)
             
             if response.status_code == 200:
                 result = response.text.strip()
-                logger.info(f"Wolfram Alpha success: {result[:200]}")
+                logger.info("Wolfram Alpha success (result_len=%d)", len(result))
                 return result
             elif response.status_code == 401:
                 logger.warning("Wolfram Alpha: Invalid API key (401)")
@@ -62,14 +62,14 @@ class WolframAlphaClient:
                 logger.warning("Wolfram Alpha: API key forbidden or rate limited (403)")
                 return None
             elif response.status_code == 501:
-                logger.warning(f"Wolfram Alpha: Could not interpret query (501): {question}")
+                logger.warning("Wolfram Alpha: Could not interpret query (501; query_len=%d)", len(question or ""))
                 return None
             else:
                 logger.warning(f"Wolfram Alpha query failed: status {response.status_code}")
                 return None
                 
         except httpx.TimeoutException:
-            logger.warning(f"Wolfram Alpha query timeout after 30s: {question[:100]}")
+            logger.warning("Wolfram Alpha query timeout after 30s (query_len=%d)", len(question or ""))
             return None
         except Exception as e:
             logger.error(f"Wolfram Alpha API error: {e}", exc_info=True)

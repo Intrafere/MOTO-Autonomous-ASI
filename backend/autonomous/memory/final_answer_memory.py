@@ -750,6 +750,26 @@ class FinalAnswerMemory:
     def _get_source_brainstorms_dir(self) -> Path:
         """Get path to source brainstorms archive directory."""
         return self._base_dir / "source_brainstorms"
+
+    def _get_archived_paper_paths(self, paper_id: str) -> Dict[str, Path]:
+        """Return root-confined paths for one archived paper ID."""
+        safe_id = validate_single_path_component(paper_id, "paper ID")
+        source_papers_dir = self._get_source_papers_dir()
+        return {
+            "content": resolve_path_within_root(source_papers_dir, f"paper_{safe_id}.txt"),
+            "abstract": resolve_path_within_root(source_papers_dir, f"paper_{safe_id}_abstract.txt"),
+            "outline": resolve_path_within_root(source_papers_dir, f"paper_{safe_id}_outline.txt"),
+            "metadata": resolve_path_within_root(source_papers_dir, f"paper_{safe_id}_metadata.json"),
+        }
+
+    def _get_archived_brainstorm_paths(self, topic_id: str) -> Dict[str, Path]:
+        """Return root-confined paths for one archived brainstorm ID."""
+        safe_id = validate_single_path_component(topic_id, "topic ID")
+        source_brainstorms_dir = self._get_source_brainstorms_dir()
+        return {
+            "content": resolve_path_within_root(source_brainstorms_dir, f"brainstorm_{safe_id}.txt"),
+            "metadata": resolve_path_within_root(source_brainstorms_dir, f"brainstorm_{safe_id}_metadata.json"),
+        }
     
     async def save_chapter_paper(
         self,
@@ -804,26 +824,24 @@ class FinalAnswerMemory:
         try:
             source_papers_dir = self._get_source_papers_dir()
             source_papers_dir.mkdir(parents=True, exist_ok=True)
+            archive_paths = self._get_archived_paper_paths(paper_id)
             
             # Copy paper content
             content = await paper_library.get_paper_content(paper_id)
             if content:
-                paper_path = source_papers_dir / f"paper_{paper_id}.txt"
-                async with aiofiles.open(paper_path, 'w', encoding='utf-8') as f:
+                async with aiofiles.open(archive_paths["content"], 'w', encoding='utf-8') as f:
                     await f.write(content)
             
             # Copy abstract
             abstract = await paper_library.get_abstract(paper_id)
             if abstract:
-                abstract_path = source_papers_dir / f"paper_{paper_id}_abstract.txt"
-                async with aiofiles.open(abstract_path, 'w', encoding='utf-8') as f:
+                async with aiofiles.open(archive_paths["abstract"], 'w', encoding='utf-8') as f:
                     await f.write(abstract)
             
             # Copy outline
             outline = await paper_library.get_outline(paper_id)
             if outline:
-                outline_path = source_papers_dir / f"paper_{paper_id}_outline.txt"
-                async with aiofiles.open(outline_path, 'w', encoding='utf-8') as f:
+                async with aiofiles.open(archive_paths["outline"], 'w', encoding='utf-8') as f:
                     await f.write(outline)
             
             # Copy metadata
@@ -834,8 +852,7 @@ class FinalAnswerMemory:
                     if isinstance(value, datetime):
                         metadata_data[key] = value.isoformat()
                 
-                metadata_path = source_papers_dir / f"paper_{paper_id}_metadata.json"
-                async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
+                async with aiofiles.open(archive_paths["metadata"], 'w', encoding='utf-8') as f:
                     await f.write(json.dumps(metadata_data, indent=2))
             
             logger.info(f"Archived paper {paper_id} to final answer source_papers")
@@ -860,12 +877,12 @@ class FinalAnswerMemory:
         try:
             source_brainstorms_dir = self._get_source_brainstorms_dir()
             source_brainstorms_dir.mkdir(parents=True, exist_ok=True)
+            archive_paths = self._get_archived_brainstorm_paths(topic_id)
             
             # Copy brainstorm database
             content = await brainstorm_memory.get_database_content(topic_id)
             if content:
-                db_path = source_brainstorms_dir / f"brainstorm_{topic_id}.txt"
-                async with aiofiles.open(db_path, 'w', encoding='utf-8') as f:
+                async with aiofiles.open(archive_paths["content"], 'w', encoding='utf-8') as f:
                     await f.write(content)
             
             # Copy metadata
@@ -876,8 +893,7 @@ class FinalAnswerMemory:
                     if isinstance(value, datetime):
                         metadata_data[key] = value.isoformat()
                 
-                metadata_path = source_brainstorms_dir / f"brainstorm_{topic_id}_metadata.json"
-                async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
+                async with aiofiles.open(archive_paths["metadata"], 'w', encoding='utf-8') as f:
                     await f.write(json.dumps(metadata_data, indent=2))
             
             logger.info(f"Archived brainstorm {topic_id} to final answer source_brainstorms")
@@ -975,11 +991,11 @@ class FinalAnswerMemory:
         Returns:
             Dictionary with paper content, abstract, outline, metadata
         """
-        source_papers_dir = self._get_source_papers_dir()
+        archive_paths = self._get_archived_paper_paths(paper_id)
         
         try:
             # Read content
-            paper_path = source_papers_dir / f"paper_{paper_id}.txt"
+            paper_path = archive_paths["content"]
             if not paper_path.exists():
                 return None
             
@@ -987,21 +1003,21 @@ class FinalAnswerMemory:
                 content = await f.read()
             
             # Read abstract
-            abstract_path = source_papers_dir / f"paper_{paper_id}_abstract.txt"
+            abstract_path = archive_paths["abstract"]
             abstract = ""
             if abstract_path.exists():
                 async with aiofiles.open(abstract_path, 'r', encoding='utf-8') as f:
                     abstract = await f.read()
             
             # Read outline
-            outline_path = source_papers_dir / f"paper_{paper_id}_outline.txt"
+            outline_path = archive_paths["outline"]
             outline = ""
             if outline_path.exists():
                 async with aiofiles.open(outline_path, 'r', encoding='utf-8') as f:
                     outline = await f.read()
             
             # Read metadata
-            metadata_path = source_papers_dir / f"paper_{paper_id}_metadata.json"
+            metadata_path = archive_paths["metadata"]
             metadata = {}
             if metadata_path.exists():
                 async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
@@ -1054,11 +1070,11 @@ class FinalAnswerMemory:
         Returns:
             Dictionary with brainstorm content and metadata
         """
-        source_brainstorms_dir = self._get_source_brainstorms_dir()
+        archive_paths = self._get_archived_brainstorm_paths(topic_id)
         
         try:
             # Read database content
-            db_path = source_brainstorms_dir / f"brainstorm_{topic_id}.txt"
+            db_path = archive_paths["content"]
             if not db_path.exists():
                 return None
             
@@ -1066,7 +1082,7 @@ class FinalAnswerMemory:
                 content = await f.read()
             
             # Read metadata
-            metadata_path = source_brainstorms_dir / f"brainstorm_{topic_id}_metadata.json"
+            metadata_path = archive_paths["metadata"]
             metadata = {}
             if metadata_path.exists():
                 async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
@@ -1390,7 +1406,7 @@ class FinalAnswerMemory:
         - word_count: Total words
         - chapter_count: Number of chapters (long form only)
         - completion_date: When it was completed
-        - location: Path to the answer
+        - location: Logical answer scope (never an absolute filesystem path)
         - session_id: Session identifier (or "legacy" for old format)
         """
         final_answers = []
@@ -1455,7 +1471,7 @@ class FinalAnswerMemory:
                             "word_count": word_count,
                             "chapter_count": chapter_count,
                             "completion_date": completion_date,
-                            "location": str(legacy_dir),
+                            "location": "legacy",
                             "session_id": "legacy"
                         })
                 except Exception as e:
@@ -1534,7 +1550,7 @@ class FinalAnswerMemory:
                             "word_count": word_count,
                             "chapter_count": chapter_count,
                             "completion_date": completion_date,
-                            "location": str(final_answer_dir),
+                            "location": session_folder.name,
                             "session_id": session_folder.name
                         })
                 except Exception as e:
@@ -1622,7 +1638,7 @@ class FinalAnswerMemory:
                     "word_count": len(full_content.split()),
                     "chapter_count": len(chapters),
                     "completion_date": completion_date,
-                    "location": str(base_dir),
+                    "location": answer_id,
                     "session_id": answer_id
                 },
                 "content": full_content,

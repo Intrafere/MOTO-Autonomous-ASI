@@ -7,6 +7,7 @@ import asyncio
 from typing import Optional, Callable, List, Dict
 from pathlib import Path
 import logging
+import re
 
 from backend.shared.config import system_config
 
@@ -27,6 +28,8 @@ CONCLUSION_PLACEHOLDER = "[HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION - T
 THEOREMS_APPENDIX_START = "[HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]"
 THEOREMS_APPENDIX_END = "[HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]"
 APPENDIX_EMPTY_PLACEHOLDER = "[Theorems appendix - verified Lean 4 theorems not placed inline will appear here]"
+AI_SELF_REVIEW_SECTION_TITLE = "AI Self-Review and Limitations"
+AI_SELF_REVIEW_SECTION_HEADER = f"## {AI_SELF_REVIEW_SECTION_TITLE}"
 
 
 class PaperMemory:
@@ -45,7 +48,6 @@ class PaperMemory:
         self.rechunk_callback: Optional[Callable] = None
         self._lock = asyncio.Lock()
         self._initialized = False
-        self.previous_versions = []  # Store previous body versions for UI display
     
     async def initialize(self) -> None:
         """Initialize paper memory."""
@@ -339,54 +341,14 @@ class PaperMemory:
             except Exception as e:
                 logger.error(f"Re-chunking callback failed after clearing body: {e}")
     
-    async def store_previous_version(
-        self,
-        version: int,
-        title: str,
-        body: str,
-        critique_feedback: str
-    ) -> None:
-        """
-        Store previous body version for UI display.
-        
-        Args:
-            version: Version number
-            title: Paper title for this version
-            body: Body section content
-            critique_feedback: Critique feedback that triggered rewrite
-        """
-        async with self._lock:
-            # Add to in-memory list
-            version_data = {
-                "version": version,
-                "title": title,
-                "body": body,
-                "critique_feedback": critique_feedback
-            }
-            self.previous_versions.append(version_data)
-            
-            # Save to file
-            version_file = Path(system_config.data_dir) / f"paper_version_{version}.txt"
-            version_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            async with aiofiles.open(version_file, 'w', encoding='utf-8') as f:
-                await f.write(f"VERSION {version}: {title}\n")
-                await f.write(f"{'=' * 80}\n\n")
-                await f.write(f"BODY SECTION:\n{body}\n\n")
-                await f.write(f"{'=' * 80}\n\n")
-                await f.write(f"CRITIQUE FEEDBACK THAT TRIGGERED REWRITE:\n{critique_feedback}\n")
-            
-            logger.info(f"Stored previous version {version} to {version_file}")
-    
     async def get_previous_versions(self) -> list:
         """
-        Get all previous versions for UI display.
-        
-        Returns:
-            List of version dicts with version, title, body, critique_feedback
+        Compatibility endpoint for older clients.
+
+        Rewrites are no longer performed, so there are no previous body
+        versions to expose.
         """
-        async with self._lock:
-            return self.previous_versions.copy()
+        return []
     
     def _extract_body_and_appendix(self, paper: str) -> tuple[str, str]:
         """
@@ -532,6 +494,82 @@ class PaperMemory:
             except Exception as e:
                 logger.error(f"Re-chunking callback failed after appendix append: {e}")
         
+        return True
+
+    def _remove_self_review_section(self, content: str) -> str:
+        """Remove an existing AI self-review section before replacing it."""
+        if not content:
+            return ""
+
+        title_pattern = re.escape(AI_SELF_REVIEW_SECTION_TITLE)
+        header_pattern = (
+            rf"(?:^|\n)\s*(?:#+\s*)?{title_pattern}\s*\n"
+        )
+        match = re.search(header_pattern, content, re.IGNORECASE)
+        if not match:
+            return content
+
+        start = match.start()
+        if start > 0 and content[start] == "\n":
+            start += 1
+
+        anchor_match = re.search(re.escape(PAPER_ANCHOR), content[match.end():])
+        end = len(content)
+        if anchor_match:
+            end = match.end() + anchor_match.start()
+
+        return (content[:start].rstrip() + "\n\n" + content[end:].lstrip()).strip()
+
+    def _build_self_review_section(self, critique_feedback: str) -> str:
+        """Build the final transparent self-review section from accepted critiques."""
+        return (
+            f"{AI_SELF_REVIEW_SECTION_HEADER}\n\n"
+            "The following self-review notes were generated during the AI critique phase "
+            "and accepted by the validator as substantive concerns, limitations, or "
+            "improvement points. They are preserved transparently rather than being used "
+            "to rewrite the paper.\n\n"
+            f"{critique_feedback.strip()}"
+        ).strip()
+
+    async def append_self_review_section(self, critique_feedback: str) -> bool:
+        """
+        Append accepted critique feedback as the final AI self-review section.
+
+        The section is placed after the Theorems Appendix when those markers
+        exist, otherwise before the paper anchor. Existing self-review content
+        is replaced so retries do not duplicate the section.
+        """
+        if not critique_feedback or not critique_feedback.strip():
+            logger.info("No critique feedback supplied; skipping self-review append")
+            return False
+
+        final_content = None
+        async with self._lock:
+            paper = await self._get_paper_unlocked()
+            if not paper.strip():
+                logger.warning("Cannot append self-review section: paper is empty")
+                return False
+
+            cleaned = self._remove_self_review_section(paper)
+            section = self._build_self_review_section(critique_feedback)
+
+            anchor_idx = cleaned.find(PAPER_ANCHOR)
+            if anchor_idx >= 0:
+                before_anchor = cleaned[:anchor_idx].rstrip()
+                anchor_and_after = cleaned[anchor_idx:].lstrip()
+                new_paper = f"{before_anchor}\n\n{section}\n\n{anchor_and_after}"
+            else:
+                new_paper = f"{cleaned.rstrip()}\n\n{section}"
+
+            final_content = await self._update_paper_unlocked(new_paper)
+            logger.info("AI self-review section appended to paper")
+
+        if final_content and self.rechunk_callback:
+            try:
+                await self.rechunk_callback(final_content)
+            except Exception as e:
+                logger.error(f"Re-chunking callback failed after self-review append: {e}")
+
         return True
     
     async def ensure_placeholders_exist(self) -> bool:

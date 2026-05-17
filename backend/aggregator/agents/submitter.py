@@ -13,8 +13,9 @@ from backend.shared.config import rag_config, system_config
 from backend.shared.models import Submission, SubmitterState
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
-from backend.shared.json_parser import parse_json
+from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.core.queue_manager import queue_manager
@@ -89,6 +90,12 @@ class SubmitterAgent:
     def get_current_task_id(self) -> str:
         """Get the task ID for the current/next API call."""
         return f"agg_sub{self.submitter_id}_{self.task_sequence:03d}"
+
+    def _generation_temperature(self) -> float:
+        """Use diversified lanes only when the coordinator is running submitters in parallel."""
+        if self.coordinator and not getattr(self.coordinator, "single_model_mode", False):
+            return api_client_manager.parallel_brainstorm_submitter_temperature(self.submitter_id)
+        return 0.0
     
     async def start(self) -> None:
         """Start the submitter agent."""
@@ -250,7 +257,7 @@ class SubmitterAgent:
                         role_id=self.role_id,
                         model=self.model_name,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=0.0,  # Deterministic generation - evolving context provides diversity
+                        temperature=self._generation_temperature(),
                         max_tokens=self.max_output_tokens  # Per-submitter max output tokens
                     )
                     call_metadata = api_client_manager.extract_call_metadata(response)
@@ -349,13 +356,13 @@ class SubmitterAgent:
                 )
                 
                 try:
-                    # CRITICAL FIX: Don't include full failed output - it can be 90K+ tokens!
-                    # Truncate to prevent context overflow during retry
+                    # Keep conversational retry context, but never replay private
+                    # model thought/channel/control tokens as an assistant turn.
                     max_failed_output_chars = 2000  # ~500 tokens - enough to show error context
-                    if len(llm_output) > max_failed_output_chars:
-                        failed_output_preview = llm_output[:max_failed_output_chars] + "\n[...output truncated for retry...]"
-                    else:
-                        failed_output_preview = llm_output
+                    failed_output_preview = sanitize_model_output_for_retry_context(
+                        llm_output,
+                        max_chars=max_failed_output_chars,
+                    )
                     
                     # Calculate if conversation fits in context window
                     prompt_tokens = count_tokens(prompt)
@@ -426,11 +433,10 @@ class SubmitterAgent:
                             )
                             
                             try:
-                                # Truncate retry output for second stage as well
-                                if len(retry_output_1) > max_failed_output_chars:
-                                    retry_output_1_preview = retry_output_1[:max_failed_output_chars] + "\n[...truncated...]"
-                                else:
-                                    retry_output_1_preview = retry_output_1
+                                retry_output_1_preview = sanitize_model_output_for_retry_context(
+                                    retry_output_1,
+                                    max_chars=max_failed_output_chars,
+                                )
                                 
                                 # Check if second retry conversation fits
                                 retry2_tokens = (prompt_tokens + preview_tokens + retry_prompt_tokens + 
@@ -516,7 +522,7 @@ class SubmitterAgent:
                     # Record as rejection in local memory
                     await self.local_memory.add_rejection(
                         error_feedback,
-                        llm_output[:750]
+                        sanitize_model_output_for_retry_context(llm_output, max_chars=750)
                     )
                     self._increment_rejection()
                     # Notify task completed (failed but still completed)
@@ -524,6 +530,83 @@ class SubmitterAgent:
                         self.task_tracking_callback("completed", task_id)
                     return None
             
+            proof_metadata = {}
+            if is_lean_proof_submission(parsed):
+                if not system_config.lean4_enabled:
+                    await self.local_memory.add_rejection(
+                        "Lean proof candidate rejected before validation because Lean 4 verification is disabled. "
+                        "Submit a normal brainstorm idea or enable Lean 4 before choosing `submission_type: lean_proof`.",
+                        str(parsed)[:750]
+                    )
+                    self._increment_rejection()
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
+                    return None
+
+                validator_model = getattr(self.coordinator, "validator_model", self.model_name) if self.coordinator else self.model_name
+                validator_context = getattr(context_allocator, "validator_context_window", rag_config.validator_context_window)
+                validator_max_tokens = getattr(rag_config, "validator_max_output_tokens", self.max_output_tokens)
+                source_context = "\n\n".join(
+                    part
+                    for part in [
+                        allocation.get("direct", ""),
+                        rag_evidence,
+                        shared_training_content,
+                    ]
+                    if part
+                )
+                gate_result = await verify_brainstorm_proof_candidate(
+                    parsed=parsed,
+                    user_prompt=self.user_prompt,
+                    source_context=source_context,
+                    model_id=self.model_name,
+                    role_id=self.role_id,
+                    task_id_prefix=f"{task_id}_lean",
+                    max_tokens=self.max_output_tokens,
+                    validator_model=validator_model,
+                    validator_context=validator_context,
+                    validator_max_tokens=validator_max_tokens,
+                    validator_role_id="aggregator_validator",
+                    max_attempts=5,
+                )
+                if not gate_result.accepted:
+                    await self.local_memory.add_rejection(
+                        gate_result.failure_feedback,
+                        str(parsed.get("lean_code") or parsed.get("submission") or parsed)[:750],
+                    )
+                    self._increment_rejection()
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
+                    return None
+
+                parsed["submission"] = gate_result.submission_content
+                parsed["reasoning"] = gate_result.reasoning or parsed.get("reasoning", "")
+                proof_metadata = {
+                    "brainstorm_lean_proof": {
+                        "theorem_statement": gate_result.theorem_statement,
+                        "theorem_name": gate_result.theorem_name,
+                        "formal_sketch": gate_result.formal_sketch,
+                        "lean_code": gate_result.lean_code,
+                        "lean_feedback": gate_result.lean_feedback,
+                        "reasoning": gate_result.reasoning,
+                        "attempts": [
+                            attempt.model_dump(mode="json")
+                            for attempt in (gate_result.attempts or [])
+                        ],
+                        "attempt_count": len(gate_result.attempts or []),
+                    }
+                }
+
+            if "submission" not in parsed or "reasoning" not in parsed:
+                await self.local_memory.add_rejection(
+                    "Submission JSON missing required `submission` or `reasoning` fields after proof gating.",
+                    str(parsed)[:750],
+                )
+                self._increment_rejection()
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+                return None
+
             # Create submission
             submission = Submission(
                 submission_id=str(uuid.uuid4()),
@@ -535,6 +618,7 @@ class SubmitterAgent:
                     "chunk_size": chunk_size,
                     "rag_used": bool(allocation["rag_context"]),
                     "llm_call": call_metadata,
+                    **proof_metadata,
                 }
             )
             

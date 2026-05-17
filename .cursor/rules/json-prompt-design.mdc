@@ -164,16 +164,30 @@ CORRECT RESPONSE:
 - Improve validator rigor (currently lacks evaluation depth)
 - Maintain existing prompt assembly order: System → JSON Schema → User Prompt → Context → RAG → Final Instruction
 - **MATH VARIANT**: Citation requirements REMOVED. Focus on mathematical rigor, logical correctness, and established mathematical principles. Models with web search capabilities are encouraged to use them for verification. Validation is purely AI-driven.
+- **Proof Prompt Relevance Boundary**: Every automated proof JSON prompt must treat the USER RESEARCH PROMPT as the primary filter. Candidate identification returns every prompt-relevant, non-trivial theorem worth attempting, ordered by usefulness to the user prompt first and novelty/formalization value second. Never impose an artificial theorem-count cap unless explicitly requested.
 - **Compiler Outline Injection**: The compiler outline is always fully injected (never truncated, never RAGed) for all modes because it provides the structural framework for document construction and validation.
-- **TEMPERATURE POLICY**: All prompts use temperature=0.0 (deterministic generation). The system's evolving context provides sufficient diversity. This applies to ALL agents.
+- **TEMPERATURE POLICY**: Default all prompts to `temperature=0.0`. Only two exceptions are allowed: Supercharge candidate attempts and parallel brainstorm submitter lanes. Validators, compiler roles, proof/final roles, and JSON retries must stay deterministic.
+- **Supercharge Schema Preservation**: Per-role Supercharge calls generate 4 full answer attempts plus a 5th synthesis answer. Candidate attempts must be sanitized to reusable visible answer text before the 5th call; private thought/channel/control transcript text must never be fed into synthesis, retries, feedback memory, accepted memory, or RAG. The synthesis prompt must place the final instruction after the candidate block, treat candidates as optional working material, and preserve the original task's exact output contract; if the original role expects JSON, the 5th answer must output only valid JSON in that same schema and must not mention Supercharge or candidate attempts.
 - **NATURAL COMPLETION POLICY**: Models stop naturally when JSON response is complete. No stop sequences enforced. `sanitize_json_response()` handles trailing whitespace. **CRITICAL**: Truncated JSON (unclosed braces/brackets) raises ValueError - no repair attempted.
 - **JSON Response Preprocessing**: All LLM responses preprocessed by `sanitize_json_response()` in `backend/shared/json_parser.py`. See implementation for complete sanitization pipeline: strips reasoning tokens/markdown/control tokens, handles LaTeX escapes (pre-escapes dangerous commands), escapes control chars in strings, rejects truncated JSON, detects pure reasoning text. Enhanced error logging with diagnostics. Array responses auto-extract `data[0]`.
+- **Retry Transcript Hygiene**: Raw provider/model transport output must never enter retry prompts, feedback memory, accepted memory, RAG, synthesis prompts, or durable context. Keep conversational retries, but replay only `sanitize_model_output_for_retry_context()` output, which strips known leading private thought/channel/control transcript scaffolding while preserving useful visible malformed JSON/output excerpts and literal tags/operators inside visible content. Channel/control markers must be treated as transport scaffolding only when detected outside visible JSON/string content; sanitization must not treat ordinary Lean/math/operator text such as `<|`, or literal visible text such as `<think>`, `<thought>`, `<|channel>final`, or `<channel|>`, as a control token when it appears inside visible content. Exact assistant/tool protocol turns are the only exception.
 - **No Startup Compatibility Testing**: Models trusted to work. JSON sanitizer handles all quirks automatically. Model configs cached on first success.
 - **Reasoning Field Extraction**: Agent code checks BOTH `content` and `reasoning` fields for model compatibility.
 - **Centralized JSON Parsing**: All agents use `parse_json()` from `backend/shared/json_parser.py`. Exceptions: memory modules loading system-written files use direct `json.loads()`.
+- **LeanOJ JSON Retry**: LeanOJ proof-solver roles also use centralized `parse_json()` and must retry malformed/non-object JSON before treating a role call as failed. During each configured final-attempt cycle, malformed model output is recorded as failed proof feedback and the loop continues until Lean verifies, the cycle is exhausted, or the operator stops; provider credit exhaustion/no-fallback configuration errors are non-retryable resumable pauses, not proof feedback.
+- **LeanOJ Batch Validation JSON**: LeanOJ brainstorm validation may receive 2-3 submissions and must return `{"decisions": [...]}` with one ordered binary accept/reject decision per submission. Accepted brainstorm decisions should classify `context_role` as `active_plan`, `verified_hint`, `refuted_construction`, or `scratch`; topic validation may receive 2-3 topics and must return ordered `{"decisions": [...]}` entries keyed by `topic_number`. Initial topic validation accepts only broad locked foundation questions that cover `answer n`, lower construction, upper proof, exact LeanOJ semantics, and Lean formalization; reject narrow lemma/tactic/bound/repair topics.
+- **LeanOJ Brainstorm Prune JSON**: LeanOJ prune-review prompts must ask whether any accepted brainstorm memory should be removed or updated because it is `outdated`, `redundant`, wrong, harmful, or superseded. Do not pressure the reviewer to remove content: keep the conservative `"none"` default, allow at most one operation, and preserve any idea with unique proof-solving value. Prune validation should accept deletes/edits only when the operation clearly improves the proof-solving database under those criteria.
+- **LeanOJ Final Context Routing**: Final-solver direct proof context is limited to verified standalone subproofs plus accepted notes explicitly classified as `active_plan`. Ordinary accepted brainstorm notes default to `scratch`, and accepted idea artifact records must persist `context_role` metadata across resume/reload. Lean-accepted partial scaffolds with `sorry`/`admit` and failed final attempts cannot seed `master_proof.lean` unless explicitly marked high-value/master-seed eligible. The final solver may receive the most recent 5 final attempts only as compact execution feedback to avoid repeating failed edits; this feedback is not proof evidence. Failed/refuted constructions are not proof evidence: pass them only through the compact `refuted_construction_warnings` / “DO NOT USE” channel.
+- **LeanOJ Master-Proof Editing JSON**: The final solver edits durable `master_proof.lean` with `{"action":"edit_proof","needs_more_time":true|false,"operation":"full_content|replace|insert_after|delete","old_string":"exact unique proof text","new_string":"Lean code","reasoning":"..."}`. `master_proof.lean` must contain the current chosen proof route only, not accumulated competing/refuted constructions. Final solver prompts must not expose path-transition choices, raw `need_more_brainstorming`, final-cycle failed-attempt counts, or any `stuck_needs_brainstorm` action. They may expose compact recent execution feedback such as Lean errors, stale `old_string` rejections, JSON truncation, and watchdog/no-progress notices. Required corrections from recent feedback must take priority over unrelated new additions, fresh routes, or speculative helpers; new additions are allowed only when they directly implement the required correction or helper code needed for that correction. Phase transitions are selected only by the discrete path-decision mode. Legacy `{"lean_code":...}` is compatibility only.
+- **LeanOJ Master-Proof Lean Gate**: A master proof edit must never be persisted merely because the string edit applies. After structural edit application and any required shortening validation, the updated proof is checked in memory first. `needs_more_time=true` edits run Lean with placeholders allowed but still must parse/typecheck, preserve the original template/declarations, and pass forbidden-device integrity checks. `needs_more_time=false` edits run Lean with no placeholders, then final template integrity, answer adequacy, semantic review, and registration. Lean/template failure rejects the edit, preserves the prior master proof and shortening-backup metadata, and feeds the Lean diagnostics (`error_output`, diagnostic output, goal states, raw stderr when present) back to the final solver.
+- **LeanOJ Master-Proof Shortening Validation JSON**: Material-shortening edits to `master_proof.lean` must be reviewed before the Lean gate by `leanoj_master_proof_edit_validator` using `{"decision":"accept","reasoning":"...","feedback_to_submitter":""}` or `{"decision":"reject","reasoning":"...","feedback_to_submitter":"precise correction"}`. Rejection preserves the prior proof and becomes direct final-solver feedback. Validator acceptance is not proof acceptance: shortening backup/redo state and `master_proof.lean` persistence happen only after the accepted edit also passes the Lean/template gate. The edit validator must reject changes that ignore required corrections in favor of unrelated new additions, and rejection feedback must instruct the submitter to fix the required corrections before new addition attempts.
+- **LeanOJ Final Semantic Review JSON**: After Lean accepts final code and deterministic integrity checks pass, the Final Proof Solver must review the Lean-accepted code against the full LeanOJ problem prompt/template using `{"solved":true,"reasoning":"..."}` or `{"solved":false,"continuation_feedback":"...","reasoning":"..."}`. Rejection is continuation feedback, not verified success.
+- **LeanOJ Formalization Semantics Guardrail**: LeanOJ planning, proof-editing, validation, and final-review prompts must state that the Lean template is the formal source of truth, template operations must not be silently reinterpreted to match informal olympiad intuition (e.g. `Nat` subtraction truncates), proposed formulas/constructions should be sanity-checked against the exact Lean predicate on small cases when feasible, and Lean acceptance alone must not be claimed as solving the informal problem unless the formal/informal correspondence is justified.
+- **Shared Post-Lean Proof Integrity Gate**: Lean 4 is authoritative for proof checking, but proof outputs still pass `backend/shared/lean_proof_integrity.py` before storage/placement. This shared gate rejects newly introduced `axiom`/`constant`/`opaque` proof devices and uses statement-alignment validation so a Lean-accepted proof cannot be stored for an unrelated or user-prompt-irrelevant `ProofCandidate.statement`.
+- **LeanOJ Proof Validation Boundary**: Lean 4 is authoritative formal checking for LeanOJ success, but LLM validators still gate planning decisions, Lean-accepted subproof relevance, and final semantic review. A compiled subproof must not be stored as verified run context unless it matches the requested subproof/role; a compiled final solution must not stop the run unless it preserves the template and the Final Proof Solver confirms it solves the actual prompt rather than a formal loophole.
 - **Specialized Retry for Pure Reasoning Text**: When "No JSON found" error, aggregator submitter uses specialized retry: (1) Don't think step-by-step, (2) Start with `{` immediately, (3) Raw JSON only. See `backend/aggregator/agents/submitter.py`.
 - **Standard LaTeX-Focused Retry**: Retry prompts explain HOW to escape LaTeX properly. **LaTeX IS allowed** - just escape backslashes once (`\mathbb` → `\\mathbb`). DO NOT double-escape. For `old_string`: copy EXACTLY from document, just escape backslashes.
-- **Retry Context Overflow Prevention (CRITICAL)**: Truncate failed output to ~2000 chars before retry. Calculate if retry fits context window. Fall back to simple re-prompt if too large. Set `max_tokens` explicitly (never `None`). NEVER auto-increase beyond user limits. Applies to: `submitter.py`, `validator.py`, `high_param_submitter.py`, `compiler_validator.py`.
+- **Retry Context Overflow Prevention (CRITICAL)**: Sanitize failed output, then truncate to ~2000 chars before retry. Parser exception messages that are inserted into retry prompts must report failure type/structure only and must not include raw output excerpts. Calculate if retry fits context window. Fall back to simple re-prompt if too large. Set `max_tokens` explicitly (never `None`). NEVER auto-increase beyond user limits. Applies to: `submitter.py`, `validator.py`, `high_context_submitter.py`, `high_param_submitter.py`, `compiler_validator.py`.
 
 ## Internal Content Warning (Required in All Prompts)
 
@@ -227,6 +241,7 @@ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified inte
 - `backend/autonomous/prompts/paper_redundancy_prompts.py`
 - `backend/autonomous/prompts/paper_continuation_prompts.py`
 - `backend/autonomous/prompts/final_answer_prompts.py`
+- `backend/autonomous/prompts/proof_prompts.py`
 
 **Note:** The prompt structure examples in the sections below show the core task-specific content. The INTERNAL CONTENT WARNING block is ALWAYS inserted between the role description and the "YOUR TASK:" section in the actual code.
 
@@ -245,13 +260,20 @@ def get_validator_system_prompt() -> str:
     return """You are a validation agent in an AI cluster. Your role is to evaluate mathematical submissions and decide whether they should be added to the shared knowledge base.
 
 YOUR TASK:
-Tell me if the addition of the new submission increases potential solution availability in a significant way and/or provides a valuable solution space-constraint that narrows where we need to search in a significant way.
+Decide whether the submission provides the strongest rigorous progress currently justified toward solving the user's problem, with highest priority given to direct solutions, direct partial solutions, impossibility results, exact reductions, or sharp constraints.
 
-Essentially, you are evaluating whether the training database becomes more useful toward finding mathematical solutions with this submission added than it was without it.
+Essentially, you are evaluating whether the training database becomes more useful toward directly answering the user's mathematical prompt with this submission added than it was without it.
 
-Note: You are not generating solutions yourself - you are assessing if there are new solutions potentially available if we add this submission to the training database, or if the solution space becomes stronger in any way.
+Note: You are not generating solutions yourself. You are judging whether this submission directly solves, partially solves, refutes, or materially enables the user's problem better than the current knowledge base does.
+
+META-PHASE EXCEPTION:
+If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate the submission as the requested candidate artifact, not as a direct solution:
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at a strong direct-answer path
+- PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
+- Do NOT reject these meta-phase submissions merely because they are questions or titles rather than mathematical solutions
 
 EVALUATION CRITERIA - Consider:
+- Does the submission directly answer, partially answer, refute, or sharply constrain the user's problem or a necessary subproblem?
 - Does the submission add genuinely new information or perspectives beyond what is already accepted?
 - Does the submission connect existing mathematical concepts in novel ways?
 - Does the submission provide concrete methods, theorems, proofs, or mathematical techniques?
@@ -263,9 +285,9 @@ EVALUATION CRITERIA - Consider:
 
 VALIDATION DECISION RULES:
 A submission should be ACCEPTED if it:
-1. Increases potential solution availability in a significant way, OR
-2. Provides valuable solution space constraints that narrow where to search, OR
-3. Offers novel mathematical insights not present in existing accepted submissions, OR
+1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
+2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
 A submission should be REJECTED if it:
@@ -451,9 +473,15 @@ YOUR TASK:
 Evaluate EACH submission INDEPENDENTLY to determine if it would make a valuable cumulative addition to the shared knowledge base.
 
 Independent Assessment:
-For each submission, ask: "Does this submission increase potential solution availability or provide valuable constraints, considering only the existing database (not the other submission in this batch)?"
+For each submission, ask: "Does this submission provide the strongest rigorous direct progress currently justified toward the user's problem, considering only the existing database (not the other submission in this batch)?"
 
-Essentially, you are evaluating whether the training database becomes more useful toward finding mathematical solutions with each submission added than it was without it.
+Essentially, you are evaluating whether the training database becomes more useful toward directly answering the user's mathematical prompt with each submission added than it was without it.
+
+META-PHASE EXCEPTION:
+If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate each submission as the requested candidate artifact, not as a direct solution:
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at a strong direct-answer path
+- PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
+- Do NOT reject these meta-phase submissions merely because they are questions or titles rather than mathematical solutions
 
 EVALUATION CRITERIA (Apply to EACH submission independently):
 - Does the submission add genuinely new information or perspectives beyond what is already accepted?
@@ -466,9 +494,9 @@ EVALUATION CRITERIA (Apply to EACH submission independently):
 
 VALIDATION DECISION RULES (for each submission):
 A submission should be ACCEPTED if it:
-1. Increases potential solution availability in a significant way, OR
-2. Provides valuable solution space constraints that narrow where to search, OR
-3. Offers novel mathematical insights not present in existing accepted submissions, OR
+1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
+2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
 A submission should be REJECTED if it:
@@ -599,9 +627,15 @@ YOUR TASK:
 Evaluate EACH submission INDEPENDENTLY to determine if it would make a valuable cumulative addition to the shared knowledge base.
 
 Independent Assessment:
-For each of the three submissions, ask: "Does this submission increase potential solution availability or provide valuable constraints, considering only the existing database (not the other submissions in this batch)?"
+For each of the three submissions, ask: "Does this submission provide the strongest rigorous direct progress currently justified toward the user's problem, considering only the existing database (not the other submissions in this batch)?"
 
-Essentially, you are evaluating whether the training database becomes more useful toward finding mathematical solutions with each submission added than it was without it.
+Essentially, you are evaluating whether the training database becomes more useful toward directly answering the user's mathematical prompt with each submission added than it was without it.
+
+META-PHASE EXCEPTION:
+If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate each submission as the requested candidate artifact, not as a direct solution:
+- TOPIC EXPLORATION PHASE: accept a candidate brainstorm question if it is specific, distinct, relevant, grounded, and aimed at a strong direct-answer path
+- PAPER TITLE EXPLORATION PHASE: accept a candidate title if it is accurate, specific, distinct, professional, and foregrounds direct answer-bearing content when justified
+- Do NOT reject these meta-phase submissions merely because they are questions or titles rather than mathematical solutions
 
 EVALUATION CRITERIA (Apply to EACH submission independently):
 - Does the submission add genuinely new information or perspectives beyond what is already accepted?
@@ -614,9 +648,9 @@ EVALUATION CRITERIA (Apply to EACH submission independently):
 
 VALIDATION DECISION RULES (for each submission):
 A submission should be ACCEPTED if it:
-1. Increases potential solution availability in a significant way, OR
-2. Provides valuable solution space constraints that narrow where to search, OR
-3. Offers novel mathematical insights not present in existing accepted submissions, OR
+1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
+2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
 A submission should be REJECTED if it:
@@ -1652,79 +1686,37 @@ Output your response ONLY as JSON in this exact format:
 
 ---
 
-## 8. CRITIQUE & REWRITE PHASE (POST-BODY CONSTRUCTION)
+## 8. CRITIQUE & SELF-REVIEW PHASE (POST-BODY CONSTRUCTION)
 
 **File:** `backend/compiler/prompts/critique_prompts.py`
 
 ### Overview
 
-After the body section is complete (before conclusion), the system enters a **Critique Phase** that reuses the aggregator infrastructure to collect peer review feedback. This phase ensures the body section is mathematically sound and properly aligned before proceeding.
+After the body section is complete (before conclusion), the system enters a **Critique Phase** that collects validator-approved self-review notes. Accepted critiques are appended to the paper transparently instead of rewriting paper content.
 
 ### Workflow
 
-1. **Critique Aggregation** (5 total attempts required):
+1. **Critique Aggregation** (3 total attempts required):
    - Single critique submitter generates peer review feedback on body section
-   - **Decline Mechanism**: Submitter can assess "no critique needed" when body is academically acceptable (counts toward 5 total attempts)
+   - **Decline Mechanism**: Submitter can assess "no critique needed" when body is academically acceptable (counts toward 3 total attempts)
    - Validator validates critiques/declines (accept/reject with feedback loop)
    - Pruning occurs every 7 acceptances (same as aggregator cleanup review)
-   - Target: 5 total attempts (accepted + rejected + declined attempts)
+   - Target: 3 total attempts (accepted + rejected + declined attempts)
    - Uses aggregator workflow with critique-specific prompts
 
-2. **Rewrite Decision**:
-   - If at least 1 critique accepted: Critique submitter reviews all accepted critiques + accumulated history from previous failed versions
-   - If 0 critiques accepted: Skip rewrite, move to next section
-   - Decides: "rewrite" (major issues found) or "continue" (minor/incorrect critiques)
-   - Validator validates the decision (accept/reject with retry loop)
-   - Decision includes optional new title and new outline
-
-3. **Rewrite Execution** (if approved):
-   - Mark rewrite as pending (counter increments only after first successful acceptance)
-   - Three execution paths based on decision:
-     - **CONTINUE**: Proceed to conclusion (critiques minor/incorrect)
-     - **PARTIAL_REVISION**: **ITERATIVE** edits - proposes ONE edit at a time, validates, applies, then proposes next edit
-     - **TOTAL_REWRITE**: Clear body section completely and rebuild from scratch
-   - Update title if changed (increment version number)
-   - Update outline if changed
-   - **CONTEXT FOR BOTH PARTIAL_REVISION AND TOTAL_REWRITE**:
-     - Pre-critique paper (paper snapshot from START of critique phase - shows what failed)
-     - Current accepted critique feedback (ONLY accepted, not rejected critiques)
-     - ALL critiques from ALL previous failed versions (accumulated feedback history)
-     - Original aggregator database
-     - Reference papers (if applicable)
-
-4. **Version Loop**:
-   - If rewrite_count >= 1 (completed rewrites): Skip critique phase entirely, proceed to conclusion
-   - Rewrite counts as "completed" only after first successful body acceptance
-   - Single completed rewrite cycle is sufficient for convergence
+2. **Self-Review Append**:
+   - If at least 1 critique is accepted: append accepted critiques as `AI Self-Review and Limitations`
+   - If 0 critiques are accepted: move to conclusion without adding the section
+   - The section is placed after compiler/appended proof material when present, otherwise after conclusion
+   - Critiques never trigger partial rewrites, total rewrites, body clearing, title changes, or outline updates
 
 ### Rationale
 
-**Why partial revision is ITERATIVE (one edit at a time):**
-- Allows the model to see the result of each edit before proposing the next
-- Each edit is validated individually for correctness
-- Prevents cascading failures from a batch of edits
-- Model can see pre-critique paper AND current paper to understand what started vs where we are
-- More precise control over the revision process
-
-**Why partial revision is preferred:**
-- Most critiques identify specific, localized issues that can be fixed with targeted edits
-- Preserves coherence in sections that are already correct
-- Faster than full body rewrite
-- Reduces risk of introducing new errors in previously sound sections
-- More efficient use of model context and computation
-
-**Why total rewrite is last resort:**
-- Total rewrites are difficult and can introduce errors in areas that were previously correct
-- Even with feedback, rewriting from scratch can lose coherence
-- Should only be used when issues are too pervasive for targeted edits
-- Catastrophic flaws (fundamental math errors throughout, complete misalignment) justify total rewrite
-- Now receives full context: pre-critique paper + accepted critiques, so rewrite is informed
-
-**Why maximum 1 rewrite:**
-- Prevents infinite rewrite loops on difficult topics
-- Forces convergence to best-effort result after single revision attempt
-- Accumulated feedback ensures the revision benefits from all critique history
-- Single rewrite cycle is sufficient with partial revision option available
+**Why append rather than rewrite:**
+- Preserves the validated paper content and proof placement.
+- Keeps model-discovered limitations visible to readers.
+- Avoids rewrite loops and accidental loss of correct content.
+- Makes the AI self-review honest provenance rather than hidden revision pressure.
 
 ### Decline Mechanism (Academically Acceptable Body)
 
@@ -1740,9 +1732,9 @@ After the body section is complete (before conclusion), the system enters a **Cr
 - Mathematical rigor meets academic standards
 
 **Behavior When Target Met**:
-- If NO accepted critiques: Skip rewrite, transition directly to conclusion
-- If accepted critiques exist: Run rewrite decision
-- Rationale: With only 5 attempts, no early termination mechanism is needed
+- If NO accepted critiques: transition directly to conclusion
+- If accepted critiques exist: append `AI Self-Review and Limitations`, then transition to conclusion
+- Rationale: With only 3 attempts, no early termination mechanism is needed
 
 ### Complete Prompt Structure - Critique Generation
 
@@ -1819,84 +1811,6 @@ Output as JSON:
 """
 ```
 
-### Complete Prompt Structure - Rewrite Decision
-
-**Function:** `get_rewrite_decision_system_prompt()`
-
-```python
-def get_rewrite_decision_system_prompt() -> str:
-    return """You are reviewing aggregated peer review critiques to decide if body needs revision.
-
-[... INTERNAL CONTENT WARNING ...]
-
-YOUR TASK:
-The peer review phase collected critiques through multiple attempts. ALL accepted critiques from the CURRENT version are provided below (typically 1-3 accepted out of 5 total attempts).
-
-**ACCUMULATED CRITIQUE HISTORY**: If this is not the first critique phase (rewrite_count > 0), you will also see critiques from ALL previous failed versions, labeled as "FAILED - REWRITTEN". Use this accumulated feedback to understand what went wrong in past attempts and avoid repeating mistakes.
-
-Review all critiques and decide:
-
-DECISION OPTIONS:
-1. CONTINUE - Minor/incorrect critiques
-2. PARTIAL_REVISION - Fixable issues, you will propose edits ONE AT A TIME in iterative loop
-3. TOTAL_REWRITE - Catastrophic flaws, rebuild from scratch (last resort)
-
-CONTINUE if:
-- Minor issues
-- Incorrect critiques
-- Small gaps addressable in review
-
-PARTIAL_REVISION if:
-- Specific sections have fixable errors
-- Missing content can be inserted at specific locations
-- Most of body is sound, only targeted fixes needed
-- NOTE: You will then propose edits ONE AT A TIME (not all at once)
-
-TOTAL_REWRITE if (ONLY AS LAST RESORT):
-- Fundamental mathematical errors pervasive throughout
-- Body fundamentally misaligned with paper title
-- Structural problems require complete reorganization
-- Issues too widespread for targeted edits
-- NOTE: Rewrite will have full context (pre-critique paper + accepted critiques)
-
-FOR ANY REVISION:
-- Can change title (if scope drift)
-- Can update outline (if structure needs changes)
-- For PARTIAL_REVISION: Edit operations are proposed iteratively (not in this decision)
-
-Output as JSON:
-{
-  "decision": "continue | partial_revision | total_rewrite",
-  "new_title": "New title or null",
-  "new_outline": "Updated outline or null",
-  "reasoning": "Detailed explanation"
-}
-"""
-```
-
-### Iterative Edit Prompt Structure (for PARTIAL_REVISION)
-
-**Function:** `get_iterative_edit_system_prompt()`
-
-When PARTIAL_REVISION is chosen, the system enters an iterative edit loop. Each iteration:
-1. Shows pre-critique paper (original state before this revision cycle)
-2. Shows current paper (after any edits applied so far)
-3. Shows accepted critique feedback
-4. Shows edits already applied
-5. Requests ONE edit proposal
-
-```json
-{
-  "operation": "replace | insert_after | delete",
-  "old_string": "Exact text to find in CURRENT paper",
-  "new_string": "Replacement text",
-  "reasoning": "Which critique issue this addresses",
-  "more_edits_needed": true | false
-}
-```
-
-The loop continues until `more_edits_needed=false` or max iterations (20) reached.
-
 ### Assembly in `build_critique_prompt()`
 
 ```python
@@ -1938,35 +1852,6 @@ The loop continues until `more_edits_needed=false` or max iterations (20) reache
 }
 ```
 
-**Rewrite Decision:**
-```json
-{
-  "decision": "continue | partial_revision | total_rewrite",
-  "new_title": "New title or null",
-  "new_outline": "Updated outline or null",
-  "reasoning": "Detailed explanation"
-}
-```
-
-**Iterative Edit (for partial_revision loop):**
-```json
-{
-  "operation": "replace | insert_after | delete",
-  "old_string": "Exact text to find",
-  "new_string": "Replacement text",
-  "reasoning": "Which critique this addresses",
-  "more_edits_needed": true | false
-}
-```
-
-**Rewrite Decision Validation:**
-```json
-{
-  "decision": "accept or reject",
-  "reasoning": "Why decision is or isn't justified"
-}
-```
-
 ---
 
 ## 9. COMPILER RIGOR PROMPTS (LEAN 4 THEOREM FLOW)
@@ -1979,30 +1864,35 @@ The loop continues until `more_edits_needed=false` or max iterations (20) reache
 
 ### Four-Stage Architecture
 
-The rigor loop no longer edits paper text. Each rigor cycle runs four stages, with the coordinator owning the validator loop and the appendix fallback:
+The rigor loop no longer edits paper text directly during discovery/formalization. Each rigor cycle runs four stages, with the coordinator owning inline validator attempts and appendix routing:
 
 **Stage 1: Theorem discovery (unvalidated)** — `build_rigor_theorem_discovery_prompt`
 - High-param submitter reads the full writing context (outline direct-injected, paper direct-injected when it fits, RAG for the rest per the offload priority excluding `compiler_outline.txt` + `compiler_paper.txt`).
 - Sees `EXISTING VERIFIED PROOFS` block (from `proof_database.get_all_proofs()`) so it does not re-propose already-verified theorems.
 - Sees `OPEN LEMMA TARGETS` block (from `proof_database.get_recent_failure_hints()`) as optional retry candidates.
-- Decides whether a theorem is worth attempting. Decline ends the rigor cycle.
+- Decides whether a user-prompt-relevant theorem is worth attempting. Decline ends the rigor cycle.
+- Discovery is explicitly allowed to construct extension theorems from partial paper work, the current outline, supporting context, or the user prompt when helpful to paper construction and/or the user's goal. It is not limited to exact claims already present in the current paper.
+- Discovery must classify `theorem_origin` as `existing_paper_claim`, `extension_from_partial_work`, or `extension_from_user_prompt`, and must set `placement_preference` to `inline` or `appendix_only`. Extension-derived theorems must use `appendix_only`.
 
 **Stage 2: Lean 4 formalization** — reuses `ProofFormalizationAgent.prove_candidate(max_attempts=5)` from autonomous mode
 - Up to 5 Lean 4 attempts with error-feedback chaining (failing tactic + goal states + raw Lean diagnostics fed back into each retry).
 - Broadcasts `proof_attempt_started` / `proof_verified` / `proof_attempt_failed` / `proof_check_complete` events with `source_type="compiler_rigor"` so the existing autonomous-mode proof UI lights up for free.
 - All-5-fail: candidate is recorded via `proof_database.record_failed_candidate` (becomes a future open lemma target) and the cycle ends as a decline.
 
-**Stage 3: Novelty classification + persistence** — shared `assess_proof_novelty` helper from `backend/autonomous/core/proof_novelty.py`
+**Stage 3: Post-Lean integrity + novelty classification + persistence** — shared `validate_full_lean_proof_integrity` helper from `backend/shared/lean_proof_integrity.py`, then shared `assess_proof_novelty` helper from `backend/autonomous/core/proof_novelty.py`
+- Rejects Lean-accepted proofs that introduce new fake proof devices (`axiom`, `constant`, `opaque`) not present in the source context.
+- Rejects Lean-accepted proofs that do not align with the intended theorem statement.
 - Classifies the verified proof as novel or known.
 - `proof_database.add_proof(record)` stores it with `source_type="paper"`, `source_id=f"compiler_rigor:{session}"`.
 - Novel proofs automatically enter the highest-priority direct-injection block on the next submitter instantiation (via `proof_database.inject_into_prompt`).
 - Non-novel proofs stay in the database, visible through `/api/proofs/*` for future reference-selection UI flows.
 
-**Stage 4: Placement (2 attempts + appendix fallback)** — `build_rigor_placement_prompt`
-- Submitter proposes an inline edit that introduces the theorem with an explicit "verified in Lean 4, see Appendix A, <proof_id>" marker.
+- **Stage 4: Placement routing (inline attempts OR appendix-only)** — `build_rigor_placement_prompt`
+- If `placement_preference="appendix_only"`, inline placement is skipped and the verified theorem is appended directly to the Theorems Appendix with `placement_outcome="appendix_requested"`.
+- If `placement_preference="inline"`, submitter proposes an inline edit that introduces the theorem with an explicit "verified in Lean 4, see Appendix A, <proof_id>" marker.
 - Validator uses the new `rigor_lean_placement` mode: judges placement and narrative only; `rigor_check` is **forced to True** regardless of LLM output (Lean 4 is the source of mathematical truth).
 - Up to 2 placement attempts; attempt 2 receives the validator's rejection feedback via `validator_rejection_feedback` field.
-- On double rejection (or when attempt 1 is not produced), the theorem is appended to the **Theorems Appendix** via `paper_memory.append_to_theorems_appendix(...)`. Counts as a `rigor_acceptance` because the math is preserved.
+- On double rejection (or when attempt 1 is not produced), the theorem is appended to the **Theorems Appendix** via `paper_memory.append_to_theorems_appendix(...)` with `placement_outcome="appendix_fallback"`. Counts as a `rigor_acceptance` because the math is preserved.
 
 ### Stage 1 JSON Schema (discovery)
 
@@ -2011,7 +1901,9 @@ The rigor loop no longer edits paper text. Each rigor cycle runs four stages, wi
   "needs_theorem_work": true,
   "theorem_statement": "precise statement with explicit hypotheses",
   "formal_sketch": "concrete Mathlib tactics / lemmas that look promising",
-  "source_excerpt": "2-6 sentences from the paper that motivate this theorem",
+  "source_excerpt": "2-6 sentences of motivating paper/outline/context/user-prompt basis",
+  "theorem_origin": "existing_paper_claim | extension_from_partial_work | extension_from_user_prompt",
+  "placement_preference": "inline | appendix_only",
   "retry_existing_failure_id": "theorem_id from OPEN LEMMA TARGETS if retrying, empty otherwise",
   "reasoning": "why this theorem is the best target right now OR why no theorem"
 }
@@ -2024,10 +1916,14 @@ Decline form:
   "theorem_statement": "",
   "formal_sketch": "",
   "source_excerpt": "",
+  "theorem_origin": "",
+  "placement_preference": "",
   "retry_existing_failure_id": "",
   "reasoning": "why declining"
 }
 ```
+
+Placement preference rule: `extension_from_partial_work` and `extension_from_user_prompt` MUST resolve to `appendix_only` even if the model emits `inline`. Existing paper claims may use `inline` when the theorem strengthens local prose, or `appendix_only` when it is useful but would distract from the body.
 
 ### Stage 4 JSON Schema (placement)
 
@@ -2060,7 +1956,7 @@ Each entry written by `format_theorem_appendix_entry(...)` (helper in `backend/c
 
 ```
 Theorem (proof_XXX) [Novel | Known] - <theorem_name or proof_id>
-Status: verified by Lean 4 (<inline | appendix_fallback>)
+Status: verified by Lean 4 (<inline | appendix_requested | appendix_fallback>)
 Statement: <natural-language theorem statement>
 Lean 4 proof:
 <full Lean 4 source>
@@ -2306,7 +2202,7 @@ Part 3 introduces autonomous topic selection, brainstorm-to-paper workflows, and
 
 **File:** `backend/autonomous/prompts/topic_exploration_prompts.py`
 
-**Purpose:** Before topic selection, collect 5 validated candidate brainstorm questions using the full Part 1 aggregator infrastructure (parallel submitters, batch validation up to 3). Uses `build_exploration_user_prompt()` to frame the standard aggregator as a candidate question generator.
+**Purpose:** Before topic selection, collect 5 validated candidate brainstorm questions using the full Part 1 aggregator infrastructure (parallel submitters, batch validation up to 3). Uses `build_exploration_user_prompt()` to frame the standard aggregator as a candidate question generator, with a preference for candidate questions that maximize the chance of a rigorous direct answer rather than merely broad exploration.
 
 **Architecture:** Reuses `AggregatorCoordinator` — no custom JSON schemas. Standard aggregator submitter/validator prompts handle generation and validation. The exploration user prompt provides the framing context (research goal, existing brainstorms/papers, diversity requirement).
 
@@ -2757,7 +2653,7 @@ All proof prompts pass `temperature=0.0`.
 
 **Function:** `build_proof_framing_gate_prompt(user_prompt)`
 
-**Purpose:** One-shot decision at autonomous start — decides whether the research program should activate the full proof pipeline. Errs on the side of `true` whenever there is meaningful mathematical substance.
+**Purpose:** One-shot decision at autonomous start — decides whether the research program should activate the full proof pipeline. Errs on the side of `true` whenever formal proof can materially help the user's prompt.
 
 ```json
 {
@@ -2776,7 +2672,7 @@ All proof prompts pass `temperature=0.0`.
 
 **Function:** `build_proof_identification_prompt(user_prompt, source_type, source_id, source_content)`
 
-**Purpose:** Novelty-seeking gate that extracts the most promising non-trivial theorem candidates from a brainstorm or paper. Rejects trivial identities and textbook restatements. Returns at most 5 candidates ranked by novelty potential.
+**Purpose:** User-prompt relevance gate that extracts every prompt-relevant, non-trivial theorem candidate from a brainstorm or paper. Rejects off-prompt curiosities, trivial identities, and textbook restatements. Orders candidates by direct usefulness to the user prompt first, then novelty/formalization value. No artificial theorem-count cap.
 
 ```json
 {
@@ -2786,23 +2682,23 @@ All proof prompts pass `temperature=0.0`.
       "theorem_id": "thm_1",
       "statement": "natural-language theorem statement",
       "formal_sketch": "optional note about assumptions, notation, or likely Lean formalization strategy",
-      "novelty_rationale": "why this theorem is non-trivial and worth formalizing"
+      "novelty_rationale": "why this theorem helps the user prompt and is worth formalizing"
     }
   ]
 }
 ```
 
 **Field requirements:**
-- `has_provable_theorems`: Boolean. `true` when at least one non-trivial novel-potential theorem is present.
-- `theorems`: Array of candidates, ranked by novelty potential. **Maximum 5 entries.** Empty array when `has_provable_theorems` is `false`.
+- `has_provable_theorems`: Boolean. `true` when at least one prompt-relevant, non-trivial theorem is present.
+- `theorems`: Array of every prompt-relevant candidate, ordered by direct usefulness to the user prompt first and novelty/formalization value second. Empty array when `has_provable_theorems` is `false`.
 - `theorem_id`: Stable string identifier such as `"thm_1"`, `"thm_2"`, etc.
 - `statement`: Natural-language theorem statement. Required.
 - `formal_sketch`: Optional Lean formalization hints, assumptions, or notation notes.
-- `novelty_rationale`: Brief explanation of why this theorem is non-trivial and worth the cost of Lean verification. Required for each candidate.
+- `novelty_rationale`: Brief explanation of why this theorem helps the USER RESEARCH PROMPT and is worth the cost of Lean verification. Required for each candidate.
 
-**What to extract:** Novel theorems, bold conjectures that can be sharpened, non-obvious connections/bounds/structural results, ambitious claims (the formalization agent narrows if needed).
+**What to extract:** Theorems, supporting lemmas, sharpened conjectures, non-obvious bounds, and structural results that materially help answer, support, or advance the USER RESEARCH PROMPT.
 
-**What to reject:** Trivial identities (e.g. `n + 0 = n`), standard Mathlib restatements, results closable by a single tactic (`simp`, `omega`, `norm_num`, `decide`, `rfl`), tautologies, definitional equalities.
+**What to reject:** Off-prompt mathematical curiosities, trivial identities (e.g. `n + 0 = n`), standard Mathlib restatements, results closable by a single tactic (`simp`, `omega`, `norm_num`, `decide`, `rfl`), tautologies, definitional equalities.
 
 ---
 
@@ -2910,20 +2806,24 @@ All proof prompts pass `temperature=0.0`.
 
 **Function:** `build_proof_novelty_prompt(user_prompt, theorem_statement, lean_code, existing_novel_proofs)`
 
-**Purpose:** Post-verification novelty gate — classifies a Lean-4-verified theorem as novel or known. Does NOT re-check validity. Errs on the side of recognizing novelty for results that required multi-step reasoning or non-trivial formalization work.
+**Purpose:** Post-verification novelty gate — classifies a Lean-4-verified theorem into a novelty tier. Does NOT re-check validity. Errs on the side of recognizing novelty for results that required multi-step reasoning, non-trivial formalization work, or original proof strategy.
 
 ```json
 {
-  "is_novel": true,
+  "novelty_tier": "mathematical_discovery",
   "reasoning": "brief explanation"
 }
 ```
 
 **Field requirements:**
-- `is_novel`: Boolean. `true` → proof enters the highest-priority direct-injection block for all subsequent brainstorm/paper submitters via `proof_database.get_novel_proofs_for_injection()`. `false` → stored in the database but not injected.
+- `novelty_tier`: One of `not_novel`, `novel_formulation`, `novel_variant`, `mathematical_discovery`, or `major_mathematical_discovery`. Any tier except `not_novel` enters the highest-priority direct-injection block for all subsequent brainstorm/paper submitters via `proof_database.get_novel_proofs_for_injection()`. `not_novel` proofs are stored in the database but not injected.
 - `reasoning`: Always required.
 
-**Novel criteria (any one sufficient):** Result not in Mathlib or standard textbooks; new connection/bound/structural insight; formalizes a previously unverified conjecture; non-trivial composition of known results yielding something new; original relative to the existing stored proofs.
+**Novelty tiers:**
+- `novel_formulation`: The mathematical result is historically known, but this Lean 4 formalization or mechanized proof is novel for the research program.
+- `novel_variant`: A non-trivial reformulation, restructuring, generalization, different proof strategy, weaker hypotheses, stronger conclusion, or original composition based on known material.
+- `mathematical_discovery`: A new theorem, bound, connection, structural insight, formally verified conjecture, or independently publishable/citable mathematical contribution.
+- `major_mathematical_discovery`: A possible field-level breakthrough that may be competitive for a major prize or medal in a related field if confirmed and accepted by domain experts. This sits above ordinary `mathematical_discovery`.
 
 **Not novel:** Direct Mathlib restatement; trivial identity or tautology; closable by a single standard tactic (`simp`, `omega`, `norm_num`, `decide`, `rfl`); duplicates an already-stored novel proof.
 
@@ -2936,16 +2836,17 @@ These core requirements apply across all prompt types:
 1. **Internal Content Warning**: All system prompts include the standardized skepticism warning block
 2. **Concrete Format Examples**: Every prompt includes correct/wrong format examples with visual indicators
 3. **Structured Rejection Feedback**: Validators use the standardized rejection format (Reason/Issue/What I Saw/Expected/Fix)
-4. **Compiler Outline Injection**: The compiler outline is always fully injected (never RAGed) for structural framework
-5. **Temperature Policy**: All prompts use temperature=0.0 where API calls allow (deterministic generation) - the context in the program from feedback, etc provide enough variance to avoid looping.
-6. **JSON Preprocessing**: All LLM responses preprocessed by `sanitize_json_response()`
-7. **Exact String Matching**: Document edits use exact verbatim matches with conservative consecutive fuzzy matching fallback for model escaping quirks (85% consecutive + tail anchor + uniqueness required)
-8. **Phase-Based Construction**: Papers written in order: Body → Conclusion → Introduction → Abstract
-9. **Required Sections**: 
+4. **Direct-Solution Preference**: Prompts should prefer the strongest rigorous direct progress toward the user's goal (direct solutions, direct partial solutions, impossibility results, exact reductions, or sharp constraints) and use indirect support only when no stronger direct step is currently justified. Meta-phases such as topic exploration and paper title exploration still output candidates, but those candidates are judged by direct-answer potential instead of being rejected for not being solutions themselves.
+5. **Compiler Outline Injection**: The compiler outline is always fully injected (never RAGed) for structural framework
+6. **Temperature Policy**: Default `temperature=0.0`; only Supercharge candidates and parallel brainstorm submitter lanes may use explicit diversity temperatures. Validators, compiler roles, proof/final roles, and JSON retries stay `0.0`.
+7. **JSON Preprocessing**: All LLM responses preprocessed by `sanitize_json_response()`
+8. **Exact String Matching**: Document edits use exact verbatim matches with conservative consecutive fuzzy matching fallback for model escaping quirks (85% consecutive + tail anchor + uniqueness required)
+9. **Phase-Based Construction**: Papers written in order: Body → Conclusion → Introduction → Abstract
+10. **Required Sections**:
    - **OUTLINE**: Must include Introduction, Body, Conclusion (Abstract is optional - can be "Abstract", "I. Abstract", or "0. Abstract")
    - **PAPER CONSTRUCTION**: Always writes Abstract → Introduction → Body → Conclusion (Abstract is always written during construction phase regardless of outline)
-10. **No Placeholder Output**: Submissions must never contain placeholder markers
-11. **Placeholder Resume Repair**: When resuming from existing paper, missing placeholders are automatically added via `paper_memory.ensure_placeholders_exist()` to prevent "old_string not found" failures
-12. **Fake Placeholder Detection**: System distinguishes real section content from model-inserted fake placeholder text (FULL content >300 chars = real; <300 chars with keywords = fake) to prevent confusion during marker repair
+11. **No Placeholder Output**: Submissions must never contain placeholder markers
+12. **Placeholder Resume Repair**: When resuming from existing paper, missing placeholders are automatically added via `paper_memory.ensure_placeholders_exist()` to prevent "old_string not found" failures
+13. **Fake Placeholder Detection**: System distinguishes real section content from model-inserted fake placeholder text (FULL content >300 chars = real; <300 chars with keywords = fake) to prevent confusion during marker repair
 
 ---

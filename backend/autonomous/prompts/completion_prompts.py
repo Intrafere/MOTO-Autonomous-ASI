@@ -37,18 +37,23 @@ Assess whether you have sufficiently explored this brainstorm topic using all av
 CRITICAL UNDERSTANDING:
 This is an assessment of topic exploration completeness using all resources at your disposal. Consider whether you can contribute more valuable mathematical insights using your knowledge, web search capabilities (if available), and analysis of what's been covered.
 
+DIRECT-SOLUTION PREFERENCE:
+- Prefer moving to paper writing once the brainstorm can support the strongest rigorous direct answer currently justified
+- Continue brainstorming only when you can identify concrete additional work that is likely to produce a more direct solution, stronger partial solution, impossibility result, or sharper constraint
+- Do not extend brainstorming merely for breadth if the best direct answer is already ready to synthesize
+
 DECISION CRITERIA:
 
 Choose CONTINUE_BRAINSTORM if:
-- You can identify specific mathematical areas not yet covered in the submissions
-- You have additional theorems, proofs, or techniques relevant to the topic (from your knowledge or discoverable via web search)
-- The brainstorm would benefit from deeper exploration in specific directions
-- You can still contribute valuable insights using available resources (base knowledge, web search if available)
+- You can identify specific mathematical areas not yet covered in the submissions that are likely to improve the direct answer
+- You have additional theorems, proofs, techniques, constructions, or impossibility arguments relevant to the topic (from your knowledge or discoverable via web search)
+- The brainstorm would benefit from deeper exploration in specific directions that materially strengthen direct resolution
+- You can still contribute valuable direct-progress insights using available resources (base knowledge, web search if available)
 
 Choose WRITE_PAPER if:
 - All major mathematical avenues for this topic have been explored
 - Additional submissions would likely be redundant with existing content
-- The brainstorm database is comprehensive enough for a quality paper
+- The brainstorm database is comprehensive enough for a quality paper that gives the strongest currently justified direct answer
 - Available resources (base knowledge, web search if available) have been sufficiently utilized for this topic
 - You genuinely cannot think of significant new contributions using available resources
 
@@ -57,6 +62,7 @@ SELF-HONESTY REQUIREMENTS:
 - Don't artificially extend brainstorming if exhausted
 - Don't prematurely end if valuable knowledge remains
 - Consider the mathematical depth achieved, not just submission count
+- Prefer best-answer readiness over breadth for breadth's sake
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -131,14 +137,14 @@ VALIDATION CRITERIA:
 
 Validate as TRUE (confirm your assessment) if:
 - Your assessment accurately reflects the current state of the brainstorm using all available resources (base knowledge, web search if available)
-- If you said "continue_brainstorm": You genuinely have more valuable insights to contribute using available resources
-- If you said "write_paper": You genuinely cannot think of significant new contributions
+- If you said "continue_brainstorm": You genuinely have more valuable direct-progress insights to contribute using available resources
+- If you said "write_paper": You genuinely cannot think of significant new contributions that would materially strengthen the direct answer
 - The reasoning in your assessment is sound and honest
 
 Validate as FALSE if:
 - Upon reflection, the assessment was CLEARLY incorrect
-- If "continue_brainstorm": The suggested additions are trivial, irrelevant, or already extensively covered
-- If "write_paper": You have CONCRETE, SPECIFIC valuable additions you overlooked (not vague possibilities)
+- If "continue_brainstorm": The suggested additions are trivial, irrelevant, already extensively covered, or too indirect to justify delay
+- If "write_paper": You have CONCRETE, SPECIFIC valuable additions you overlooked that would materially improve direct resolution (not vague possibilities)
 - The reasoning contains obvious flawed logic
 
 BALANCED VALIDATION APPROACH:

@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from backend.api.routes import websocket
@@ -39,19 +40,50 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/proofs", tags=["proofs"])
 
 
+def _safe_path_label(path_value: str) -> str:
+    """Return a display-safe basename instead of an absolute local path."""
+    text = str(path_value or "").strip()
+    if not text:
+        return ""
+    try:
+        return Path(text).name or "[configured]"
+    except Exception:
+        return "[configured]"
+
+
 def _build_model_config(role: ProofRoleConfigSnapshot) -> ModelConfig:
     return ModelConfig(
         provider=role.provider,
         model_id=role.model_id,
         openrouter_model_id=role.model_id if role.provider == "openrouter" else None,
         openrouter_provider=role.openrouter_provider,
+        openrouter_reasoning_effort=role.openrouter_reasoning_effort,
         lm_studio_fallback_id=role.lm_studio_fallback_id,
         context_window=role.context_window,
         max_output_tokens=role.max_output_tokens,
+        supercharge_enabled=role.supercharge_enabled,
     )
 
 
-async def _get_runtime_snapshot() -> Optional[ProofRuntimeConfigSnapshot]:
+def _get_request_runtime_snapshot(request: Optional[ProofCheckRequest]) -> Optional[ProofRuntimeConfigSnapshot]:
+    if not request or not request.proof_runtime_config:
+        return None
+
+    try:
+        return ProofRuntimeConfigSnapshot(**request.proof_runtime_config)
+    except Exception as exc:
+        logger.error("Manual proof runtime config from request is invalid: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Manual proof runtime model configuration is invalid.",
+        )
+
+
+async def _get_runtime_snapshot(request: Optional[ProofCheckRequest] = None) -> Optional[ProofRuntimeConfigSnapshot]:
+    request_snapshot = _get_request_runtime_snapshot(request)
+    if request_snapshot is not None:
+        return request_snapshot
+
     snapshot_dict = autonomous_coordinator.get_proof_runtime_config()
     if not snapshot_dict:
         snapshot_dict = await research_metadata.get_proof_runtime_config()
@@ -134,7 +166,7 @@ async def _resolve_manual_source(request: ProofCheckRequest) -> Tuple[str, str]:
 async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
     try:
         source_content, source_title = await _resolve_manual_source(request)
-        snapshot = await _get_runtime_snapshot()
+        snapshot = await _get_runtime_snapshot(request)
         if snapshot is None:
             raise RuntimeError("No proof runtime model configuration is available yet.")
 
@@ -287,15 +319,38 @@ async def _strip_known_proofs_from_files() -> dict:
 
 
 @router.post("/cleanup-known-from-files")
-async def cleanup_known_proofs_from_files():
+async def cleanup_known_proofs_from_files(confirm: bool = Query(default=False)):
     """One-time cleanup: strip non-novel proof entries from brainstorm/paper files.
 
     Non-novel proofs are stored in ProofDatabase (no data loss).  This endpoint
     removes their raw Lean 4 code from brainstorm and paper .txt files so that
     compiler and RAG context is no longer polluted by standard known results.
 
-    Safe to call on a running session.  Novel proof entries are preserved.
+    Requires explicit confirmation because it mutates brainstorm/paper files.
+    Novel proof entries are preserved.
     """
+    if system_config.generic_mode:
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "lean4_enabled": False,
+                "message": "Proof file cleanup is unavailable in hosted mode.",
+            },
+        )
+    if not system_config.lean4_enabled:
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "lean4_enabled": False,
+                "message": "Proof file cleanup is unavailable while Lean 4 is disabled.",
+            },
+        )
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Pass ?confirm=true to strip known proof entries from brainstorm and paper files.",
+        )
+
     result = await _strip_known_proofs_from_files()
     return result
 
@@ -335,8 +390,11 @@ async def get_proofs_status():
     return {
         "lean4_enabled": system_config.lean4_enabled,
         "lean4_lsp_enabled": system_config.lean4_lsp_enabled,
-        "lean4_path": system_config.lean4_path,
-        "lean4_workspace_dir": system_config.lean4_workspace_dir,
+        "lean4_path": _safe_path_label(system_config.lean4_path),
+        "lean4_path_configured": bool(system_config.lean4_path),
+        "lean4_workspace_dir": _safe_path_label(system_config.lean4_workspace_dir),
+        "lean4_workspace_configured": bool(system_config.lean4_workspace_dir),
+        "runtime_paths_redacted": True,
         "lean_version": version,
         "lean4_version": version,
         "lean4_proof_timeout": system_config.lean4_proof_timeout,
@@ -347,7 +405,8 @@ async def get_proofs_status():
         "mathlib_commit": mathlib_commit,
         "smt_enabled": system_config.smt_enabled,
         "smt_available": smt_available,
-        "z3_path": system_config.z3_path,
+        "z3_path": _safe_path_label(system_config.z3_path),
+        "z3_path_configured": bool(system_config.z3_path),
         "smt_timeout": system_config.smt_timeout,
         "z3_version": z3_version,
         "manual_check_ready": manual_check_ready,
@@ -371,7 +430,6 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
     )
     previous_smt_settings = (
         system_config.smt_enabled,
-        system_config.z3_path,
         system_config.smt_timeout,
     )
 
@@ -383,8 +441,6 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
         system_config.lean4_lsp_idle_timeout = int(request.lean4_lsp_idle_timeout)
     if request.smt_enabled is not None:
         system_config.smt_enabled = bool(request.smt_enabled)
-    if request.z3_path is not None:
-        system_config.z3_path = str(request.z3_path or "").strip()
     if request.smt_timeout is not None:
         system_config.smt_timeout = int(request.smt_timeout)
 
@@ -397,7 +453,6 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
     )
     smt_settings_changed = previous_smt_settings != (
         system_config.smt_enabled,
-        system_config.z3_path,
         system_config.smt_timeout,
     )
 
@@ -421,7 +476,7 @@ async def run_manual_proof_check(request: ProofCheckRequest, background_tasks: B
     if not system_config.lean4_enabled:
         raise HTTPException(status_code=501, detail={"lean4_enabled": False, "message": "Lean 4 proof checks are disabled."})
 
-    snapshot = await _get_runtime_snapshot()
+    snapshot = await _get_runtime_snapshot(request)
     if snapshot is None:
         raise HTTPException(
             status_code=409,
@@ -431,7 +486,7 @@ async def run_manual_proof_check(request: ProofCheckRequest, background_tasks: B
     if not selected_role.model_id or not snapshot.validator.model_id:
         raise HTTPException(
             status_code=409,
-            detail="Proof runtime model configuration is incomplete. Start autonomous research again to refresh proof roles.",
+            detail="Proof runtime model configuration is incomplete. Select models for the proof role and validator, then try again.",
         )
 
     await _resolve_manual_source(request)

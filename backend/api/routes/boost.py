@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from typing import Dict, Any, Optional
 import logging
 
-from backend.shared.config import rag_config
+from backend.shared.config import rag_config, system_config
 from backend.shared.models import BoostConfig
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
@@ -28,11 +28,16 @@ class BoostNextCountRequest(BaseModel):
     count: int
 
 
-def _resolve_boost_api_key(api_key: Optional[str]) -> str:
-    """Use the explicit boost key when provided, otherwise fall back to the active global key."""
+def _resolve_boost_api_key(api_key: Optional[str], *, allow_current_override: bool = False) -> str:
+    """Use an explicit/current boost key when provided, otherwise fall back to the active global key."""
     explicit_key = (api_key or "").strip()
     if explicit_key:
         return explicit_key
+
+    if allow_current_override and boost_manager.boost_config:
+        current_key = (boost_manager.boost_config.openrouter_api_key or "").strip()
+        if current_key:
+            return current_key
 
     global_key = (rag_config.openrouter_api_key or "").strip()
     if global_key:
@@ -56,7 +61,8 @@ async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
         Status and boost configuration
     """
     try:
-        effective_api_key = _resolve_boost_api_key(config.openrouter_api_key)
+        explicit_api_key = (config.openrouter_api_key or "").strip()
+        effective_api_key = _resolve_boost_api_key(explicit_api_key)
         
         client = OpenRouterClient(effective_api_key)
         try:
@@ -70,7 +76,9 @@ async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
         finally:
             await client.close()
 
-        config.openrouter_api_key = effective_api_key
+        # Keep explicit boost override keys in process memory only. When the
+        # user relies on the global OpenRouter key, Boost stores no key at all.
+        config.openrouter_api_key = explicit_api_key
         
         # Enable boost
         await boost_manager.set_boost_config(config)
@@ -84,6 +92,7 @@ async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
             "config": {
                 "model_id": config.boost_model_id,
                 "provider": config.boost_provider,
+                "reasoning_effort": config.boost_reasoning_effort,
                 "context_window": config.boost_context_window,
                 "max_output_tokens": config.boost_max_output_tokens
             }
@@ -119,7 +128,11 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
                 detail="Boost must be enabled first. Use /api/boost/enable to enable boost."
             )
         
-        effective_api_key = _resolve_boost_api_key(config.openrouter_api_key)
+        explicit_api_key = (config.openrouter_api_key or "").strip()
+        effective_api_key = _resolve_boost_api_key(
+            explicit_api_key,
+            allow_current_override=True,
+        )
         
         client = OpenRouterClient(effective_api_key)
         try:
@@ -133,7 +146,12 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
         finally:
             await client.close()
 
-        config.openrouter_api_key = effective_api_key
+        if explicit_api_key:
+            config.openrouter_api_key = explicit_api_key
+        elif boost_manager.boost_config and boost_manager.boost_config.openrouter_api_key:
+            config.openrouter_api_key = boost_manager.boost_config.openrouter_api_key
+        else:
+            config.openrouter_api_key = ""
         
         # Store current boost state before update
         old_boost_next_count = boost_manager.boost_next_count
@@ -158,6 +176,7 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
             "config": {
                 "model_id": config.boost_model_id,
                 "provider": config.boost_provider,
+                "reasoning_effort": config.boost_reasoning_effort,
                 "context_window": config.boost_context_window,
                 "max_output_tokens": config.boost_max_output_tokens
             },
@@ -467,7 +486,7 @@ async def get_boost_logs(limit: int = 100) -> Dict[str, Any]:
         List of log entries (most recent first)
     """
     try:
-        logs = await boost_logger.get_logs(limit)
+        logs = await boost_logger.get_logs(limit, include_full=False)
         stats = await boost_logger.get_stats()
         
         return {
@@ -493,7 +512,7 @@ async def get_boost_log_entry(index: int) -> Dict[str, Any]:
         Full log entry including complete response
     """
     try:
-        entry = await boost_logger.get_log_entry(index)
+        entry = await boost_logger.get_log_entry(index, include_full=system_config.api_log_store_full_payloads)
         
         if not entry:
             raise HTTPException(status_code=404, detail="Log entry not found")

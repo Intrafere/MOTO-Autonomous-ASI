@@ -7,6 +7,7 @@ Novel proofs are also formatted for highest-priority direct prompt injection.
 import asyncio
 import json
 import logging
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -100,6 +101,31 @@ class ProofDatabase:
                 if proof_id not in self._mathlib_reverse_short_index[short_name]:
                     self._mathlib_reverse_short_index[short_name].append(proof_id)
 
+    def _rebuild_index_from_record_files_sync(self) -> Dict[str, Any]:
+        proofs: List[Dict[str, Any]] = []
+        for record_path in self._base_dir.glob("proof_*.json"):
+            if record_path.name.endswith("_metadata.json"):
+                continue
+            try:
+                data = json.loads(record_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or not data.get("proof_id"):
+                    continue
+                proofs.append(data)
+            except Exception as exc:
+                logger.warning("Skipping unreadable proof record during index rebuild: %s (%s)", record_path, exc)
+
+        proofs.sort(key=lambda proof: proof.get("created_at", ""), reverse=True)
+        max_numeric_id = 0
+        for proof in proofs:
+            proof_id = str(proof.get("proof_id", ""))
+            match = re.search(r"(\d+)$", proof_id)
+            if match:
+                max_numeric_id = max(max_numeric_id, int(match.group(1)))
+        return {
+            "next_proof_id": max(max_numeric_id + 1, len(proofs) + 1, 1),
+            "proofs": proofs,
+        }
+
     async def initialize(self) -> None:
         """Ensure storage exists and load the index."""
         if self._session_manager and self._session_manager.is_session_active:
@@ -117,8 +143,11 @@ class ProofDatabase:
                     self._index_data = json.loads(await handle.read())
             except Exception as exc:
                 logger.error("Failed to load proofs index: %s", exc)
-                self._index_data = self._default_index()
-                await self._save_index()
+                self._index_data = await asyncio.to_thread(self._rebuild_index_from_record_files_sync)
+                logger.warning(
+                    "Rebuilt proofs index from %s record file(s) after index load failure",
+                    len(self._index_data.get("proofs", [])),
+                )
         else:
             self._index_data = self._default_index()
             await self._save_index()
@@ -140,7 +169,7 @@ class ProofDatabase:
                 self._index_data = json.loads(index_path.read_text(encoding="utf-8"))
             except Exception as exc:
                 logger.error("Failed to synchronously load proofs index: %s", exc)
-                self._index_data = self._default_index()
+                self._index_data = self._rebuild_index_from_record_files_sync()
         else:
             self._index_data = self._default_index()
 
@@ -206,9 +235,25 @@ class ProofDatabase:
 
     async def add_proof(self, record: ProofRecord) -> ProofRecord:
         """Persist a proof record and return the stored copy."""
+        stored_record, _duplicate = await self.add_proof_if_absent(record)
+        return stored_record
+
+    async def add_proof_if_absent(self, record: ProofRecord) -> tuple[ProofRecord, bool]:
+        """Persist a proof record unless an identical source/theorem/code exists."""
         async with self._lock:
             if self._index_data is None:
                 await self._load_index()
+
+            normalized_statement = " ".join((record.theorem_statement or "").split())
+            normalized_code = "\n".join((record.lean_code or "").strip().splitlines())
+            for existing in self._index_data.get("proofs", []):
+                if existing.get("source_type") != record.source_type or existing.get("source_id") != record.source_id:
+                    continue
+                if " ".join(str(existing.get("theorem_statement") or "").split()) != normalized_statement:
+                    continue
+                if "\n".join(str(existing.get("lean_code") or "").strip().splitlines()) != normalized_code:
+                    continue
+                return self._deserialize_record(existing), True
 
             proof_id = record.proof_id or f"proof_{self._index_data['next_proof_id']:03d}"
             stored_record = record.model_copy(update={"proof_id": proof_id})
@@ -241,7 +286,7 @@ class ProofDatabase:
                 stored_record.source_type,
                 stored_record.source_id,
             )
-            return stored_record
+            return stored_record, False
 
     async def record_failed_candidate(
         self,
@@ -627,12 +672,13 @@ class ProofDatabase:
         lines = [
             "=== VERIFIED NOVEL MATHEMATICAL PROOFS (Lean 4 Verified) ===",
             "[These proofs have been formally verified. They represent proven mathematical truths.",
-            "Novelty tiers: Mathematical Discovery (highest — new result), Novel Reformulation (novel reformulation of known proof), Novel Formalization (first Lean 4 formalization of known result).]",
+            "Novelty tiers: Major Mathematical Discovery (highest — possible prize-level discovery), Mathematical Discovery (new result), Novel Reformulation (novel reformulation of known proof), Novel Formalization (first Lean 4 formalization of known result).]",
             "",
         ]
         for index, proof in enumerate(novel_proofs, start=1):
             tier = proof.get("novelty_tier", "")
             tier_label = {
+                "major_mathematical_discovery": "Major Mathematical Discovery",
                 "mathematical_discovery": "Mathematical Discovery",
                 "novel_variant": "Novel Reformulation",
                 "novel_formulation": "Novel Formalization",

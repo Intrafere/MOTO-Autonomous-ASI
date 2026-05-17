@@ -119,6 +119,11 @@
   stroke: rgba(96, 165, 250, 0.32);
 }
 
+.proof-graph-node-group.platinum .proof-graph-node-frame {
+  stroke: rgba(226, 232, 240, 0.85);
+  filter: drop-shadow(0 0 5px rgba(226, 232, 240, 0.45));
+}
+
 .proof-graph-node-group.gold .proof-graph-node-frame {
   stroke: rgba(255, 214, 92, 0.55);
 }

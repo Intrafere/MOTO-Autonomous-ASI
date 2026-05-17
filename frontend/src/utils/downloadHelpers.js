@@ -31,11 +31,15 @@ export const downloadRawText = (content, filename, outline = null, disclaimerTyp
 
   fullContent += body;
 
-  const blob = new Blob([fullContent], { type: 'text/plain' });
+  downloadTextFile(fullContent, `${filename}.txt`);
+};
+
+export const downloadTextFile = (content, filename, mimeType = 'text/plain') => {
+  const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `${filename}.txt`;
+  link.download = filename;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);

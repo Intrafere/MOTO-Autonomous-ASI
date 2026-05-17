@@ -138,7 +138,7 @@ class SystemConfig(BaseSettings):
         validation_alias=AliasChoices("MOTO_INSTANCE_ID", "INSTANCE_ID"),
     )
     backend_host: str = Field(
-        default="0.0.0.0",
+        default="127.0.0.1",
         validation_alias=AliasChoices("MOTO_BACKEND_HOST", "HOST"),
     )
     backend_port: int = Field(
@@ -157,6 +157,30 @@ class SystemConfig(BaseSettings):
         default=None,
         validation_alias=AliasChoices("MOTO_INTERNAL_PROXY_SECRET", "INTERNAL_PROXY_SECRET"),
     )
+    generic_max_request_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        validation_alias=AliasChoices("MOTO_GENERIC_MAX_REQUEST_BYTES", "GENERIC_MAX_REQUEST_BYTES"),
+    )
+    pdf_max_html_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        validation_alias=AliasChoices("MOTO_PDF_MAX_HTML_BYTES", "PDF_MAX_HTML_BYTES"),
+    )
+    pdf_max_outline_bytes: int = Field(
+        default=1 * 1024 * 1024,
+        validation_alias=AliasChoices("MOTO_PDF_MAX_OUTLINE_BYTES", "PDF_MAX_OUTLINE_BYTES"),
+    )
+    pdf_max_metadata_bytes: int = Field(
+        default=64 * 1024,
+        validation_alias=AliasChoices("MOTO_PDF_MAX_METADATA_BYTES", "PDF_MAX_METADATA_BYTES"),
+    )
+    api_log_store_full_payloads: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("MOTO_API_LOG_STORE_FULL_PAYLOADS", "API_LOG_STORE_FULL_PAYLOADS"),
+    )
+    desktop_api_token: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("MOTO_DESKTOP_API_TOKEN", "DESKTOP_API_TOKEN"),
+    )
     frontend_storage_prefix: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("MOTO_FRONTEND_STORAGE_PREFIX", "FRONTEND_STORAGE_PREFIX"),
@@ -169,6 +193,13 @@ class SystemConfig(BaseSettings):
     consecutive_rejection_reset_threshold: int = 15
     queue_overflow_threshold: int = 10
     per_submitter_queue_threshold: int = 4  # Pause an individual submitter when it already has more than this many submissions queued (fairness cap)
+    max_model_concurrency_per_model: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "MOTO_MAX_MODEL_CONCURRENCY_PER_MODEL",
+            "MAX_MODEL_CONCURRENCY_PER_MODEL",
+        ),
+    )
     
     # Compiler settings (Phase 2)
     # NOTE: Compiler contexts are set by user in GUI, these are just default fallbacks
@@ -234,6 +265,10 @@ class SystemConfig(BaseSettings):
     lean4_lsp_idle_timeout: int = Field(
         default=600,
         validation_alias=AliasChoices("MOTO_LEAN4_LSP_IDLE_TIMEOUT", "LEAN4_LSP_IDLE_TIMEOUT"),
+    )
+    leanoj_auto_resume_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("MOTO_LEANOJ_AUTO_RESUME_ENABLED", "LEANOJ_AUTO_RESUME_ENABLED"),
     )
     # Maximum number of theorem candidates whose Lean 4 formalization attempts
     # may run concurrently within a single proof-verification stage. Novelty
@@ -373,6 +408,9 @@ class SystemConfig(BaseSettings):
 
         if self.internal_proxy_secret is not None:
             self.internal_proxy_secret = self.internal_proxy_secret.strip() or None
+
+        if self.desktop_api_token is not None:
+            self.desktop_api_token = self.desktop_api_token.strip() or None
 
         if self.frontend_storage_prefix is not None:
             self.frontend_storage_prefix = self.frontend_storage_prefix.strip() or None

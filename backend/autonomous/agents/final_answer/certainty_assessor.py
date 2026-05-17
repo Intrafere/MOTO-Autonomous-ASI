@@ -9,8 +9,7 @@ Uses a two-step workflow similar to reference selection:
 CRITICAL: Operates ONLY on Tier 2 papers, NOT on Tier 1 brainstorm databases.
 
 NO RAG FOR ABSTRACTS (by design): Step 1 browses abstracts/outlines which are small metadata.
-EXPANDED PAPERS OVERFLOW: Step 2 currently drops expanded papers if they don't fit.
-TODO: Should RAG expanded papers instead of dropping — see audit note in rag-design rule.
+EXPANDED PAPERS OVERFLOW: Step 2 uses RAG fallback for expanded papers when full direct injection does not fit.
 """
 import asyncio
 import json

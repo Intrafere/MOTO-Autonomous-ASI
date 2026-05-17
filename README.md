@@ -1,12 +1,12 @@
 # MOTO Autonomous ASI
-## An Autonomous Prototype Superintelligence - Automated Theorem Generation with Lean 4 Mathematics Proof Verification
-**Version: 1.0.7**
+## Autonomous Prototype Superintelligence - Automated Theorem Generation with Lean 4 Math Proof Verification
+**Version: 1.0.8**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 16+](https://img.shields.io/badge/node-16+-green.svg)](https://nodejs.org/)
 
-**A breakthrough in AI automated theorem generation. An autonomous AI/ASI research system that generates novel and publication-worthy research papers — and the machine-checked theorem proving programming language Lean 4 proofs alongside them for definitive mathematical confirmation of correctness. This ASI is autonomously powered by Intrafere Research Group's new ASI discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/). Top-P exploration assists in deciphering how we explore AI weights, a specific combination of reiterative brainstorming, validation, feedback, and pruning allows for superintelligence exploration and creative multi-model data extraction from nearly any combination of AI models. Additionally, MOTO ships an optional automated theorem generation pipeline that formalizes candidate theorems and lemmas in Lean 4 (with optional Z3/SMT hinting and Mathlib lemma search) and only stores proofs that Lean 4 accepts as genuinely verified. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.**
+**A breakthrough in AI automated theorem generation. An autonomous AI/ASI research system that generates novel and publication-worthy research papers — and the machine-checked theorem proving programming language Lean 4 proofs alongside them for definitive mathematical confirmation of correctness. This ASI is autonomously powered by Intrafere Research Group's new ASI discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/). Top-P exploration assists in deciphering how we explore AI weights, a specific combination of reiterative brainstorming, validation, feedback, and pruning allows for superintelligence exploration and creative multi-model data extraction from nearly any combination of AI models. Additionally, MOTO has optional automated theorem generation capabilities that formalize candidate theorems and lemmas in Lean 4 (with optional Z3/SMT hinting and Mathlib lemma search) and only stores proofs that Lean 4 accepts as genuinely mathematically verified. Lean 4 automation means the user gets guaranteed verification of the mathematical results produced. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.**
 
 ### The Core Discovery: Top-P Exploration 
 
@@ -22,7 +22,7 @@ MOTO may produce many brilliant papers as it runs; these intermediate papers are
 
 ### Secondary Feature: Automated Theorem Generation with Lean 4 Verification
 
-Paired with Top-P Exploration — and secondary to it — MOTO ships an **optional automated theorem generation pipeline** that turns the autonomous brainstorm and paper stream into **machine-checked Lean 4 proofs**. When `lean4_enabled` is on, the coordinator first runs a one-shot *proof-framing gate* to decide whether the user's prompt is proof-amenable; if it is, every subsequent brainstorm and paper becomes a candidate source for formalization. After each completed brainstorm (Tier 1) and each completed paper (Tier 2 / Tier 3 chapter), a dedicated proof stage runs:
+Paired with Top-P Exploration — and secondary to it — MOTO has an **optional automated theorem generation pipeline** that turns the autonomous brainstorm and paper stream into **machine-checked Lean 4 proofs**. When `lean4_enabled` is on, the coordinator first runs a one-shot *proof-framing gate* to decide whether the user's prompt is proof-amenable; if it is, every subsequent brainstorm and paper becomes a candidate source for formalization. After each completed brainstorm (Tier 1) and each completed paper (Tier 2 / Tier 3 chapter), a dedicated proof stage runs:
 
 1. **Candidate identification** — an LLM agent extracts theorem/lemma candidates from the brainstorm or paper.
 2. **Mathlib lemma search** — a second agent surfaces relevant existing Mathlib lemmas and threads them into the formalization prompt.
@@ -33,7 +33,7 @@ Paired with Top-P Exploration — and secondary to it — MOTO ships an **option
 
 **Lean 4 is authoritative.** SMT results are hints only — they never substitute for Lean verification, and any proof that would compile only because of a `sorry` or `admit` is rejected. The pipeline is entirely silent and skipped when `lean4_enabled=False`, so it never blocks brainstorm or paper completion; the default hosted image stays Lean-free and Z3-free. A manual-check endpoint (`POST /api/proofs/check`) also lets you re-run the pipeline on any stored brainstorm or paper after the fact, and the compiler's "rigor mode" reuses the same Lean 4 checker to upgrade lemmas inside a paper as it's being written.
 
-Give the program a try — MOTO is as cool as it sounds. Windows has a one-click launcher and Ubuntu 24.04 now has a repo-root launcher too. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green "< > Code" drop-down menu on the top right of this GitHub page and download the zip file. On Windows, extract it to your desktop and double-click `Click To Launch MOTO.bat`. On Ubuntu 24.04, extract it and run `bash "Launch MOTO.sh"`. Put in your OpenRouter.AI API key (or optionally connect LM Studio for faster performance), select your agents in the settings profile - if desired and you are unsure you may use the preselected "fastest" profile.
+Give the program a try — MOTO is as cool as it sounds. Windows has a one-click launcher and Ubuntu 24.04 now has a repo-root launcher too. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green "< > Code" drop-down menu on the top right of this GitHub page and download the zip file. On Windows, extract it to your desktop and double-click `Click To Launch MOTO.bat`. On Ubuntu 24.04, extract it and run `bash linux-ubuntu-launcher.sh`. Put in your OpenRouter.AI API key (or optionally connect LM Studio for faster performance), select your agents in the settings profile - if desired and you are unsure you may use the preselected "fastest" profile.
 
 ***Now you are set up and every time you press launch your home lab is ready for your prompt!*** **Give MOTO the toughest question you can think of and press start to begin YOUR creations!**
 
@@ -69,6 +69,16 @@ Before installation, you need:
 4. **If using cloud AI - Get an OpenRouter API key**: Sign up at OpenRouter.ai and get a paid or free API key to use the most powerful cloud models available from your favorite providers. OpenRouter may also offer a certain amount of free API calls per day with your account key. When you download MOTO Autonomous ASI, you can see which models are free by checking the "show only free models" check box(es) in the MOTO app settings.
 5. **On first startup, pick your provider path**: After you acknowledge the disclaimer, MOTO will prompt you to either enter an OpenRouter key or confirm that LM Studio is running. If you save an OpenRouter key there, the recommended default autonomous profile is applied immediately so you can open Settings and see it already selected.
 
+#### Optional Lean 4 / SMT Proof Verification Requirements
+
+Lean 4 proof verification is optional. The launcher prepares it when available, but normal brainstorming and paper generation still run when Lean 4 is disabled or unavailable.
+
+- **Lean 4 / elan / lake**: Required only when `lean4_enabled` is turned on. The launcher attempts a one-time `elan` install and expects both `lean` and `lake` to be available afterward.
+- **Git and internet access**: Required for the first Lean 4 workspace setup because Mathlib is fetched through Lake.
+- **Mathlib storage**: Plan on several additional GB for the repo-local Lean workspace, Mathlib sources, and prebuilt `.olean` cache. First setup can take a while.
+- **Z3 / SMT**: Optional. When `smt_enabled` is turned on, MOTO uses Z3 only for conservative hints; Lean 4 remains authoritative. The launcher attempts to find or download Z3, and advanced users can provide a path through the proof settings or `MOTO_Z3_PATH`.
+- **Linux note**: On Ubuntu 24.04, make sure `python3`, `python3-venv`, `bash`, `curl`, `git`, Node.js, and npm are available. A desktop keyring backend is recommended if you want provider keys saved securely.
+
 ### Installation
 
 #### Windows (One-Click Launcher)
@@ -98,7 +108,7 @@ Before installation, you need:
 3. From the repo root, run:
 
 ```bash
-bash "Launch MOTO.sh"
+bash linux-ubuntu-launcher.sh
 ```
 
 4. The Ubuntu launcher will:
@@ -112,13 +122,15 @@ bash "Launch MOTO.sh"
 
 **Ubuntu note:** If Playwright or the desktop keyring is unavailable, the launcher stays runnable and explains the limitation. Saved provider keys will only persist when a Linux desktop keyring backend is available.
 
+**Linux support note:** Ubuntu 24.04 is the tested Linux launcher target. Other Linux distributions may work through the manual installation flow if they provide compatible Python, Node.js/npm, shell, keyring, Lean 4/elan, and browser dependencies, but they are best-effort unless explicitly tested.
+
 ### Build Identity and Update Contract
 
 - `moto-update-manifest.json` is the authoritative Build 0 updater/build identity manifest for the `main` branch.
 - `GET /api/features` exposes the public build-comparison fields `version`, `build_commit`, `update_channel`, and `api_contract_version`.
 - Official update comparisons target GitHub `main`, not GitHub Releases.
 - `Click To Launch MOTO.bat` is the authoritative Windows launcher entrypoint and delegates to `moto_launcher.py`.
-- `Launch MOTO.sh` is the authoritative Ubuntu 24.04 launcher entrypoint; it bootstraps the repo-local `.venv`, delegates to `moto_launcher.py`, and is used again for relaunch after an update when MOTO was started from that wrapper.
+- `linux-ubuntu-launcher.sh` is the authoritative Ubuntu 24.04 launcher entrypoint; it bootstraps the repo-local `.venv`, delegates to `moto_launcher.py`, and is used again for relaunch after an update when MOTO was started from that wrapper.
 - Clean extracted ZIP installs and clean `main`-tracking git clones are the supported automatic update-apply targets.
 - Dirty or locally mutated repos remain runnable, but they are update-detection-only and are not eligible for automatic update-apply behavior.
 - If launcher-managed backend/frontend services from this install are still running, the updater warns and skips update-apply until those services are closed.
@@ -207,6 +219,7 @@ moto-math-variant/
 ├── .cursor/
 │   └── rules/               # AI agent design specifications (full system documentation)
 ├── Click To Launch MOTO.bat  # One-click Windows launcher
+├── linux-ubuntu-launcher.sh  # Ubuntu 24.04 launcher
 ├── moto_launcher.py          # Internal Python launcher orchestration
 ├── moto_updater.py           # Build 1 updater helper and launcher state manager
 ├── requirements.txt         # Python dependencies
@@ -323,7 +336,7 @@ All configurable per role:
 
 #### Manual Installation (All Platforms)
 
-If you want the consumer launcher experience on Ubuntu 24.04, prefer `bash "Launch MOTO.sh"` instead of the manual steps below. The manual flow remains the fallback path when you intentionally want full terminal-level control.
+If you want the consumer launcher experience on Ubuntu 24.04, prefer `bash linux-ubuntu-launcher.sh` instead of the manual steps below. The manual flow remains the fallback path when you intentionally want full terminal-level control.
 
 ```bash
 # Clone the repository
@@ -427,9 +440,9 @@ All content generated by this system is for informational purposes only. Papers 
 
 Best if you want to run local models in LM Studio, especially models above 20B parameters or larger MoE-style models.
 
-- **OS**: Windows 10+, macOS 12+, Linux
+- **OS**: Windows 10+, macOS 12+, Linux; Ubuntu 24.04 is the tested Linux launcher target
 - **RAM**: 32GB+ recommended
-- **Storage**: 50GB+ free space for models and project data
+- **Storage**: 50GB+ free space for models and project data; add several GB more if Lean 4 / Mathlib proof verification is enabled
 - **GPU**: 16GB+ VRAM recommended for practical local inference on 20B+ class models
 - **Internet**: Required for installation; optional afterward if staying local-only
 
@@ -437,13 +450,13 @@ Best if you want to run local models in LM Studio, especially models above 20B p
 
 Best if you want the lightest local hardware requirements and are comfortable running inference in the cloud through OpenRouter.
 
-- **OS**: Windows, macOS, Linux, or Raspberry Pi OS
+- **OS**: Windows, macOS, Linux, or Raspberry Pi OS; Ubuntu 24.04 is the tested Linux launcher target
 - **RAM**: 4GB minimum, 8GB recommended
-- **Storage**: 5GB+ free space
+- **Storage**: 5GB+ free space for base MOTO; use 15GB+ if enabling Lean 4 / Mathlib proof verification
 - **GPU**: Not required
 - **Internet**: Required
 
-Because the heavy model inference happens on OpenRouter, MOTO can run on very modest local hardware in this mode, including a Raspberry Pi, as long as it can run Python, Node.js, and maintain a stable internet connection.
+Because the heavy model inference happens on OpenRouter, MOTO can run on very modest local hardware in this mode, including a Raspberry Pi, as long as it can run Python, Node.js, and maintain a stable internet connection. Lean 4 proof verification adds a local toolchain and Mathlib workspace requirement even in OpenRouter-only mode.
 
 ---
 

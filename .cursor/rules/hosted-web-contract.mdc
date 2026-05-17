@@ -1,0 +1,193 @@
+---
+description: Hybrid deployment contract — generic_mode, hosted sandbox, proxy auth, web-team boundary, updater policy
+alwaysApply: true
+---
+
+# Hybrid Deployment Contract (intrafere.ai / Hosted Web Product)
+
+MOTO is ONE codebase serving TWO deployment targets. A single `generic_mode` boolean switches between them. All features, fixes, and improvements ship to both targets simultaneously.
+
+## Two Deployment Targets
+
+- **Default mode (`generic_mode=False`)**: GitHub open-source release. Desktop app with `.bat`/`.ps1` launcher. LM Studio + OpenRouter. User runs locally.
+- **Generic mode (`generic_mode=True`)**: Hosted web backend. API-only sandbox on Blaxel, fronted by the Intrafere website/control plane on AWS. FastEmbed embeddings, OpenRouter-only LLM inference, no LM Studio dependency.
+
+## Two-Team Boundary (Strict)
+
+| Team | Repo | Owns |
+|------|------|------|
+| **Upgrade Team** | MOTO repo | `generic_mode` conditional branches, FastEmbed provider, hosted runtime contract, proxy auth plumbing, `/api/features`, `/api/health`, build metadata, desktop launchers + updater contract |
+| **Web Team** | Separate repo | Website frontend, Clerk auth, Stripe billing, AWS control plane, Blaxel sandbox lifecycle, same-domain proxy, dashboard update UX, CI/CD image pipeline |
+
+The Web Team consumes MOTO as a pre-built image. They never commit into the MOTO repo. Their website wraps private MOTO sandboxes — handles auth, billing, proxying, and instance lifecycle while MOTO handles all research orchestration.
+
+## Hosted Container Artifacts
+
+- The MOTO repo provides the canonical hosted container files: `Dockerfile`, `.dockerignore`, and `docker/entrypoint.sh`.
+- Those files define the API-only `python:3.12-slim` generic-mode runtime contract. Image publish, rollout, and redeploy automation still belong to the separate Web Team repo.
+
+## The `generic_mode` Flag
+
+`SystemConfig` field in `backend/shared/config.py`:
+```python
+generic_mode: bool = False
+```
+
+Toggled via `MOTO_GENERIC_MODE=true` env var (read explicitly in `main.py` lifespan, not via Pydantic auto-mapping, to avoid adding an env_prefix to SystemConfig).
+
+When `False`: program behaves as the existing open-source desktop release. When `True`: activates conditional code paths. No existing default-mode behavior is modified.
+
+## Decision Points
+
+1. **`api_client_manager.get_embeddings()`** — generic mode early-returns to in-process `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain
+2. **`rag_manager.py`** — generic mode skips global RAG lock for embedding calls (FastEmbed is in-process/thread-safe); ChromaDB write locking remains in both modes; synchronous ChromaDB calls and CPU-heavy RAG scoring must run off the FastAPI event loop
+3. **`main.py` lifespan** — generic mode skips LM Studio connection test; auto-loads `OPENROUTER_API_KEY` from env if present
+4. **`openrouter.py` LM Studio availability** — generic mode returns `{available: false, generic_mode: true}` without pinging LM Studio
+5. **`download.py` PDF** — generic mode returns `501` (Playwright/Chromium not installed in hosted image)
+6. **Frontend** — calls `GET /api/features` on mount; when `generic_mode=True`, hides all LM Studio UI, defaults everything to OpenRouter
+7. **`middleware.py` + `websocket.py`** — generic mode validates internal proxy auth (`X-Moto-*` signed headers) on all non-allowlisted routes
+8. **Long-running workflow isolation** — research/proof/RAG/Lean jobs may run in background tasks, but must not block the FastAPI event loop that serves GUI/status/health/API-key routes
+
+## Instance-Scoped Runtime Contract (Both Modes)
+
+One process pair = one MOTO instance (local or sandbox). Env inputs:
+- `MOTO_INSTANCE_ID`, `MOTO_BACKEND_HOST`/`HOST`, `MOTO_BACKEND_PORT`/`PORT`
+- `MOTO_DATA_ROOT`, optional `MOTO_LOG_ROOT`, optional `MOTO_SECRET_NAMESPACE`
+- optional `MOTO_FRONTEND_STORAGE_PREFIX`, optional `MOTO_CORS_ORIGINS`, optional `MOTO_LM_STUDIO_BASE_URL`
+- Default desktop launches bind backend and bundled Vite frontend to loopback and require `MOTO_DESKTOP_API_TOKEN` / `VITE_MOTO_DESKTOP_API_TOKEN` on protected HTTP routes. Desktop WebSockets use one-time tickets minted by authenticated `POST /api/ws-ticket`; hosted generic mode continues to use proxy HMAC auth instead.
+
+Hosted sandboxes reuse this exact contract (`MOTO_DATA_ROOT=/app/backend/data`). No separate hosted-only env model.
+
+## Proxy Auth Contract (Generic Mode Only)
+
+Browser reaches sandboxes only through the authenticated control-plane proxy, never via direct sandbox URLs.
+
+- **Proxy path**: `https://app.intrafere.com/instances/{instance_id}/moto/api/...` and `wss://.../moto/ws`
+- Proxy strips `/instances/{instance_id}/moto` prefix before forwarding
+- Control plane injects signed headers: `X-Moto-Instance-Id`, `X-Moto-Proxy-Timestamp`, `X-Moto-Proxy-Signature`, and `X-Moto-Body-SHA256` for body-capable protected requests
+- Signature payload binds `{instance_id}`, `{timestamp}`, uppercase method, stripped path, raw query string, and the `X-Moto-Body-SHA256` value (empty hash for WebSockets/bodyless requests)
+- Sandbox validates instance ID match, timestamp skew ≤60s, HMAC digest, query string, that the signed body hash matches the actual received request body, and rejects replayed signatures inside the accepted skew window
+- Protected hosted HTTP requests with `Content-Length` above `MOTO_GENERIC_MAX_REQUEST_BYTES` / `GENERIC_MAX_REQUEST_BYTES` (default 16 MiB) are rejected before route handling; the control-plane proxy should enforce the same or stricter body-size cap before forwarding
+- If `generic_mode=True` and `MOTO_INSTANCE_ID` or `MOTO_INTERNAL_PROXY_SECRET` is missing: fail closed at startup
+- Allowlisted without proxy auth: `GET /health`, `GET /api/health`, `GET /api/features`, `OPTIONS` preflight
+- `Authorization` header is NOT reused for sandbox auth (existing MOTO routes use it for OpenRouter key passthrough)
+
+Implementation: centralized in `middleware.py` (HTTP) and `websocket.py` (before `accept()`). No per-route auth changes.
+
+## `/api/features` Endpoint (Both Modes)
+
+Build 0 lands the public identity subset first. Returns:
+```python
+{
+    "version": str,
+    "build_commit": str,  # authoritative update key
+    "update_channel": "main",
+ "api_contract_version": "build5-v12",
+    "generic_mode": bool,
+    "lm_studio_enabled": bool,
+    "pdf_download_available": bool,
+}
+```
+
+The current Build 5 runtime preserves the four identity fields while exposing the stable capability flags above. Build 5 v12 replaces compiler critique rewrite WebSocket events with `self_review_appended` and changes post-body critique output to a validated appended self-review section. Later hosted work may extend `/api/features` with additional capability flags such as `max_submitters` and `tier3_available`, but the existing fields above remain stable and `api_contract_version` must bump when that happens.
+
+Must remain capability-only. Must NOT expose per-user or per-instance state (e.g. whether an OpenRouter key is set).
+
+## `/api/health` Endpoint
+
+Richer readiness alias of `/health`. Available in both modes. Hosted sandboxes use it for liveness/readiness probes.
+
+## FastAPI Responsiveness Contract
+
+GUI loads, hosted control-plane probes, and desktop status polling share the same FastAPI app as long-running MOTO workflows. Any code reachable from background research/proof tasks must preserve event-loop responsiveness:
+
+- Do not run synchronous ChromaDB operations, large in-memory RAG scoring, Lean temp-file writes/deletes, workspace repair deletes, subprocess waits, or `time.sleep()` on the event loop.
+- Use async subprocess APIs for external tools and `asyncio.to_thread()` for unavoidable synchronous filesystem, ChromaDB, or CPU-heavy scoring work.
+- Status/health/capability/key-status endpoints must be fast-lane routes: return cached/in-memory state only and must not trigger Lean, ChromaDB scans, OpenRouter model-list fetches, or large session-directory walks.
+- Do not paper over event-loop starvation with multiple Uvicorn workers unless coordinator state, WebSockets, and runtime memory have first been externalized; current singleton coordinators assume one backend process per instance.
+
+## Embedding Strategy (Generic Mode)
+
+FastEmbed by Qdrant — in-process ONNX Runtime, `nomic-embed-text-v1.5` INT8, ~200 MB RAM, no PyTorch.
+
+- Dependency in `requirements-generic.txt` (additive, not in main `requirements.txt`)
+- `fastembed_provider.py` (~30 lines) wraps the library; lazy-imported so default installs are unaffected
+- If `generic_mode=True` and `fastembed` is missing: fail fast with clear error
+- Batch query variant optimization: `_vector_search()` batches all query embeddings into one `get_embeddings()` call (benefits both modes)
+
+## Dependency Handling
+
+`requirements-generic.txt`:
+```
+-r requirements.txt
+fastembed>=0.3.6
+onnxruntime>=1.18.0,<2.0
+```
+Hosted image installs both files but does NOT run `playwright install chromium`.
+
+## Frontend Serving (Generic Mode)
+
+Sandbox is API-only. The MOTO React frontend is NOT served from the hosted sandbox. The Web Team builds their own frontend (website + dashboard + embedded MOTO UI). In default mode, the bundled frontend is served by Vite / static build as today.
+
+## PDF Download
+
+- Default mode: `POST /api/download/pdf` works via Playwright, but submitted HTML is untrusted; server-side rendering must sanitize/allowlist content, enforce PDF-specific size caps, disable JavaScript, keep Chromium sandboxing enabled, and block external browser network requests
+- Generic mode: returns `501` ("PDF generation unavailable in web mode. Use raw text download.")
+- Web Team may implement client-side PDF in their frontend independently
+
+## Secret Handling (Generic Mode)
+
+- Desktop default: `secret_store.py` uses OS keyring, restored on startup
+- Hosted generic mode: provider keys are env-injected at sandbox launch and/or set via proxied MOTO API routes. `secret_store` persistence is bypassed; keys live in sandbox memory only. Re-injection required after sandbox recreation.
+- Generic-mode OpenRouter and Wolfram routes update runtime memory only; they do not write to or clear the desktop keyring.
+- Control plane NEVER stores, logs, or persists user provider keys in its own database
+
+## Data Persistence
+
+- `backend/data/` is the default desktop working set
+- Hosted: `MOTO_DATA_ROOT=/app/backend/data` so Blaxel storage mounts to one unambiguous path
+- ChromaDB SQLite files stay on Blaxel sandbox storage (local file semantics required)
+- Sandbox recall/resume returns the same filesystem state; redeploy/recreate advances to the newest image
+- Uploads: server-side enforcement of `.txt` only, 5 MB max, filename sanitization, path traversal rejection
+
+## Updater Policy
+
+- **Authoritative update source**: GitHub `main` branch (not GitHub Releases)
+- **Desktop**: launcher compares local build metadata against GitHub `main`. Auto-apply is only for clean `origin/main` git checkouts or ZIP/extracted installs with no launcher-managed instances still running. ZIP updates preserve active data/log roots, instance storage, launcher state, env files, and keyring-related namespaces.
+- **Hosted**: sandboxes do NOT self-mutate. Redeploy/recreate uses the latest approved `main`-derived image. Recall/resume keeps the existing image. Hosted `POST /api/update/pull` must return unavailable instead of attempting in-place update.
+- **Build metadata**: `version`, `build_commit`, `update_channel`, and `api_contract_version` exposed via `/api/features`; the committed `main`-branch manifest lives at `moto-update-manifest.json`
+
+## Canonical Runtime Baselines
+
+- **Desktop release**: Windows (release-blocking); Ubuntu 24.04 LTS (validation target, separate launcher effort)
+- **Hosted sandbox**: Debian/glibc via `python:3.12-slim`
+- **Unsupported**: Alpine/musl (Python + ONNX + Chroma stack needs glibc)
+
+## What Stays the Same (Both Modes)
+
+All RAG pipeline logic, coordinator logic, prompt engineering, WebSocket routing, paper/brainstorm/outline memory management, ChromaDB usage, and REST route surface remain shared. Generic mode adds proxy auth and hides LM Studio options; proof execution routes may exist but must report disabled/unavailable capability unless the required runtime flags and toolchains are present.
+
+## Integration Contract Rule
+
+Any REST shape, auth contract, or WebSocket event change that affects the website must update **code, this rule, the live `/openapi.json` schema, and `api_contract_version` in `/api/features`** in the same approved `main` merge. The live backend's `GET /openapi.json` is the machine-readable REST schema contract.
+
+## Proof Integration Contract (Builds 1-5, optional, gated off by default)
+
+All Lean 4 and SMT behavior is gated on three runtime flags (`lean4_enabled`, `lean4_lsp_enabled`, `smt_enabled`). All three default false and stay silent when disabled. Hosted sandboxes ship with them disabled.
+
+- **Hosted image stays Lean-free and Z3-free.** No Lean toolchain, no `z3` binary, and no Python wheel for either is permitted in `Dockerfile`, `docker/entrypoint.sh`, or `requirements-generic.txt`. Proof features are desktop-opt-in only for the current contract.
+- **Lean 4 remains authoritative** for every stored proof. The `Lean4Result` contract is unchanged by SMT; SMT (when enabled) produces tactic hints consumed by the formalization agent, never a standalone proof artifact.
+- **Subprocess fallback must keep working** when `lean4_lsp_enabled=False`. LSP is a latency optimization, not a replacement.
+- **Proof routes under `/api/proofs/*`** are additive to the hosted REST contract: `GET /api/proofs` (list), `GET /api/proofs/novel`, `GET /api/proofs/status`, `POST /api/proofs/settings`, `POST /api/proofs/check` (manual check), `GET /api/proofs/{id}`, `GET /api/proofs/{id}/certificate[.lean]`, `GET /api/proofs/{id}/dependencies`, `GET /api/proofs/graph`, `GET /api/proofs/mathlib/{lemma_name}/dependents` (Build 5).
+- **LeanOJ routes** are additive to the hosted REST contract in `build5-v6`: start/resume, stop, status, clear, skip-brainstorm, force-brainstorm, master-proof draft/edit summaries, current-run proofs, and cross-session proof library endpoints live under `/api/leanoj/*`.
+- **Pruned Stage 2 paper routes** are additive in `build5-v6`: pruned papers are removed from model context/RAG but remain downloadable under `/api/auto-research/paper-history/pruned*`; hard deletion is limited to explicit delete-all-pruned endpoints.
+- **LeanOJ live-activity WebSocket events** include model-call failure/retry progress, initial topic generation/validation, recursive brainstorm progress, brainstorm submitter/queue/batch-validation events, sufficiency/phase-limit events, master-proof edit validation/applied/rejected events, final semantic-review rejection, and final-attempt-cycle exhaustion.
+- **Compiler critique WebSocket events** include validated critique progress and `self_review_appended`; partial/total rewrite events are no longer emitted by the active critique flow.
+- **Proof WebSocket events** are part of the web-surface contract: `proof_framing_decided`, `proof_check_started`, `proof_check_complete`, `proof_check_no_candidates`, `proof_check_candidates_found`, `mathlib_lemmas_suggested`, `proof_attempt_started`, `proof_verified`, `proof_attempt_failed`, `proof_attempts_exhausted`, `proof_retry_started`, `proof_retry_scheduled`, `novel_proof_discovered`, `known_proof_verified`, `proof_dependency_added`, `smt_check_started`, `smt_check_complete`. `proof_verified` is emitted only after proof registration/reuse and includes `proof_id`.
+- **Proof certificate exports stay text-based** (`.lean` source + JSON metadata). No binary-only proof artifacts.
+- **Proof runtime config snapshot** (`ProofRuntimeConfigSnapshot`) is persisted via `research_metadata` so manual `POST /api/proofs/check` can run without an active autonomous session; required state is `lean4_enabled=True` AND a seeded snapshot.
+- **`api_contract_version` bumps** apply the same way to proof additions as to the base contract: any new proof route or event added after Build 5 must bump the contract version in the same merge.
+
+## Hosting Ownership
+
+Intrafere operates the service providing back-end with Blaxel.

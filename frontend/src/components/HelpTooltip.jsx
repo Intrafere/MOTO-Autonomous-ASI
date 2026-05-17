@@ -10,6 +10,7 @@ export default function HelpTooltip({
   popupStyle,
   buttonContent = '?',
   useFixedPosition = false,
+  fixedPlacement = 'above-right',
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [fixedPopupStyle, setFixedPopupStyle] = useState(null);
@@ -31,11 +32,22 @@ export default function HelpTooltip({
     const viewportPadding = 16;
 
     let left = buttonRect.right + gap;
-    if (left + popupRect.width > window.innerWidth - viewportPadding) {
+    let top = buttonRect.top - popupRect.height - gap;
+
+    if (fixedPlacement === 'side-right') {
+      if (left + popupRect.width > window.innerWidth - viewportPadding) {
+        left = buttonRect.left - popupRect.width - gap;
+      }
+      left = Math.max(viewportPadding, left);
+      top = buttonRect.top + (buttonRect.height - popupRect.height) / 2;
+    } else if (left + popupRect.width > window.innerWidth - viewportPadding) {
       left = Math.max(viewportPadding, window.innerWidth - popupRect.width - viewportPadding);
     }
 
-    const top = Math.max(viewportPadding, buttonRect.top - popupRect.height - gap);
+    top = Math.min(
+      Math.max(viewportPadding, top),
+      Math.max(viewportPadding, window.innerHeight - popupRect.height - viewportPadding)
+    );
 
     setFixedPopupStyle({
       position: 'fixed',
@@ -45,7 +57,7 @@ export default function HelpTooltip({
       bottom: 'auto',
       zIndex: 100000,
     });
-  }, [useFixedPosition]);
+  }, [fixedPlacement, useFixedPosition]);
 
   const showTooltip = () => {
     setIsOpen(true);

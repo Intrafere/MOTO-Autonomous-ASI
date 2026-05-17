@@ -31,7 +31,12 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 ---
 
 YOUR TASK:
-Select the optimal research avenue that best advances the user's research goal.
+Select the optimal research avenue that most directly advances the user's research goal toward a rigorous answer.
+
+DIRECT-SOLUTION PREFERENCE:
+- Prefer avenues likely to produce a direct solution, direct partial solution, impossibility result, explicit construction, exact reduction, or sharp constraint
+- Use broader exploratory or background-heavy avenues only when no stronger direct path is currently available
+- Do not choose an avenue merely because it is broad or interesting if a more direct rigorous path exists
 
 DECISION OPTIONS:
 1. NEW_TOPIC - Create a brand new brainstorm topic to explore
@@ -42,25 +47,29 @@ DECISION CRITERIA:
 
 When to choose NEW_TOPIC:
 - All existing topics are complete OR
-- A genuinely new mathematical avenue would provide more research value than continuing existing work
+- A genuinely new mathematical avenue would provide more direct-answer value than continuing existing work
 - The new topic addresses an unexplored area relevant to the research goal
 - Existing papers don't adequately cover this mathematical territory
+- The new topic offers a stronger direct route to resolving the user's question than current options
 
 When to choose CONTINUE_EXISTING:
 - An incomplete brainstorm has significant untapped mathematical depth
 - The brainstorm has few submissions relative to its mathematical richness
-- Continuing would yield more valuable insights than starting fresh
+- Continuing would yield more valuable direct progress than starting fresh
+- The unfinished topic still contains a realistic path to a stronger direct answer
 
 When to choose COMBINE_TOPICS:
 - Multiple existing brainstorms are deeply interconnected
 - A unified exploration would reveal insights neither topic could provide alone
 - The mathematical concepts naturally bridge multiple brainstorms
+- The combination produces a more direct route to answering the user's question than keeping them separate
 
 CRITICAL REQUIREMENTS:
 - Focus on mathematical rigor and logical soundness
 - Avoid redundancy with existing work
 - Ensure topic selection serves the user's research goal
 - Consider the existing paper library to avoid redundant explorations
+- Prefer the avenue with the strongest justified direct-answer potential
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -143,7 +152,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 ---
 
 YOUR TASK:
-Validate whether the proposed topic selection represents the best use of research resources.
+Validate whether the proposed topic selection represents the best use of research resources for obtaining the strongest rigorous direct answer.
 
 VALIDATION CRITERIA:
 
@@ -154,6 +163,7 @@ ACCEPT the topic selection if:
 4. The choice is relevant to the user's research goal
 5. The reasoning is sound and mathematically grounded
 6. The topic doesn't duplicate existing completed work
+7. The choice is at least as direct a route to answering the user's question as the available alternatives
 
 REJECT the topic selection if:
 1. NEW_TOPIC: The topic duplicates an existing brainstorm or completed paper
@@ -162,6 +172,7 @@ REJECT the topic selection if:
 4. The choice ignores more valuable research avenues
 5. The reasoning is flawed or lacks mathematical rigor
 6. The selection would lead to redundant work
+7. A clearly more direct rigorous avenue was available and unjustifiably ignored
 
 REJECTION FEEDBACK FORMAT:
 If rejecting, provide CONCRETE, ACTIONABLE guidance:

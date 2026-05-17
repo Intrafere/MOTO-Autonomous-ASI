@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
+import LiveActivityFeed from '../LiveActivityFeed';
+import { getActivityClass, getActivityIcon } from '../../utils/activityStyles';
+import '../autonomous/AutonomousResearch.css';
 
 function CompilerLogs() {
   const [metrics, setMetrics] = useState({
@@ -128,11 +131,7 @@ function CompilerLogs() {
     websocket.on('critique_removed', handleCompilerEvent);
     websocket.on('critique_phase_ended', handleCritiquePhaseEnded);
     websocket.on('critique_phase_skipped', handleCompilerEvent);
-
-    // Rewrite events
-    websocket.on('rewrite_decision_rejected', handleCompilerEvent);
-    websocket.on('rewrite_decision_max_retries_exceeded', handleCompilerEvent);
-    websocket.on('body_rewrite_started', handleCompilerEvent);
+    websocket.on('self_review_appended', handleCompilerEvent);
 
     // Phase transition events
     websocket.on('phase_transition', handleCompilerEvent);
@@ -167,11 +166,7 @@ function CompilerLogs() {
       websocket.off('critique_removed', handleCompilerEvent);
       websocket.off('critique_phase_ended', handleCritiquePhaseEnded);
       websocket.off('critique_phase_skipped', handleCompilerEvent);
-
-      // Rewrite events cleanup
-      websocket.off('rewrite_decision_rejected', handleCompilerEvent);
-      websocket.off('rewrite_decision_max_retries_exceeded', handleCompilerEvent);
-      websocket.off('body_rewrite_started', handleCompilerEvent);
+      websocket.off('self_review_appended', handleCompilerEvent);
 
       // Phase transition events cleanup
       websocket.off('phase_transition', handleCompilerEvent);
@@ -263,13 +258,13 @@ function CompilerLogs() {
 
     // Critique phase events
     if (type === 'critique_phase_started') {
-      return `Critique phase started (paper v${data.paper_version || 1}, target: ${data.target_critiques || 5} attempts)`;
+      return `Critique phase started (paper v${data.paper_version || 1}, target: ${data.target_critiques || 3} attempts)`;
     }
     if (type === 'critique_progress') {
-      return `Progress: ${data.acceptances || 0} accepted, ${data.rejections || 0} rejected, ${data.total_attempts || 0}/5 total`;
+      return `Progress: ${data.acceptances || 0} accepted, ${data.rejections || 0} rejected, ${data.total_attempts || 0}/${data.target || 3} total`;
     }
     if (type === 'critique_accepted') {
-      return `Critique ACCEPTED (${data.count || '?'}/5): ${(data.preview || '').substring(0, 80)}...`;
+      return `Critique ACCEPTED (${data.count || '?'}/${data.target || 3}): ${(data.preview || '').substring(0, 80)}...`;
     }
     if (type === 'critique_rejected') {
       return `Critique REJECTED: ${(data.reasoning || '').substring(0, 100)}...`;
@@ -284,21 +279,13 @@ function CompilerLogs() {
       return `Critique #${data.critique_number} removed via cleanup`;
     }
     if (type === 'critique_phase_ended') {
-      return `Critique phase ended (rewrite: ${data.rewrite ? 'YES' : 'NO'})`;
+      return `Critique phase ended (self-review appended: ${data.self_review_appended ? 'YES' : 'NO'})`;
     }
     if (type === 'critique_phase_skipped') {
       return `Critique phase skipped: ${data.reason || 'no critiques accepted'}`;
     }
-
-    // Rewrite events
-    if (type === 'rewrite_decision_rejected') {
-      return `Rewrite decision rejected (attempt ${data.attempt || '?'}/${data.max_retries || 5})`;
-    }
-    if (type === 'rewrite_decision_max_retries_exceeded') {
-      return `Rewrite decision failed after max retries - defaulting to ${data.action || 'continue'}`;
-    }
-    if (type === 'body_rewrite_started') {
-      return `Body REWRITE started (v${data.version || '?'}) - title changed: ${data.title_changed ? 'YES' : 'NO'}`;
+    if (type === 'self_review_appended') {
+      return `AI self-review appended (${data.critique_count || 0} accepted critique${data.critique_count === 1 ? '' : 's'})`;
     }
 
     // Phase transitions
@@ -351,7 +338,7 @@ function CompilerLogs() {
     if (type?.includes('rejected') || type?.includes('rejection') || type === 'compiler_error') {
       return 'event-error';
     }
-    if (type?.includes('critique') || type?.includes('phase') || type?.includes('rewrite')) {
+    if (type?.includes('critique') || type?.includes('phase') || type?.includes('self_review')) {
       return 'event-info';
     }
     if (type === 'compiler_wolfram_call') {
@@ -363,9 +350,13 @@ function CompilerLogs() {
     return '';
   };
 
+  const chronologicalEvents = events.slice().reverse();
+
   return (
-    <div className="compiler-logs">
-      <h2>Compiler Logs</h2>
+    <div className="autonomous-logs compiler-logs">
+      <div className="autonomous-header">
+        <h2>Single Paper Writer Logs</h2>
+      </div>
 
       {/* Error Alert */}
       {error && (
@@ -489,32 +480,21 @@ function CompilerLogs() {
             )}
           </div>
 
-          <div className="events-section">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3>Recent Events (Last 10,000 - Persistent)</h3>
-              <button onClick={clearEventsLog} className="clear-log-btn" style={{ padding: '0.5rem 1rem', cursor: 'pointer' }}>
+          <LiveActivityFeed
+            title={`Live Activity${events.length > 0 ? ` (${events.length} saved)` : ''}`}
+            items={chronologicalEvents}
+            emptyMessage="No events yet"
+            getEventName={(event) => event.type || ''}
+            getMessage={formatEventDisplay}
+            getTimestamp={(event) => event.fullTimestamp || event.timestamp}
+            getClassName={getActivityClass}
+            getIcon={getActivityIcon}
+            headerAction={(
+              <button onClick={clearEventsLog} className="btn-clear">
                 Clear Events Log
               </button>
-            </div>
-            <div className="events-list">
-              {events.length === 0 ? (
-                <p className="no-events">No events yet</p>
-              ) : (
-                <>
-                  <div style={{ marginBottom: '0.5rem', color: '#aaa', fontSize: '0.9rem' }}>
-                    Showing {events.length} events (saved to browser storage)
-                  </div>
-                  {events.map((event, index) => (
-                    <div key={index} className={`event-item event-${event.type} ${getEventClass(event.type)}`}>
-                      <span className="event-time">{event.timestamp}</span>
-                      <span className="event-type">{(event.type || '').replace(/_/g, ' ')}</span>
-                      <span className="event-data">{formatEventDisplay(event)}</span>
-                    </div>
-                  ))}
-                </>
-              )}
-            </div>
-          </div>
+            )}
+          />
 
           <div className="info-section">
             <h4>Convergence Indicators</h4>

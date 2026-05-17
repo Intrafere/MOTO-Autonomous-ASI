@@ -6,12 +6,12 @@ alwaysApply: true
 
  This describes additional architecture for the synergy between the part 1 database aggregator tool and part 2 aggregator-compiler tool. Both modes operate identically in default and generic deployment — the only difference is provider availability (see `hosted-web-contract.mdc` for details on generic mode).
 
- NOTE: This is a continuously-running program that does not stop itself, the user selects the aggregator to start, then starts the compiler when they desire, and then the user choses when to turn off each selective mode by turning the off switch. There is no "solution stop token" as in normal AI solution generation.
+ NOTE: This is a continuously-running program that does not stop itself; the user selects one top-level workflow mode to run and turns it off when desired. There is no "solution stop token" as in normal AI solution generation.
  
  
  ## Aggregator start-up workflow
 1.) The aggregator runs initially with no compiler running.
-2.) The compiler does not begin running until the user starts it manually. Aggregator can run on its own for a head-start for as long as the operator would like. If the operator desires the aggregator can also run by itself without any compilation.
+2.) The compiler does not begin running until the user starts it manually, and current code enforces that Aggregator, Compiler, Autonomous Research, and LeanOJ Proof Solver are mutually exclusive top-level modes. Aggregator can run on its own without any compilation.
 
 ## GUI Design
 
@@ -40,22 +40,34 @@ The live-constructing compiler-written paper should be viewable in one tab and a
 
 **Use Case**: User may have domain knowledge that the brainstorm has explored sufficient territory before the automatic 10-acceptance interval, saving time and allowing manual control over the autonomous workflow.
 
-## Multi-Submitter Architecture (Aggregator Only)
+## Hierarchy / Parent Action Precedence
 
-**Distinction**: Multiple submitters are only available for the Aggregator (Part 1 and Part 3 brainstorm aggregation). The Compiler (Part 2) uses a fixed single-submitter sequential Markov chain workflow.
+Parent workflow actions override child agents immediately. Manual paper writing, forced Tier 3, LeanOJ forced final solving, and final selection phases must stop or fence off any lower-tier brainstorm/topic/path workers before continuing. Never allow stale child outputs to change phase after a parent action has taken ownership.
+
+## Multi-Submitter Architecture (Aggregator and LeanOJ)
+
+**Distinction**: Multiple submitters are available for the Aggregator (Part 1 and Part 3 brainstorm aggregation) and LeanOJ topic/brainstorm phases. The Compiler (Part 2) uses a fixed single-submitter sequential Markov chain workflow.
 
 ### Aggregator Multi-Submitter (Part 1 & Part 3)
 - Configurable 1-10 parallel submitters (default: 3)
 - Each submitter can have its own model, context window, and max output tokens
 - Enables multi-model exploration of different solution basins simultaneously
+- Parallel submitter generation uses the shared temperature ladder `[0.0, 0.1, ..., 0.9]` by submitter index; single-model sequential submitters and validators stay `0.0`.
+- If all submitters and the validator are configured with the same LM Studio model ID, the Aggregator normally uses single-model sequential mode. Exception: when LM Studio reports multiple loaded same-base numeric `:#` instances for that model, submitters may run in parallel and `lm_studio_client` routes independent calls to idle sibling instances while the validator remains ordered.
 - Single validator maintains coherent Markov chain evolution for database alignment
 - UI labels: "Submitter 1 (Main Submitter)", "Submitter 2", "Submitter 3", etc.
 - "Copy Main to All" button for quick configuration
 
+### LeanOJ Topic/Brainstorm Multi-Submitter
+- Configurable 1-10 parallel submitters generate initial topics and brainstorm ideas
+- One validator batch-validates up to 3 completed topics or submissions at a time; initial topics must be broad locked foundation questions for the whole LeanOJ solution route, not narrow lemma/tactic/repair targets
+- Parallel topic/brainstorm submitters use the shared temperature ladder `[0.0, 0.1, ..., 0.9]` by submitter index; LeanOJ validators, final solver, semantic review, and retry/repair calls stay `0.0`.
+- No round-robin/serial submitter awaiting; a hung submitter must not block other submitters or validation
+
 ### Compiler Single-Submitter (Part 2)
 - Fixed 2-submitter architecture (NOT configurable):
   - **High-Context Submitter**: Handles outline_create, outline_update, construction, review modes. During construction, may invoke the Wolfram Alpha tool up to 20 times per submission when `system_config.wolfram_alpha_enabled=true`.
-  - **High-Parameter Submitter**: Handles rigor mode. Rigor is the **Lean-4-verified-theorem flow**: discovery → up to 5 Lean 4 formalization attempts (with error feedback) → novelty classification → placement (2 attempts, validator uses `rigor_lean_placement` mode forcing `rigor_check=True`) → Theorems Appendix fallback. The compiler writes verified proofs directly into the shared `proof_database` (same database used by autonomous mode); novel proofs automatically enter the highest-priority direct-injection block on the next submitter instantiation.
+  - **High-Parameter Submitter**: Handles rigor mode. Rigor is the **Lean-4-verified-theorem flow**: user-prompt-relevant discovery (including explicit extension theorems from partial paper work / outline / supporting context / user prompt when helpful) → up to 5 Lean 4 formalization attempts (with error feedback) → novelty classification → placement routing. Existing-paper-claim theorems may go through inline placement (2 attempts, validator uses `rigor_lean_placement` mode forcing `rigor_check=True`); extension-derived theorems are forced to `placement_preference="appendix_only"` and appended directly to the Theorems Appendix (`placement_outcome="appendix_requested"`). Inline failures still use Theorems Appendix fallback. The compiler writes verified proofs directly into the shared `proof_database` (same database used by autonomous mode); novel proofs automatically enter the highest-priority direct-injection block on the next submitter instantiation.
 - Sequential Markov chain workflow (only one submission at a time)
 - Each compiler submitter has its own model, context, and max token settings (separate from aggregator)
 - UI shows these as separate "High-Context Submitter" and "High-Parameter Submitter" sections
@@ -65,6 +77,7 @@ The live-constructing compiler-written paper should be viewable in one tab and a
 ## Additional Traits Shared Between Aggregator-Submitters and Compiler-Submitters
 
 - The JSON of aggregator-subbmiters and compiler-submitters should include a "reasoning:" request below its "submission:" line. (This forces the submitter to explain the thoughts behind there reasoning and can also reveal deception for additional context for the validator.)
+- MOTO conversational retries must preserve useful failed-output context, but never raw provider/model transcript text. Any assistant replay or reusable feedback/memory excerpt must be sanitized to remove known private thought/channel/control transport scaffolding first while preserving visible mathematical/Lean syntax such as `<|` and literal marker text inside JSON/string content. Parser error strings sent back to models must not include raw output excerpts. Exact tool-call assistant/tool protocol turns are the only exception.
 
 ## API Call Output Notes (User-Configurable)
 - **All `max_tokens` limits are user-configurable via GUI settings** (like context window sizes). Users can adjust these per model role based on their specific models' capabilities.

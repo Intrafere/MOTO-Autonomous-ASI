@@ -19,6 +19,15 @@ import {
   MathematicalProofs,
   ProofLibrary
 } from './components/autonomous';
+import {
+  LeanOJBrainstorms,
+  LeanOJInterface,
+  LeanOJLogs,
+  LeanOJMasterProof,
+  LeanOJMathematicalProofs,
+  LeanOJProofLibrary,
+  LeanOJSettings,
+} from './components/leanoj';
 import WorkflowPanel from './components/WorkflowPanel';
 import BoostControlModal from './components/BoostControlModal';
 import StartupProviderSetupModal from './components/StartupProviderSetupModal';
@@ -31,7 +40,7 @@ import HungConnectionNotificationStack from './components/HungConnectionNotifica
 import UpdateNotificationBanner from './components/UpdateNotificationBanner';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import { websocket } from './services/websocket';
-import { api, autonomousAPI, openRouterAPI } from './services/api';
+import { api, autonomousAPI, leanojAPI, openRouterAPI } from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
   RECOMMENDED_PROFILE_KEY,
@@ -42,14 +51,27 @@ import {
   settingsToAutonomousConfig,
   persistAutonomousSettings,
 } from './utils/autonomousProfiles';
+import {
+  getStoredLeanOJSettings,
+  persistLeanOJSettings,
+} from './utils/leanojProfiles';
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+} from './utils/openRouterSelection';
 
 const APP_MODE_STORAGE_KEY = 'appMode';
 const AUTONOMOUS_TAB_STORAGE_KEY = 'autonomousActiveTab';
 const MANUAL_TAB_STORAGE_KEY = 'manualActiveTab';
+const LEANOJ_TAB_STORAGE_KEY = 'leanojActiveTab';
 const COMPLETED_WORKS_SUB_TAB_STORAGE_KEY = 'completedWorksSubTab';
 const LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY = 'singlePaperWriterExpanded';
+const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
 const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'];
 const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'high_context', 'high_param', 'critique_submitter'];
+const HIGH_SCORE_CRITIQUE_THRESHOLD = 6.25;
+const SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY = 'seenHighScoreCritiqueNotifications';
+const MAX_SEEN_HIGH_SCORE_CRITIQUES = 500;
 const DEFAULT_CAPABILITIES = Object.freeze({
   genericMode: false,
   lmStudioEnabled: true,
@@ -59,6 +81,60 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   updateChannel: 'main',
   apiContractVersion: '',
 });
+
+function readDeveloperModeEnabled() {
+  return localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === 'true';
+}
+
+function getHighScoreCritiqueNotificationKey(paperId, averageRating) {
+  const rating = Number(averageRating);
+  if (!paperId || !Number.isFinite(rating)) {
+    return null;
+  }
+  return `${paperId}:${rating.toFixed(1)}`;
+}
+
+function readSeenHighScoreCritiques() {
+  if (typeof window === 'undefined') {
+    return new Set();
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY);
+    const values = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(values) ? values.filter(value => typeof value === 'string') : []);
+  } catch (error) {
+    console.warn('Could not read seen high-score critique notifications:', error);
+    return new Set();
+  }
+}
+
+function persistSeenHighScoreCritiques(seenSet) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    const values = Array.from(seenSet).slice(-MAX_SEEN_HIGH_SCORE_CRITIQUES);
+    window.localStorage.setItem(SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY, JSON.stringify(values));
+  } catch (error) {
+    console.warn('Could not save seen high-score critique notifications:', error);
+  }
+}
+
+const createDefaultAggregatorSubmitterConfigs = () => (
+  [1, 2, 3].map((submitterId) => ({
+    submitterId,
+    provider: 'lm_studio',
+    modelId: '',
+    openrouterProvider: null,
+    openrouterReasoningEffort: 'auto',
+    lmStudioFallbackId: null,
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    superchargeEnabled: false,
+  }))
+);
 
 function normalizeLoadedLmStudioModelId(modelId = '') {
   return String(modelId).replace(/:\d+$/, '');
@@ -106,6 +182,7 @@ function normalizeRuntimeModelConfig(config = {}, lmStudioEnabled) {
     provider: normalizeRuntimeProvider(config.provider, lmStudioEnabled),
     modelId: shouldResetLmState ? '' : (config.modelId || ''),
     openrouterProvider: shouldResetLmState ? null : (config.openrouterProvider || null),
+    openrouterReasoningEffort: config.openrouterReasoningEffort || 'auto',
     lmStudioFallbackId: lmStudioEnabled ? (config.lmStudioFallbackId || null) : null,
   };
 }
@@ -124,6 +201,7 @@ function normalizeAggregatorConfigForCapabilities(config, lmStudioEnabled) {
     validatorOpenrouterProvider: shouldResetValidator
       ? null
       : (config.validatorOpenrouterProvider || null),
+    validatorOpenrouterReasoningEffort: config.validatorOpenrouterReasoningEffort || 'auto',
     validatorLmStudioFallback: lmStudioEnabled ? (config.validatorLmStudioFallback || null) : null,
   };
 }
@@ -149,6 +227,7 @@ function normalizeAutonomousConfigForCapabilities(config, lmStudioEnabled) {
     nextConfig[openRouterProviderKey] = shouldResetRole
       ? null
       : (nextConfig[openRouterProviderKey] || null);
+    nextConfig[`${rolePrefix}_openrouter_reasoning_effort`] = nextConfig[`${rolePrefix}_openrouter_reasoning_effort`] || 'auto';
     nextConfig[fallbackKey] = lmStudioEnabled ? (nextConfig[fallbackKey] || null) : null;
   });
 
@@ -158,7 +237,10 @@ function normalizeAutonomousConfigForCapabilities(config, lmStudioEnabled) {
 function App() {
   const [appMode, setAppMode] = useState(() => {
     const savedMode = localStorage.getItem(APP_MODE_STORAGE_KEY);
-    if (savedMode === 'autonomous' || savedMode === 'manual') {
+    if (savedMode === 'leanoj' && !readDeveloperModeEnabled()) {
+      return 'autonomous';
+    }
+    if (savedMode === 'autonomous' || savedMode === 'manual' || savedMode === 'leanoj') {
       return savedMode;
     }
 
@@ -181,6 +263,9 @@ function App() {
     return saved || 'auto-interface';
   });
   const [manualActiveTab, setManualActiveTab] = useState('aggregator-interface');
+  const [leanojActiveTab, setLeanojActiveTab] = useState(() => {
+    return localStorage.getItem(LEANOJ_TAB_STORAGE_KEY) || 'leanoj-interface';
+  });
   const [completedWorksSubTab, setCompletedWorksSubTab] = useState(() => {
     const savedSubTab = localStorage.getItem(COMPLETED_WORKS_SUB_TAB_STORAGE_KEY);
     if (savedSubTab) return savedSubTab;
@@ -189,7 +274,11 @@ function App() {
     if (savedTab === 'auto-final-answer-library') return 'stage3-history';
     return 'stage2-history';
   });
-  const activeTab = appMode === 'manual' ? manualActiveTab : autonomousActiveTab;
+  const activeTab = appMode === 'manual'
+    ? manualActiveTab
+    : appMode === 'leanoj'
+      ? leanojActiveTab
+      : autonomousActiveTab;
   const shimmerAccentsEnabled = (() => {
     const saved = localStorage.getItem('banner_shimmer_enabled');
     return saved !== null ? JSON.parse(saved) : true;
@@ -233,6 +322,9 @@ function App() {
     const savedState = localStorage.getItem('workflow_panel_collapsed');
     return savedState !== 'false';
   });
+  const [developerModeEnabled, setDeveloperModeEnabled] = useState(() => {
+    return readDeveloperModeEnabled();
+  });
 
   // Update notice banner state (dismissible per session, re-appears on restart)
   const [updateNotice, setUpdateNotice] = useState(null);
@@ -255,8 +347,89 @@ function App() {
   }, [manualActiveTab]);
 
   useEffect(() => {
+    localStorage.setItem(LEANOJ_TAB_STORAGE_KEY, leanojActiveTab);
+  }, [leanojActiveTab]);
+
+  useEffect(() => {
     localStorage.setItem(COMPLETED_WORKS_SUB_TAB_STORAGE_KEY, completedWorksSubTab);
   }, [completedWorksSubTab]);
+
+  useEffect(() => {
+    if (!developerModeEnabled && appMode === 'leanoj') {
+      setAppMode('autonomous');
+    }
+  }, [developerModeEnabled, appMode]);
+
+  useEffect(() => {
+    const pressedCodes = new Set();
+    let shortcutChordActive = false;
+
+    const toggleDeveloperMode = () => {
+      setDeveloperModeEnabled((currentValue) => {
+        const nextValue = !currentValue;
+        localStorage.setItem(DEVELOPER_MODE_STORAGE_KEY, String(nextValue));
+        return nextValue;
+      });
+    };
+
+    const getShortcutCode = (event) => {
+      if (event.code?.startsWith('Shift') || event.key === 'Shift') {
+        return 'Shift';
+      }
+      if (event.code === 'KeyZ' || event.key?.toLowerCase() === 'z') {
+        return 'KeyZ';
+      }
+      if (event.code === 'KeyX' || event.key?.toLowerCase() === 'x') {
+        return 'KeyX';
+      }
+      return null;
+    };
+
+    const hasDeveloperShortcutChord = () => (
+      pressedCodes.has('Shift') &&
+      pressedCodes.has('KeyZ') &&
+      pressedCodes.has('KeyX')
+    );
+
+    const handleKeyDown = (event) => {
+      const shortcutCode = getShortcutCode(event);
+      if (!shortcutCode) {
+        return;
+      }
+
+      pressedCodes.add(shortcutCode);
+      if (hasDeveloperShortcutChord() && !shortcutChordActive) {
+        shortcutChordActive = true;
+        event.preventDefault();
+        toggleDeveloperMode();
+      }
+    };
+
+    const handleKeyUp = (event) => {
+      const shortcutCode = getShortcutCode(event);
+      if (shortcutCode) {
+        pressedCodes.delete(shortcutCode);
+      }
+      if (!hasDeveloperShortcutChord()) {
+        shortcutChordActive = false;
+      }
+    };
+
+    const clearPressedCodes = () => {
+      pressedCodes.clear();
+      shortcutChordActive = false;
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('keyup', handleKeyUp, true);
+    window.addEventListener('blur', clearPressedCodes);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('keyup', handleKeyUp, true);
+      window.removeEventListener('blur', clearPressedCodes);
+    };
+  }, []);
   
   // Initialize config from localStorage or use defaults
   // CRITICAL: Read from 'aggregator_settings' (used by AggregatorSettings component)
@@ -268,17 +441,15 @@ function App() {
         const settings = JSON.parse(settingsConfig);
         return {
           userPrompt: settings.userPrompt || '',
-          submitterConfigs: settings.submitterConfigs || [
-            { submitterId: 1, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-            { submitterId: 2, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-            { submitterId: 3, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 }
-          ],
+          submitterConfigs: settings.submitterConfigs || createDefaultAggregatorSubmitterConfigs(),
           validatorModel: settings.validatorModel || '',
           validatorProvider: settings.validatorProvider || 'lm_studio',
           validatorOpenrouterProvider: settings.validatorOpenrouterProvider || null,
+          validatorOpenrouterReasoningEffort: settings.validatorOpenrouterReasoningEffort || 'auto',
           validatorLmStudioFallback: settings.validatorLmStudioFallback || null,
-          validatorContextSize: settings.validatorContextSize || 131072,
-          validatorMaxOutput: settings.validatorMaxOutput || 25000,
+          validatorContextSize: settings.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
+          validatorMaxOutput: settings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+          validatorSuperchargeEnabled: Boolean(settings.validatorSuperchargeEnabled),
           uploadedFiles: [],
         };
       } catch (e) {
@@ -293,17 +464,15 @@ function App() {
         const parsed = JSON.parse(savedConfig);
         return {
           userPrompt: parsed.userPrompt || '',
-          submitterConfigs: parsed.submitterConfigs || [
-            { submitterId: 1, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-            { submitterId: 2, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-            { submitterId: 3, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 }
-          ],
+          submitterConfigs: parsed.submitterConfigs || createDefaultAggregatorSubmitterConfigs(),
           validatorModel: parsed.validatorModel || '',
           validatorProvider: parsed.validatorProvider || 'lm_studio',
           validatorOpenrouterProvider: parsed.validatorOpenrouterProvider || null,
+          validatorOpenrouterReasoningEffort: parsed.validatorOpenrouterReasoningEffort || 'auto',
           validatorLmStudioFallback: parsed.validatorLmStudioFallback || null,
-          validatorContextSize: parsed.validatorContextSize || 131072,
-          validatorMaxOutput: parsed.validatorMaxOutput || 25000,
+          validatorContextSize: parsed.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
+          validatorMaxOutput: parsed.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+          validatorSuperchargeEnabled: Boolean(parsed.validatorSuperchargeEnabled),
           uploadedFiles: [],
         };
       } catch (e) {
@@ -312,17 +481,15 @@ function App() {
     }
     return {
       userPrompt: '',
-      submitterConfigs: [
-        { submitterId: 1, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-        { submitterId: 2, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 },
-        { submitterId: 3, provider: 'lm_studio', modelId: '', openrouterProvider: null, lmStudioFallbackId: null, contextWindow: 131072, maxOutputTokens: 25000 }
-      ],
+      submitterConfigs: createDefaultAggregatorSubmitterConfigs(),
       validatorModel: '',
       validatorProvider: 'lm_studio',
       validatorOpenrouterProvider: null,
+      validatorOpenrouterReasoningEffort: 'auto',
       validatorLmStudioFallback: null,
-      validatorContextSize: 131072,
-      validatorMaxOutput: 25000,
+      validatorContextSize: DEFAULT_CONTEXT_WINDOW,
+      validatorMaxOutput: DEFAULT_MAX_OUTPUT_TOKENS,
+      validatorSuperchargeEnabled: false,
       uploadedFiles: [],
     };
   });
@@ -336,14 +503,16 @@ function App() {
       validatorModel: config.validatorModel,
       validatorProvider: config.validatorProvider,
       validatorOpenrouterProvider: config.validatorOpenrouterProvider,
+      validatorOpenrouterReasoningEffort: config.validatorOpenrouterReasoningEffort,
       validatorLmStudioFallback: config.validatorLmStudioFallback,
       validatorContextSize: config.validatorContextSize,
       validatorMaxOutput: config.validatorMaxOutput,
+      validatorSuperchargeEnabled: config.validatorSuperchargeEnabled,
     };
     // Save to both old and new keys
     localStorage.setItem('aggregatorConfig', JSON.stringify(configToSave));
     localStorage.setItem('aggregator_settings', JSON.stringify(configToSave));
-  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput]);
+  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorOpenrouterReasoningEffort, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput, config.validatorSuperchargeEnabled]);
 
   // Autonomous mode state
   const [autonomousRunning, setAutonomousRunning] = useState(false);
@@ -353,6 +522,13 @@ function App() {
   const [brainstorms, setBrainstorms] = useState([]);
   const [papers, setPapers] = useState([]);
   const [autonomousStats, setAutonomousStats] = useState(null);
+
+  // LeanOJ mode state
+  const [leanojRunning, setLeanojRunning] = useState(false);
+  const [leanojStatus, setLeanojStatus] = useState(null);
+  const [leanojActivity, setLeanojActivity] = useState([]);
+  const [leanojSettings, setLeanojSettings] = useState(() => getStoredLeanOJSettings());
+  const [leanojProofRefreshToken, setLeanojProofRefreshToken] = useState(0);
   
   // Disclaimer modal state (shows on every app load)
   const [showDisclaimer, setShowDisclaimer] = useState(true);
@@ -386,6 +562,12 @@ function App() {
   const autonomousRunningRef = useRef(autonomousRunning);
   const autonomousTierRef = useRef(autonomousStatus?.current_tier || null);
   const openRouterKeyJustSavedRef = useRef(false);
+  const seenHighScoreCritiquesRef = useRef(null);
+  const shownHighScoreCritiquesRef = useRef(null);
+  if (seenHighScoreCritiquesRef.current === null) {
+    seenHighScoreCritiquesRef.current = readSeenHighScoreCritiques();
+    shownHighScoreCritiquesRef.current = new Set(seenHighScoreCritiquesRef.current);
+  }
 
   useEffect(() => {
     autonomousRunningRef.current = autonomousRunning;
@@ -394,6 +576,20 @@ function App() {
   useEffect(() => {
     autonomousTierRef.current = autonomousStatus?.current_tier || null;
   }, [autonomousStatus]);
+
+  const markHighScoreCritiqueSeen = useCallback((seenKey) => {
+    if (!seenKey) {
+      return;
+    }
+
+    const seen = seenHighScoreCritiquesRef.current;
+    if (seen.has(seenKey)) {
+      return;
+    }
+
+    seen.add(seenKey);
+    persistSeenHighScoreCritiques(seen);
+  }, []);
 
   // Autonomous config with localStorage persistence
   // CRITICAL: Read from 'autonomous_research_settings' (used by AutonomousResearchSettings component)
@@ -416,28 +612,36 @@ function App() {
         validator_lm_studio_fallback: autonomousConfig.validator_lm_studio_fallback,
         validator_context_window: autonomousConfig.validator_context_window,
         validator_max_tokens: autonomousConfig.validator_max_tokens,
+        validator_supercharge_enabled: autonomousConfig.validator_supercharge_enabled,
         high_context_provider: autonomousConfig.high_context_provider,
         high_context_model: autonomousConfig.high_context_model,
         high_context_openrouter_provider: autonomousConfig.high_context_openrouter_provider,
         high_context_lm_studio_fallback: autonomousConfig.high_context_lm_studio_fallback,
         high_context_context_window: autonomousConfig.high_context_context_window,
         high_context_max_tokens: autonomousConfig.high_context_max_tokens,
+        high_context_supercharge_enabled: autonomousConfig.high_context_supercharge_enabled,
         high_param_provider: autonomousConfig.high_param_provider,
         high_param_model: autonomousConfig.high_param_model,
         high_param_openrouter_provider: autonomousConfig.high_param_openrouter_provider,
         high_param_lm_studio_fallback: autonomousConfig.high_param_lm_studio_fallback,
         high_param_context_window: autonomousConfig.high_param_context_window,
         high_param_max_tokens: autonomousConfig.high_param_max_tokens,
+        high_param_supercharge_enabled: autonomousConfig.high_param_supercharge_enabled,
         critique_submitter_provider: autonomousConfig.critique_submitter_provider,
         critique_submitter_model: autonomousConfig.critique_submitter_model,
         critique_submitter_openrouter_provider: autonomousConfig.critique_submitter_openrouter_provider,
         critique_submitter_lm_studio_fallback: autonomousConfig.critique_submitter_lm_studio_fallback,
         critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
         critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
+        critique_submitter_supercharge_enabled: autonomousConfig.critique_submitter_supercharge_enabled,
       },
       tier3Enabled: autonomousConfig.tier3_enabled ?? existingSettings.tier3Enabled ?? false,
     });
   }, [autonomousConfig]);
+
+  useEffect(() => {
+    persistLeanOJSettings(leanojSettings);
+  }, [leanojSettings]);
 
   const syncProviderAvailability = useCallback(async () => {
     let nextCapabilities = DEFAULT_CAPABILITIES;
@@ -665,6 +869,7 @@ function App() {
         if (status.is_running) {
           console.log('Autonomous research detected as running, syncing state...');
           setAutonomousRunning(true);
+          setAnyWorkflowRunning(true);
         }
       } catch (error) {
         console.error('Failed to check initial autonomous status:', error);
@@ -672,6 +877,69 @@ function App() {
     };
     
     checkInitialStatus();
+  }, []);
+
+  // Recover high-score critique popups from persisted paper metadata. WebSocket
+  // events are best-effort, so a sleeping/closed browser can miss the live event.
+  useEffect(() => {
+    if (!papers || papers.length === 0) {
+      return;
+    }
+
+    const recoveredNotifications = [];
+    for (const paper of papers) {
+      const averageRating = Number(paper.critique_avg);
+      if (!Number.isFinite(averageRating) || averageRating < HIGH_SCORE_CRITIQUE_THRESHOLD) {
+        continue;
+      }
+
+      const seenKey = getHighScoreCritiqueNotificationKey(paper.paper_id, averageRating);
+      if (!seenKey || shownHighScoreCritiquesRef.current.has(seenKey)) {
+        continue;
+      }
+
+      shownHighScoreCritiquesRef.current.add(seenKey);
+      recoveredNotifications.push({
+        id: `critique_recovered_${seenKey}_${Date.now()}`,
+        paper_id: paper.paper_id,
+        paper_title: paper.title || paper.paper_title || paper.paper_id,
+        average_rating: averageRating,
+        timestamp: paper.created_at || new Date().toISOString(),
+        seenKey,
+        recovered: true,
+      });
+    }
+
+    if (recoveredNotifications.length === 0) {
+      return;
+    }
+
+    setCritiqueNotifications(prev => {
+      const existingSeenKeys = new Set(prev.map(notification => notification.seenKey).filter(Boolean));
+      const newNotifications = recoveredNotifications.filter(notification => !existingSeenKeys.has(notification.seenKey));
+      if (newNotifications.length === 0) {
+        return prev;
+      }
+
+      const newStack = [...prev, ...newNotifications];
+      return newStack.length > 3 ? newStack.slice(-3) : newStack;
+    });
+  }, [papers]);
+
+  useEffect(() => {
+    const checkLeanOJStatus = async () => {
+      try {
+        const status = await leanojAPI.getStatus();
+        setLeanojStatus(status);
+        if (status.is_running) {
+          setLeanojRunning(true);
+          setAnyWorkflowRunning(true);
+        }
+      } catch (error) {
+        console.error('Failed to check initial Proof Solver status:', error);
+      }
+    };
+    checkLeanOJStatus();
   }, []);
 
   // WebSocket connection
@@ -718,6 +986,33 @@ function App() {
       const cleaned = String(reasoning).replace(/\s+/g, ' ').trim();
       if (!cleaned) return '';
       return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen)}...` : cleaned;
+    };
+    const proofName = (data = {}) => (data.proof_label ? `Proof ${data.proof_label}` : 'Proof');
+    const proofTarget = (data = {}) => data.theorem_statement || data.theorem_id || '';
+    const proofLeanResponse = (data = {}) => {
+      if (data.lean_response) return data.lean_response;
+      if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
+      const error = formatReason(data.error_summary || data.error_output || data.reason || '', 960);
+      return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
+    };
+    const isLeanOJProofEvent = (data = {}) => {
+      const sourceType = String(data.source_type || '');
+      const sourceId = String(data.source_id || '');
+      const trigger = String(data.trigger || '');
+      return sourceType === 'leanoj_final'
+        || sourceType === 'leanoj_subproof'
+        || sourceId.startsWith('leanoj_')
+        || trigger.startsWith('leanoj');
+    };
+    const formatProofCheckCompleteMessage = (data = {}) => {
+      const verified = data.verified_count ?? 0;
+      const novel = data.novel_count ?? 0;
+      const hasTotal = data.total_candidates !== undefined && data.total_candidates !== null;
+      const base = hasTotal
+        ? `Proof check complete: ${verified}/${data.total_candidates} candidates verified, ${novel} novel`
+        : `Proof check complete: ${verified} verified`;
+      const detail = formatReason(data.message, 220);
+      return detail ? `${base} - ${detail}` : base;
     };
     
     // Topic exploration events (pre-brainstorm candidate collection)
@@ -908,7 +1203,7 @@ function App() {
       addActivity({
         event: 'critique_phase_started',
         timestamp: getTimestamp(data),
-        message: `Critique phase started (Paper v${data.paper_version || '?'}, target: ${data.target_critiques || 5} critiques)`,
+        message: `Critique phase started (Paper v${data.paper_version || '?'}, target: ${data.target_critiques || 3} attempts)`,
         data
       });
     }));
@@ -925,20 +1220,11 @@ function App() {
       }
     }));
     
-    unsubscribers.push(websocket.on('body_rewrite_started', (data) => {
+    unsubscribers.push(websocket.on('self_review_appended', (data) => {
       addActivity({
-        event: 'body_rewrite_started',
+        event: 'self_review_appended',
         timestamp: getTimestamp(data),
-        message: `REWRITE PHASE: Total rewrite started for Paper v${data.version || '?'}${data.title_changed ? ' (Title updated)' : ''}`,
-        data
-      });
-    }));
-    
-    unsubscribers.push(websocket.on('partial_revision_complete', (data) => {
-      addActivity({
-        event: 'partial_revision_complete',
-        timestamp: getTimestamp(data),
-        message: `PARTIAL REVISION: Applied ${data.edits_applied || 0} targeted edits (Paper v${data.version || '?'})${data.title_changed ? ' (Title updated)' : ''}`,
+        message: `AI self-review appended (${data.critique_count || 0} accepted critique${data.critique_count === 1 ? '' : 's'})`,
         data
       });
     }));
@@ -947,7 +1233,7 @@ function App() {
       addActivity({
         event: 'critique_phase_ended',
         timestamp: getTimestamp(data),
-        message: `Critique phase complete (${data.decision || 'unknown'})`,
+        message: `Critique phase complete (self-review appended: ${data.self_review_appended ? 'yes' : 'no'})`,
         data
       });
     }));
@@ -1006,78 +1292,39 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('proof_check_started', (data) => {
-      const prefix = data.trigger === 'manual'
-        ? 'Manual proof check started'
-        : data.trigger === 'retry'
-          ? 'Paper-stage proof retry started'
-          : 'Proof check started';
-      addActivity({
-        event: 'proof_check_started',
-        timestamp: getTimestamp(data),
-        message: `${prefix} for ${data.source_type} ${data.source_id}`,
-        data
-      });
+      setProofRefreshToken((prev) => prev + 1);
     }));
 
     unsubscribers.push(websocket.on('proof_retry_scheduled', (data) => {
-      addActivity({
-        event: 'proof_retry_scheduled',
-        timestamp: getTimestamp(data),
-        message: `Scheduled ${data.count || 0} proof retry candidate(s) for paper ${data.source_id}`,
-        data
-      });
+      setProofRefreshToken((prev) => prev + 1);
     }));
 
     unsubscribers.push(websocket.on('proof_retry_started', (data) => {
-      addActivity({
-        event: 'proof_retry_started',
-        timestamp: getTimestamp(data),
-        message: `Retrying ${data.count || 0} failed proof candidate(s) against paper ${data.source_id}`,
-        data
-      });
+      setProofRefreshToken((prev) => prev + 1);
     }));
 
     unsubscribers.push(websocket.on('proof_check_no_candidates', (data) => {
-      addActivity({
-        event: 'proof_check_no_candidates',
-        timestamp: getTimestamp(data),
-        message: `No formal proof candidates found in ${data.source_type} ${data.source_id}`,
-        data
-      });
+      setProofRefreshToken((prev) => prev + 1);
     }));
 
     unsubscribers.push(websocket.on('proof_check_candidates_found', (data) => {
-      addActivity({
-        event: 'proof_check_candidates_found',
-        timestamp: getTimestamp(data),
-        message: `Proof check found ${data.count || 0} theorem candidate(s)`,
-        data
-      });
+      setProofRefreshToken((prev) => prev + 1);
     }));
 
     unsubscribers.push(websocket.on('proof_attempt_started', (data) => {
       addActivity({
         event: 'proof_attempt_started',
         timestamp: getTimestamp(data),
-        message: `Proof attempt ${data.attempt || 1} started: ${data.theorem_statement || data.theorem_id}`,
+        message: `${proofName(data)}, Attempt ${data.attempt || 1} started: ${proofTarget(data)}`,
         data
       });
     }));
 
-    unsubscribers.push(websocket.on('smt_check_started', (data) => {
+    unsubscribers.push(websocket.on('smt_check_error', (data) => {
       addActivity({
-        event: 'smt_check_started',
+        event: 'smt_check_error',
         timestamp: getTimestamp(data),
-        message: `SMT check started: ${data.theorem_statement || data.theorem_id}`,
-        data
-      });
-    }));
-
-    unsubscribers.push(websocket.on('smt_check_complete', (data) => {
-      addActivity({
-        event: 'smt_check_complete',
-        timestamp: getTimestamp(data),
-        message: `SMT check complete (${data.result || 'unknown'}): ${data.theorem_statement || data.theorem_id}`,
+        message: `${proofName(data)} SMT error: ${formatReason(data.error_summary, 960) || proofTarget(data)}`,
         data
       });
     }));
@@ -1086,16 +1333,29 @@ function App() {
       addActivity({
         event: 'proof_attempt_failed',
         timestamp: getTimestamp(data),
-        message: `Proof attempt ${data.attempt || '?'} failed: ${formatReason(data.error_summary, 960) || data.theorem_statement || data.theorem_id}`,
+        message: `${proofName(data)}, Attempt ${data.attempt || '?'} final: ${proofLeanResponse(data)}`,
         data
       });
     }));
 
     unsubscribers.push(websocket.on('proof_verified', (data) => {
+      setProofRefreshToken((prev) => prev + 1);
+    }));
+
+    unsubscribers.push(websocket.on('proof_lean_accepted', (data) => {
       addActivity({
-        event: 'proof_verified',
+        event: 'proof_lean_accepted',
         timestamp: getTimestamp(data),
-        message: `Lean 4 verified: ${data.theorem_statement || data.theorem_id}`,
+        message: `${proofName(data)}, Attempt ${data.attempt || '?'} final: ${proofLeanResponse(data)}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_integrity_rejected', (data) => {
+      addActivity({
+        event: 'proof_integrity_rejected',
+        timestamp: getTimestamp(data),
+        message: `${proofName(data)} error: integrity rejected - ${formatReason(data.reason, 960) || proofTarget(data)}`,
         data
       });
     }));
@@ -1104,7 +1364,7 @@ function App() {
       addActivity({
         event: 'proof_attempts_exhausted',
         timestamp: getTimestamp(data),
-        message: `Proof attempts exhausted: ${data.theorem_statement || data.theorem_id}`,
+        message: `${proofName(data)} terminated: proof attempts exhausted for ${proofTarget(data)}`,
         data
       });
     }));
@@ -1126,41 +1386,28 @@ function App() {
         ];
         return next.length > 3 ? next.slice(-3) : next;
       });
-      addActivity({
-        event: 'novel_proof_discovered',
-        timestamp: getTimestamp(data),
-        message: `Novel proof discovered: ${data.theorem_statement}`,
-        data
-      });
     }));
 
     unsubscribers.push(websocket.on('known_proof_verified', (data) => {
       setProofRefreshToken((prev) => prev + 1);
-      addActivity({
-        event: 'known_proof_verified',
-        timestamp: getTimestamp(data),
-        message: `Verified known proof recorded for ${data.source_type} ${data.source_id}`,
-        data
-      });
     }));
 
     unsubscribers.push(websocket.on('proof_dependency_added', (data) => {
       setLatestProofDependencyEvent(data);
       setProofRefreshToken((prev) => prev + 1);
-      addActivity({
-        event: 'proof_dependency_added',
-        timestamp: getTimestamp(data),
-        message: `Dependency graph updated for ${data.theorem_name || data.proof_id}`,
-        data
-      });
     }));
 
     unsubscribers.push(websocket.on('proof_check_complete', (data) => {
+      if (isLeanOJProofEvent(data)) return;
+      if (data.source_type === 'compiler_rigor' && !isAutonomousTier2Active()) return;
+
       setProofRefreshToken((prev) => prev + 1);
+      const message = formatProofCheckCompleteMessage(data);
+
       addActivity({
         event: 'proof_check_complete',
         timestamp: getTimestamp(data),
-        message: `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`,
+        message,
         data
       });
     }));
@@ -1168,6 +1415,7 @@ function App() {
     unsubscribers.push(websocket.on('auto_research_started', () => {
       setAutonomousActivity([]);
       setAutonomousRunning(true);
+      setAnyWorkflowRunning(true);
       setAutonomousStopping(false);
     }));
     
@@ -1175,6 +1423,7 @@ function App() {
       // Handle resume after crash/restart - sync running state
       console.log('Autonomous research resumed:', data);
       setAutonomousRunning(true);
+      setAnyWorkflowRunning(true);
       setAutonomousStopping(false);
       if (data?.tier) {
         autonomousTierRef.current = data.tier;
@@ -1585,6 +1834,14 @@ function App() {
       
       // Add to notification stack (max 3, FIFO)
       setCritiqueNotifications(prev => {
+        const seenKey = getHighScoreCritiqueNotificationKey(data.paper_id, data.average_rating);
+        if (seenKey && (seenHighScoreCritiquesRef.current.has(seenKey) || prev.some(notification => notification.seenKey === seenKey))) {
+          return prev;
+        }
+        if (seenKey) {
+          shownHighScoreCritiquesRef.current.add(seenKey);
+        }
+
         const newNotification = {
           id: `critique_${data.paper_id}_${Date.now()}`,
           paper_id: data.paper_id,
@@ -1593,7 +1850,8 @@ function App() {
           novelty_rating: data.novelty_rating,
           correctness_rating: data.correctness_rating,
           impact_rating: data.impact_rating,
-          timestamp: data.timestamp
+          timestamp: data.timestamp,
+          seenKey
         };
         
         // Add to stack, keep max 3 (remove oldest if full)
@@ -1616,6 +1874,233 @@ function App() {
     return () => {
       unsubscribers.forEach(unsub => unsub());
     };
+  }, []);
+
+  useEffect(() => {
+    const MAX_LEANOJ_ACTIVITY_EVENTS = 500;
+    const getTimestamp = (data = {}) => data?._serverTimestamp || data?.timestamp || new Date().toISOString();
+    const shouldTrackLeanOJModelCall = (data = {}) => {
+      const taskId = String(data.task_id || '');
+      const roleId = String(data.role_id || '');
+      const summary = String(data.result_summary || data.message || '').toLowerCase();
+      return !(
+        taskId === 'leanoj_sufficiency' ||
+        taskId === 'leanoj_path' ||
+        taskId === 'leanoj_path_val' ||
+        summary.startsWith('sufficiency result:') ||
+        summary.startsWith('path result:') ||
+        (
+          roleId === 'leanoj_path_validator' &&
+          (summary.startsWith('decision: accept') || summary.startsWith('decision: reject'))
+        )
+      );
+    };
+    const addLeanOJActivity = (event, data = {}, message = '') => {
+      setLeanojActivity(prev => [
+        ...prev,
+        {
+          event,
+          timestamp: getTimestamp(data),
+          message: message || data.message || data.reasoning || data.decision || data.phase || 'Proof Solver update',
+          data,
+        },
+      ].slice(-MAX_LEANOJ_ACTIVITY_EVENTS));
+    };
+    const summarizeLeanOJText = (text = '', limit = 220) => {
+      const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+      return cleaned.length > limit ? `${cleaned.slice(0, limit)}...` : cleaned;
+    };
+    const formatModelName = (modelId = '') => {
+      const cleaned = String(modelId || '').trim();
+      if (!cleaned) return '';
+      const displayName = cleaned.split('/').pop() || cleaned;
+      return displayName.length > 32 ? `${displayName.slice(0, 32)}...` : displayName;
+    };
+    const formatLeanOJRole = (roleId = '') => {
+      const cleaned = String(roleId || '').replace(/^leanoj_/, '').replace(/_/g, ' ').trim();
+      return cleaned ? cleaned.replace(/\b\w/g, (char) => char.toUpperCase()) : 'Proof Solver Model';
+    };
+    const formatLeanOJDuration = (durationMs) => {
+      if (durationMs === null || durationMs === undefined || Number.isNaN(Number(durationMs))) return '';
+      const seconds = Number(durationMs) / 1000;
+      return seconds >= 60 ? `${(seconds / 60).toFixed(1)}m` : `${seconds.toFixed(1)}s`;
+    };
+    const formatLeanOJCallResult = (data = {}) => {
+      const role = formatLeanOJRole(data.role_id);
+      const modelName = formatModelName(data.model) || 'model';
+      const summary = summarizeLeanOJText(data.result_summary || data.message || '', 220);
+      const attemptSuffix = Number(data.attempt || 1) > 1 ? `, attempt ${data.attempt}` : '';
+      const duration = formatLeanOJDuration(data.duration_ms);
+      const durationSuffix = duration ? `, ${duration}` : '';
+      return `${role} [${modelName}]: ✓ RESULT${attemptSuffix}${durationSuffix}${summary ? ` - ${summary}` : ''}`;
+    };
+    const formatLeanOJBrainstormMessage = (data = {}, accepted = true) => {
+      const submitterId = data.submitter_id ?? data.submitter ?? '?';
+      const modelName = formatModelName(data.submitter_model || data.model) || 'N/A';
+      const totalValue = accepted ? data.total_acceptances : data.total_rejections;
+      const total = totalValue !== undefined ? ` (total: ${totalValue})` : '';
+      const detail = accepted
+        ? summarizeLeanOJText(data.submission_preview || data.submission, 160)
+        : summarizeLeanOJText(
+          data.rejection_reason
+            || data.validator_summary
+            || data.validator_reasoning
+            || data.submission_preview
+            || data.submission,
+          160
+        );
+      return `Brainstorm Submitter ${submitterId} [${modelName}]: ${accepted ? '✓ ACCEPTED' : '✗ REJECTED'}${total}${detail ? ` - ${detail}` : ''}`;
+    };
+    const leanOJProofName = (data = {}) => {
+      const attempt = data.attempt || {};
+      if (data.proof_label) return `Proof ${data.proof_label}`;
+      if (data.source_type === 'leanoj_final' || attempt.target === 'final') return 'Final proof';
+      if (data.source_type === 'leanoj_subproof' || data.subproof_id || data.subproof || attempt.target === 'subproof') return 'Proof fragment';
+      return 'Proof';
+    };
+    const leanOJProofTarget = (data = {}) => {
+      const attempt = data.attempt || {};
+      const subproof = data.subproof || {};
+      return data.theorem_statement
+        || data.theorem_id
+        || subproof.theorem_or_lemma
+        || subproof.request
+        || attempt.request
+        || data.subproof_id
+        || '';
+    };
+    const leanOJLeanResponse = (data = {}) => {
+      const attempt = data.attempt || {};
+      if (data.lean_response) return data.lean_response;
+      if (data.proof_verified === true || attempt.success === true) return 'Lean 4 response: proof verified.';
+      const error = summarizeLeanOJText(
+        attempt.error_output || data.error_summary || data.error_output || data.reason || data.message || '',
+        960
+      );
+      return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
+    };
+    const leanOJAttemptStartedMessage = (data = {}) => {
+      const attemptNumber = data.attempt?.attempt || data.attempt || 1;
+      const target = leanOJProofTarget(data);
+      return `${leanOJProofName(data)}, Attempt ${attemptNumber} started${target ? `: ${target}` : ''}`;
+    };
+    const leanOJAttemptFinalMessage = (data = {}) => {
+      const attemptNumber = data.attempt?.attempt || data.attempt || '?';
+      return `${leanOJProofName(data)}, Attempt ${attemptNumber} final: ${leanOJLeanResponse(data)}`;
+    };
+    const isLeanOJProofEvent = (data = {}) => {
+      const sourceType = String(data.source_type || '');
+      const sourceId = String(data.source_id || '');
+      const trigger = String(data.trigger || '');
+      return sourceType === 'leanoj_final'
+        || sourceType === 'leanoj_subproof'
+        || sourceId.startsWith('leanoj_')
+        || trigger.startsWith('leanoj');
+    };
+    const addLeanOJSharedProofActivity = (event, data = {}, messageFactory) => {
+      if (!isLeanOJProofEvent(data)) return;
+      setLeanojProofRefreshToken((prev) => prev + 1);
+      addLeanOJActivity(event, data, messageFactory(data));
+    };
+
+    const handlers = [
+      ['leanoj_started', (data) => {
+        setLeanojRunning(true);
+        addLeanOJActivity('leanoj_started', data, 'Proof Solver started');
+      }],
+      ['leanoj_stopped', (data) => {
+        setLeanojRunning(false);
+        setAnyWorkflowRunning(false);
+        addLeanOJActivity('leanoj_stopped', data, 'Proof Solver stopped');
+        leanojAPI.getStatus().then(setLeanojStatus).catch(console.error);
+      }],
+      ['leanoj_status_updated', (data) => setLeanojStatus(data)],
+      ['leanoj_phase_changed', (data) => addLeanOJActivity('leanoj_phase_changed', data, `Proof Solver phase: ${data.phase || 'unknown'}`)],
+      ['leanoj_model_call_completed', (data) => {
+        if (shouldTrackLeanOJModelCall(data)) {
+          addLeanOJActivity('leanoj_model_call_completed', data, formatLeanOJCallResult(data));
+        }
+      }],
+      ['leanoj_model_call_failed', (data) => addLeanOJActivity('leanoj_model_call_failed', data, `${formatLeanOJRole(data.role_id)} call failed${data.retryable ? '; retrying' : ''}: ${summarizeLeanOJText(data.message, 160)}`)],
+      ['leanoj_role_json_retrying', (data) => addLeanOJActivity('leanoj_role_json_retrying', data, `Proof Solver role ${data.role_id || 'model'} returned invalid JSON; retrying attempt ${data.attempt || '?'}`)],
+      ['leanoj_skip_brainstorm_requested', (data) => addLeanOJActivity('leanoj_skip_brainstorm_requested', data, 'Skip brainstorm requested')],
+      ['leanoj_brainstorm_skip_deferred', (data) => addLeanOJActivity('leanoj_brainstorm_skip_deferred', data, 'Brainstorm skip queued after topic setup')],
+      ['leanoj_brainstorm_skipped', (data) => addLeanOJActivity('leanoj_brainstorm_skipped', data, 'Brainstorm skipped; proceeding directly to proof solving')],
+      ['leanoj_force_brainstorm_requested', (data) => addLeanOJActivity('leanoj_force_brainstorm_requested', data, 'Force recursive brainstorm requested')],
+      ['leanoj_brainstorm_forced', (data) => addLeanOJActivity('leanoj_brainstorm_forced', data, 'Returning to recursive brainstorm with the current proof preserved')],
+      ['leanoj_topic_submitters_started', (data) => addLeanOJActivity('leanoj_topic_submitters_started', data, `Topic submitters started (${data.submitter_count || 0} parallel submitters)`)],
+      ['leanoj_topic_generation_started', (data) => addLeanOJActivity('leanoj_topic_generation_started', data, `Submitter ${data.submitter_id ?? data.submitter ?? '?'} generating topic ${data.topic_index || '?'}/${data.target_topics || 5}`)],
+      ['leanoj_topic_empty', (data) => addLeanOJActivity('leanoj_topic_empty', data, `Topic submitter ${data.submitter_id ?? data.submitter ?? '?'} returned empty output on attempt ${data.attempt || '?'}`)],
+      ['leanoj_topic_candidate_queued', (data) => addLeanOJActivity('leanoj_topic_candidate_queued', data, `Submitter ${data.submitter_id ?? data.submitter ?? '?'} queued topic for validation: ${summarizeLeanOJText(data.topic_preview, 140)}`)],
+      ['leanoj_topic_batch_validation_started', (data) => addLeanOJActivity('leanoj_topic_batch_validation_started', data, `Topic validator reviewing batch of ${data.batch_size || 0} topic(s)`)],
+      ['leanoj_topic_validated', (data) => addLeanOJActivity('leanoj_topic_validated', data, `Topic accepted: ${summarizeLeanOJText(data.topic, 140)}`)],
+      ['leanoj_topic_rejected', (data) => addLeanOJActivity('leanoj_topic_rejected', data, `Topic rejected: ${summarizeLeanOJText(data.topic, 140)}`)],
+      ['leanoj_recursive_brainstorm_started', (data) => addLeanOJActivity('leanoj_recursive_brainstorm_started', data, `Recursive brainstorm cycle ${data.cycle || '?'} ${data.resumed ? 'resumed' : 'started'}; targeting the current proof attempt`)],
+      ['leanoj_topic_submitter_failed', (data) => addLeanOJActivity('leanoj_topic_submitter_failed', data, `Topic submitter ${data.submitter || '?'} failed: ${summarizeLeanOJText(data.message, 160)}`)],
+      ['leanoj_recursive_brainstorm_completed', (data) => addLeanOJActivity('leanoj_recursive_brainstorm_completed', data, `Recursive brainstorm cycle ${data.cycle || '?'} completed with ${data.accepted_delta || 0} new accepted ideas`)],
+      ['leanoj_initial_topic_selected', (data) => addLeanOJActivity('leanoj_initial_topic_selected', data, `Initial topic: ${summarizeLeanOJText(data.topic, 140)}`)],
+      ['leanoj_brainstorm_submitters_started', (data) => addLeanOJActivity('leanoj_brainstorm_submitters_started', data, `Brainstorm submitters started for ${data.phase || 'brainstorm'} (${data.submitter_count || 0} parallel submitters)`)],
+      ['leanoj_brainstorm_submission_queued', (data) => addLeanOJActivity('leanoj_brainstorm_submission_queued', data, `Submitter ${data.submitter_id ?? data.submitter ?? '?'} queued brainstorm idea for validation: ${summarizeLeanOJText(data.submission_preview, 140)}`)],
+      ['leanoj_brainstorm_submitter_failed', (data) => addLeanOJActivity('leanoj_brainstorm_submitter_failed', data, `Brainstorm submitter ${data.submitter || '?'} failed: ${summarizeLeanOJText(data.message, 160)}`)],
+      ['leanoj_brainstorm_batch_validation_started', (data) => addLeanOJActivity('leanoj_brainstorm_batch_validation_started', data, `Brainstorm validator reviewing batch of ${data.batch_size || 0} submission(s)`)],
+      ['leanoj_brainstorm_accepted', (data) => addLeanOJActivity('leanoj_brainstorm_accepted', data, formatLeanOJBrainstormMessage(data, true))],
+      ['leanoj_brainstorm_rejected', (data) => addLeanOJActivity('leanoj_brainstorm_rejected', data, formatLeanOJBrainstormMessage(data, false))],
+      ['leanoj_brainstorm_phase_limit_reached', (data) => addLeanOJActivity('leanoj_brainstorm_phase_limit_reached', data, `Brainstorm phase limit reached for ${data.phase || 'brainstorm'} (${data.accepted_delta || 0}/${data.max_accepts || '?'})`)],
+      ['leanoj_brainstorm_prune_review_complete', (data) => addLeanOJActivity('leanoj_brainstorm_prune_review_complete', data, 'Brainstorm prune review complete: no removal needed')],
+      ['leanoj_brainstorm_prune_rejected', (data) => addLeanOJActivity('leanoj_brainstorm_prune_rejected', data, `Brainstorm prune rejected: ${summarizeLeanOJText(data.reasoning || data.reason, 140)}`)],
+      ['leanoj_brainstorm_prune_applied', (data) => addLeanOJActivity('leanoj_brainstorm_prune_applied', data, `Brainstorm prune applied: ${summarizeLeanOJText(data.reasoning || data.reason, 140)}`)],
+      ['leanoj_brainstorm_prune_apply_failed', (data) => addLeanOJActivity('leanoj_brainstorm_prune_apply_failed', data, 'Brainstorm prune apply failed')],
+      ['leanoj_brainstorm_prune_error', (data) => addLeanOJActivity('leanoj_brainstorm_prune_error', data, data.message || 'Brainstorm prune review error')],
+      ['leanoj_brainstorm_proof_failed', (data) => addLeanOJActivity('leanoj_brainstorm_proof_failed', data, `Brainstorm proof failed Lean gate: ${summarizeLeanOJText(data.feedback?.error_summary, 180)}`)],
+      ['leanoj_brainstorm_proof_registration_failed', (data) => addLeanOJActivity('leanoj_brainstorm_proof_registration_failed', data, `Brainstorm proof registration failed: ${summarizeLeanOJText(data.error, 180)}`)],
+      ['leanoj_brainstorm_proof_verified', (data) => {
+        setLeanojProofRefreshToken((prev) => prev + 1);
+        addLeanOJActivity('leanoj_brainstorm_proof_verified', data, `Brainstorm proof verified and accepted: ${leanOJProofTarget(data)}`);
+      }],
+      ['leanoj_path_decided', (data) => addLeanOJActivity('leanoj_path_decided', data, `Path decision: ${data.decision || ''}`)],
+      ['leanoj_partial_proof_saved', (data) => addLeanOJActivity('leanoj_partial_proof_saved', data, `Partial proof saved: ${data.partial_proof?.request || data.partial_proof?.target || ''}`)],
+      ['leanoj_master_proof_initialized', (data) => addLeanOJActivity('leanoj_master_proof_initialized', data, 'Proof Solver master proof initialized')],
+      ['leanoj_master_proof_edit_started', (data) => addLeanOJActivity('leanoj_master_proof_edit_started', data, `Master proof edit started for final attempt ${data.next_verification_attempt || '?'}`)],
+      ['leanoj_master_proof_edit_validation_started', (data) => addLeanOJActivity('leanoj_master_proof_edit_validation_started', data, `Master proof shortening validation started (${data.line_delta_removed || 0} line(s), ${data.char_delta_removed || 0} char(s) removed)`)],
+      ['leanoj_master_proof_edit_applied', (data) => addLeanOJActivity('leanoj_master_proof_edit_applied', data, `Master proof edit accepted (version ${data.master_proof_version || '?'})`)],
+      ['leanoj_master_proof_edit_rejected', (data) => addLeanOJActivity('leanoj_master_proof_edit_rejected', data, `Master proof edit rejected: ${summarizeLeanOJText(data.validator_feedback || data.error_summary || data.message, 180)}`)],
+      ['leanoj_master_proof_stuck', (data) => addLeanOJActivity('leanoj_master_proof_stuck', data, data.continuing_final_cycle ? `Master proof stuck; continuing final cycle (${data.attempts_in_cycle || '?'} / ${data.max_attempts || '?'})` : `Master proof stuck; path requested: ${data.requested_path || 'unknown'}`)],
+      ['leanoj_master_proof_progress_watchdog', (data) => addLeanOJActivity('leanoj_master_proof_progress_watchdog', data, data.continuing_final_cycle ? `Master proof watchdog fired; continuing final cycle (${data.attempts_in_cycle || '?'} / ${data.max_attempts || '?'})` : `Master proof watchdog returned to ${data.requested_path || 'path planning'}`)],
+      ['leanoj_final_attempt_started', (data) => addLeanOJActivity('leanoj_final_attempt_started', data, leanOJAttemptStartedMessage(data))],
+      ['leanoj_final_attempt_failed', (data) => addLeanOJActivity('leanoj_final_attempt_failed', data, leanOJAttemptFinalMessage(data))],
+      ['leanoj_final_attempt_cycle_exhausted', (data) => addLeanOJActivity('leanoj_final_attempt_cycle_exhausted', data, data.message || 'Final attempt cycle exhausted; returning to path planning')],
+      ['leanoj_final_verified', (data) => {
+        setLeanojRunning(false);
+        setAnyWorkflowRunning(false);
+        setLeanojProofRefreshToken((prev) => prev + 1);
+        addLeanOJActivity('leanoj_final_verified', data, `${leanOJProofName(data)} verified and accepted: ${leanOJProofTarget(data) || 'final Proof Solver submission'}`);
+        leanojAPI.getStatus().then(setLeanojStatus).catch(console.error);
+      }],
+      ['proof_check_started', (data) => addLeanOJSharedProofActivity('proof_check_started', data, (eventData) => `Proof check started for ${eventData.source_type} ${eventData.source_id}`)],
+      ['proof_check_no_candidates', (data) => addLeanOJSharedProofActivity('proof_check_no_candidates', data, (eventData) => `No formal theorem candidates found in ${eventData.source_type} ${eventData.source_id}`)],
+      ['proof_check_candidates_found', (data) => addLeanOJSharedProofActivity('proof_check_candidates_found', data, (eventData) => `Proof candidates found: ${eventData.count || 0}`)],
+      ['proof_attempt_started', (data) => addLeanOJSharedProofActivity('proof_attempt_started', data, leanOJAttemptStartedMessage)],
+      ['proof_attempt_failed', (data) => addLeanOJSharedProofActivity('proof_attempt_failed', data, leanOJAttemptFinalMessage)],
+      ['proof_lean_accepted', (data) => addLeanOJSharedProofActivity('proof_lean_accepted', data, leanOJAttemptFinalMessage)],
+      ['proof_integrity_rejected', (data) => addLeanOJSharedProofActivity('proof_integrity_rejected', data, (eventData) => `${leanOJProofName(eventData)} error: integrity rejected - ${summarizeLeanOJText(eventData.reason || leanOJProofTarget(eventData), 960)}`)],
+      ['proof_verified', (data) => addLeanOJSharedProofActivity('proof_verified', data, (eventData) => `${leanOJProofName(eventData)} verified and accepted: ${leanOJProofTarget(eventData)}`)],
+      ['proof_attempts_exhausted', (data) => addLeanOJSharedProofActivity('proof_attempts_exhausted', data, (eventData) => `${leanOJProofName(eventData)} terminated: proof attempts exhausted for ${leanOJProofTarget(eventData)}`)],
+      ['novel_proof_discovered', (data) => addLeanOJSharedProofActivity('novel_proof_discovered', data, (eventData) => `${leanOJProofName(eventData)} novel proof discovered: ${eventData.theorem_statement || leanOJProofTarget(eventData)}`)],
+      ['known_proof_verified', (data) => addLeanOJSharedProofActivity('known_proof_verified', data, (eventData) => `${leanOJProofName(eventData)} known proof verified for ${eventData.source_type} ${eventData.source_id}`)],
+      ['proof_dependency_added', (data) => addLeanOJSharedProofActivity('proof_dependency_added', data, () => 'Proof Solver proof dependency added')],
+      ['proof_check_complete', (data) => addLeanOJSharedProofActivity('proof_check_complete', data, (eventData) => `Proof check complete: ${eventData.verified_count || 0} verified, ${eventData.novel_count || 0} novel`)],
+      ['leanoj_error', (data) => addLeanOJActivity('leanoj_error', data, data.message || 'Proof Solver error')],
+      ['leanoj_cleared', (data) => {
+        setLeanojRunning(false);
+        setAnyWorkflowRunning(false);
+        setLeanojActivity([]);
+        setLeanojStatus(data);
+        setLeanojProofRefreshToken((prev) => prev + 1);
+      }],
+    ];
+
+    handlers.forEach(([event, handler]) => websocket.on(event, handler));
+    return () => handlers.forEach(([event, handler]) => websocket.off(event, handler));
   }, []);
 
   // Poll for autonomous data while running
@@ -1642,6 +2127,24 @@ function App() {
     
     return () => clearInterval(interval);
   }, [autonomousRunning]);
+
+  useEffect(() => {
+    if (!leanojRunning) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const status = await leanojAPI.getStatus();
+        setLeanojStatus(status);
+        if (!status.is_running) {
+          setLeanojRunning(false);
+        }
+      } catch (error) {
+        console.error('Failed to poll Proof Solver status:', error);
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [leanojRunning]);
   
   // Clean up expired rate limits every minute
   useEffect(() => {
@@ -1667,6 +2170,7 @@ function App() {
   const handleAutonomousStart = async (researchPrompt) => {
     try {
       const lmStudioEnabled = capabilities.lmStudioEnabled;
+      const superchargeAllowed = developerModeEnabled;
 
       // Convert frontend camelCase to backend snake_case for submitter_configs (includes OpenRouter fields)
       const submitterConfigs = autonomousConfig.submitter_configs?.map(cfg => ({
@@ -1674,9 +2178,11 @@ function App() {
         provider: normalizeRuntimeProvider(cfg.provider, lmStudioEnabled),
         model_id: cfg.modelId,
         openrouter_provider: cfg.openrouterProvider || null,
+        openrouter_reasoning_effort: cfg.openrouterReasoningEffort || 'auto',
         lm_studio_fallback_id: lmStudioEnabled ? (cfg.lmStudioFallbackId || null) : null,
         context_window: cfg.contextWindow,
-        max_output_tokens: cfg.maxOutputTokens
+        max_output_tokens: cfg.maxOutputTokens,
+        supercharge_enabled: superchargeAllowed && Boolean(cfg.superchargeEnabled || cfg.supercharge_enabled)
       })) || [];
 
       await autonomousAPI.start({
@@ -1689,11 +2195,13 @@ function App() {
         ),
         validator_model: autonomousConfig.validator_model,
         validator_openrouter_provider: autonomousConfig.validator_openrouter_provider,
+        validator_openrouter_reasoning_effort: autonomousConfig.validator_openrouter_reasoning_effort || 'auto',
         validator_lm_studio_fallback: lmStudioEnabled
           ? autonomousConfig.validator_lm_studio_fallback
           : null,
         validator_context_window: autonomousConfig.validator_context_window,
         validator_max_tokens: autonomousConfig.validator_max_tokens,
+        validator_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.validator_supercharge_enabled),
         // High-context submitter config with OpenRouter support
         high_context_provider: normalizeRuntimeProvider(
           autonomousConfig.high_context_provider,
@@ -1701,11 +2209,13 @@ function App() {
         ),
         high_context_model: autonomousConfig.high_context_model,
         high_context_openrouter_provider: autonomousConfig.high_context_openrouter_provider,
+        high_context_openrouter_reasoning_effort: autonomousConfig.high_context_openrouter_reasoning_effort || 'auto',
         high_context_lm_studio_fallback: lmStudioEnabled
           ? autonomousConfig.high_context_lm_studio_fallback
           : null,
         high_context_context_window: autonomousConfig.high_context_context_window,
         high_context_max_tokens: autonomousConfig.high_context_max_tokens,
+        high_context_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_context_supercharge_enabled),
         // High-param submitter config with OpenRouter support
         high_param_provider: normalizeRuntimeProvider(
           autonomousConfig.high_param_provider,
@@ -1713,11 +2223,13 @@ function App() {
         ),
         high_param_model: autonomousConfig.high_param_model,
         high_param_openrouter_provider: autonomousConfig.high_param_openrouter_provider,
+        high_param_openrouter_reasoning_effort: autonomousConfig.high_param_openrouter_reasoning_effort || 'auto',
         high_param_lm_studio_fallback: lmStudioEnabled
           ? autonomousConfig.high_param_lm_studio_fallback
           : null,
         high_param_context_window: autonomousConfig.high_param_context_window,
         high_param_max_tokens: autonomousConfig.high_param_max_tokens,
+        high_param_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
         // Critique submitter config with OpenRouter support
         critique_submitter_provider: normalizeRuntimeProvider(
           autonomousConfig.critique_submitter_provider,
@@ -1725,16 +2237,19 @@ function App() {
         ),
         critique_submitter_model: autonomousConfig.critique_submitter_model,
         critique_submitter_openrouter_provider: autonomousConfig.critique_submitter_openrouter_provider,
+        critique_submitter_openrouter_reasoning_effort: autonomousConfig.critique_submitter_openrouter_reasoning_effort || 'auto',
         critique_submitter_lm_studio_fallback: lmStudioEnabled
           ? autonomousConfig.critique_submitter_lm_studio_fallback
           : null,
         critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
         critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
+        critique_submitter_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.critique_submitter_supercharge_enabled),
         tier3_enabled: autonomousConfig.tier3_enabled ?? false
       });
       setAutonomousRunning(true);
       setAutonomousStopping(false);
       setAutonomousActivity([]);
+      setAnyWorkflowRunning(true);
     } catch (error) {
       alert(`Failed to start autonomous research: ${error.details || error.message}`);
     }
@@ -1785,6 +2300,94 @@ function App() {
     }
   };
 
+  const normalizeLeanOJRoleForCapabilities = (roleConfig = {}) => {
+    const lmStudioEnabled = capabilities.lmStudioEnabled;
+    const provider = normalizeRuntimeProvider(roleConfig.provider, lmStudioEnabled);
+    const shouldResetLmState = !lmStudioEnabled && roleConfig.provider !== 'openrouter';
+    return {
+      ...roleConfig,
+      provider,
+      model_id: shouldResetLmState ? '' : (roleConfig.model_id || ''),
+      openrouter_provider: shouldResetLmState ? null : (roleConfig.openrouter_provider || null),
+      lm_studio_fallback_id: lmStudioEnabled ? (roleConfig.lm_studio_fallback_id || null) : null,
+      supercharge_enabled: developerModeEnabled && Boolean(roleConfig.supercharge_enabled),
+    };
+  };
+
+  const normalizeLeanOJRequestForCapabilities = (request) => ({
+    ...request,
+    topic_generator: normalizeLeanOJRoleForCapabilities(request.topic_generator),
+    topic_validator: normalizeLeanOJRoleForCapabilities(request.topic_validator),
+    brainstorm_submitters: (request.brainstorm_submitters || []).map(normalizeLeanOJRoleForCapabilities),
+    brainstorm_validator: normalizeLeanOJRoleForCapabilities(request.brainstorm_validator),
+    path_decider: normalizeLeanOJRoleForCapabilities(request.path_decider || request.final_solver),
+    final_solver: normalizeLeanOJRoleForCapabilities(request.final_solver),
+  });
+
+  const handleLeanOJStart = async (request) => {
+    try {
+      await leanojAPI.start(normalizeLeanOJRequestForCapabilities(request));
+      setLeanojRunning(true);
+      setLeanojActivity([]);
+      const status = await leanojAPI.getStatus();
+      setLeanojStatus(status);
+      setLeanojProofRefreshToken((prev) => prev + 1);
+      setAnyWorkflowRunning(true);
+    } catch (error) {
+      alert(`Failed to start Proof Solver: ${error.details || error.message}`);
+    }
+  };
+
+  const handleLeanOJStop = async () => {
+    try {
+      await leanojAPI.stop();
+      setLeanojRunning(false);
+      setAnyWorkflowRunning(false);
+      const status = await leanojAPI.getStatus();
+      setLeanojStatus(status);
+    } catch (error) {
+      alert(`Failed to stop Proof Solver: ${error.message}`);
+    }
+  };
+
+  const handleLeanOJClear = async () => {
+    if (!window.confirm('Clear all saved Proof Solver progress?')) {
+      return;
+    }
+    try {
+      const result = await leanojAPI.clear();
+      setLeanojRunning(false);
+      setAnyWorkflowRunning(false);
+      setLeanojActivity([]);
+      setLeanojStatus(result.status || null);
+      setLeanojProofRefreshToken((prev) => prev + 1);
+    } catch (error) {
+      alert(`Failed to clear Proof Solver progress: ${error.message}`);
+    }
+  };
+
+  const handleLeanOJSkipBrainstorm = async () => {
+    try {
+      const result = await leanojAPI.skipBrainstorm();
+      if (result.status) {
+        setLeanojStatus(result.status);
+      }
+    } catch (error) {
+      alert(`Failed to skip Proof Solver brainstorming: ${error.message}`);
+    }
+  };
+
+  const handleLeanOJForceBrainstorm = async () => {
+    try {
+      const result = await leanojAPI.forceBrainstorm();
+      if (result.status) {
+        setLeanojStatus(result.status);
+      }
+    } catch (error) {
+      alert(`Failed to force Proof Solver recursive brainstorming: ${error.message}`);
+    }
+  };
+
   const refreshBrainstorms = async () => {
     try {
       const data = await autonomousAPI.getBrainstorms();
@@ -1796,8 +2399,12 @@ function App() {
 
   const refreshPapers = async () => {
     try {
-      const data = await autonomousAPI.getPapers();
+      const [data, stats] = await Promise.all([
+        autonomousAPI.getPapers(),
+        autonomousAPI.getStats(),
+      ]);
       setPapers(data.papers || []);
+      setAutonomousStats(stats);
     } catch (error) {
       console.error('Failed to refresh papers:', error);
     }
@@ -1816,10 +2423,13 @@ function App() {
   
   // Critique notification handlers
   const handleDismissNotification = (notificationId) => {
+    const notification = critiqueNotifications.find(item => item.id === notificationId);
+    markHighScoreCritiqueSeen(notification?.seenKey);
     setCritiqueNotifications(prev => prev.filter(n => n.id !== notificationId));
   };
   
-  const handleClickNotification = (paperId, paperTitle) => {
+  const handleClickNotification = (paperId, paperTitle, seenKey) => {
+    markHighScoreCritiqueSeen(seenKey);
     setSelectedCritiquePaper({ paper_id: paperId, paper_title: paperTitle });
     setShowCritiqueModal(true);
   };
@@ -1853,6 +2463,13 @@ function App() {
     setManualActiveTab(tabId);
     if (appMode !== 'manual') {
       setAppMode('manual');
+    }
+  };
+
+  const handleLeanOJTabSelect = (tabId) => {
+    setLeanojActiveTab(tabId);
+    if (appMode !== 'leanoj') {
+      setAppMode('leanoj');
     }
   };
 
@@ -2029,6 +2646,19 @@ function App() {
     { id: 'compiler-live-paper', label: 'Live Paper', subtext: 'Part 2 Live Results', subtextClass: 'green', group: 'compiler' },
   ];
 
+  const leanojMainTabs = [
+    { id: 'leanoj-interface', label: 'Proof Solver', group: 'leanoj-main' },
+    { id: 'leanoj-brainstorms', label: 'Brainstorms', group: 'leanoj-main' },
+    { id: 'leanoj-master-proof', label: 'Master Proof Draft', group: 'leanoj-main' },
+    { id: 'leanoj-proofs', label: 'Mathematical Proofs', group: 'leanoj-main' },
+  ];
+
+  const leanojSettingsTabs = [
+    { id: 'leanoj-completed-proof-works', label: 'Your Completed Proof Works Library', group: 'leanoj-settings' },
+    { id: 'leanoj-logs', label: 'API Call Logs', group: 'leanoj-settings' },
+    { id: 'leanoj-settings', label: 'Proof Solver Model Profiles & Settings', group: 'leanoj-settings' },
+  ];
+
   useEffect(() => {
     if (!autonomousConfig.tier3_enabled && autonomousActiveTab === 'auto-final-answer') {
       setAutonomousActiveTab('auto-interface');
@@ -2050,13 +2680,14 @@ function App() {
   useEffect(() => {
     const checkWorkflowStatus = async () => {
       try {
-        const [aggStatus, compStatus, autoStatus] = await Promise.all([
+        const [aggStatus, compStatus, autoStatus, leanojCurrentStatus] = await Promise.all([
           api.get('/api/aggregator/status').catch(() => ({ is_running: false })),
           api.get('/api/compiler/status').catch(() => ({ is_running: false })),
-          autonomousAPI.getStatus().catch(() => ({ is_running: false }))
+          autonomousAPI.getStatus().catch(() => ({ is_running: false })),
+          leanojAPI.getStatus().catch(() => ({ is_running: false }))
         ]);
         
-        const running = aggStatus.is_running || compStatus.is_running || autoStatus.is_running;
+        const running = aggStatus.is_running || compStatus.is_running || autoStatus.is_running || leanojCurrentStatus.is_running;
         setAnyWorkflowRunning(running);
       } catch (error) {
         console.error('Failed to check workflow status:', error);
@@ -2079,6 +2710,12 @@ function App() {
           </h1>
           <p className="banner-company">By Intrafere Research Group</p>
           <p className="banner-variant">A Prototype Artificial Superintelligence - Novelty Seeking Autonomous S.T.E.M. Researcher For Automated Theorem Generation</p>
+          <p
+            className={`banner-mode-subtitle ${appMode === 'manual' || appMode === 'leanoj' ? '' : 'banner-mode-subtitle--hidden'}`}
+            aria-hidden={appMode !== 'manual' && appMode !== 'leanoj'}
+          >
+            {appMode === 'manual' ? 'MANUAL S.T.E.M. WRITER' : 'Proof Solver Mode'}
+          </p>
         </div>
       </div>
 
@@ -2107,6 +2744,9 @@ function App() {
           >
             <option value="autonomous">Autonomous S.T.E.M. ASI</option>
             <option value="manual">Advanced Manual S.T.E.M. ASI</option>
+            {developerModeEnabled && (
+              <option value="leanoj">LeanOJ Proof Solver</option>
+            )}
           </select>
         </div>
         <div className="boost-control-row">
@@ -2178,9 +2818,17 @@ function App() {
             Hosted Web Mode
           </span>
         )}
+        {developerModeEnabled && (
+          <span
+            className="header-status-chip header-status-chip--ready"
+            title="Developer mode settings are enabled. Raw JSON editors are available in settings pages."
+          >
+            Developer Mode
+          </span>
+        )}
       </div>
       
-      <div className={`tabs ${appMode === 'manual' ? 'tabs-manual' : ''} ${shimmerAccentsEnabled ? 'tabs-shimmer-enabled' : ''}`}>
+      <div className={`tabs ${appMode === 'manual' ? 'tabs-manual' : ''} ${appMode === 'leanoj' ? 'tabs-leanoj' : ''} ${shimmerAccentsEnabled ? 'tabs-shimmer-enabled' : ''}`}>
         {appMode === 'autonomous' ? (
           <>
             {mainTabs.map((tab, index) => {
@@ -2226,6 +2874,32 @@ function App() {
                 </React.Fragment>
               );
             })}
+          </>
+        ) : appMode === 'leanoj' ? (
+          <>
+            {leanojMainTabs.map((tab) => (
+              <React.Fragment key={tab.id}>
+                <button
+                  className={`tab ${activeTab === tab.id ? 'active' : ''} tab-${tab.group}`}
+                  onClick={() => handleLeanOJTabSelect(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              </React.Fragment>
+            ))}
+
+            <div className="tab-group-spacer-large"></div>
+
+            {leanojSettingsTabs.map((tab) => (
+              <React.Fragment key={tab.id}>
+                <button
+                  className={`tab ${activeTab === tab.id ? 'active' : ''} tab-${tab.group}`}
+                  onClick={() => handleLeanOJTabSelect(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              </React.Fragment>
+            ))}
           </>
         ) : (
           <>
@@ -2309,10 +2983,11 @@ function App() {
             <PaperLibrary
               papers={papers}
               onRefresh={refreshPapers}
-              archivedCount={autonomousStats?.paper_counts?.archived || 0}
+              archivedCount={autonomousStats?.paper_counts?.pruned || autonomousStats?.paper_counts?.archived || 0}
               api={{ 
                 getAutonomousPaper: autonomousAPI.getAutonomousPaper,
-                deletePaper: autonomousAPI.deletePaper
+                deletePaper: autonomousAPI.deletePaper,
+                deleteAllPrunedPapers: autonomousAPI.deleteAllPrunedPapers
               }}
             />
           )}
@@ -2382,6 +3057,49 @@ function App() {
               events={autonomousActivity}
             />
           )}
+
+          {activeTab === 'leanoj-interface' && (
+            <LeanOJInterface
+              isRunning={leanojRunning}
+              anyWorkflowRunning={anyWorkflowRunning}
+              status={leanojStatus}
+              activity={leanojActivity}
+              settings={leanojSettings}
+              onSettingsChange={setLeanojSettings}
+              onStart={handleLeanOJStart}
+              onStop={handleLeanOJStop}
+              onClear={handleLeanOJClear}
+              onSkipBrainstorm={handleLeanOJSkipBrainstorm}
+              onForceBrainstorm={handleLeanOJForceBrainstorm}
+            />
+          )}
+          {activeTab === 'leanoj-brainstorms' && (
+            <LeanOJBrainstorms status={leanojStatus} />
+          )}
+          {activeTab === 'leanoj-proofs' && (
+            <LeanOJMathematicalProofs
+              api={leanojAPI}
+              status={leanojStatus}
+              refreshToken={leanojProofRefreshToken}
+            />
+          )}
+          {activeTab === 'leanoj-master-proof' && (
+            <LeanOJMasterProof
+              api={leanojAPI}
+              status={leanojStatus}
+              refreshToken={leanojProofRefreshToken}
+            />
+          )}
+          {activeTab === 'leanoj-completed-proof-works' && (
+            <LeanOJProofLibrary
+              api={leanojAPI}
+              refreshToken={leanojProofRefreshToken}
+            />
+          )}
+          {activeTab === 'leanoj-logs' && (
+            <LeanOJLogs />
+          )}
+          {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
           
           {activeTab === 'aggregator-interface' && (
             <AggregatorInterface
@@ -2389,15 +3107,11 @@ function App() {
               setConfig={setConfig}
               capabilities={capabilities}
               anyWorkflowRunning={anyWorkflowRunning}
+              onWorkflowRunningChange={setAnyWorkflowRunning}
+              developerModeEnabled={developerModeEnabled}
             />
           )}
-          {activeTab === 'aggregator-settings' && (
-            <AggregatorSettings
-              config={config}
-              setConfig={setConfig}
-              capabilities={capabilities}
-            />
-          )}
+          {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
           {activeTab === 'aggregator-logs' && <AggregatorLogs />}
           {activeTab === 'aggregator-results' && <LiveResults />}
           
@@ -2406,11 +3120,11 @@ function App() {
               activeTab={activeTab}
               capabilities={capabilities}
               anyWorkflowRunning={anyWorkflowRunning}
+              onWorkflowRunningChange={setAnyWorkflowRunning}
+              developerModeEnabled={developerModeEnabled}
             />
           )}
-          {activeTab === 'compiler-settings' && (
-            <CompilerSettings capabilities={capabilities} />
-          )}
+          {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
           {activeTab === 'compiler-logs' && <CompilerLogs />}
           {activeTab === 'compiler-live-paper' && <LivePaper />}
         </div>
@@ -2424,6 +3138,33 @@ function App() {
           models={models}
           capabilities={capabilities}
           isRunning={autonomousRunning}
+          developerModeEnabled={developerModeEnabled}
+        />
+      )}
+
+      {activeTab === 'leanoj-settings' && (
+        <LeanOJSettings
+          settings={leanojSettings}
+          onSettingsChange={setLeanojSettings}
+          capabilities={capabilities}
+          isRunning={leanojRunning}
+          developerModeEnabled={developerModeEnabled}
+        />
+      )}
+
+      {activeTab === 'aggregator-settings' && (
+        <AggregatorSettings
+          config={config}
+          setConfig={setConfig}
+          capabilities={capabilities}
+          developerModeEnabled={developerModeEnabled}
+        />
+      )}
+
+      {activeTab === 'compiler-settings' && (
+        <CompilerSettings
+          capabilities={capabilities}
+          developerModeEnabled={developerModeEnabled}
         />
       )}
       
@@ -2509,6 +3250,7 @@ function App() {
         isOpen={showBoostModal}
         onClose={() => setShowBoostModal(false)}
         capabilities={capabilities}
+        developerModeEnabled={developerModeEnabled}
       />
       
       {/* OpenRouter API Key Modal */}
@@ -2566,6 +3308,7 @@ function App() {
           paperTitle={selectedCritiquePaper.paper_title}
           onGenerateCritique={handleGenerateCritique}
           onGetCritiques={handleGetCritiques}
+          developerModeEnabled={developerModeEnabled}
         />
       )}
       
@@ -2585,7 +3328,6 @@ function App() {
               rel="noopener noreferrer"
               className="footer-link footer-link-github"
             >
-              <span className="footer-icon">ℹ️</span>
               How MOTO's Superintelligence Works
             </a>
             <a
@@ -2594,7 +3336,7 @@ function App() {
               rel="noopener noreferrer"
               className="footer-link footer-link-purchase"
             >
-              Purchase a Custom ASI Program
+              Purchase Custom Industrial-Grade ASI Programs
             </a>
             <a
               href="https://github.com/"
@@ -2602,8 +3344,7 @@ function App() {
               rel="noopener noreferrer"
               className="footer-link footer-link-github"
             >
-              <span className="footer-icon">⭐</span>
-              Visit MOTO's GitHub (Star Us for More ASI Programs)
+              Intrafere GitHub
             </a>
           </div>
         </div>

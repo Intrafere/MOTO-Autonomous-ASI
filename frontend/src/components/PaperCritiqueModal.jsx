@@ -59,7 +59,7 @@ function getRatingBgColor(rating) {
 const AUTONOMOUS_SETTINGS_STORAGE_KEY = 'autonomous_research_settings';
 const COMPILER_SETTINGS_STORAGE_KEY = 'compiler_settings';
 
-function readStoredValidatorConfig(paperType) {
+function readStoredValidatorConfig(paperType, developerModeEnabled = false) {
   try {
     if (paperType === 'compiler_paper') {
       const raw = localStorage.getItem(COMPILER_SETTINGS_STORAGE_KEY);
@@ -79,6 +79,8 @@ function readStoredValidatorConfig(paperType) {
         validator_max_tokens: config.validatorMaxOutput,
         validator_provider: config.validatorProvider,
         validator_openrouter_provider: config.validatorOpenrouterProvider,
+        validator_openrouter_reasoning_effort: config.validatorOpenrouterReasoningEffort || 'auto',
+        validator_supercharge_enabled: developerModeEnabled && Boolean(config.validatorSuperchargeEnabled),
       };
     }
 
@@ -102,6 +104,8 @@ function readStoredValidatorConfig(paperType) {
       validator_max_tokens: localConfig.validator_max_tokens,
       validator_provider: localConfig.validator_provider,
       validator_openrouter_provider: localConfig.validator_openrouter_provider,
+      validator_openrouter_reasoning_effort: localConfig.validator_openrouter_reasoning_effort || 'auto',
+      validator_supercharge_enabled: developerModeEnabled && Boolean(localConfig.validator_supercharge_enabled),
     };
   } catch (error) {
     console.warn('Could not read validator config from localStorage:', error);
@@ -129,6 +133,7 @@ export default function PaperCritiqueModal({
   paperTitle,
   onGenerateCritique,
   onGetCritiques,
+  developerModeEnabled = false,
 }) {
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -177,7 +182,7 @@ export default function PaperCritiqueModal({
         : 'autonomous_critique_custom_prompt';
       const customPrompt = localStorage.getItem(storageKey);
 
-      const validatorConfig = readStoredValidatorConfig(paperType);
+      const validatorConfig = readStoredValidatorConfig(paperType, developerModeEnabled);
       const result = await onGenerateCritique(customPrompt, validatorConfig);
       
       // Reload critiques to get the updated list

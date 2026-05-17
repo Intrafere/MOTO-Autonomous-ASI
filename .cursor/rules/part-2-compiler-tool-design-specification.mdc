@@ -31,9 +31,11 @@ Before every `_pre_validate_exact_string_match()`, system calls `paper_memory.en
 
 **Provider Selection**: Each compiler role (validator, high-context, high-param, critique submitter) can independently use LM Studio or OpenRouter with optional host provider and LM Studio fallback (default mode). In generic mode, all roles use OpenRouter only; LM Studio options are hidden in the frontend.
 
-**Export Behavior**: Raw text export available in both modes. PDF export (`POST /api/download/pdf`) is desktop-only — generic mode returns `501` (Playwright/Chromium not installed in hosted image).
+**Supercharge**: Each compiler role has an optional Supercharge checkbox. Checked roles run 4 full answer attempts plus a 5th same-model synthesis answer through `api_client_manager.generate_completion()`. If Boost applies, every internal Supercharge call uses the Boost route/model/provider settings first. Tool-call requests bypass Supercharge; this is especially important for the Wolfram-enabled construction loop.
 
-**Aggregator RAG refresh**: Every 10 accepted aggregator submissions (not immediate like aggregator).
+**Export Behavior**: Raw text export available in both modes. PDF export (`POST /api/download/pdf`) is desktop-only — generic mode returns `501` (Playwright/Chromium not installed in hosted image). Server-side PDF rendering must treat submitted HTML as untrusted: sanitize/allowlist content and block external network requests from Playwright.
+
+**Aggregator RAG refresh**: Manual Part 2 refreshes every 10 accepted aggregator submissions (not immediate like aggregator). Autonomous/Tier 3 compiler runs do not start the manual aggregator monitor because the parent autonomous tier owns the active brainstorm/reference context.
 
 **Enhanced Rejection Feedback Format** (`compiler_rejection_log.py`):
 - Header: "🚫 REJECTED BECAUSE: [Failure Reason]"
@@ -97,20 +99,19 @@ Body content is ALWAYS inserted BEFORE CONCLUSION_PLACEHOLDER. `_apply_edit()` a
 - 4× HC construction → validator
 - 1× HC outline update → validator *(skipped if body complete)*
 - 2× HC review → validator
-- 1× HP rigor → validator *(skipped if body complete)*
+- Then, if body is still active, run the HP Lean-4 theorem-search rigor loop until the first decline. Each successful rigor cycle lands one verified theorem inline or in the Theorems Appendix, then the rigor loop may continue; this is no longer exactly one HP pass.
 
 **Rigor Mode (Lean 4 verified theorems, 4-stage)**:
 The rigor loop no longer rewrites prose. Each rigor cycle:
-- Stage 1 (HP, unvalidated): theorem discovery - using the full writing context, decide if a theorem worth formalizing exists that is not already verified; return `needs_theorem_work=false` to decline and end the rigor loop.
+- Stage 1 (HP, unvalidated): theorem discovery - using the full writing context, decide if a user-prompt-relevant theorem worth formalizing exists that is not already verified; return `needs_theorem_work=false` to decline and end the rigor loop. Discovery is explicitly allowed to construct extension theorems from partial paper work, the outline, supporting context, or the user prompt when helpful to paper construction and/or the user's goal, not only exact claims already written in the current paper.
+- Stage 1 output includes `theorem_origin` (`existing_paper_claim`, `extension_from_partial_work`, `extension_from_user_prompt`) and `placement_preference` (`inline`, `appendix_only`). Extension-derived theorems MUST be forced to `appendix_only`; existing-paper-claim theorems may be inline or appendix-only.
 - Stage 2: `ProofFormalizationAgent.prove_candidate(max_attempts=5)` - up to 5 Lean 4 attempts with error-feedback chaining. On 5 failures: record the candidate via `proof_database.record_failed_candidate` so future cycles see it as an open lemma target; end the rigor cycle as a decline.
 - Stage 3: novelty classification via the shared `assess_proof_novelty` helper; `proof_database.add_proof` persists the verified proof. Novel proofs automatically enter the highest-priority direct-injection block (`proof_database.inject_into_prompt`) on the next submitter instantiation. Non-novel proofs remain available through `/api/proofs` for future user-driven reference selection.
-- Stage 4: placement - HP model proposes an inline edit that introduces the theorem with an explicit "verified in Lean 4" marker and an appendix cross-reference. Validator uses the new `rigor_lean_placement` mode which forces `rigor_check=True` (Lean 4 is the source of mathematical truth) and judges placement/narrative only. Up to 2 placement attempts (attempt 2 gets validator rejection feedback).
-- Appendix fallback: if both placement attempts fail, the verified theorem is appended to the **Theorems Appendix** block (`THEOREMS_APPENDIX_START` / `THEOREMS_APPENDIX_END` bracket markers in `paper_memory.py`). Still counts as a `rigor_acceptance` because the math is preserved.
+- Stage 4: placement - if `placement_preference="inline"`, HP model proposes an inline edit that introduces the theorem with an explicit "verified in Lean 4" marker and an appendix cross-reference. Validator uses `rigor_lean_placement` mode which forces `rigor_check=True` (Lean 4 is the source of mathematical truth) and judges placement/narrative only. Up to 2 placement attempts (attempt 2 gets validator rejection feedback).
+- Appendix routing: if `placement_preference="appendix_only"`, skip inline placement and append directly to the **Theorems Appendix** with `placement_outcome="appendix_requested"`. If inline placement is attempted but both placement attempts fail, append with `placement_outcome="appendix_fallback"`. Both outcomes count as `rigor_acceptance` because the math is preserved.
 - Loop 2 ends on first **decline** (no theorem found OR 5 Lean attempts failed OR Lean 4 disabled). Every verified theorem lands somewhere so there is no "rejection" outcome at the loop level.
 - Config gate: `system_config.lean4_enabled=false` → every rigor cycle declines immediately.
 
-**Decline Mechanisms:**
-- `outline_update`: `needs_update: boolean`
 **Decline Mechanisms:**
 - `outline_update`: `needs_update: boolean`
 - `construction`: `needs_construction: boolean`
@@ -133,24 +134,22 @@ Detection via `_is_body_complete()` in `compiler_coordinator.py`.
 
 ## Critique Phase (Post-Body, Pre-Conclusion)
 
-**"5 total attempts"** = accepted + rejected + declined (not just accepted).
-
-**Max 1 completed rewrite**. Rewrite "completed" only after first successful body acceptance post-rewrite. After 1 completed rewrite, critique phase is skipped entirely.
+**"3 total attempts"** = accepted + rejected + declined (not just accepted).
 
 **Workflow:**
-1. If `rewrite_count >= 1` completed rewrites → skip critique, proceed to conclusion
-2. Critique aggregation: target 5 total attempts
-3. Pre-critique snapshot of paper body
-4. If 5 attempts with ≥1 accepted → rewrite decision; if 0 accepted → skip rewrite
-5. Decisions: **CONTINUE** (minor/incorrect critiques) | **PARTIAL_REVISION** (iterative one-edit-at-a-time loop until `more_edits_needed=false`) | **TOTAL_REWRITE** (catastrophic flaws only)
+1. Critique aggregation: target 3 total attempts
+2. Submitter may critique or decline; validator still validates every critique/decline
+3. If accepted critiques exist, append them to the paper as `AI Self-Review and Limitations`
+4. If 0 critiques are accepted, proceed without adding the section
+5. Transition to conclusion; critique never rewrites paper content
 
-Context for rewrites: pre-critique paper + accepted critiques only (rejected excluded) + accumulated history from prior failed versions.
+The self-review section is inserted after the compiler Theorems Appendix when present, otherwise after the paper conclusion and before the paper anchor. Later autonomous proof appends must stay before this self-review section.
 
-**Decline**: Submitter can assess "no critique needed" if body is academically acceptable (no errors, complete, meets rigor). If 0 accepted critiques at end of 5 attempts → skip rewrite.
+**Decline**: Submitter can assess "no critique needed" if body is academically acceptable (no errors, complete, meets rigor). If no critiques are accepted after 3 attempts, no self-review section is appended.
 
 **Skip Critique (User Override)**: `POST /api/compiler/skip-critique` — available only during active critique phase (`in_critique_phase=True`). Immediately ends critique, transitions to conclusion, broadcasts `critique_phase_skipped` with `reason: "user_override"`. Irreversible.
 
-**WebSocket Events:** `critique_phase_started`, `critique_progress`, `critique_accepted`, `critique_rejected`, `critique_decline_accepted`, `critique_decline_rejected`, `critique_removed`, `critique_phase_ended`, `critique_phase_skipped`, `rewrite_decision_rejected`, `body_rewrite_started`, `phase_transition`, `phase_completion_signal`
+**WebSocket Events:** `critique_phase_started`, `critique_progress`, `critique_accepted`, `critique_rejected`, `critique_decline_accepted`, `critique_decline_rejected`, `critique_removed`, `self_review_appended`, `critique_phase_ended`, `critique_phase_skipped`, `phase_transition`, `phase_completion_signal`
 
 ---
 
@@ -207,11 +206,11 @@ Prevents models' fake placeholder text (e.g., "XI. Conclusion\n*placeholder*") f
 
 Per-role context windows (all user-configurable, default 131072):
 - Validator, High-Context Submitter, High-Parameter Submitter: 131072 tokens each
-- **Settings flow**: All compiler modules read from `system_config.compiler_*` at runtime. The caller that creates `CompilerCoordinator` MUST write settings to `system_config` before init (manual mode: `/api/compiler/start`; autonomous mode: `autonomous_coordinator.py` before `CompilerCoordinator()` creation).
+- **Settings flow**: All compiler modules read from `system_config.compiler_*` at runtime. The caller that creates `CompilerCoordinator` MUST write settings to `system_config` before init (manual mode: `/api/compiler/start`; autonomous mode: `autonomous_coordinator.py` before `CompilerCoordinator()` creation). Per-role Supercharge flags must be passed through `ModelConfig`, not `system_config`.
 - **OpenRouter auto-fill**: Selecting an OpenRouter model auto-fills from endpoint metadata only. Context window uses the smallest relevant host `context_length`; max output tokens use `min(20% of that host context, smallest relevant host max_completion_tokens)`. If `max_prompt_tokens` is available, shrink usable context to respect it. If endpoint caps are incomplete, preserve current values (no guessing).
 - Rigor mode dynamically adjusts RAG budget if outline + system prompts exceed available context
 - Construction mode dynamically adjusts RAG budget when brainstorm content is present: `rag_budget = max(5000, max_allowed - outline_tokens - paper_tokens - brainstorm_tokens - 5000_overhead)`. Brainstorm always direct-injected at full fidelity; RAG evidence scales to fit remaining budget.
-- **Wolfram Alpha as a construction tool**: During `HighContextSubmitter.submit_construction` (body / conclusion / introduction / abstract), when `system_config.wolfram_alpha_enabled=true`, the writer may invoke the `wolfram_alpha_query` OpenAI-compatible tool up to **20 times per submission** to verify factual / computational claims before writing them. On budget exhaustion, the loop forces finalization with tools disabled. Tool audit trail lives in `CompilerSubmission.metadata["wolfram_calls"]`. The validator is not re-invoking Wolfram; it just sees the audit trail. Wolfram tool is NOT available in `outline_create`, `outline_update`, `review`, or the rigor loop.
+- **Wolfram Alpha as a construction tool**: During `HighContextSubmitter.submit_construction` (body / conclusion / introduction / abstract), when `system_config.wolfram_alpha_enabled=true`, the writer may invoke the `wolfram_alpha_query` OpenAI-compatible tool up to **20 times per submission** to verify factual / computational claims before writing them. On budget exhaustion, the loop forces finalization with tools disabled. Tool replies remain model-visible, but logs/WebSocket events expose only redacted metadata and lengths; paper credits store counts only. Wolfram tool is NOT available in `outline_create`, `outline_update`, `review`, or the rigor loop.
 
 **Context rules:** User prompt ALWAYS direct injected. Direct injection first; RAG only when doesn't fit. ~85% RAG retrieval, ~15% direct injections. Halt with error if user prompt exceeds context_window - minimum_RAG_allocation.
 

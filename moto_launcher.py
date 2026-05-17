@@ -1,6 +1,6 @@
 """
 MOTO System Launcher (Python)
-This is an internal script. Use "Click To Launch MOTO.bat" on Windows or "Launch MOTO.sh" on Ubuntu 24.04.
+This is an internal script. Use "Click To Launch MOTO.bat" on Windows or "linux-ubuntu-launcher.sh" on Ubuntu 24.04.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 import platform
 from random import randint
 import re
+import secrets
 import socket
 import shlex
 from shutil import rmtree, which
@@ -230,7 +231,7 @@ def resolve_instance_runtime() -> InstanceRuntime:
     explicit_secret = sanitize_instance_id(os.environ.get("MOTO_SECRET_NAMESPACE"))
     explicit_storage = sanitize_instance_id(os.environ.get("MOTO_FRONTEND_STORAGE_PREFIX"))
 
-    backend_host = os.environ.get("MOTO_BACKEND_HOST") or os.environ.get("HOST") or "0.0.0.0"
+    backend_host = os.environ.get("MOTO_BACKEND_HOST") or os.environ.get("HOST") or "127.0.0.1"
 
     explicit_backend_port = None
     for variable in ("MOTO_BACKEND_PORT", "PORT"):
@@ -648,7 +649,7 @@ def check_python_installation() -> None:
         cprint("============================================================", RED)
         print()
         if is_linux():
-            cprint("Install Python 3 and python3-venv, then launch via `Launch MOTO.sh`.", YELLOW)
+            cprint("Install Python 3 and python3-venv, then launch via `bash linux-ubuntu-launcher.sh`.", YELLOW)
             cprint("Example: sudo apt install python3 python3-venv", YELLOW)
         else:
             cprint("Please install Python 3.8+ from:", YELLOW)
@@ -664,7 +665,7 @@ def check_python_installation() -> None:
         if using_repo_local_venv():
             cprint("Using repo-local .venv for Ubuntu-safe package installs.", GREEN)
         else:
-            cprint("Tip: `Launch MOTO.sh` is the recommended Ubuntu 24.04 entrypoint because it keeps Python packages inside the repo-local .venv.", YELLOW)
+            cprint("Tip: `linux-ubuntu-launcher.sh` is the recommended Ubuntu 24.04 entrypoint because it keeps Python packages inside the repo-local .venv.", YELLOW)
     print()
 
 
@@ -771,6 +772,9 @@ def prepare_runtime_and_environment() -> tuple[InstanceRuntime, str, str, dict[s
     env["VITE_MOTO_BACKEND_URL"] = backend_url
     env["VITE_MOTO_INSTANCE_ID"] = runtime.instance_id
     env["VITE_MOTO_DATA_ROOT_DISPLAY"] = runtime.data_root
+    desktop_api_token = os.environ.get("MOTO_DESKTOP_API_TOKEN") or secrets.token_urlsafe(32)
+    env["MOTO_DESKTOP_API_TOKEN"] = desktop_api_token
+    env["VITE_MOTO_DESKTOP_API_TOKEN"] = desktop_api_token
 
     if runtime.storage_prefix:
         env["MOTO_FRONTEND_STORAGE_PREFIX"] = runtime.storage_prefix
@@ -808,7 +812,7 @@ def install_python_dependencies() -> None:
         cprint("- Internet connection is working", YELLOW)
         cprint("- You have permission to install packages", YELLOW)
         if is_linux():
-            cprint("- On Ubuntu 24.04, prefer launching via `Launch MOTO.sh` so installs stay inside the repo-local .venv", YELLOW)
+            cprint("- On Ubuntu 24.04, prefer launching via `bash linux-ubuntu-launcher.sh` so installs stay inside the repo-local .venv", YELLOW)
             cprint("- If venv creation fails, install `python3-venv` first", YELLOW)
         exit_with_pause(1)
     cprint("Python dependencies up to date", GREEN)

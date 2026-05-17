@@ -40,5 +40,5 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
     exit 1
 fi
 
-export MOTO_LAUNCHER_ENTRYPOINT="$SCRIPT_DIR/Launch MOTO.sh"
+export MOTO_LAUNCHER_ENTRYPOINT="$SCRIPT_DIR/linux-ubuntu-launcher.sh"
 exec "$PYTHON_BIN" "$SCRIPT_DIR/moto_launcher.py" "$@"

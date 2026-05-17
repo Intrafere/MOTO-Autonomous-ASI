@@ -14,8 +14,6 @@ function LivePaper() {
   const [version, setVersion] = useState(0);
   const [autoScroll, setAutoScroll] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
-  const [previousVersions, setPreviousVersions] = useState([]);
-  const [showVersions, setShowVersions] = useState(false);
   const [showLatex, setShowLatex] = useState(true);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const paperContainerRef = useRef(null);
@@ -37,22 +35,20 @@ function LivePaper() {
   useEffect(() => {
     loadPaper();
     loadStatus();
-    loadPreviousVersions();
     
     const interval = setInterval(() => {
       loadPaper();
       loadStatus();
-      loadPreviousVersions();
     }, 10000);
 
     websocket.on('paper_updated', debouncedLoadPaper);
-    websocket.on('body_rewrite_started', handleBodyRewrite);
+    websocket.on('self_review_appended', debouncedLoadPaper);
 
     return () => {
       clearInterval(interval);
       if (wsDebounceRef.current) clearTimeout(wsDebounceRef.current);
       websocket.off('paper_updated', debouncedLoadPaper);
-      websocket.off('body_rewrite_started', handleBodyRewrite);
+      websocket.off('self_review_appended', debouncedLoadPaper);
     };
   }, []);
 
@@ -90,21 +86,6 @@ function LivePaper() {
       setIsRunning(response.data.is_running);
     } catch (error) {
       console.error('Failed to load status:', error);
-    }
-  };
-
-  const handleBodyRewrite = (event) => {
-    // Reload previous versions when rewrite starts
-    loadPreviousVersions();
-    loadPaper();
-  };
-
-  const loadPreviousVersions = async () => {
-    try {
-      const response = await compilerAPI.getPreviousVersions();
-      setPreviousVersions(response.data.previous_versions || []);
-    } catch (error) {
-      console.error('Failed to load previous versions:', error);
     }
   };
 
@@ -329,62 +310,6 @@ function LivePaper() {
           </div>
         )}
       </div>
-
-      {previousVersions.length > 0 && (
-        <div className="previous-versions-section">
-          <button 
-            className="btn btn-secondary mt-1"
-            onClick={() => setShowVersions(!showVersions)}
-            style={{ marginBottom: '0.5rem' }}
-          >
-            📜 Previous Versions ({previousVersions.length})
-          </button>
-          
-          {showVersions && (
-            <div className="versions-list">
-              {previousVersions.map(v => (
-                <div key={v.version} className="version-card" style={{
-                  border: '1px solid #444',
-                  borderRadius: '4px',
-                  padding: '1rem',
-                  marginBottom: '1rem',
-                  backgroundColor: '#2a2a2a'
-                }}>
-                  <h3 style={{ color: '#1eff1c', marginBottom: '0.5rem' }}>
-                    Version {v.version}: {v.title}
-                  </h3>
-                  
-                  <div className="version-body" style={{ marginBottom: '1rem' }}>
-                    <h4 style={{ color: '#4CAF50', marginBottom: '0.5rem' }}>Body Section:</h4>
-                    <pre style={{
-                      backgroundColor: '#1a1a1a',
-                      padding: '1rem',
-                      borderRadius: '4px',
-                      maxHeight: '400px',
-                      overflow: 'auto',
-                      fontSize: '0.85rem',
-                      whiteSpace: 'pre-wrap'
-                    }}>{v.body}</pre>
-                  </div>
-                  
-                  <div className="version-critique">
-                    <h4 style={{ color: '#ff6b6b', marginBottom: '0.5rem' }}>Critique Feedback (triggered rewrite):</h4>
-                    <pre style={{
-                      backgroundColor: '#1a1a1a',
-                      padding: '1rem',
-                      borderRadius: '4px',
-                      maxHeight: '300px',
-                      overflow: 'auto',
-                      fontSize: '0.85rem',
-                      whiteSpace: 'pre-wrap'
-                    }}>{v.critique_feedback}</pre>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       <div className="paper-footer">
         <p className="info-text">

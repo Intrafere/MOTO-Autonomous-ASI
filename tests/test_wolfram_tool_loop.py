@@ -65,7 +65,7 @@ class WolframToolLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(content, '{"needs_construction": false}')
         self.assertEqual(fake_client.queries, ["2+2"])
-        self.assertEqual(wolfram_calls[0]["query"], "2+2")
+        self.assertEqual(wolfram_calls[0]["query"], "[redacted]")
         self.assertIsNotNone(calls[0]["tools"])
         self.assertEqual(calls[1]["messages"][-1]["role"], "tool")
         self.assertEqual(broadcasts[0][0], "compiler_wolfram_call")

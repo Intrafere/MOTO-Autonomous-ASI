@@ -1,18 +1,29 @@
 import React, { useState, useEffect } from 'react';
 import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+} from '../../utils/openRouterSelection';
 import TextFileUploader from '../TextFileUploader';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
+import '../autonomous/AutonomousResearch.css';
 
-function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false }) {
+function CompilerInterface({
+  activeTab,
+  capabilities,
+  anyWorkflowRunning = false,
+  onWorkflowRunningChange = null,
+  developerModeEnabled = false,
+}) {
   const [compilerPrompt, setCompilerPrompt] = useState('');
   const [status, setStatus] = useState({ is_running: false });
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState(null);
-  const [validatorContextSize, setValidatorContextSize] = useState(131072);
-  const [highContextContextSize, setHighContextContextSize] = useState(131072);
-  const [highParamContextSize, setHighParamContextSize] = useState(131072);
-  const [critiqueSubmitterContextSize, setCritiqueSubmitterContextSize] = useState(131072);
+  const [validatorContextSize, setValidatorContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
+  const [highContextContextSize, setHighContextContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
+  const [highParamContextSize, setHighParamContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
+  const [critiqueSubmitterContextSize, setCritiqueSubmitterContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
   const [critiquePhaseActive, setCritiquePhaseActive] = useState(false);
   const [critiqueAcceptances, setCritiqueAcceptances] = useState(0);
   const [paperVersion, setPaperVersion] = useState(1);
@@ -75,16 +86,10 @@ function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false
       // Skip worked! Keep skipQueued=true to show checkmark
     };
     
-    const handleBodyRewriteStarted = (data) => {
-      setPaperVersion(data.version || 1);
-      setSkipQueued(false);  // Reset skip state for new paper version
-    };
-    
     websocket.on('critique_phase_started', handleCritiquePhaseStarted);
     websocket.on('critique_progress', handleCritiqueProgress);
     websocket.on('critique_phase_ended', handleCritiquePhaseEnded);
     websocket.on('critique_phase_skipped', handleCritiquePhaseSkipped);
-    websocket.on('body_rewrite_started', handleBodyRewriteStarted);
     
     return () => {
       clearInterval(interval);
@@ -92,7 +97,6 @@ function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false
       websocket.off('critique_progress', handleCritiqueProgress);
       websocket.off('critique_phase_ended', handleCritiquePhaseEnded);
       websocket.off('critique_phase_skipped', handleCritiquePhaseSkipped);
-      websocket.off('body_rewrite_started', handleBodyRewriteStarted);
     };
   }, []);
 
@@ -127,6 +131,9 @@ function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false
     try {
       const response = await compilerAPI.getStatus();
       setStatus(response.data);
+      if (response.data.is_running) {
+        onWorkflowRunningChange?.(true);
+      }
       // Update critique phase state from status
       if (response.data.in_critique_phase !== undefined) {
         setCritiquePhaseActive(response.data.in_critique_phase);
@@ -181,35 +188,44 @@ function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false
         validator_provider: lmStudioEnabled ? (settings.validatorProvider || 'lm_studio') : 'openrouter',
         validator_model: settings.validatorModel,
         validator_openrouter_provider: settings.validatorOpenrouterProvider || null,
+        validator_openrouter_reasoning_effort: settings.validatorOpenrouterReasoningEffort || 'auto',
         validator_lm_studio_fallback: lmStudioEnabled ? (settings.validatorLmStudioFallback || null) : null,
         validator_context_size: settings.validatorContextSize || validatorContextSize,
-        validator_max_output_tokens: settings.validatorMaxOutput || 25000,
+        validator_max_output_tokens: settings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        validator_supercharge_enabled: developerModeEnabled && Boolean(settings.validatorSuperchargeEnabled),
         // High-context submitter config with OpenRouter support
         high_context_provider: lmStudioEnabled ? (settings.highContextProvider || 'lm_studio') : 'openrouter',
         high_context_model: settings.highContextModel,
         high_context_openrouter_provider: settings.highContextOpenrouterProvider || null,
+        high_context_openrouter_reasoning_effort: settings.highContextOpenrouterReasoningEffort || 'auto',
         high_context_lm_studio_fallback: lmStudioEnabled ? (settings.highContextLmStudioFallback || null) : null,
         high_context_context_size: settings.highContextContextSize || highContextContextSize,
-        high_context_max_output_tokens: settings.highContextMaxOutput || 25000,
+        high_context_max_output_tokens: settings.highContextMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        high_context_supercharge_enabled: developerModeEnabled && Boolean(settings.highContextSuperchargeEnabled),
         // High-param submitter config with OpenRouter support
         high_param_provider: lmStudioEnabled ? (settings.highParamProvider || 'lm_studio') : 'openrouter',
         high_param_model: settings.highParamModel,
         high_param_openrouter_provider: settings.highParamOpenrouterProvider || null,
+        high_param_openrouter_reasoning_effort: settings.highParamOpenrouterReasoningEffort || 'auto',
         high_param_lm_studio_fallback: lmStudioEnabled ? (settings.highParamLmStudioFallback || null) : null,
         high_param_context_size: settings.highParamContextSize || highParamContextSize,
-        high_param_max_output_tokens: settings.highParamMaxOutput || 25000,
+        high_param_max_output_tokens: settings.highParamMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        high_param_supercharge_enabled: developerModeEnabled && Boolean(settings.highParamSuperchargeEnabled),
         // Critique submitter config with OpenRouter support
         critique_submitter_provider: lmStudioEnabled
           ? (settings.critiqueSubmitterProvider || 'lm_studio')
           : 'openrouter',
         critique_submitter_model: settings.critiqueSubmitterModel,
         critique_submitter_openrouter_provider: settings.critiqueSubmitterOpenrouterProvider || null,
+        critique_submitter_openrouter_reasoning_effort: settings.critiqueSubmitterOpenrouterReasoningEffort || 'auto',
         critique_submitter_lm_studio_fallback: lmStudioEnabled
           ? (settings.critiqueSubmitterLmStudioFallback || null)
           : null,
         critique_submitter_context_window: settings.critiqueSubmitterContextSize || critiqueSubmitterContextSize,
-        critique_submitter_max_tokens: settings.critiqueSubmitterMaxOutput || 25000
+        critique_submitter_max_tokens: settings.critiqueSubmitterMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        critique_submitter_supercharge_enabled: developerModeEnabled && Boolean(settings.critiqueSubmitterSuperchargeEnabled)
       });
+      onWorkflowRunningChange?.(true);
       
       await loadStatus();
     } catch (err) {
@@ -240,6 +256,7 @@ function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false
     try {
       await compilerAPI.stop();
       setSkipQueued(false);  // Reset skip state when compiler stops
+      onWorkflowRunningChange?.(false);
       await loadStatus();
     } catch (error) {
       console.error('Failed to stop compiler:', error);
@@ -274,16 +291,50 @@ function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false
   };
 
   return (
-    <div className="compiler-interface">
-      <h2>Compiler Interface</h2>
-      
-      <div className="status-indicator">
-        <span className={`status-badge ${status.is_running ? 'running' : 'stopped'}`}>
-          {status.is_running ? '● Running' : '○ Stopped'}
-        </span>
-        {status.current_mode && status.current_mode !== 'idle' && (
-          <span className="mode-badge">Mode: {status.current_mode}</span>
-        )}
+    <div className={`autonomous-interface compiler-interface workflow-main-interface ${status.is_running ? 'workflow-main-interface--running' : ''}`}>
+      <div className="autonomous-header">
+        <div>
+          <h2>Single Paper Writer</h2>
+          <p className="settings-hint">
+            Compile the accepted aggregator database into one live mathematical paper.
+          </p>
+        </div>
+        <div className="autonomous-controls">
+          {!status.is_running ? (
+            <button
+              onClick={handleStart}
+              className="btn-start"
+              disabled={isStarting || (anyWorkflowRunning && !status.is_running)}
+            >
+              {isStarting ? 'Starting...' : 'Start Writer'}
+            </button>
+          ) : (
+            <>
+              <span className="runtime-indicator" role="status" aria-live="polite" title="Single paper writer is running">
+                <span className="runtime-indicator-dot" aria-hidden="true"></span>
+                <span className="runtime-indicator-label">Running</span>
+              </span>
+              <button
+                onClick={handleStop}
+                className="btn-stop"
+              >
+                Stop Writer
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="status-section">
+        <div className="status-tier">
+          <span className="status-label">Current Status:</span>
+          <span className={`status-value ${status.is_running ? 'status-running' : 'status-idle'}`}>
+            {status.is_running ? 'Paper Writing' : 'Not Running'}
+          </span>
+          {status.current_mode && status.current_mode !== 'idle' && (
+            <span className="mode-badge">Mode: {status.current_mode}</span>
+          )}
+        </div>
       </div>
 
       {status.is_running && (
@@ -345,13 +396,13 @@ function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false
           </div>
           {error.suggestion && (
             <div className="error-suggestion">
-              <p><strong>💡 Suggestion:</strong> {error.suggestion}</p>
+              <p><strong>Suggestion:</strong> {error.suggestion}</p>
             </div>
           )}
         </div>
       )}
 
-      <div className="form-group">
+      <div className="research-prompt-section">
         <label htmlFor="compilerPrompt">Compiler-Directing Prompt:</label>
         <textarea
           id="compilerPrompt"
@@ -372,39 +423,26 @@ function CompilerInterface({ activeTab, capabilities, anyWorkflowRunning = false
         <small>This prompt directs the compiler on what kind of mathematical document to create from the aggregated database. View your in-progress and final answer in the "Live Paper" tab.</small>
       </div>
 
-      <div className="form-group">
-        <label htmlFor="contextSizeDisplay">Context Window Sizes:</label>
-        <div className="context-size-display">
-          <div><strong>Validator:</strong> {validatorContextSize.toLocaleString()} tokens</div>
-          <div><strong>High-Context:</strong> {highContextContextSize.toLocaleString()} tokens</div>
-          <div><strong>High-Parameter:</strong> {highParamContextSize.toLocaleString()} tokens</div>
-          <div><strong>Critique Submitter:</strong> {critiqueSubmitterContextSize.toLocaleString()} tokens</div>
-          <small style={{marginTop: '0.5rem', display: 'block', color: '#666'}}>
-            (Change these in the Compiler Settings tab)
-          </small>
+      <div className="stats-section">
+        <div className="stat-item">
+          <span className="stat-value">{validatorContextSize.toLocaleString()}</span>
+          <span className="stat-label">Validator Tokens</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-value">{highContextContextSize.toLocaleString()}</span>
+          <span className="stat-label">High-Context Tokens</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-value">{highParamContextSize.toLocaleString()}</span>
+          <span className="stat-label">High-Param Tokens</span>
+        </div>
+        <div className="stat-item">
+          <span className="stat-value">{critiqueSubmitterContextSize.toLocaleString()}</span>
+          <span className="stat-label">Critique Tokens</span>
         </div>
       </div>
 
-      <div className="button-group">
-        {!status.is_running ? (
-          <button 
-            onClick={handleStart} 
-            className="btn btn-primary"
-            disabled={isStarting || (anyWorkflowRunning && !status.is_running)}
-          >
-            {isStarting ? 'Starting...' : 'Start Compiler'}
-          </button>
-        ) : (
-          <button 
-            onClick={handleStop} 
-            className="btn btn-danger"
-          >
-            Stop Compiler
-          </button>
-        )}
-      </div>
-
-      <div className="info-section">
+      <div className="status-section">
         <h3>Aggregator Database</h3>
         <p>The compiler will read from the aggregator's accepted submissions database.</p>
         <p>Location: <code>{getRuntimeDataPath('rag_shared_training.txt')}</code></p>

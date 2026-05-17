@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { autonomousAPI } from '../../services/api';
 import { buildResearchRunGroups } from '../../utils/researchRunHistory';
-import { downloadRawText } from '../../utils/downloadHelpers';
+import { downloadTextFile } from '../../utils/downloadHelpers';
 import './FinalAnswerLibrary.css';
 import './ProofLibrary.css';
 
@@ -21,8 +21,11 @@ function truncate(text, maxLength = 220) {
 
 function getTierBadge(proof) {
   const tier = proof.novelty_tier;
+  if (tier === 'major_mathematical_discovery') {
+    return { cssClass: 'proof-badge--platinum', label: 'Major Mathematical Discovery' };
+  }
   if (tier === 'mathematical_discovery') {
-    return { cssClass: 'proof-badge--gold', label: 'Mathematical Discovery' };
+    return { cssClass: 'proof-badge--gold', label: 'Minor Mathematical Discovery' };
   }
   if (tier === 'novel_variant') {
     return { cssClass: 'proof-badge--silver', label: 'Novel Reformulation' };
@@ -38,6 +41,7 @@ function getTierBadge(proof) {
 
 function getCardClass(proof) {
   const tier = proof.novelty_tier;
+  if (tier === 'major_mathematical_discovery') return 'proof-card--platinum';
   if (tier === 'mathematical_discovery') return 'proof-card--gold';
   if (tier === 'novel_variant') return 'proof-card--silver';
   if (tier === 'novel_formulation') return 'proof-card--bronze';
@@ -152,11 +156,23 @@ export default function ProofLibrary() {
     }
   };
 
-  const handleDownloadLean = (proof) => {
-    const leanCode = proof.lean_code || '';
+  const handleDownloadLean = async (proof, event) => {
+    event?.stopPropagation();
+
+    let proofForDownload = proof;
+    let leanCode = proof.lean_code || '';
+    if (!leanCode && proof.session_id && proof.proof_id) {
+      try {
+        proofForDownload = await autonomousAPI.getLibraryProof(proof.session_id, proof.proof_id);
+        leanCode = proofForDownload.lean_code || '';
+      } catch {
+        return;
+      }
+    }
+
     if (!leanCode) return;
-    const filename = `${proof.theorem_name || proof.proof_id}.lean`;
-    downloadRawText(leanCode, filename);
+    const filename = `${proofForDownload.theorem_name || proof.theorem_name || proof.proof_id}.lean`;
+    downloadTextFile(leanCode, filename);
   };
 
   const novelCount = proofs.filter((p) => p.novel).length;
@@ -288,9 +304,18 @@ export default function ProofLibrary() {
                               <h4 className="answer-title proof-title">
                                 {proof.theorem_name || proof.proof_id}
                               </h4>
-                              <button className="expand-button">
-                                {isExpanded ? '\u25B2' : '\u25BC'}
-                              </button>
+                              <div className="proof-card-actions">
+                                <button
+                                  type="button"
+                                  className="proof-header-download"
+                                  onClick={(event) => handleDownloadLean(proof, event)}
+                                >
+                                  Download .lean
+                                </button>
+                                <button className="expand-button">
+                                  {isExpanded ? '\u25B2' : '\u25BC'}
+                                </button>
+                              </div>
                             </div>
 
                             <div className="answer-metadata">
@@ -423,7 +448,16 @@ export default function ProofLibrary() {
             return (
               <div key={id} className="answer-card proof-card">
                 <div className="answer-header" onClick={() => handleExpand(proof)}>
-                  <h4 className="answer-title">{proof.theorem_name || proof.proof_id}</h4>
+                  <div className="answer-title-row">
+                    <h4 className="answer-title">{proof.theorem_name || proof.proof_id}</h4>
+                    <button
+                      type="button"
+                      className="proof-header-download"
+                      onClick={(event) => handleDownloadLean(proof, event)}
+                    >
+                      Download .lean
+                    </button>
+                  </div>
                 </div>
               </div>
             );

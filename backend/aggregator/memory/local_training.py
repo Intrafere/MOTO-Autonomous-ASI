@@ -9,7 +9,10 @@ import asyncio
 import logging
 
 from backend.shared.config import system_config, rag_config
-from backend.shared.utils import truncate_with_ellipsis
+from backend.shared.json_parser import (
+    RETRY_CONTEXT_EMPTY_PLACEHOLDER,
+    sanitize_model_output_for_retry_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +72,14 @@ class LocalTrainingMemory:
             submission_content: Original submission (first 750 chars)
         """
         async with self._lock:
-            # Truncate to limits
-            summary = truncate_with_ellipsis(validator_summary, 750)
-            preview = truncate_with_ellipsis(submission_content, 750)
+            # This log is reused as submitter context, so sanitize at the memory
+            # boundary rather than persisting raw provider/model transcript text.
+            summary = sanitize_model_output_for_retry_context(validator_summary, max_chars=750)
+            preview = sanitize_model_output_for_retry_context(submission_content, max_chars=750)
+            if summary == RETRY_CONTEXT_EMPTY_PLACEHOLDER:
+                summary = "Validator rejection summary unavailable after retry-context sanitization."
+            if preview == RETRY_CONTEXT_EMPTY_PLACEHOLDER:
+                preview = "Rejected submission preview unavailable after retry-context sanitization."
             
             # Add rejection
             self.rejections.append({

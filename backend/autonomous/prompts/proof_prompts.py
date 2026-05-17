@@ -9,11 +9,14 @@ from backend.shared.models import MathlibLemmaHint, ProofAttemptFeedback, SmtHin
 
 
 PROOF_FRAMING_CONTEXT = """[PROOF FRAMING CONTEXT -- This research prompt targets formal mathematical proof.
-Submissions should aggressively pursue NOVEL, NON-TRIVIAL theorems that push the
-boundaries of what is known. The Lean 4 proof assistant is available for formal
-verification. Prioritize ambitious conjectures, original results, and theorems that
-would represent genuine mathematical contributions over safe restatements of textbook
-facts. Standard identities and well-known Mathlib lemmas are NOT valuable targets.]"""
+All proof work must serve the user's research prompt. Submissions should pursue
+theorems, lemmas, and formalizations that directly help answer, support, or advance
+that prompt. Novel/non-trivial results are valuable only when they are relevant to
+the user's goal. The Lean 4 proof assistant is available for formal verification.
+Prioritize ambitious conjectures, original results, and theorems that would represent
+genuine mathematical contributions toward the prompt over safe restatements of
+textbook facts. Standard identities, irrelevant curiosities, and well-known Mathlib
+lemmas are NOT valuable targets.]"""
 
 
 def _json_only_footer(example: str) -> str:
@@ -159,7 +162,7 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
 
     lines = [
         "=== OPEN LEMMA TARGETS LEAN 4 COULD NOT YET CLOSE ===",
-        "[These are recent proof attempts that failed. Prefer brainstorms that generate missing lemmas, stronger assumptions, or cleaner formal theorem statements.]",
+        "[These are recent proof attempts that failed. Prefer brainstorms that generate missing lemmas, stronger assumptions, or cleaner formal theorem statements only when they directly support the user's research prompt.]",
         "",
     ]
     for index, hint in enumerate(hints, start=1):
@@ -188,7 +191,8 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
                 "Note: the previous formalization attempt was rejected because "
                 "it used `sorry`/`admit` or axiomatized the theorem's concepts "
                 "to make the goal trivial. Prefer brainstorms that state a "
-                "narrower, concretely provable lemma instead of the full claim."
+                "narrower, concretely provable lemma that still supports the "
+                "user's research prompt instead of the full claim."
             )
         lines.extend(
             [
@@ -206,20 +210,20 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
 
 def build_proof_framing_gate_prompt(user_prompt: str) -> str:
     """Ask whether the research goal should be framed toward formal proof."""
-    return f"""You are deciding whether a research program should be explicitly framed toward formal mathematical proof and novel theorem discovery.
+    return f"""You are deciding whether a research program should be explicitly framed toward formal mathematical proof and novel theorem discovery that helps answer the user's prompt.
 
 USER RESEARCH PROMPT:
 {user_prompt}
 
-Return TRUE if the prompt would benefit from working toward formally provable theorems in Lean 4, especially novel or non-trivial ones.
+Return TRUE if the prompt would benefit from working toward Lean 4-formalized theorems that directly help answer, support, or advance the user's research goal.
 Return FALSE only if the prompt is purely empirical, engineering-focused, descriptive, or has no meaningful mathematical content.
 
 Consider:
 - Does the research involve mathematical structures, proofs, bounds, or formal reasoning?
-- Could novel theorems or formalizations emerge from this research direction?
-- Would formal verification add rigor or uncover new results?
+- Could prompt-relevant theorems, lemmas, or formalizations emerge from this research direction?
+- Would formal verification add rigor or uncover new results that matter for the user's goal?
 
-Err on the side of TRUE -- if there is any mathematical substance worth formalizing, enable the proof pipeline.
+Err on the side of TRUE when there is mathematical substance worth formalizing for the prompt. Do not enable proof framing solely for off-topic mathematical curiosities.
 
 {_json_only_footer('{"is_proof_amenable": true, "reasoning": "brief explanation"}')}
 """
@@ -231,7 +235,7 @@ def build_proof_identification_prompt(
     source_id: str,
     source_content: str,
 ) -> str:
-    """Identify novel, non-trivial theorem candidates from a brainstorm or paper."""
+    """Identify prompt-relevant theorem candidates from a brainstorm or paper."""
     example_json = """{
   "has_provable_theorems": true,
   "theorems": [
@@ -239,22 +243,24 @@ def build_proof_identification_prompt(
       "theorem_id": "thm_1",
       "statement": "natural-language theorem statement",
       "formal_sketch": "optional note about assumptions, notation, or likely Lean formalization strategy",
-      "novelty_rationale": "why this theorem is non-trivial and worth formalizing"
+      "novelty_rationale": "why this theorem helps the user prompt and is worth formalizing"
     }
   ]
 }"""
-    return f"""You are a theorem-discovery agent for MOTO. Your mission is to find NOVEL, NON-TRIVIAL mathematical claims in the source below that deserve formal verification in Lean 4.
+    return f"""You are a theorem-discovery agent for MOTO. Your mission is to find mathematical claims in the source below that directly help answer, support, or advance the USER RESEARCH PROMPT and deserve formal verification in Lean 4.
 
-MOTO's goal is to push the frontier of mathematical knowledge. You are the gatekeeper that decides which theorems are worth the cost of formal verification. Be ambitious -- seek out the most original, surprising, or substantive results the source offers.
+MOTO's goal is to push the frontier of mathematical knowledge in service of the user's stated problem. You are the gatekeeper that decides which theorems are worth the cost of formal verification. Be ambitious, but do not chase unrelated mathematical curiosities: a proof candidate must be useful for the user's prompt, not merely non-trivial in isolation.
 
 WHAT TO EXTRACT (prioritize these):
-- Novel theorems, lemmas, or propositions that represent genuine mathematical insight
-- Bold conjectures that can be sharpened into provable statements
-- Non-obvious connections, bounds, inequalities, or structural results
-- Original formalizations of results not yet in Mathlib
-- Ambitious claims even if they need narrowing -- the formalization agent can refine them
+- Theorems, lemmas, or propositions that directly help answer or advance the USER RESEARCH PROMPT
+- Supporting lemmas needed to prove prompt-central claims
+- Novel mathematical insights only when they are relevant to the user's stated goal
+- Non-obvious connections, bounds, inequalities, or structural results that strengthen the prompt's argument
+- Original formalizations of prompt-relevant results not yet in Mathlib
+- Ambitious prompt-relevant claims even if they need narrowing -- the formalization agent can refine them
 
 WHAT TO REJECT (never extract these):
+- Mathematically interesting claims that do not materially help the USER RESEARCH PROMPT
 - Trivial identities (e.g. n + 0 = n, a * 1 = a, commutativity of addition)
 - Direct restatements of well-known Mathlib lemmas or standard textbook results
 - Results closable by a single tactic like `simp`, `omega`, `norm_num`, `decide`, or `rfl`
@@ -262,11 +268,12 @@ WHAT TO REJECT (never extract these):
 - Routine algebraic manipulations with no conceptual content
 
 Rules:
-- Return TRUE when at least one non-trivial, novel-potential theorem is found.
-- Return FALSE only if the source genuinely contains nothing beyond trivial or well-known results.
-- Rank candidates by novelty potential. Return at most 5 of the most promising theorems.
-- For each candidate, include a brief novelty_rationale explaining why it is worth formalizing.
-- Welcome bold or speculative claims -- if the source proposes something ambitious that might be provable with the right formalization, extract it. The downstream formalization agent will handle narrowing if needed.
+- Return TRUE when at least one prompt-relevant, non-trivial theorem is found.
+- Return FALSE if the source contains no theorem that would materially help answer, support, or advance the USER RESEARCH PROMPT.
+- Order candidates by direct usefulness to the USER RESEARCH PROMPT first, then by novelty/formalization value. This ordering is not a cap.
+- Return every prompt-relevant theorem that is non-trivial and worth attempting.
+- For each candidate, include a brief novelty_rationale explaining both why it helps the USER RESEARCH PROMPT and why it is worth formalizing.
+- Welcome bold or speculative claims only when they are prompt-relevant -- if the source proposes something ambitious that might be provable with the right formalization, extract it. The downstream formalization agent will handle narrowing if needed.
 - Use theorem IDs that are stable strings such as "thm_1", "thm_2", etc.
 
 USER RESEARCH PROMPT:
@@ -305,6 +312,7 @@ Rules:
 - Return 5-10 candidate lemma/theorem names when possible.
 - Prefer concrete declaration names over descriptions.
 - Use familiar Mathlib naming when possible (for example `Nat.add_comm`, `mul_assoc`, `Finset.card_union_add_card_inter`).
+- Keep suggestions tied to the target theorem and the USER RESEARCH PROMPT; do not drift toward merely adjacent or interesting Mathlib facts.
 - If the theorem is too vague or no good candidates are evident, return an empty list.
 
 USER RESEARCH PROMPT:
@@ -347,6 +355,7 @@ Rules:
 - Prefer quantifier-free arithmetic fragments when possible.
 - If the theorem is underspecified, only encode the part that is clearly justified by the theorem statement and notes.
 - Do not invent new assumptions that are not strongly implied by the theorem.
+- Do not translate a different or weaker theorem merely because it is easier; the SMT check must still support the USER RESEARCH PROMPT through the selected target theorem.
 - Return an empty `smtlib` string if you cannot produce a faithful SMT translation.
 - Use only SMT-LIB text in the `smtlib` field.
 
@@ -397,6 +406,9 @@ Requirements:
 - Include needed imports.
 - State assumptions explicitly.
 - Prefer correct, minimal, compilable code over stylistic elegance.
+- Keep the USER RESEARCH PROMPT as the relevance boundary. If you narrow an
+  underspecified theorem, the narrowed lemma must still help answer, support,
+  or advance the user's prompt.
 - PRESERVE the theorem's non-trivial content. Do not simplify or weaken the
   statement into a trivial identity just to make it compile. The goal is to
   formalize the ACTUAL claim, not a watered-down version of it.
@@ -474,6 +486,9 @@ Requirements:
 - Return a short, ordered list of tactics that can be appended under a `by` block.
 - Each tactic entry must include the Lean tactic string and one short reasoning note.
 - Prefer small, composable tactics over a single opaque script.
+- Keep the USER RESEARCH PROMPT as the relevance boundary. If you narrow an
+  underspecified theorem, the narrowed lemma must still help answer, support,
+  or advance the user's prompt.
 - PRESERVE the theorem's non-trivial content. Do not simplify or weaken the
   statement into a trivial identity just to make it compile.
 - NEVER include `sorry` or `admit` in the tactic list. A script that uses
@@ -522,7 +537,7 @@ def build_proof_novelty_prompt(
     lean_code: str,
     existing_novel_proofs: str,
 ) -> str:
-    """Ask the validator to classify a Lean-verified theorem into one of four novelty tiers."""
+    """Ask the validator to classify a Lean-verified theorem into one of five novelty tiers."""
     existing_proofs_block = existing_novel_proofs or "[No previously stored novel proofs.]"
     return f"""This proof has been FORMALLY VERIFIED by Lean 4. It is mathematically valid.
 
@@ -555,10 +570,17 @@ NOVELTY TIERS (choose exactly one):
 - It constitutes a novel alternative proof of an existing result whose existence changes mathematical understanding (e.g., a constructive proof where only non-constructive proofs were known).
 - Assign this tier when the proof would be a publishable or citable contribution in its own right.
 
+"major_mathematical_discovery"
+- The result appears to be an exceptional mathematical breakthrough, not merely a publishable or citable new result.
+- It may be competitive for a major prize or medal in a related field if confirmed, contextualized, and accepted by domain experts.
+- It resolves an important open problem, creates a powerful new theory or framework, or proves a result with unusually broad consequences.
+- Assign this tier only when the proof's significance appears field-level or prize-level, above an ordinary mathematical discovery.
+
 Rules:
 - Do NOT re-check validity. Lean 4 already verified it.
 - Choose the single best-fitting tier. When a proof could fit multiple tiers, choose the highest applicable one.
-- Consider the research prompt context. A result textbook-standard in one field may qualify as "novel_formulation" if it is the first mechanized Lean 4 proof of that result for this research program.
+- Consider the research prompt context. A result textbook-standard in one field may qualify as "novel_formulation" if it is the first mechanized Lean 4 proof of that result for this research program and it helps the USER RESEARCH PROMPT.
+- Do not assign a high novelty tier to a theorem that is mathematically interesting but irrelevant to the USER RESEARCH PROMPT.
 - Err toward recognizing higher tiers for results that required multi-step reasoning, non-trivial formalization work, or original proof strategy.
 
 USER RESEARCH PROMPT:
@@ -574,4 +596,49 @@ EXISTING STORED NOVEL PROOFS:
 {existing_proofs_block}
 
 {_json_only_footer('{"novelty_tier": "mathematical_discovery", "reasoning": "brief explanation"}')}
+"""
+
+
+def build_proof_statement_alignment_prompt(
+    user_prompt: str,
+    theorem_statement: str,
+    formal_sketch: str,
+    lean_code: str,
+    source_excerpt: str,
+) -> str:
+    """Validate that Lean-accepted code proves the intended theorem candidate."""
+    return f"""You are validating a Lean 4 proof candidate after Lean 4 has accepted the code.
+
+Lean 4 already verified that the code is logically valid. Your task is narrower:
+decide whether the accepted Lean code actually corresponds to the intended theorem
+candidate below. Reject code that proves an unrelated trivial theorem, proves only a
+weakened/irrelevant result, or avoids the intended statement by changing the target.
+
+Accept if the Lean code formalizes the same mathematical claim, a clearly equivalent
+claim, or a faithful narrowed form explicitly justified by the formal sketch and still
+useful for the USER RESEARCH PROMPT.
+
+USER RESEARCH PROMPT:
+{user_prompt}
+
+INTENDED THEOREM CANDIDATE:
+{theorem_statement}
+
+FORMAL SKETCH / EXPECTED SHAPE:
+{formal_sketch or '[none provided]'}
+
+SOURCE EXCERPT:
+{source_excerpt or '[none provided]'}
+
+LEAN 4-ACCEPTED CODE:
+{lean_code}
+
+Reject examples:
+- The code proves only `True`, `1 = 1`, or a routine identity unrelated to the candidate.
+- The theorem name/statement in Lean bears no relationship to the intended theorem.
+- The proof introduces a different result and ignores the claimed theorem.
+- The result is materially weaker than the intended theorem without being a useful, explicitly scoped lemma.
+- The result may be mathematically valid but does not help answer, support, or advance the USER RESEARCH PROMPT.
+
+{_json_only_footer('{"decision": "accept", "reasoning": "why the Lean code matches or does not match the intended theorem", "summary": "short rejection feedback if rejected"}')}
 """

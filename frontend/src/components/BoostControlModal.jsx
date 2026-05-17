@@ -2,19 +2,31 @@ import React, { useState, useEffect, useRef } from 'react';
 import { boostAPI, openRouterAPI } from '../services/api';
 import {
   computeOpenRouterAutoSettings,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
   getProviderNames,
+  getReasoningSupportInfo,
+  normalizeOpenRouterReasoningEffort,
+  OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../utils/openRouterSelection';
 import './BoostControlModal.css';
 
 const BOOST_SETTINGS_STORAGE_KEY = 'boost_modal_settings';
 
-export default function BoostControlModal({ isOpen, onClose, capabilities }) {
+export default function BoostControlModal({
+  isOpen,
+  onClose,
+  capabilities,
+  developerModeEnabled = false,
+}) {
   const [apiKey, setApiKey] = useState('');
   const [boostModel, setBoostModel] = useState('');
   const [selectedProvider, setSelectedProvider] = useState('');
-  const [contextWindow, setContextWindow] = useState(131072);
-  const [maxOutputTokens, setMaxOutputTokens] = useState(25000);
+  const [reasoningEffort, setReasoningEffort] = useState(DEFAULT_OPENROUTER_REASONING_EFFORT);
+  const [contextWindow, setContextWindow] = useState(DEFAULT_CONTEXT_WINDOW);
+  const [maxOutputTokens, setMaxOutputTokens] = useState(DEFAULT_MAX_OUTPUT_TOKENS);
   const [models, setModels] = useState([]);
   const [providerData, setProviderData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -31,6 +43,7 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
 
   const hasAvailableKey = Boolean(apiKey.trim() || hasGlobalKey);
   const providers = getProviderNames(providerData);
+  const reasoningInfo = getReasoningSupportInfo(providerData, selectedProvider || null);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
   
   // Load saved settings from localStorage on mount
@@ -41,6 +54,7 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
         const settings = JSON.parse(saved);
         if (settings.boostModel) setBoostModel(settings.boostModel);
         if (settings.selectedProvider) setSelectedProvider(settings.selectedProvider);
+        if (settings.reasoningEffort) setReasoningEffort(normalizeOpenRouterReasoningEffort(settings.reasoningEffort));
         if (settings.contextWindow) setContextWindow(settings.contextWindow);
         if (settings.maxOutputTokens) setMaxOutputTokens(settings.maxOutputTokens);
         if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
@@ -53,11 +67,12 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
   // Save settings to localStorage whenever they change
   useEffect(() => {
     // Only save if we have meaningful values (not initial empty state)
-    if (boostModel || selectedProvider || contextWindow !== 131072 || maxOutputTokens !== 25000 || freeOnly) {
+    if (boostModel || selectedProvider || reasoningEffort !== DEFAULT_OPENROUTER_REASONING_EFFORT || contextWindow !== DEFAULT_CONTEXT_WINDOW || maxOutputTokens !== DEFAULT_MAX_OUTPUT_TOKENS || freeOnly) {
       try {
         const settings = {
           boostModel,
           selectedProvider,
+          reasoningEffort,
           contextWindow,
           maxOutputTokens,
           freeOnly
@@ -67,7 +82,7 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
         console.error('Failed to save boost settings to localStorage:', e);
       }
     }
-  }, [boostModel, selectedProvider, contextWindow, maxOutputTokens, freeOnly]);
+  }, [boostModel, selectedProvider, reasoningEffort, contextWindow, maxOutputTokens, freeOnly]);
 
   const fetchProviders = async (modelId, keyOverride = undefined) => {
     if (!modelId) {
@@ -128,6 +143,7 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
           // Boost is enabled - use backend values (they're authoritative)
           setBoostModel(response.status.model_id);
           setSelectedProvider(response.status.provider || '');
+          setReasoningEffort(normalizeOpenRouterReasoningEffort(response.status.reasoning_effort));
           setContextWindow(response.status.context_window);
           setMaxOutputTokens(response.status.max_output_tokens);
           if (response.status.model_id) {
@@ -139,6 +155,7 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
             const settings = {
               boostModel: response.status.model_id,
               selectedProvider: response.status.provider || '',
+              reasoningEffort: normalizeOpenRouterReasoningEffort(response.status.reasoning_effort),
               contextWindow: response.status.context_window,
               maxOutputTokens: response.status.max_output_tokens,
               freeOnly
@@ -161,6 +178,7 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
   const handleModelChange = async (modelId) => {
     setBoostModel(modelId);
     setSelectedProvider(''); // Reset provider when model changes
+    setReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
     if (modelId) {
       const autoSettings = await getAutoSettingsForModel(modelId, null);
       if (autoSettings) {
@@ -300,6 +318,7 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
         openrouter_api_key: trimmedApiKey,
         boost_model_id: boostModel,
         boost_provider: selectedProvider || null,
+        boost_reasoning_effort: reasoningEffort,
         boost_context_window: contextWindow,
         boost_max_output_tokens: maxOutputTokens
       };
@@ -504,6 +523,26 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
             </div>
           )}
 
+          {boostModel && (
+            <div className="boost-form-group">
+              <label>Reasoning Effort</label>
+              <select
+                value={normalizeOpenRouterReasoningEffort(reasoningEffort)}
+                onChange={(e) => setReasoningEffort(e.target.value)}
+                disabled={loading}
+              >
+                {OPENROUTER_REASONING_EFFORT_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <small>
+                {reasoningInfo.hasEndpointMetadata && !reasoningInfo.supportsReasoning
+                  ? 'This selected provider does not advertise reasoning support; OpenRouter may ignore the setting.'
+                  : 'Auto sends OpenRouter max reasoning effort by default.'}
+              </small>
+            </div>
+          )}
+
           <div className="form-row">
             <div className="boost-form-group">
               <label>Context Window</label>
@@ -559,6 +598,9 @@ export default function BoostControlModal({ isOpen, onClose, capabilities }) {
             <ul>
               <li>Click tasks in the MOTO Workflow panel to toggle boost</li>
               <li>Boosted tasks use your selected OpenRouter model and optional host provider</li>
+              {developerModeEnabled && (
+                <li>Supercharge is enabled per role in each settings panel; when Boost also applies, all 5 Supercharge calls use this Boost model</li>
+              )}
               <li>
                 {lmStudioEnabled
                   ? 'If boost credits or provider capacity fail, the task falls back to its primary model path for that call'

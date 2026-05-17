@@ -52,6 +52,7 @@ class Lean4Result:
     """Result of one Lean 4 proof check."""
     success: bool
     error_output: str = ""
+    diagnostic_output: str = ""
     goal_states: str = ""
     raw_stderr: str = ""
     tactic_error_slice: str = ""
@@ -370,7 +371,7 @@ class Lean4Client:
     ) -> tuple[int, str, str]:
         temp_path = self.workspace_dir / temp_filename
         try:
-            temp_path.write_text(prepared_code, encoding="utf-8")
+            await asyncio.to_thread(temp_path.write_text, prepared_code, encoding="utf-8")
             return await self._run_process(
                 [self.lake_path, "env", self.lean_path or self._resolve_executable("lean"), temp_filename],
                 cwd=self.workspace_dir,
@@ -379,7 +380,7 @@ class Lean4Client:
         finally:
             try:
                 if temp_path.exists():
-                    temp_path.unlink()
+                    await asyncio.to_thread(temp_path.unlink)
             except OSError:
                 logger.debug("Could not remove temporary Lean file %s", temp_path)
 
@@ -478,7 +479,7 @@ class Lean4Client:
         async with self._workspace_lock:
             self._workspace_unhealthy_error = ""
             self._workspace_ready = False
-            self._wipe_lake_directory()
+            await asyncio.to_thread(self._wipe_lake_directory)
             repaired = await self._ensure_workspace_locked()
             if not repaired:
                 self._mark_workspace_unhealthy(output)
@@ -940,7 +941,7 @@ class Lean4Client:
             ).strip()
         return error_slice, failing_tactic_index
 
-    async def check_proof(self, lean_code: str, timeout: int = 120) -> Lean4Result:
+    async def check_proof(self, lean_code: str, timeout: int = 120, *, allow_placeholders: bool = False) -> Lean4Result:
         """Write a temp Lean file, run Lean 4, and return structured feedback."""
         if not system_config.lean4_enabled:
             return Lean4Result(success=False, error_output="Lean 4 is disabled in system configuration.")
@@ -951,9 +952,10 @@ class Lean4Client:
 
         # Fast pre-check: reject placeholder proofs before invoking Lean so
         # the model learns the rejection reason even when Lean would have
-        # compiled the file with only a warning.
+        # compiled the file with only a warning. LeanOJ can opt out when it
+        # intentionally wants to harvest a compiling incomplete scaffold.
         placeholder = _detect_forbidden_placeholder(prepared_code)
-        if placeholder:
+        if placeholder and not allow_placeholders:
             return Lean4Result(
                 success=False,
                 error_output=_format_placeholder_rejection(placeholder, from_lean_diagnostic=False),
@@ -1002,16 +1004,13 @@ class Lean4Client:
         has_error_diagnostic = "error:" in lowered
         has_sorry_warning = _output_contains_sorry_warning(combined_output)
         lean_exited_cleanly = returncode == 0
-        positive_pass = (
-            lean_exited_cleanly
-            and not has_error_diagnostic
-            and not has_sorry_warning
-        )
+        positive_pass = lean_exited_cleanly and not has_error_diagnostic and (allow_placeholders or not has_sorry_warning)
 
         if positive_pass:
             return Lean4Result(
                 success=True,
                 error_output="",
+                diagnostic_output=combined_output,
                 goal_states=goal_states,
                 raw_stderr=stderr.strip(),
             )
@@ -1173,6 +1172,7 @@ class Lean4Client:
             return Lean4Result(
                 success=True,
                 error_output="",
+                diagnostic_output=combined_output,
                 goal_states=goal_states,
                 raw_stderr=stderr.strip(),
                 tactic_error_slice="",
@@ -1586,6 +1586,7 @@ class Lean4LspClient(Lean4Client):
             return Lean4Result(
                 success=True,
                 error_output="",
+                diagnostic_output=combined_output,
                 goal_states=goal_states,
                 raw_stderr=raw_stderr,
             )
@@ -1649,7 +1650,7 @@ class Lean4LspClient(Lean4Client):
         self._open_document_versions[uri] = version
 
         try:
-            temp_path.write_text(prepared_code, encoding="utf-8")
+            await asyncio.to_thread(temp_path.write_text, prepared_code, encoding="utf-8")
             await self._send_notification(
                 "textDocument/didOpen",
                 {
@@ -1697,9 +1698,9 @@ class Lean4LspClient(Lean4Client):
             self._open_document_versions.pop(uri, None)
             with suppress(OSError):
                 if temp_path.exists():
-                    temp_path.unlink()
+                    await asyncio.to_thread(temp_path.unlink)
 
-    async def check_proof(self, lean_code: str, timeout: int = 120) -> Lean4Result:
+    async def check_proof(self, lean_code: str, timeout: int = 120, *, allow_placeholders: bool = False) -> Lean4Result:
         """Check a proof through the persistent Lean LSP when healthy, otherwise fall back."""
         if not system_config.lean4_enabled:
             return Lean4Result(success=False, error_output="Lean 4 is disabled in system configuration.")
@@ -1709,6 +1710,12 @@ class Lean4LspClient(Lean4Client):
             return Lean4Result(success=False, error_output="No Lean 4 code was provided.")
 
         placeholder = _detect_forbidden_placeholder(prepared_code)
+        if placeholder and allow_placeholders:
+            return await self._subprocess_fallback.check_proof(
+                lean_code,
+                timeout=timeout,
+                allow_placeholders=True,
+            )
         if placeholder:
             return Lean4Result(
                 success=False,

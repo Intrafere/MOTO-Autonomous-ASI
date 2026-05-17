@@ -21,7 +21,7 @@ def get_submitter_system_prompt() -> str:
 1. Analyze the user's prompt and provided context carefully
 2. Build upon the shared training database (accepted submissions from other agents)
 3. Learn from your rejection history to avoid repeating mistakes
-4. Generate novel, valuable mathematical insights that advance the solution
+4. Generate novel, valuable mathematical progress that advances the solution
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -43,13 +43,25 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 ---
 
 YOUR TASK:
-Generate a novel mathematical insight that advances the user's goal.
+Generate the strongest rigorous mathematical contribution you can toward the user's goal, preferring direct solutions, direct partial solutions, impossibility results, exact reductions, or sharp constraints whenever they are justified.
 
 PROGRESSIVE SYSTEM: You will be called MANY times throughout this brainstorming process. Each call should produce ONE deep, well-developed mathematical insight. Do not try to cover everything at once — focus on thoroughly developing a single avenue per submission with full rigor. You will have many more opportunities to explore other avenues in future submissions.
 
-Focus on mathematical concepts, theorems, techniques, and proofs that may provide an avenue towards solving or understanding the mathematical problem in the prompt. Use all available resources including web search if available.
+DIRECT-SOLUTION PREFERENCE:
+- If you can directly solve the user's problem, a clearly necessary subproblem, or prove a meaningful impossibility/limitation result, do that FIRST
+- Prefer contributions that close the problem, partially close it, or sharply reduce what remains
+- Use indirect background, exploratory framing, or supportive observations ONLY when a stronger direct step is not yet justified
+
+META-PHASE EXCEPTION:
+If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, follow that requested output format exactly:
+- For TOPIC EXPLORATION PHASE, propose one candidate brainstorm question optimized for producing a future direct answer
+- For PAPER TITLE EXPLORATION PHASE, propose one candidate paper title optimized for communicating the paper's direct answer-bearing content
+- In these meta-phases, do NOT solve the mathematical problem or write the paper unless the user prompt explicitly asks for that; the direct-solution preference means the candidate should point toward or communicate direct resolution
+
+Focus on mathematical concepts, theorems, techniques, and proofs that solve, partially solve, refute, or sharply characterize the mathematical problem in the prompt whenever possible. Use all available resources including web search if available.
 
 WHAT MAKES A VALUABLE SUBMISSION - Consider:
+- Does it directly answer, partially answer, or sharply constrain the user's problem or a necessary subproblem?
 - Does it add genuinely new information or perspectives beyond what is already in the training database?
 - Does it connect existing mathematical concepts in novel ways?
 - Does it provide concrete methods, theorems, proofs, or mathematical techniques?
@@ -59,6 +71,7 @@ WHAT MAKES A VALUABLE SUBMISSION - Consider:
 
 CRITICAL REQUIREMENTS - CONTENT:
 - ALL submissions must be rooted in sound mathematical reasoning - NO unfounded claims or logical fallacies
+- Prefer directly resolving the user's problem or a clearly necessary subproblem over auxiliary exposition
 - Focus on mathematical concepts, theorems, and techniques that are verifiable and established
 - Be specific and actionable, not vague or generic
 - Avoid redundancy with existing accepted submissions
@@ -67,16 +80,35 @@ CRITICAL REQUIREMENTS - CONTENT:
 - Unsupported empirical or artifact claims must be framed as proposals, hypotheses, or future work rather than as completed results
 
 Your submission will be validated against these criteria:
+- Does it provide the strongest direct progress currently justified?
 - Does it meaningfully advance the solution space?
 - Is it based on sound mathematical principles?
 - Does it avoid contradictions?
 - Is it non-redundant with existing knowledge?
 - Is it mathematically rigorous?
 
-Output your response ONLY as JSON in this exact format:
+OPTIONAL LEAN 4 PROOF ROUTE:
+If Lean 4 proof verification is enabled and you can produce a complete Lean 4 proof that would be useful brainstorm progress, you may choose the `lean_proof` submission type. A Lean proof candidate is NOT added directly to the knowledge base: the system first runs Lean 4, gives you up to 5 repair attempts with Lean/integrity feedback, and only then sends the Lean-verified proof to the normal brainstorm validator for usefulness and redundancy review.
+
+Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to accept. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
+
+Output your response ONLY as JSON in one of these exact formats:
+
+Normal brainstorm idea:
 {
+  "submission_type": "idea",
   "submission": "Your detailed mathematical submission describing concepts, theorems, proofs, and approaches based on established mathematical principles.",
   "reasoning": "Brief explanation of why this submission is valuable"
+}
+
+Lean proof candidate:
+{
+  "submission_type": "lean_proof",
+  "theorem_statement": "Natural-language statement of the theorem or lemma proved by the Lean code.",
+  "formal_sketch": "Brief note about assumptions, formalization choices, and why this proof helps the brainstorm.",
+  "theorem_name": "Optional Lean declaration name",
+  "lean_code": "Complete Lean 4 code expected to verify.",
+  "reasoning": "Why this verified proof would be a useful brainstorm addition"
 }
 """
 
@@ -85,9 +117,21 @@ def get_submitter_json_schema() -> str:
     """Get JSON schema specification for submitter."""
     return """
 REQUIRED JSON FORMAT:
+Normal brainstorm idea:
 {
+  "submission_type": "idea",
   "submission": "string - your detailed mathematical submission with theorems, proofs, and techniques",
   "reasoning": "string - explanation of submission value"
+}
+
+Lean proof candidate, only when Lean 4 is enabled and you can provide complete code:
+{
+  "submission_type": "lean_proof",
+  "theorem_statement": "string - natural-language statement proved",
+  "formal_sketch": "string - formalization notes",
+  "theorem_name": "string - optional Lean declaration name",
+  "lean_code": "string - complete Lean 4 source code",
+  "reasoning": "string - why the verified proof would help the brainstorm"
 }
 
 CRITICAL JSON ESCAPE RULES:
@@ -103,14 +147,26 @@ CRITICAL JSON ESCAPE RULES:
 
 Example (mathematical proof):
 {
+  "submission_type": "idea",
   "submission": "The problem of squaring the circle is equivalent to constructing a line segment of length \\\\sqrt{\\\\pi} using only compass and straightedge. By the Lindemann-Weierstrass theorem (1882), \\\\pi is transcendental, meaning it is not the root of any polynomial with rational coefficients. Since compass and straightedge constructions can only produce algebraic numbers (roots of polynomials with rational coefficients), and \\\\sqrt{\\\\pi} would require \\\\pi to be algebraic, the construction is impossible.",
   "reasoning": "This submission provides the rigorous mathematical foundation for why squaring the circle is impossible, connecting transcendental number theory to geometric constructibility."
 }
 
 GOOD Example (technique application):
 {
+  "submission_type": "idea",
   "submission": "For problems involving irrational approximations, continued fractions provide optimal rational approximations. The continued fraction expansion of \\\\pi = [3; 7, 15, 1, 292, ...] shows that 22/7 and 355/113 are best rational approximants within their denominator ranges. This technique generalizes: for any irrational \\\\alpha, its convergents p_n/q_n satisfy |\\\\alpha - p_n/q_n| < 1/(q_n * q_{n+1}), providing provably good approximations.",
   "reasoning": "Leverages established number theory techniques for understanding irrational approximations relevant to the mathematical problem."
+}
+
+GOOD Example (Lean proof candidate):
+{
+  "submission_type": "lean_proof",
+  "theorem_statement": "For every natural number n, n + 0 = n.",
+  "formal_sketch": "A minimal sanity-check example; in real brainstorms prefer non-trivial proofs.",
+  "theorem_name": "moto_nat_add_zero",
+  "lean_code": "import Mathlib\\n\\ntheorem moto_nat_add_zero (n : Nat) : n + 0 = n := by\\n  simpa using Nat.add_zero n",
+  "reasoning": "Demonstrates the Lean proof-candidate format."
 }
 """
 

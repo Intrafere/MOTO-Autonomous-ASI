@@ -21,6 +21,42 @@ from backend.shared.config import system_config
 logger = logging.getLogger(__name__)
 
 
+def _session_paper_has_section(content: str, section_name: str) -> bool:
+    base_patterns = [
+        rf"##\s*{section_name}",
+        rf"#\s*{section_name}",
+        rf"\*\*{section_name}\*\*",
+        rf"^{section_name}\s*$",
+        rf"^\\(?:section|chapter)\*?\{{{section_name}\}}\s*$",
+    ]
+    if section_name == "Introduction":
+        base_patterns.append(rf"^I\.\s*{section_name}")
+        base_patterns.append(rf"^\\(?:section|chapter)\*?\{{I\.?\s*{section_name}\}}\s*$")
+    elif section_name == "Conclusion":
+        base_patterns.append(rf"^[IVXLC]+\.\s*{section_name}")
+
+    return any(re.search(pattern, content, re.IGNORECASE | re.MULTILINE) for pattern in base_patterns)
+
+
+def _detect_session_paper_phase(paper_content: str) -> str:
+    has_abstract = _session_paper_has_section(paper_content, "Abstract")
+    has_intro = _session_paper_has_section(paper_content, "Introduction")
+    has_conclusion = _session_paper_has_section(paper_content, "Conclusion")
+
+    has_abstract_placeholder = "[HARD CODED PLACEHOLDER FOR THE ABSTRACT SECTION" in paper_content
+    has_intro_placeholder = "[HARD CODED PLACEHOLDER FOR INTRODUCTION SECTION" in paper_content
+    has_conclusion_placeholder = "[HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION" in paper_content
+    has_body_content = bool(re.search(r"^[IVX]+\.\s+\w", paper_content or "", re.MULTILINE))
+
+    if not has_conclusion or has_conclusion_placeholder:
+        return "conclusion" if has_body_content else "body"
+    if not has_intro or has_intro_placeholder:
+        return "introduction"
+    if not has_abstract or has_abstract_placeholder:
+        return "abstract"
+    return "abstract"
+
+
 class SessionManager:
     """
     Manages prompt-based session folder organization.
@@ -308,21 +344,31 @@ class SessionManager:
                 continue
                 
             workflow_state_path = session_dir / "workflow_state.json"
-            if not workflow_state_path.exists():
-                continue
-                
+            workflow_state = None
             try:
-                async with aiofiles.open(workflow_state_path, 'r', encoding='utf-8') as f:
-                    raw = await f.read()
-                if not raw.strip().strip('\x00'):
-                    continue  # Empty or null-padded file — skip silently
-                workflow_state = json.loads(raw)
-                
-                # Check if this session is resumable
-                # Resumable means: has a tier AND (has a topic OR has completed papers)
-                has_tier = workflow_state.get("current_tier") is not None
-                has_topic = workflow_state.get("current_topic_id") is not None
-                has_papers = workflow_state.get("papers_completed_count", 0) > 0
+                if workflow_state_path.exists():
+                    async with aiofiles.open(workflow_state_path, 'r', encoding='utf-8') as f:
+                        raw = await f.read()
+                    if raw.strip().strip('\x00'):
+                        workflow_state = json.loads(raw)
+                # Check if this session is resumable.
+                # Resumable means: has a tier AND (has a topic OR has completed papers).
+                has_tier = bool(workflow_state and workflow_state.get("current_tier") is not None)
+                has_topic = bool(workflow_state and workflow_state.get("current_topic_id") is not None)
+                has_papers = bool(workflow_state and workflow_state.get("papers_completed_count", 0) > 0)
+
+                # A stale idle workflow_state.json can coexist with valid session
+                # stats/brainstorm files. Try the durable-file recovery before
+                # deciding the session is not resumable.
+                if not (has_tier and (has_topic or has_papers)):
+                    recovered_state = await self._recover_workflow_state_from_session_files(session_dir)
+                    if recovered_state is not None:
+                        workflow_state = recovered_state
+                        has_tier = workflow_state.get("current_tier") is not None
+                        has_topic = workflow_state.get("current_topic_id") is not None
+                        has_papers = workflow_state.get("papers_completed_count", 0) > 0
+                if workflow_state is None:
+                    continue
                 
                 if has_tier and (has_topic or has_papers):
                     # Load session metadata for user prompt
@@ -357,6 +403,147 @@ class SessionManager:
         
         return most_recent
 
+    async def _recover_workflow_state_from_session_files(self, session_dir: Path) -> Optional[Dict[str, Any]]:
+        """Build a conservative resume state from session stats/brainstorm files.
+
+        This protects sessions where the workflow checkpoint was stale or absent
+        but durable brainstorm metadata still shows work in progress.  It only
+        resumes a current stats pointer, an in-progress brainstorm, or a completed
+        brainstorm that has not produced a paper yet.
+        """
+        try:
+            stats = {}
+            stats_path = session_dir / "session_stats.json"
+            if stats_path.exists():
+                async with aiofiles.open(stats_path, 'r', encoding='utf-8') as f:
+                    stats = json.loads(await f.read())
+
+            topic_id = stats.get("current_brainstorm_id")
+            paper_id = stats.get("current_paper_id")
+            topic_metadata = None
+            paper_metadata = None
+            paper_title = None
+            reference_paper_ids = []
+
+            brainstorms_dir = session_dir / "brainstorms"
+            papers_dir = session_dir / "papers"
+            if paper_id and papers_dir.exists():
+                paper_metadata_path = papers_dir / f"paper_{paper_id}_metadata.json"
+                if paper_metadata_path.exists():
+                    async with aiofiles.open(paper_metadata_path, 'r', encoding='utf-8') as f:
+                        paper_metadata = json.loads(await f.read())
+                    if paper_metadata.get("status") == "in_progress":
+                        paper_title = paper_metadata.get("title")
+                        reference_paper_ids = paper_metadata.get("referenced_papers") or []
+                        if not topic_id:
+                            source_ids = paper_metadata.get("source_brainstorm_ids") or []
+                            topic_id = source_ids[0] if source_ids else None
+                    else:
+                        # `current_paper_id` is sticky in stats; a completed paper
+                        # must not make a stale/idle session look like active paper writing.
+                        paper_id = None
+                else:
+                    paper_id = None
+
+            if not paper_id and papers_dir.exists():
+                paper_candidates = []
+                for paper_metadata_path in papers_dir.glob("paper_*_metadata.json"):
+                    try:
+                        async with aiofiles.open(paper_metadata_path, 'r', encoding='utf-8') as f:
+                            data = json.loads(await f.read())
+                        if data.get("status") == "in_progress":
+                            paper_candidates.append(data)
+                    except Exception:
+                        continue
+                if paper_candidates:
+                    paper_candidates.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+                    paper_metadata = paper_candidates[0]
+                    paper_id = paper_metadata.get("paper_id")
+                    paper_title = paper_metadata.get("title")
+                    reference_paper_ids = paper_metadata.get("referenced_papers") or []
+                    if not topic_id:
+                        source_ids = paper_metadata.get("source_brainstorm_ids") or []
+                        topic_id = source_ids[0] if source_ids else None
+
+            if topic_id and brainstorms_dir.exists():
+                metadata_path = brainstorms_dir / f"brainstorm_{topic_id}_metadata.json"
+                if metadata_path.exists():
+                    async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
+                        topic_metadata = json.loads(await f.read())
+
+            if topic_metadata is None and brainstorms_dir.exists():
+                candidates = []
+                for metadata_path in brainstorms_dir.glob("brainstorm_*_metadata.json"):
+                    try:
+                        async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
+                            data = json.loads(await f.read())
+                        status = data.get("status")
+                        papers_generated = data.get("papers_generated") or []
+                        if status == "in_progress" or (status == "complete" and not papers_generated):
+                            candidates.append(data)
+                    except Exception:
+                        continue
+                if candidates:
+                    candidates.sort(key=lambda item: item.get("last_activity", ""), reverse=True)
+                    topic_metadata = candidates[0]
+                    topic_id = topic_metadata.get("topic_id")
+
+            if not topic_id and not paper_id:
+                return None
+
+            current_tier = "tier2_paper_writing" if paper_id else "tier1_aggregation"
+            paper_phase = None
+            if paper_id:
+                paper_path = papers_dir / f"paper_{paper_id}.txt"
+                if paper_path.exists():
+                    async with aiofiles.open(paper_path, 'r', encoding='utf-8') as f:
+                        paper_phase = _detect_session_paper_phase(await f.read())
+                else:
+                    paper_phase = "body"
+            acceptance_count = int((topic_metadata or {}).get("submission_count") or 0)
+            if (
+                topic_metadata
+                and topic_metadata.get("status") == "complete"
+                and not paper_id
+                and not (topic_metadata.get("papers_generated") or [])
+            ):
+                current_tier = "tier2_paper_writing"
+                paper_phase = "brainstorm_proof_verification"
+            elif topic_metadata and topic_metadata.get("status") == "complete" and not paper_id:
+                return None
+
+            return {
+                "is_running": False,
+                "current_tier": current_tier,
+                "current_topic_id": topic_id,
+                "current_paper_id": paper_id,
+                "current_paper_title": paper_title,
+                "paper_phase": paper_phase,
+                "reference_paper_ids": reference_paper_ids,
+                "acceptance_count": acceptance_count,
+                "rejection_count": 0,
+                "consecutive_rejections": 0,
+                "exhaustion_signals": 0,
+                "papers_completed_count": stats.get("total_papers_completed", 0),
+                "last_redundancy_check_at": 0,
+                "last_completion_review_at": 0,
+                "last_tier3_check_at": 0,
+                "brainstorm_paper_count": 0,
+                "current_brainstorm_paper_ids": [],
+                "proof_framing_active": False,
+                "proof_framing_context": "",
+                "proof_framing_reasoning": "",
+                "tier3_active": False,
+                "tier3_enabled": False,
+                "tier3_format": None,
+                "tier3_phase": None,
+                "model_config": {},
+                "last_updated": stats.get("last_updated") or (topic_metadata or {}).get("last_activity", ""),
+            }
+        except Exception as exc:
+            logger.debug(f"Failed to recover workflow state from session files {session_dir.name}: {exc}")
+            return None
+
     async def list_all_sessions(self, base_dir: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         List all research sessions.
@@ -377,7 +564,7 @@ class SessionManager:
                     try:
                         async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
                             metadata = json.loads(await f.read())
-                            metadata["path"] = str(session_dir)
+                            metadata["path"] = session_dir.name
                             
                             # Count items in subdirectories
                             brainstorms_dir = session_dir / "brainstorms"
