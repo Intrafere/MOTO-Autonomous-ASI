@@ -39,10 +39,6 @@ export default function WorkflowPanel({ isRunning }) {
   // No persistence. Resets every time isRunning goes true.
   const hasPoppedThisSession = useRef(false);
 
-  // Auto-open: pop open exactly once, 10 minutes after user presses Start.
-  // No persistence. Resets every time isRunning goes true.
-  const hasPoppedThisSession = useRef(false);
-
   const expandPanel = useCallback(() => {
     setCollapsed(false);
     localStorage.setItem('workflow_panel_collapsed', 'false');

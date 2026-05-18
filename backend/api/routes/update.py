@@ -9,7 +9,6 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -49,8 +48,20 @@ def _detect_install_kind() -> str:
     return "zip"
 
 
+async def _run_git_command(*args: str) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *args,
+        cwd=str(_REPO_ROOT),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    stdout, _ = await proc.communicate()
+    return proc.returncode, stdout.decode("utf-8", errors="replace").strip()
+
+
 async def _run_git_pull() -> None:
-    """Execute git pull for git-clone installs, pulling from the configured update_channel."""
+    """Fast-forward a clean git checkout to the configured update channel."""
     import sys
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
@@ -83,24 +94,67 @@ async def _run_git_pull() -> None:
             _pull_state["status"] = "done"
             return
 
-        proc = await asyncio.create_subprocess_exec(
-            "git", "pull", "origin", channel,
-            cwd=str(_REPO_ROOT),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+        status_code, status_output = await _run_git_command("status", "--porcelain", "--untracked-files=no")
+        if status_code != 0:
+            _pull_state["output_lines"].append(status_output or "Failed to inspect git status.")
+            _pull_state["returncode"] = status_code
+            _pull_state["status"] = "error"
+            return
+        if status_output.strip():
+            _pull_state["output_lines"].append(
+                "Refused: tracked files have local modifications. Clean the checkout before updating."
+            )
+            _pull_state["returncode"] = 1
+            _pull_state["status"] = "error"
+            return
+
+        fetch_code, fetch_output = await _run_git_command("fetch", "origin", channel, "--quiet")
+        if fetch_code != 0:
+            _pull_state["output_lines"].append(fetch_output or f"Failed to fetch origin/{channel}.")
+            _pull_state["returncode"] = fetch_code
+            _pull_state["status"] = "error"
+            return
+
+        divergence_code, divergence_output = await _run_git_command(
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"HEAD...origin/{channel}",
         )
+        if divergence_code != 0:
+            _pull_state["output_lines"].append(divergence_output or f"Failed to compare HEAD with origin/{channel}.")
+            _pull_state["returncode"] = divergence_code
+            _pull_state["status"] = "error"
+            return
 
-        assert proc.stdout is not None
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            decoded = line.decode("utf-8", errors="replace").rstrip("\n")
-            _pull_state["output_lines"].append(decoded)
+        try:
+            ahead_str, behind_str = divergence_output.split()
+            ahead = int(ahead_str)
+            behind = int(behind_str)
+        except (ValueError, TypeError):
+            _pull_state["output_lines"].append("Failed to parse git divergence counts.")
+            _pull_state["returncode"] = 1
+            _pull_state["status"] = "error"
+            return
 
-        await proc.wait()
-        _pull_state["returncode"] = proc.returncode
-        _pull_state["status"] = "done" if proc.returncode == 0 else "error"
+        if ahead:
+            _pull_state["output_lines"].append(
+                f"Refused: this checkout is ahead of origin/{channel} and cannot be updated automatically."
+            )
+            _pull_state["returncode"] = 1
+            _pull_state["status"] = "error"
+            return
+        if not behind:
+            _pull_state["output_lines"].append("Already up to date.")
+            _pull_state["returncode"] = 0
+            _pull_state["status"] = "done"
+            return
+
+        merge_code, merge_output = await _run_git_command("merge", "--ff-only", f"origin/{channel}")
+        if merge_output:
+            _pull_state["output_lines"].extend(merge_output.splitlines())
+        _pull_state["returncode"] = merge_code
+        _pull_state["status"] = "done" if merge_code == 0 else "error"
     except Exception as exc:
         logger.exception("git pull failed with exception")
         _pull_state["output_lines"].append(f"Exception: {exc}")
@@ -122,10 +176,11 @@ def _run_zip_update_sync(state_lines: list) -> None:
         fetch_remote_manifest,
         fetch_branch_head_fallback,
         archive_url_for_manifest,
+        _download_archive,
+        _extract_archive,
         cleanup_path,
+        _write_installed_manifest,
     )
-    import urllib.request
-    import zipfile
 
     state_lines.append("Detecting update target...")
 
@@ -159,22 +214,17 @@ def _run_zip_update_sync(state_lines: list) -> None:
 
     journal = None
     try:
-        request = urllib.request.Request(archive_url, headers={"User-Agent": "MOTO-Build1-Updater"})
-        with urllib.request.urlopen(request, timeout=60) as response, archive_path.open("wb") as output:
-            shutil.copyfileobj(response, output)
+        _download_archive(remote_manifest, archive_path)
         state_lines.append("Download complete. Extracting...")
 
-        with zipfile.ZipFile(archive_path) as archive:
-            archive.extractall(extract_root)
-
-        children = [child for child in extract_root.iterdir()]
-        extracted_source = children[0] if len(children) == 1 and children[0].is_dir() else extract_root
+        extracted_source = _extract_archive(archive_path, extract_root)
 
         state_lines.append("Applying update (preserving data/config)...")
 
         active_instances = cleanup_launcher_state()
         preserved_relatives = collect_preserved_relatives(os.environ, active_instances)
         journal = sync_snapshot_into_install(extracted_source, _REPO_ROOT, preserved_relatives, backup_root)
+        _write_installed_manifest(remote_manifest)
 
         state_lines.append(
             f"Update applied: {local_manifest.version} ({local_manifest.short_commit}) "

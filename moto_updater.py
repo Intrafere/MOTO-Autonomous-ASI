@@ -3,6 +3,7 @@ Build 1/2 updater helpers for the MOTO launcher.
 """
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import json
 import os
@@ -12,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import urllib.request
 import zipfile
 
@@ -166,8 +167,44 @@ def _coerce_manifest(payload: dict | None) -> BuildManifest:
     )
 
 
+def _manifest_with_build_commit(manifest: BuildManifest, build_commit: str) -> BuildManifest:
+    return BuildManifest(
+        version=manifest.version,
+        build_commit=build_commit,
+        update_channel=manifest.update_channel,
+        api_contract_version=manifest.api_contract_version,
+        manifest_version=manifest.manifest_version,
+    )
+
+
+def _current_git_head() -> str | None:
+    if not (REPO_ROOT / ".git").exists():
+        return None
+    if not _git_checkout_matches_repo():
+        return None
+    code, output, _ = _git_output(["rev-parse", "HEAD"])
+    return output.strip() if code == 0 and output.strip() else None
+
+
+def _write_installed_manifest(manifest: BuildManifest) -> None:
+    _write_json(
+        LOCAL_MANIFEST_PATH,
+        {
+            "manifest_version": manifest.manifest_version,
+            "version": manifest.version,
+            "build_commit": manifest.build_commit,
+            "update_channel": manifest.update_channel,
+            "api_contract_version": manifest.api_contract_version,
+        },
+    )
+
+
 def load_local_manifest() -> BuildManifest:
-    return _coerce_manifest(_read_json(LOCAL_MANIFEST_PATH))
+    manifest = _coerce_manifest(_read_json(LOCAL_MANIFEST_PATH))
+    git_head = _current_git_head()
+    if git_head:
+        return _manifest_with_build_commit(manifest, git_head)
+    return manifest
 
 
 def _normalize_repo_slug(url: str) -> str | None:
@@ -231,16 +268,11 @@ def _official_repo_slug() -> str:
     return repo_slug
 
 
-def _manifest_url_for_channel(update_channel: str) -> str:
+def _contents_api_url_for_path(update_channel: str, path: str) -> str:
     repo_slug = _official_repo_slug()
-    channel = (update_channel or "main").strip() or "main"
-    return f"https://raw.githubusercontent.com/{repo_slug}/{channel}/moto-update-manifest.json"
-
-
-def _package_json_url_for_channel(update_channel: str) -> str:
-    repo_slug = _official_repo_slug()
-    channel = (update_channel or "main").strip() or "main"
-    return f"https://raw.githubusercontent.com/{repo_slug}/{channel}/package.json"
+    channel = quote((update_channel or "main").strip() or "main", safe="")
+    encoded_path = quote(path.strip("/"), safe="/")
+    return f"https://api.github.com/repos/{repo_slug}/contents/{encoded_path}?ref={channel}"
 
 
 def _branch_api_url_for_channel(update_channel: str) -> str:
@@ -257,7 +289,10 @@ def archive_url_for_manifest(manifest: BuildManifest) -> str:
 def _fetch_json_url(url: str, timeout_seconds: int) -> dict:
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "MOTO-Build1-Updater"},
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "MOTO-Build1-Updater",
+        },
     )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         payload = json.loads(response.read().decode("utf-8"))
@@ -267,19 +302,45 @@ def _fetch_json_url(url: str, timeout_seconds: int) -> dict:
     return payload
 
 
+def _fetch_repo_file_json(update_channel: str, path: str, timeout_seconds: int) -> dict:
+    payload = _fetch_json_url(_contents_api_url_for_path(update_channel, path), timeout_seconds)
+    if payload.get("type") != "file":
+        raise RuntimeError(f"GitHub contents API did not return a file for {path}.")
+
+    content = str(payload.get("content", ""))
+    encoding = str(payload.get("encoding", "")).lower()
+    if encoding != "base64" or not content.strip():
+        raise RuntimeError(f"GitHub contents API returned unsupported content encoding for {path}.")
+
+    try:
+        decoded = base64.b64decode(content, validate=False).decode("utf-8")
+        parsed = json.loads(decoded)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not decode JSON from GitHub contents API for {path}: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Unexpected JSON payload in {path}.")
+    return parsed
+
+
 def fetch_remote_manifest(local_manifest: BuildManifest, timeout_seconds: int = 10) -> BuildManifest:
-    payload = _fetch_json_url(_manifest_url_for_channel(local_manifest.update_channel), timeout_seconds)
-    return _coerce_manifest(payload)
+    branch_payload = _fetch_json_url(_branch_api_url_for_channel(local_manifest.update_channel), timeout_seconds)
+    branch_head = str(branch_payload.get("commit", {}).get("sha", "")).strip()
+    if not branch_head:
+        raise RuntimeError("GitHub branch metadata did not include a branch-head commit SHA.")
+    payload = _fetch_repo_file_json(branch_head, "moto-update-manifest.json", timeout_seconds)
+    manifest = _coerce_manifest(payload)
+    return _manifest_with_build_commit(manifest, branch_head)
 
 
 def fetch_branch_head_fallback(local_manifest: BuildManifest, timeout_seconds: int = 10) -> BuildManifest:
-    package_payload = _fetch_json_url(_package_json_url_for_channel(local_manifest.update_channel), timeout_seconds)
     branch_payload = _fetch_json_url(_branch_api_url_for_channel(local_manifest.update_channel), timeout_seconds)
 
-    version = str(package_payload.get("version", "")).strip() or local_manifest.version
     commit = str(branch_payload.get("commit", {}).get("sha", "")).strip()
     if not commit:
         raise RuntimeError("GitHub branch metadata did not include a branch-head commit SHA.")
+    package_payload = _fetch_repo_file_json(commit, "package.json", timeout_seconds)
+    version = str(package_payload.get("version", "")).strip() or local_manifest.version
 
     return BuildManifest(
         version=version,
@@ -881,6 +942,7 @@ def apply_zip_update(
         _download_archive(remote_manifest, archive_path)
         extracted_source = _extract_archive(archive_path, extract_root)
         journal = sync_snapshot_into_install(extracted_source, REPO_ROOT, preserved_relatives, backup_root)
+        _write_installed_manifest(remote_manifest)
         _relaunch_launcher(launcher_args, [backup_root, work_root], env)
         return True, "Update applied successfully. Relaunching MOTO with the new build."
     except Exception as exc:
