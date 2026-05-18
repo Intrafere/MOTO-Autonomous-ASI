@@ -54,7 +54,7 @@ One process pair = one MOTO instance (local or sandbox). Env inputs:
 - `MOTO_INSTANCE_ID`, `MOTO_BACKEND_HOST`/`HOST`, `MOTO_BACKEND_PORT`/`PORT`
 - `MOTO_DATA_ROOT`, optional `MOTO_LOG_ROOT`, optional `MOTO_SECRET_NAMESPACE`
 - optional `MOTO_FRONTEND_STORAGE_PREFIX`, optional `MOTO_CORS_ORIGINS`, optional `MOTO_LM_STUDIO_BASE_URL`
-- Default desktop launches bind backend and bundled Vite frontend to loopback and require `MOTO_DESKTOP_API_TOKEN` / `VITE_MOTO_DESKTOP_API_TOKEN` on protected HTTP routes. Desktop WebSockets use one-time tickets minted by authenticated `POST /api/ws-ticket`; hosted generic mode continues to use proxy HMAC auth instead.
+- Default desktop launches bind backend and bundled Vite frontend to loopback and require `MOTO_DESKTOP_API_TOKEN` / `VITE_MOTO_DESKTOP_API_TOKEN` on protected HTTP routes, except read-only proof certificate exports (`/api/proofs/{id}/certificate[.lean]`) which may be direct local browser downloads. Desktop WebSockets use one-time tickets minted by authenticated `POST /api/ws-ticket`; hosted generic mode continues to use proxy HMAC auth instead.
 
 Hosted sandboxes reuse this exact contract (`MOTO_DATA_ROOT=/app/backend/data`). No separate hosted-only env model.
 

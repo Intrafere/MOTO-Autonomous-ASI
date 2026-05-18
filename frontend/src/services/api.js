@@ -592,13 +592,20 @@ export const autonomousAPI = {
     return response.json();
   },
 
-  // Download URLs for machine-readable proof certificates
-  getProofCertificateUrl(proofId) {
-    return `${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate`;
+  async getProofCertificate(proofId) {
+    const response = await fetch(`${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate`);
+    if (!response.ok) {
+      await throwFromResponse(response, `Failed to get proof certificate for ${proofId}`);
+    }
+    return response.json();
   },
 
-  getProofLeanDownloadUrl(proofId) {
-    return `${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate.lean`;
+  async getProofLeanSource(proofId) {
+    const response = await fetch(`${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate.lean`);
+    if (!response.ok) {
+      await throwFromResponse(response, `Failed to get Lean source for ${proofId}`);
+    }
+    return response.text();
   },
 
   async getProofLibrary(novelOnly = true) {
