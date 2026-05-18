@@ -3,6 +3,7 @@ Middleware for CORS and error handling.
 """
 import hmac
 import os
+import re
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +32,16 @@ DEFAULT_ORIGINS = [
 ]
 DESKTOP_API_TOKEN_HEADER = "X-Moto-Desktop-Token"
 UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+DESKTOP_PUBLIC_PROOF_EXPORT_RE = re.compile(r"^/api/proofs/[^/]+/certificate(?:\.lean)?$")
+
+
+def _is_desktop_public_export(method: str, path: str) -> bool:
+    """Allow direct local browser downloads for read-only generated artifacts."""
+    normalized_method = (method or "").upper()
+    normalized_path = path or ""
+    if normalized_method not in {"GET", "HEAD"}:
+        return False
+    return bool(DESKTOP_PUBLIC_PROOF_EXPORT_RE.fullmatch(normalized_path))
 
 
 def _origin_from_url(value: str) -> str:
@@ -44,6 +55,8 @@ def _origin_from_url(value: str) -> str:
 def _validate_desktop_token(request: Request, allowed_origins: list[str]) -> None:
     """Require the launcher-provided desktop API token outside public routes."""
     if is_proxy_auth_allowlisted(request.method, request.url.path):
+        return
+    if _is_desktop_public_export(request.method, request.url.path):
         return
 
     expected = (system_config.desktop_api_token or "").strip()

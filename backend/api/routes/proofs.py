@@ -51,6 +51,23 @@ def _safe_path_label(path_value: str) -> str:
         return "[configured]"
 
 
+async def _get_export_proof_or_404(proof_id: str):
+    try:
+        proof = await proof_database.get_proof(proof_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Proof not found")
+    if proof is None:
+        raise HTTPException(status_code=404, detail="Proof not found")
+    return proof
+
+
+async def _get_export_lean_code(proof_id: str) -> str:
+    try:
+        return await proof_database.get_lean_code(proof_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Proof not found")
+
+
 def _build_model_config(role: ProofRoleConfigSnapshot) -> ModelConfig:
     return ModelConfig(
         provider=role.provider,
@@ -530,21 +547,19 @@ async def get_library_proof(session_id: str, proof_id: str):
 @router.get("/{proof_id}/certificate")
 async def get_proof_certificate(proof_id: str):
     """Return a machine-readable proof certificate JSON payload."""
-    proof = await proof_database.get_proof(proof_id)
-    if proof is None:
-        raise HTTPException(status_code=404, detail="Proof not found")
+    proof = await _get_export_proof_or_404(proof_id)
 
     lean_version = ""
     mathlib_commit = ""
     if system_config.lean4_enabled:
         try:
             client = get_lean4_client()
-            lean_version = await client.get_version()
+            lean_version = await asyncio.wait_for(client.get_version(), timeout=5.0)
             mathlib_commit = client.get_mathlib_commit()
-        except Exception:
-            pass
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.warning("Lean 4 certificate metadata lookup timed out or failed: %s", exc)
 
-    lean_code = await proof_database.get_lean_code(proof_id)
+    lean_code = await _get_export_lean_code(proof_id)
     payload = {
         "proof_id": proof.proof_id,
         "theorem_statement": proof.theorem_statement,
@@ -574,11 +589,9 @@ async def get_proof_certificate(proof_id: str):
 @router.get("/{proof_id}/certificate.lean")
 async def get_proof_certificate_lean(proof_id: str):
     """Return the raw saved Lean file for a proof."""
-    proof = await proof_database.get_proof(proof_id)
-    if proof is None:
-        raise HTTPException(status_code=404, detail="Proof not found")
+    proof = await _get_export_proof_or_404(proof_id)
 
-    lean_code = await proof_database.get_lean_code(proof_id)
+    lean_code = await _get_export_lean_code(proof_id)
     return PlainTextResponse(
         content=lean_code or proof.lean_code,
         headers={

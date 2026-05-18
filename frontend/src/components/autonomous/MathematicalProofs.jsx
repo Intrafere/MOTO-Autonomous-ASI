@@ -5,6 +5,7 @@ import {
   buildCurrentProofRuntimeConfig,
   isProofRuntimeConfigComplete,
 } from '../../hooks/useProofCheckRuntime';
+import { downloadTextFile } from '../../utils/downloadHelpers';
 
 function formatDate(isoString) {
   if (!isoString) {
@@ -419,6 +420,31 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
     }
   };
 
+  const handleDownloadLeanProof = async (proof) => {
+    try {
+      const leanCode = await api.getProofLeanSource(proof.proof_id);
+      if (!leanCode) {
+        throw new Error('Lean source is unavailable for this proof.');
+      }
+      downloadTextFile(leanCode, `${proof.proof_id}.lean`, 'text/plain');
+    } catch (err) {
+      setError(`Failed to download Lean proof: ${err.message}`);
+    }
+  };
+
+  const handleDownloadCertificate = async (proof) => {
+    try {
+      const certificate = await api.getProofCertificate(proof.proof_id);
+      downloadTextFile(
+        JSON.stringify(certificate, null, 2),
+        `${proof.proof_id}_certificate.json`,
+        'application/json'
+      );
+    } catch (err) {
+      setError(`Failed to download proof certificate: ${err.message}`);
+    }
+  };
+
   return (
     <div className="math-proofs-view">
       <div className="math-proofs-header">
@@ -646,13 +672,13 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
                   </div>
 
                   <div className="math-proof-card-actions">
-                    <a
+                    <button
+                      type="button"
                       className="math-proof-download math-proof-download--compact"
-                      href={api.getProofLeanDownloadUrl(proof.proof_id)}
-                      download={`${proof.proof_id}.lean`}
+                      onClick={() => handleDownloadLeanProof(proof)}
                     >
                       Download .lean
-                    </a>
+                    </button>
                     <button
                       className="math-proof-expand"
                       onClick={() => setExpandedProofId(isExpanded ? null : proof.proof_id)}
@@ -671,20 +697,20 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
                 {isExpanded && (
                   <div className="math-proof-details">
                     <div className="math-proof-actions">
-                      <a
+                      <button
+                        type="button"
                         className="math-proof-download"
-                        href={api.getProofCertificateUrl(proof.proof_id)}
-                        download={`${proof.proof_id}_certificate.json`}
+                        onClick={() => handleDownloadCertificate(proof)}
                       >
                         Download Certificate (JSON)
-                      </a>
-                      <a
+                      </button>
+                      <button
+                        type="button"
                         className="math-proof-download"
-                        href={api.getProofLeanDownloadUrl(proof.proof_id)}
-                        download={`${proof.proof_id}.lean`}
+                        onClick={() => handleDownloadLeanProof(proof)}
                       >
                         Download .lean
-                      </a>
+                      </button>
                     </div>
 
                     {proof.theorem_name && (
