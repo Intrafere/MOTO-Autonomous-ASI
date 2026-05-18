@@ -344,6 +344,9 @@ function CompilerLogs() {
     if (type === 'compiler_wolfram_call') {
       return 'event-info';
     }
+    if (type === 'compiler_wolfram_call') {
+      return 'event-info';
+    }
     if (type?.includes('decline') || type?.includes('skipped')) {
       return 'event-warning';
     }

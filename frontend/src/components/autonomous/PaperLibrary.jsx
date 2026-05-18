@@ -333,6 +333,12 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
         </div>
       )}
 
+      {proofActionMessage && (
+        <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
+          {proofActionMessage}
+        </div>
+      )}
+
       <div className="paper-grid">
         {papers.map((paper) => (
           <div
