@@ -20,6 +20,7 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
+from backend.shared.log_redaction import redact_log_text
 from backend.aggregator.agents.submitter import SubmitterAgent
 from backend.aggregator.agents.validator import ValidatorAgent
 from backend.aggregator.core.queue_manager import queue_manager
@@ -38,32 +39,26 @@ def _resolve_uploaded_user_file(file_ref: str, *, allow_trusted_context_files: b
 
     uploads_root = Path(system_config.user_uploads_dir).resolve()
     data_root = Path(system_config.data_dir).resolve()
-    candidate = Path(raw_ref)
 
-    if candidate.is_absolute():
-        resolved_candidate = candidate.resolve()
-        try:
-            resolved_candidate.relative_to(uploads_root)
-            return resolved_candidate
-        except ValueError:
-            pass
-
-        if allow_trusted_context_files:
-            try:
-                resolved_candidate.relative_to(data_root)
-                return resolved_candidate
-            except ValueError:
-                pass
-
-        logger.warning("Rejected uploaded file path outside trusted context roots: %s", candidate.name)
-        return None
-
+    # Public uploads are logical filenames. Absolute paths are only accepted
+    # after the same root-containment check, so a caller cannot expand access.
     try:
+        if Path(raw_ref).is_absolute():
+            return resolve_path_within_root(uploads_root, raw_ref)
+
         safe_filename = validate_single_path_component(raw_ref, "uploaded filename")
         return resolve_path_within_root(uploads_root, safe_filename)
     except ValueError as exc:
-        logger.warning("Rejected unsafe uploaded file reference: %s", exc)
-        return None
+        upload_error = exc
+
+    if allow_trusted_context_files:
+        try:
+            return resolve_path_within_root(data_root, raw_ref)
+        except ValueError:
+            pass
+
+    logger.warning("Rejected unsafe uploaded file reference: %s", redact_log_text(upload_error, 240))
+    return None
 
 
 class Coordinator:
@@ -376,9 +371,10 @@ class Coordinator:
                     is_user_file=True
                 )
                 # Also load content for potential direct injection (async to avoid blocking)
+                # codeql[py/path-injection]: path is resolved by _resolve_uploaded_user_file within uploads/data roots.
                 async with aiofiles.open(path, 'r', encoding='utf-8') as f:
                     user_files_content[path.name] = await f.read()
-                logger.info(f"Loaded user file: {path.name}")
+                logger.info("Loaded user file: %s", redact_log_text(path.name, 120))
         
         # Create submitter agents from configs (1-10 submitters with individual settings)
         self.submitters = []

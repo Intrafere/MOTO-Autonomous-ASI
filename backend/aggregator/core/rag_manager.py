@@ -19,6 +19,7 @@ from backend.shared.models import DocumentChunk, ContextPack
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.rag_lock import rag_operation_lock
 from backend.shared.utils import count_tokens, compress_text
+from backend.shared.log_redaction import redact_log_text
 from backend.aggregator.ingestion.pipeline import ingestion_pipeline
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,8 @@ class RAGManager:
         self,
         file_path: str,
         chunk_sizes: List[int] = None,
-        is_user_file: bool = False
+        is_user_file: bool = False,
+        trusted_roots: List[str | Path] | None = None,
     ) -> None:
         """
         Add a document to the RAG system.
@@ -80,11 +82,18 @@ class RAGManager:
             is_user_file: Whether this is a user file (never evicted)
         """
         try:
+            if trusted_roots is None:
+                trusted_roots = [
+                    system_config.data_dir,
+                    system_config.user_uploads_dir,
+                ]
+
             # Ingest document
             chunks_by_size = await ingestion_pipeline.ingest_file(
                 file_path,
                 chunk_sizes,
-                is_user_file
+                is_user_file,
+                trusted_roots=trusted_roots,
             )
             
             # Add to ChromaDB and memory
@@ -106,10 +115,14 @@ class RAGManager:
             # Enforce per-size chunk cap
             await self._enforce_chunk_cap()
             
-            logger.info(f"Added document: {file_path}")
+            logger.info("Added document: %s", redact_log_text(Path(file_path).name, 120))
             
         except Exception as e:
-            logger.error(f"Failed to add document {file_path}: {e}")
+            logger.error(
+                "Failed to add document %s: %s",
+                redact_log_text(Path(file_path).name, 120),
+                redact_log_text(e, 240),
+            )
             raise
     
     async def add_text(
@@ -155,10 +168,14 @@ class RAGManager:
             # Enforce per-size chunk cap
             await self._enforce_chunk_cap()
             
-            logger.info(f"Added text: {source_name}")
+            logger.info("Added text: %s", redact_log_text(source_name, 120))
             
         except Exception as e:
-            logger.error(f"Failed to add text {source_name}: {e}")
+            logger.error(
+                "Failed to add text %s: %s",
+                redact_log_text(source_name, 120),
+                redact_log_text(e, 240),
+            )
             raise
     
     async def retrieve(
@@ -718,16 +735,27 @@ class RAGManager:
             return
         
         # Evict the oldest document
-        logger.info(f"LRU eviction: Removing oldest document '{oldest_doc}' (last accessed: {oldest_time})")
+        logger.info(
+            "LRU eviction: Removing oldest document '%s' (last accessed: %s)",
+            redact_log_text(oldest_doc, 120),
+            oldest_time,
+        )
         
         try:
             await self.remove_document(oldest_doc)
             # Remove from access tracking
             if oldest_doc in self.document_access_order:
                 del self.document_access_order[oldest_doc]
-            logger.info(f"LRU eviction complete: '{oldest_doc}' removed successfully")
+            logger.info(
+                "LRU eviction complete: '%s' removed successfully",
+                redact_log_text(oldest_doc, 120),
+            )
         except Exception as e:
-            logger.error(f"LRU eviction failed for '{oldest_doc}': {e}")
+            logger.error(
+                "LRU eviction failed for '%s': %s",
+                redact_log_text(oldest_doc, 120),
+                redact_log_text(e, 240),
+            )
     
     async def remove_document(self, source_name: str) -> None:
         """Remove a document from all collections."""
@@ -759,7 +787,7 @@ class RAGManager:
         if source_name in self.permanent_documents:
             self.permanent_documents.discard(source_name)
         
-        logger.info(f"Removed document: {source_name}")
+        logger.info("Removed document: %s", redact_log_text(source_name, 120))
     
     def clear_all_documents(self) -> None:
         """Clear all documents from RAG database (synchronous for cleanup).

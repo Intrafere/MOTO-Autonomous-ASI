@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+from urllib.parse import urlparse
 import urllib.request
 import zipfile
 
@@ -126,6 +127,14 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _record_keyring_namespace(record: dict) -> str | None:
+    """Read the current keyring namespace field, with legacy state fallback."""
+    value = record.get("keyring_namespace")
+    if value is None:
+        value = record.get("secret_namespace")
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _load_package_json() -> dict:
     payload = _read_json(PACKAGE_JSON_PATH)
     return payload if isinstance(payload, dict) else {}
@@ -166,21 +175,31 @@ def _normalize_repo_slug(url: str) -> str | None:
     if not raw:
         return None
 
-    cleaned = raw.rstrip("/")
-    for prefix in ("git+https://", "https://", "http://", "ssh://git@"):
-        if cleaned.startswith(prefix):
-            cleaned = cleaned[len(prefix):]
-            break
+    def slug_from_path(path: str) -> str | None:
+        cleaned_path = path.strip("/").removesuffix(".git")
+        parts = [part for part in cleaned_path.split("/") if part]
+        if len(parts) == 2 and all(parts):
+            return f"{parts[0]}/{parts[1]}"
+        return None
 
-    if cleaned.startswith("git@github.com:"):
-        cleaned = cleaned[len("git@github.com:") :]
-    elif cleaned.startswith("github.com/"):
-        cleaned = cleaned[len("github.com/") :]
+    if raw.startswith("git@github.com:"):
+        return slug_from_path(raw[len("git@github.com:") :])
 
-    cleaned = cleaned.removesuffix(".git")
-    parts = [part for part in cleaned.split("/") if part]
-    if len(parts) >= 2:
-        return f"{parts[-2]}/{parts[-1]}"
+    parsed_raw = raw
+    if parsed_raw.startswith("git+"):
+        parsed_raw = parsed_raw[len("git+") :]
+
+    parsed = urlparse(parsed_raw)
+    if parsed.scheme in {"http", "https"}:
+        if parsed.hostname != "github.com":
+            return None
+        return slug_from_path(parsed.path)
+
+    if parsed.scheme == "ssh":
+        if parsed.hostname != "github.com":
+            return None
+        return slug_from_path(parsed.path)
+
     return None
 
 
@@ -335,7 +354,11 @@ def cleanup_launcher_state() -> list[dict]:
         backend_pid = _coerce_int(instance.get("backend_window_pid"))
         frontend_pid = _coerce_int(instance.get("frontend_window_pid"))
         if _is_pid_running(backend_pid) or _is_pid_running(frontend_pid):
-            active_instances.append(instance)
+            normalized = dict(instance)
+            keyring_namespace = _record_keyring_namespace(normalized)
+            normalized.pop("secret_namespace", None)
+            normalized["keyring_namespace"] = keyring_namespace
+            active_instances.append(normalized)
 
     _save_launcher_state({"instances": active_instances})
     return active_instances
@@ -350,7 +373,7 @@ def register_active_instance(
     frontend_port: int,
     data_root: str,
     log_root: str,
-    secret_namespace: str | None,
+    keyring_namespace: str | None,
     storage_prefix: str | None,
 ) -> None:
     active_instances = cleanup_launcher_state()
@@ -363,7 +386,6 @@ def register_active_instance(
             "frontend_port": frontend_port,
             "data_root": data_root,
             "log_root": log_root,
-            "secret_namespace": secret_namespace,
             "storage_prefix": storage_prefix,
         }
     )
@@ -373,7 +395,7 @@ def register_active_instance(
 def load_last_instance_record() -> dict | None:
     """Return the most recently launched non-default instance record, or None.
 
-    Used to preserve a stable secret_namespace / data_root / storage_prefix across
+    Used to preserve a stable keyring namespace / data_root / storage_prefix across
     relaunches when the default ports are temporarily busy. Without this the
     launcher would mint a fresh timestamped instance_id on every relaunch, which
     changes the OS-keyring service name and makes the saved OpenRouter / Wolfram
@@ -385,6 +407,11 @@ def load_last_instance_record() -> dict | None:
     instance_id = payload.get("instance_id")
     if not isinstance(instance_id, str) or not instance_id.strip():
         return None
+    payload = dict(payload)
+    keyring_namespace = _record_keyring_namespace(payload)
+    payload.pop("secret_namespace", None)
+    if keyring_namespace:
+        payload["keyring_namespace"] = keyring_namespace
     return payload
 
 
@@ -393,7 +420,7 @@ def save_last_instance_record(
     instance_id: str,
     data_root: str,
     log_root: str,
-    secret_namespace: str | None,
+    keyring_namespace: str | None,
     storage_prefix: str | None,
 ) -> None:
     """Persist the last launched non-default instance so it can be reused on relaunch."""
@@ -403,7 +430,6 @@ def save_last_instance_record(
             "instance_id": instance_id,
             "data_root": data_root,
             "log_root": log_root,
-            "secret_namespace": secret_namespace,
             "storage_prefix": storage_prefix,
         },
     )
@@ -787,6 +813,13 @@ def _download_archive(manifest: BuildManifest, destination: Path) -> None:
 
 def _extract_archive(archive_path: Path, destination: Path) -> Path:
     with zipfile.ZipFile(archive_path) as archive:
+        destination_root = destination.resolve()
+        for member in archive.infolist():
+            target = (destination_root / member.filename).resolve()
+            try:
+                target.relative_to(destination_root)
+            except ValueError as exc:
+                raise RuntimeError(f"Archive member escapes destination: {member.filename}") from exc
         archive.extractall(destination)
 
     children = [child for child in destination.iterdir()]

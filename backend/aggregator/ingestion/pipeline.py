@@ -8,6 +8,8 @@ from typing import List, Dict
 import logging
 
 from backend.shared.models import DocumentChunk
+from backend.shared.path_safety import resolve_path_within_root
+from backend.shared.log_redaction import redact_log_text
 from backend.aggregator.ingestion.normalizer import normalize_text
 from backend.aggregator.ingestion.chunker import chunker
 
@@ -21,7 +23,8 @@ class IngestionPipeline:
         self,
         file_path: str,
         chunk_sizes: List[int] = None,
-        is_user_file: bool = False
+        is_user_file: bool = False,
+        trusted_roots: List[str | Path] | None = None,
     ) -> Dict[int, List[DocumentChunk]]:
         """
         Ingest a file and return chunks at multiple sizes.
@@ -35,15 +38,26 @@ class IngestionPipeline:
             Dict mapping chunk_size -> list of DocumentChunks
         """
         try:
+            resolved_path = Path(file_path)
+            if trusted_roots:
+                for root in trusted_roots:
+                    try:
+                        resolved_path = resolve_path_within_root(Path(root), str(file_path))
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    raise ValueError("File path is outside trusted ingestion roots")
+
             # Read file
-            async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+            async with aiofiles.open(resolved_path, 'r', encoding='utf-8') as f:
                 text = await f.read()
             
             # Normalize text
             normalized_text = normalize_text(text)
             
             # Get file name
-            file_name = Path(file_path).name
+            file_name = resolved_path.name
             
             # Chunk at multiple sizes
             chunks_by_size = chunker.chunk_text(
@@ -53,12 +67,15 @@ class IngestionPipeline:
                 is_user_file
             )
             
-            logger.info(f"Ingested {file_name}: {sum(len(chunks) for chunks in chunks_by_size.values())} total chunks")
+            logger.info(
+                "Ingested trusted file into %s total chunks",
+                sum(len(chunks) for chunks in chunks_by_size.values()),
+            )
             
             return chunks_by_size
             
         except Exception as e:
-            logger.error(f"Failed to ingest file {file_path}: {e}")
+            logger.error("Failed to ingest trusted file: %s", redact_log_text(e, 240))
             raise
     
     async def ingest_text(
@@ -92,12 +109,20 @@ class IngestionPipeline:
                 is_user_file
             )
             
-            logger.info(f"Ingested {source_name}: {sum(len(chunks) for chunks in chunks_by_size.values())} total chunks")
+            logger.info(
+                "Ingested %s: %s total chunks",
+                redact_log_text(source_name, 120),
+                sum(len(chunks) for chunks in chunks_by_size.values()),
+            )
             
             return chunks_by_size
             
         except Exception as e:
-            logger.error(f"Failed to ingest text {source_name}: {e}")
+            logger.error(
+                "Failed to ingest text %s: %s",
+                redact_log_text(source_name, 120),
+                redact_log_text(e, 240),
+            )
             raise
 
 

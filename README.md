@@ -3,8 +3,8 @@
 **Version: 1.0.8**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Node.js 16+](https://img.shields.io/badge/node-16+-green.svg)](https://nodejs.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Node.js 20.19+](https://img.shields.io/badge/node-20.19+-green.svg)](https://nodejs.org/)
 
 **A breakthrough in AI automated theorem generation. An autonomous AI/ASI research system that generates novel and publication-worthy research papers — and the machine-checked theorem proving programming language Lean 4 proofs alongside them for definitive mathematical confirmation of correctness. This ASI is autonomously powered by Intrafere Research Group's new ASI discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/). Top-P exploration assists in deciphering how we explore AI weights, a specific combination of reiterative brainstorming, validation, feedback, and pruning allows for superintelligence exploration and creative multi-model data extraction from nearly any combination of AI models. Additionally, MOTO has optional automated theorem generation capabilities that formalize candidate theorems and lemmas in Lean 4 (with optional Z3/SMT hinting and Mathlib lemma search) and only stores proofs that Lean 4 accepts as genuinely mathematically verified. Lean 4 automation means the user gets guaranteed verification of the mathematical results produced. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.**
 
@@ -59,9 +59,9 @@ MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward (novelty seeki
 
 Before installation, you need:
 
-1. **Python 3.8+** - [Download here](https://www.python.org/downloads/)
+1. **Python 3.10+** - [Download here](https://www.python.org/downloads/)
    - ⚠️ **IMPORTANT**: Check "Add Python to PATH" during installation
-2. **Node.js 16+** - [Download here](https://nodejs.org/)
+2. **Node.js 20.19+** - [Download here](https://nodejs.org/)
 3. **LM Studio** (optional but HIGHLY recommended - otherwise your system will need to pay OpenRouter for RAG embedding calls, which is very slow compared to LM Studio's local embeddings) - [Download here](https://lmstudio.ai/)
    - If using OpenRouter, then download and load at least one model (e.g., DeepSeek, Llama, Qwen - older models and some models below 12 billion parameters may struggle; however, it is always worth a try!)
    - **Load the LM Studio RAG agent [optional but HIGHLY recommended for much faster outputs/answers]**: Load the embedding model `nomic-ai/nomic-embed-text-v1.5` in your LM Studio "Developer" tab (server tab) (search for "nomic-ai/nomic-embed-text-v1.5" to download it in the LM Studio downloads center). Please note: you may need to enable "Power User" or "Developer" to see this developer tab - this server will let you load the amount and capacity of simultaneous models that your PC will support. In this developer tab is where you load both your nomic-ai embedding agent and any optional local hosted agents you want to use in the program (e.g., GPT OSS 20b, DeepSeek 32B, etc.). **If you do not download LM Studio and enable the Nomic agent the system will run much slower and cost slightly more due to having to use the paid service OpenRouter for RAG calls.**
@@ -185,7 +185,7 @@ bash linux-ubuntu-launcher.sh
 
 ### Technology Stack
 
-- **Backend**: Python 3.8+, FastAPI, Uvicorn
+- **Backend**: Python 3.10+, FastAPI, Uvicorn
 - **Frontend**: React, Vite, Tailwind CSS
 - **AI**: LM Studio API, OpenRouter API
 - **RAG**: ChromaDB, Nomic Embeddings, or OpenRouter embeddings fallback if LM Studio is unavailable (not recommended - slower).
@@ -336,7 +336,7 @@ All configurable per role:
 
 #### Manual Installation (All Platforms)
 
-If you want the consumer launcher experience on Ubuntu 24.04, prefer `bash linux-ubuntu-launcher.sh` instead of the manual steps below. The manual flow remains the fallback path when you intentionally want full terminal-level control.
+If you want the consumer launcher experience on Ubuntu 24.04, prefer `bash linux-ubuntu-launcher.sh` instead of the manual steps below. The manual flow remains the fallback path when you intentionally want full terminal-level control. For normal desktop use, the launchers are preferred because they create the matching backend/frontend desktop API tokens automatically.
 
 ```bash
 # Clone the repository
@@ -359,12 +359,16 @@ mkdir -p backend/data/user_uploads
 mkdir -p backend/logs
 
 # Start the backend (in one terminal)
-python -m uvicorn backend.api.main:app --host 0.0.0.0 --port 8000
+export MOTO_DESKTOP_API_TOKEN="local-dev-token"
+python -m uvicorn backend.api.main:app --host 127.0.0.1 --port 8000
 
 # Start the frontend (in another terminal)
 cd frontend
+export VITE_MOTO_DESKTOP_API_TOKEN="local-dev-token"
 npm run dev
 ```
+
+On Windows PowerShell, use `$env:MOTO_DESKTOP_API_TOKEN="local-dev-token"` and `$env:VITE_MOTO_DESKTOP_API_TOKEN="local-dev-token"` instead of `export ...`.
 
 Then open `http://localhost:5173` in your browser.
 

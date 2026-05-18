@@ -15,7 +15,7 @@ import re
 import secrets
 import socket
 import shlex
-from shutil import rmtree, which
+from shutil import copyfileobj, rmtree, which
 import subprocess
 import sys
 import tarfile
@@ -128,6 +128,16 @@ def _path_is_within(root: Path, candidate: str | Path) -> bool:
     except (OSError, ValueError):
         return False
     return True
+
+
+def _stored_keyring_namespace(record: dict | None) -> str | None:
+    """Read current launcher state while accepting legacy records."""
+    if not isinstance(record, dict):
+        return None
+    value = record.get("keyring_namespace")
+    if value is None:
+        value = record.get("secret_namespace")
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def using_repo_local_venv() -> bool:
@@ -300,7 +310,7 @@ def resolve_instance_runtime() -> InstanceRuntime:
                     "instance_id": candidate_id,
                     "data_root": last_record.get("data_root") or None,
                     "log_root": last_record.get("log_root") or None,
-                    "secret_namespace": last_record.get("secret_namespace"),
+                    "keyring_namespace": _stored_keyring_namespace(last_record),
                     "storage_prefix": last_record.get("storage_prefix"),
                 }
             else:
@@ -371,10 +381,10 @@ def resolve_instance_runtime() -> InstanceRuntime:
     # instance_id unless explicitly overridden or reused from a record that
     # stored an explicit override.
     if is_default_instance:
-        secret_namespace = explicit_secret or (reused_record or {}).get("secret_namespace")
+        secret_namespace = explicit_secret or _stored_keyring_namespace(reused_record)
         storage_prefix = explicit_storage or (reused_record or {}).get("storage_prefix")
     else:
-        recorded_secret = (reused_record or {}).get("secret_namespace")
+        recorded_secret = _stored_keyring_namespace(reused_record)
         recorded_storage = (reused_record or {}).get("storage_prefix")
         secret_namespace = (
             explicit_secret
@@ -741,7 +751,7 @@ def prepare_runtime_and_environment() -> tuple[InstanceRuntime, str, str, dict[s
     else:
         if reused_from_record:
             cprint(
-                "Reusing previously launched instance runtime (same secret namespace, same data root).",
+                "Reusing previously launched instance runtime (same keyring namespace, same data root).",
                 GREEN,
             )
         else:
@@ -753,9 +763,9 @@ def prepare_runtime_and_environment() -> tuple[InstanceRuntime, str, str, dict[s
     cprint(f"Data root: {runtime.data_root}", WHITE)
     cprint(f"Log root: {runtime.log_root}", WHITE)
     if runtime.secret_namespace:
-        cprint(f"Secret namespace: {runtime.secret_namespace}", WHITE)
+        cprint("Keyring namespace: configured for this instance", WHITE)
     else:
-        cprint("Secret namespace: shared default store", WHITE)
+        cprint("Keyring namespace: shared default store", WHITE)
     print()
 
     env = os.environ.copy()
@@ -918,14 +928,38 @@ def _download_file(url: str, destination: Path) -> None:
 def _extract_archive(archive_path: Path, destination: Path) -> None:
     """Extract a zip or tarball into the destination directory."""
     destination.mkdir(parents=True, exist_ok=True)
+    destination_root = destination.resolve()
+
+    def ensure_member_target(member_name: str) -> None:
+        target = (destination_root / member_name).resolve()
+        try:
+            target.relative_to(destination_root)
+        except ValueError as exc:
+            raise RuntimeError(f"Archive member escapes destination: {member_name}") from exc
+
     archive_name = archive_path.name.lower()
     if archive_name.endswith(".zip"):
         with zipfile.ZipFile(archive_path) as archive:
+            for member in archive.infolist():
+                ensure_member_target(member.filename)
             archive.extractall(destination)
         return
     if archive_name.endswith(".tar.gz") or archive_name.endswith(".tgz"):
         with tarfile.open(archive_path, "r:gz") as archive:
-            archive.extractall(destination)
+            for member in archive.getmembers():
+                ensure_member_target(member.name)
+                target = (destination_root / member.name).resolve()
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    raise RuntimeError(f"Unsupported archive member type: {member.name}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise RuntimeError(f"Could not read archive member: {member.name}")
+                with source, target.open("wb") as output:
+                    copyfileobj(source, output)
         return
     raise RuntimeError(f"Unsupported archive format: {archive_path.name}")
 
@@ -1597,12 +1631,12 @@ def start_services(
         frontend_port=runtime.frontend_port,
         data_root=runtime.data_root,
         log_root=runtime.log_root,
-        secret_namespace=runtime.secret_namespace,
+        keyring_namespace=runtime.secret_namespace,
         storage_prefix=runtime.storage_prefix,
     )
 
     # Persist the active instance runtime so subsequent relaunches can reuse
-    # the same secret_namespace / data_root / storage_prefix. This includes
+    # the same keyring namespace / data root / storage prefix. This includes
     # "default" launches — previously those were skipped, which caused the
     # keyring namespace to flip between None and a freshly minted timestamp
     # whenever the default ports happened to be busy between runs, and
@@ -1620,7 +1654,7 @@ def start_services(
                 instance_id=runtime.instance_id,
                 data_root=runtime.data_root,
                 log_root=runtime.log_root,
-                secret_namespace=runtime.secret_namespace,
+                keyring_namespace=runtime.secret_namespace,
                 storage_prefix=runtime.storage_prefix,
             )
         except OSError as exc:

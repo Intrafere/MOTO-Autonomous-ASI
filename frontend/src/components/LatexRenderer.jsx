@@ -451,22 +451,11 @@ const replaceSectionCommand = (text, command, tag, endTag) => {
 const decodeHtmlEntities = (text) => {
   if (!text) return text;
   
-  // Use a textarea to decode HTML entities properly
+  // Decode exactly one entity layer. Repeated unescaping can turn literal
+  // escaped HTML into active markup before DOMPurify sees it.
   const textarea = document.createElement('textarea');
   textarea.innerHTML = text;
-  let decoded = textarea.textContent;
-  
-  // Also handle common named entities that might not be decoded
-  decoded = decoded
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&apos;/g, "'");
-  
-  return decoded;
+  return textarea.textContent || '';
 };
 
 /**
@@ -475,8 +464,6 @@ const decodeHtmlEntities = (text) => {
 const cleanTikzContent = (content) => {
   return content.trim()
     .replace(/&lt;br\/&gt;/g, '\n')   // Fix HTML-encoded line breaks
-    .replace(/&amp;amp;/g, '&')       // Fix double-encoded ampersands
-    .replace(/&amp;/g, '&')           // Fix encoded ampersands
     .replace(/<br\s*\/?>/g, '\n');    // Fix actual HTML line breaks
 };
 
@@ -519,6 +506,59 @@ const renderKatexSafely = (latex, displayMode, originalMatch) => {
     const tag = displayMode ? 'div' : 'span';
     return `<${tag} class="${errorClass}" title="${escapeHtml(e.message)}">${escapeHtml(originalMatch)}</${tag}>`;
   }
+};
+
+const isEscapedAt = (text, index) => {
+  let backslashCount = 0;
+  for (let i = index - 1; i >= 0 && text[i] === '\\'; i--) {
+    backslashCount += 1;
+  }
+  return backslashCount % 2 === 1;
+};
+
+const isSingleDollarDelimiter = (text, index) => (
+  text[index] === '$'
+  && text[index - 1] !== '$'
+  && text[index + 1] !== '$'
+  && !isEscapedAt(text, index)
+);
+
+const renderInlineDollarMath = (text) => {
+  let output = '';
+  let segmentStart = 0;
+  let index = 0;
+
+  while (index < text.length) {
+    if (!isSingleDollarDelimiter(text, index)) {
+      index += 1;
+      continue;
+    }
+
+    const openIndex = index;
+    let closeIndex = -1;
+    for (let scan = openIndex + 1; scan < text.length; scan++) {
+      if (isSingleDollarDelimiter(text, scan)) {
+        closeIndex = scan;
+        break;
+      }
+    }
+
+    if (closeIndex === -1) {
+      break;
+    }
+
+    const latex = text.slice(openIndex + 1, closeIndex);
+    const match = text.slice(openIndex, closeIndex + 1);
+    output += text.slice(segmentStart, openIndex);
+    output += (latex.includes('<div') || latex.includes('class='))
+      ? match
+      : renderKatexSafely(latex, false, match);
+
+    index = closeIndex + 1;
+    segmentStart = index;
+  }
+
+  return output + text.slice(segmentStart);
 };
 
 /**
@@ -861,20 +901,15 @@ const renderLatexToHtml = (text) => {
     });
   });
   
-  // Inline math patterns: $...$ or \(...\)
-  const inlineMathPatterns = [
-    /(?<!\$)\$(?!\$)((?:[^$\\]|\\.|\\)+?)\$(?!\$)/g,
-    /\\\(([\s\S]*?)\\\)/g
-  ];
-  
-  inlineMathPatterns.forEach(pattern => {
-    result = result.replace(pattern, (match, latex) => {
-      // Skip if the content looks like it contains HTML
-      if (latex.includes('<div') || latex.includes('class=')) {
-        return match;
-      }
-      return renderKatexSafely(latex, false, match);
-    });
+  // Inline math: $...$ is scanned linearly to avoid regex backtracking on
+  // adversarial backslash-heavy strings. \( ... \) remains a simple delimiter.
+  result = renderInlineDollarMath(result);
+  result = result.replace(/\\\(([\s\S]*?)\\\)/g, (match, latex) => {
+    // Skip if the content looks like it contains HTML
+    if (latex.includes('<div') || latex.includes('class=')) {
+      return match;
+    }
+    return renderKatexSafely(latex, false, match);
   });
   
   // Step 12: Handle line breaks (AFTER KaTeX - \\ is valid inside math mode)

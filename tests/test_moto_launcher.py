@@ -1,8 +1,11 @@
+import io
 import os
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 import moto_launcher
 
@@ -171,6 +174,22 @@ class ResolveInstanceRuntimeTests(unittest.TestCase):
         # caller provided explicit overrides.
         loader.assert_not_called()
 
+    def test_resolve_instance_runtime_reads_keyring_namespace_field(self) -> None:
+        saved_record = {
+            "instance_id": "instance_20260101_000000_1111",
+            "data_root": r"C:\\custom\\data",
+            "log_root": r"C:\\custom\\logs",
+            "keyring_namespace": "stored_keyring_namespace",
+            "storage_prefix": "instance_20260101_000000_1111",
+        }
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=saved_record):
+                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                    with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
+                        runtime = moto_launcher.resolve_instance_runtime()
+
+        self.assertEqual(runtime.secret_namespace, "stored_keyring_namespace")
+
 
 class WindowsLauncherStrategyTests(unittest.TestCase):
     def test_build_windows_service_command_prefers_path_safe_executable_name(self) -> None:
@@ -257,6 +276,41 @@ class LinuxLauncherStrategyTests(unittest.TestCase):
         self.assertIsNotNone(service.log_path)
         self.assertTrue(service.log_path.endswith("launcher_backend.log"))
         popen.assert_called_once()
+
+
+class ArchiveExtractionTests(unittest.TestCase):
+    def test_extract_archive_rejects_tar_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "archive.tar.gz"
+            destination = root / "extract"
+            outside = root / "evil.txt"
+
+            with tarfile.open(archive_path, "w:gz") as archive:
+                data = b"bad"
+                member = tarfile.TarInfo("../evil.txt")
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+
+            with self.assertRaises(RuntimeError):
+                moto_launcher._extract_archive(archive_path, destination)
+
+            self.assertFalse(outside.exists())
+
+    def test_extract_archive_rejects_zip_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "archive.zip"
+            destination = root / "extract"
+            outside = root / "evil.txt"
+
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../evil.txt", "bad")
+
+            with self.assertRaises(RuntimeError):
+                moto_launcher._extract_archive(archive_path, destination)
+
+            self.assertFalse(outside.exists())
 
 
 if __name__ == "__main__":
