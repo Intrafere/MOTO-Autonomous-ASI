@@ -153,9 +153,9 @@ Sandbox is API-only. The MOTO React frontend is NOT served from the hosted sandb
 ## Updater Policy
 
 - **Authoritative update source**: GitHub `main` branch (not GitHub Releases)
-- **Desktop**: launcher compares local build metadata against GitHub `main`. Auto-apply is only for clean `origin/main` git checkouts or ZIP/extracted installs with no launcher-managed instances still running. ZIP updates preserve active data/log roots, instance storage, launcher state, env files, and keyring-related namespaces.
+- **Desktop**: launcher compares local build metadata against GitHub `main`. Remote update identity resolves from GitHub branch HEAD via the GitHub REST API, metadata uses the REST contents API instead of raw GitHub files, and ZIP overlays write the resolved manifest after apply to avoid stale committed-manifest loops. Auto-apply is only for clean `origin/main` git checkouts or ZIP/extracted installs with no launcher-managed instances still running. ZIP updates preserve active data/log roots, instance storage, launcher state, env files, and keyring-related namespaces.
 - **Hosted**: sandboxes do NOT self-mutate. Redeploy/recreate uses the latest approved `main`-derived image. Recall/resume keeps the existing image. Hosted `POST /api/update/pull` must return unavailable instead of attempting in-place update.
-- **Build metadata**: `version`, `build_commit`, `update_channel`, and `api_contract_version` exposed via `/api/features`; the committed `main`-branch manifest lives at `moto-update-manifest.json`
+- **Build metadata**: `version`, `build_commit`, `update_channel`, and `api_contract_version` exposed via `/api/features`; git checkouts resolve `build_commit` from HEAD, ZIP installs use the stamped local manifest, and the committed `main`-branch manifest lives at `moto-update-manifest.json`
 
 ## Canonical Runtime Baselines
 

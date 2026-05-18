@@ -47,7 +47,7 @@ project-root/
 │   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
 │   │   ├── critique_prompts.py          # Default critique prompt and builder function for validator critiques
 │   │   ├── secret_store.py              # Secure API key persistence via OS keyring (OpenRouter, Wolfram Alpha); bypassed in generic mode (env-injected/in-memory)
-│   │   ├── build_info.py                # Build identity resolver (loads version/build_commit/update_channel/api_contract_version from moto-update-manifest.json + env overrides)
+│   │   ├── build_info.py                # Build identity resolver (manifest + git HEAD/ZIP stamp + env overrides)
 │   │   ├── path_safety.py               # Safe path resolution helpers (realpath/normpath containment checks)
 │   │   ├── fastembed_provider.py         # FastEmbed embedding wrapper (generic mode only, lazy-imported; ~30 lines)
 │   │   ├── lean4_client.py              # Lean 4 proof checker client (subprocess + optional LSP persistent mode; gated on `lean4_enabled` / `lean4_lsp_enabled`; offloads temp/workspace filesystem operations from the FastAPI event loop)
@@ -367,7 +367,7 @@ project-root/
 - `Click To Launch MOTO.bat`: The only Windows consumer entrypoint. It stays thin and always delegates to the Python launcher.
 - `linux-ubuntu-launcher.sh`: The Linux/Ubuntu consumer entrypoint. Same thin-wrapper contract as the `.bat`; delegates to `moto_launcher.py`.
 - `moto_launcher.py`: Orchestrates the launcher flow in order: update check, runtime resolution, dependency install, LM Studio detection, detached backend/frontend startup, and browser launch.
-- `moto_updater.py`: Owns Build 1 updater behavior, including GitHub `main` manifest fetch, install-state classification, clean-git fast-forward apply, ZIP overlay apply, rollback-aware relaunch, and launcher-managed instance safety checks.
+- `moto_updater.py`: Owns Build 1 updater behavior, including GitHub REST contents metadata + branch-HEAD resolution, install-state classification, clean-git fast-forward apply, ZIP overlay apply with post-apply manifest stamping, rollback-aware relaunch, and launcher-managed instance safety checks.
 - `.moto_launcher_state.json`: Local-only state written by the launcher so future launches can detect still-open backend/frontend windows from the same install and skip update-apply until those windows are closed.
 
 ### Hosted Runtime
@@ -397,7 +397,7 @@ project-root/
 - `critique_memory.py`: Paper critique persistence (ratings, feedback, history, session-aware)
 - `critique_prompts.py`: Default critique prompt and builder function
 - `secret_store.py`: Secure API key persistence via OS keyring; bypassed in generic mode (keys are env-injected/in-memory only)
-- `build_info.py`: Build identity helper that reads the committed `moto-update-manifest.json` contract and applies optional env overrides for runtime version/build stamping
+- `build_info.py`: Build identity helper that reads the committed manifest contract, resolves git HEAD or ZIP-stamped build commits, and applies optional env overrides for runtime version/build stamping
 - `fastembed_provider.py`: FastEmbed embedding wrapper (generic mode only); lazy-imported so default installs are unaffected
 - `lean4_client.py`: Lean 4 proof checker client. Subprocess mode by default; optional persistent LSP mode when `lean4_lsp_enabled`. Silent no-op when `lean4_enabled=False`. Never bundled into the hosted image.
 - `smt_client.py`: Optional Z3/SMT launcher-managed subprocess wrapper. Silent no-op when `smt_enabled=False`. SMT results are hint-only; Lean 4 remains authoritative. Never bundled into the hosted image.

@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 import tempfile
@@ -104,6 +105,82 @@ class InstallStateTests(unittest.TestCase):
         self.assertIsNone(result.error)
         self.assertIsNotNone(result.warning)
         self.assertFalse(result.can_apply_update)
+
+    def test_fetch_remote_manifest_uses_branch_head_as_update_key(self) -> None:
+        local_manifest = moto_updater.BuildManifest(
+            version="1.0.7",
+            build_commit="localcommit",
+            update_channel="main",
+            api_contract_version="build5-v1",
+        )
+        manifest_payload = {
+            "manifest_version": 1,
+            "version": "1.0.8",
+            "build_commit": "stale-manifest-commit",
+            "update_channel": "main",
+            "api_contract_version": "build5-v12",
+        }
+        branch_payload = {"commit": {"sha": "actual-branch-head"}}
+
+        with mock.patch.object(moto_updater, "_fetch_repo_file_json", return_value=manifest_payload) as fetch_file:
+            with mock.patch.object(moto_updater, "_fetch_json_url", return_value=branch_payload):
+                remote_manifest = moto_updater.fetch_remote_manifest(local_manifest)
+
+        self.assertEqual(remote_manifest.version, "1.0.8")
+        self.assertEqual(remote_manifest.build_commit, "actual-branch-head")
+        self.assertEqual(remote_manifest.api_contract_version, "build5-v12")
+        fetch_file.assert_called_once_with(
+            "actual-branch-head",
+            "moto-update-manifest.json",
+            10,
+        )
+
+    def test_fetch_repo_file_json_uses_contents_api_payload(self) -> None:
+        file_payload = {
+            "type": "file",
+            "encoding": "base64",
+            "content": base64.b64encode(b'{"version": "1.0.8"}').decode("ascii"),
+        }
+
+        with mock.patch.object(moto_updater, "_fetch_json_url", return_value=file_payload) as fetch_json:
+            with mock.patch.object(
+                moto_updater,
+                "_contents_api_url_for_path",
+                return_value="https://api.github.com/repos/owner/repo/contents/package.json?ref=main",
+            ):
+                payload = moto_updater._fetch_repo_file_json("main", "package.json", 10)
+
+        self.assertEqual(payload["version"], "1.0.8")
+        fetch_json.assert_called_once_with(
+            "https://api.github.com/repos/owner/repo/contents/package.json?ref=main",
+            10,
+        )
+
+    def test_load_local_manifest_uses_git_head_for_git_checkouts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            manifest_path = repo_root / "moto-update-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "manifest_version": 1,
+                        "version": "1.0.8",
+                        "build_commit": "stale-local-commit",
+                        "update_channel": "main",
+                        "api_contract_version": "build5-v12",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (repo_root / ".git").mkdir()
+
+            with mock.patch.object(moto_updater, "REPO_ROOT", repo_root):
+                with mock.patch.object(moto_updater, "LOCAL_MANIFEST_PATH", manifest_path):
+                    with mock.patch.object(moto_updater, "_git_checkout_matches_repo", return_value=True):
+                        with mock.patch.object(moto_updater, "_git_output", return_value=(0, "actual-local-head", "")):
+                            local_manifest = moto_updater.load_local_manifest()
+
+        self.assertEqual(local_manifest.build_commit, "actual-local-head")
 
 
 class LauncherStateTests(unittest.TestCase):
@@ -245,6 +322,64 @@ class SnapshotSyncTests(unittest.TestCase):
             self.assertEqual((destination_root / "moto_launcher.py").read_text(encoding="utf-8"), "old launcher\n")
             self.assertFalse((destination_root / "docs" / "guide.txt").exists())
             self.assertEqual((destination_root / "backend" / "data" / "keep.txt").read_text(encoding="utf-8"), "original data\n")
+
+    def test_apply_zip_update_writes_resolved_manifest_after_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir) / "install"
+            repo_root.mkdir()
+            manifest_path = repo_root / "moto-update-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "manifest_version": 1,
+                        "version": "1.0.7",
+                        "build_commit": "old-local",
+                        "update_channel": "main",
+                        "api_contract_version": "build5-v1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_download_archive(remote_manifest: moto_updater.BuildManifest, archive_path: Path) -> None:
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr(
+                        "MOTO/moto-update-manifest.json",
+                        json.dumps(
+                            {
+                                "manifest_version": 1,
+                                "version": remote_manifest.version,
+                                "build_commit": "stale-inner-manifest",
+                                "update_channel": remote_manifest.update_channel,
+                                "api_contract_version": remote_manifest.api_contract_version,
+                            }
+                        ),
+                    )
+                    archive.writestr("MOTO/moto_launcher.py", "new launcher\n")
+
+            remote_manifest = moto_updater.BuildManifest(
+                version="1.0.8",
+                build_commit="resolved-remote-head",
+                update_channel="main",
+                api_contract_version="build5-v12",
+            )
+
+            with mock.patch.object(moto_updater, "REPO_ROOT", repo_root):
+                with mock.patch.object(moto_updater, "LOCAL_MANIFEST_PATH", manifest_path):
+                    with mock.patch.object(moto_updater, "cleanup_launcher_state", return_value=[]):
+                        with mock.patch.object(moto_updater, "_download_archive", side_effect=fake_download_archive):
+                            with mock.patch.object(moto_updater, "_relaunch_launcher", return_value=None):
+                                applied, message = moto_updater.apply_zip_update(
+                                    remote_manifest=remote_manifest,
+                                    launcher_args=[],
+                                    env={},
+                                )
+
+            installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(applied, message)
+        self.assertEqual(installed_manifest["version"], "1.0.8")
+        self.assertEqual(installed_manifest["build_commit"], "resolved-remote-head")
 
 
 class RelaunchCommandTests(unittest.TestCase):

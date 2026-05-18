@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import subprocess
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,24 @@ def _coerce_manifest_version(value: Any) -> int:
         return int(_DEFAULT_BUILD_INFO["manifest_version"])
 
 
+def _current_git_head() -> str | None:
+    if not (REPO_ROOT / ".git").exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    head = result.stdout.strip()
+    return head if result.returncode == 0 and head else None
+
+
 @lru_cache(maxsize=1)
 def get_build_info() -> BuildInfo:
     """Resolve build identity from the committed manifest with env overrides."""
@@ -105,6 +124,10 @@ def get_build_info() -> BuildInfo:
             "Build manifest not found at %s; falling back to package metadata defaults.",
             BUILD_MANIFEST_PATH,
         )
+
+    git_head = _current_git_head()
+    if git_head:
+        payload["build_commit"] = git_head
 
     for env_name, field_name in _ENV_OVERRIDES.items():
         override = os.environ.get(env_name, "").strip()

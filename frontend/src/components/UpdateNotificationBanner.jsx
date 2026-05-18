@@ -9,6 +9,7 @@ export default function UpdateNotificationBanner({ notice, onDismiss }) {
   const [errorMessage, setErrorMessage] = useState('');
   const logRef = useRef(null);
   const pollRef = useRef(null);
+  const canAutoApply = notice.can_auto_apply !== false;
 
   useEffect(() => {
     return () => {
@@ -75,12 +76,14 @@ export default function UpdateNotificationBanner({ notice, onDismiss }) {
       <div className="update-notice-banner">
         <div className="update-notice-content">
           <div className="update-notice-actions" style={{ gap: '0.75rem' }}>
-            <button
-              className="update-notice-pull-btn"
-              onClick={handlePull}
-            >
-              Update
-            </button>
+            {canAutoApply && (
+              <button
+                className="update-notice-pull-btn"
+                onClick={handlePull}
+              >
+                Update
+              </button>
+            )}
             <button
               className="update-notice-dismiss"
               onClick={onDismiss}
@@ -96,6 +99,11 @@ export default function UpdateNotificationBanner({ notice, onDismiss }) {
             {' '}&rarr;{' '}
             {notice.available_version} ({notice.available_commit})
           </span>
+          {!canAutoApply && notice.message && (
+            <span className="update-notice-detail">
+              {notice.message}
+            </span>
+          )}
         </div>
       </div>
     );
