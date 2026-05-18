@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 class SmtClient:
     """Thin async wrapper around an external Z3 binary."""
 
+    _ALLOWED_EXECUTABLE_NAMES = {"z3", "z3.exe"}
+
     def __init__(self, z3_path: str, timeout: int) -> None:
         self.z3_path = str(z3_path or "").strip()
         self.timeout = max(int(timeout or 0), 1)
@@ -25,14 +27,15 @@ class SmtClient:
     def _resolve_executable(self) -> str:
         if self.z3_path:
             candidate = Path(self.z3_path).resolve()
-            if candidate.exists():
+            if candidate.exists() and candidate.name.lower() in self._ALLOWED_EXECUTABLE_NAMES:
                 return str(candidate)
+            raise RuntimeError("Configured Z3 path must point to a z3 executable.")
 
         for name in ("z3", "z3.exe"):
             resolved = shutil.which(name)
             if resolved:
                 return resolved
-        return self.z3_path or "z3"
+        return "z3"
 
     async def _run_process(
         self,

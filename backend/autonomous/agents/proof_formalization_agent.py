@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.lean4_client import get_lean4_client
+from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.utils import count_tokens
@@ -266,6 +267,8 @@ class ProofFormalizationAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as exc:
+            if is_non_retryable_model_error(exc):
+                raise
             is_parse_error = _is_json_parse_error(exc)
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
@@ -558,6 +561,8 @@ class ProofFormalizationAgent:
             except FreeModelExhaustedError:
                 raise
             except Exception as exc:
+                if is_non_retryable_model_error(exc):
+                    raise
                 is_parse_error = _is_json_parse_error(exc)
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,

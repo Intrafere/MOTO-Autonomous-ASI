@@ -3,16 +3,30 @@ Autonomous API Logger - Logs all API calls during autonomous research mode.
 Stores logs in a persistent file for viewing in the Autonomous Logs tab.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
+from collections import deque
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 from backend.shared.config import system_config
+from backend.shared.log_redaction import redact_log_text
 
 logger = logging.getLogger(__name__)
+
+
+def _payload_metadata(value: str, preview_chars: int) -> Dict[str, Any]:
+    """Return safe log metadata for a prompt/response payload."""
+    text = value or ""
+    preview = redact_log_text(text, preview_chars)
+    return {
+        "preview": preview,
+        "size": len(text),
+        "sha256": hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest() if text else "",
+    }
 
 
 class AutonomousAPILogger:
@@ -38,6 +52,7 @@ class AutonomousAPILogger:
         
         self._initialized = True
         self._ensure_log_file()
+        self._scrub_persisted_full_payloads()
         logger.info("AutonomousAPILogger initialized")
     
     def _ensure_log_file(self) -> None:
@@ -51,6 +66,64 @@ class AutonomousAPILogger:
     def _get_log_path(self) -> Path:
         """Return the instance-scoped autonomous API log path."""
         return Path(system_config.data_dir) / "auto_api_log.txt"
+
+    def _scrub_persisted_full_payloads(self) -> None:
+        """Remove legacy full prompt/response bodies from the on-disk JSONL log."""
+        log_path = self._get_log_path()
+        if not log_path.exists():
+            return
+
+        changed = False
+        scrubbed_lines: List[str] = []
+
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    scrubbed_lines.append(line)
+                    continue
+
+                original_entry = dict(entry)
+                prompt_full = str(entry.pop("prompt_full", "") or "")
+                response_full = str(entry.pop("response_full", "") or "")
+                prompt_source = prompt_full or str(entry.get("prompt_preview") or "")
+                response_source = response_full or str(entry.get("response_preview") or "")
+
+                if prompt_source:
+                    prompt_meta = _payload_metadata(prompt_source, 1000)
+                    entry["prompt_preview"] = prompt_meta["preview"]
+                    entry["prompt_size"] = int(entry.get("prompt_size") or prompt_meta["size"])
+                    entry.setdefault("prompt_sha256", prompt_meta["sha256"])
+                if response_source:
+                    response_meta = _payload_metadata(response_source, 2000)
+                    entry["response_preview"] = response_meta["preview"]
+                    entry["response_size"] = int(entry.get("response_size") or response_meta["size"])
+                    entry.setdefault("response_sha256", response_meta["sha256"])
+
+                entry["prompt_redacted"] = True
+                entry["response_redacted"] = True
+                entry["has_full_prompt"] = False
+                entry["has_full_response"] = False
+                if entry.get("error"):
+                    entry["error"] = redact_log_text(entry["error"], 1000)
+
+                if prompt_full or response_full or entry != original_entry:
+                    changed = True
+                scrubbed_lines.append(json.dumps(entry) + "\n")
+
+            if changed:
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.writelines(scrubbed_lines)
+                logger.info("Scrubbed legacy full prompt/response payloads from autonomous API log")
+        except Exception as e:
+            logger.warning(f"Failed to scrub legacy autonomous API log payloads: {e}")
     
     async def log_api_call(
         self,
@@ -64,7 +137,8 @@ class AutonomousAPILogger:
         duration_ms: Optional[float] = None,
         success: bool = True,
         error: Optional[str] = None,
-        phase: str = "unknown"
+        phase: str = "unknown",
+        workflow: str = "autonomous",
     ) -> None:
         """
         Log an autonomous research API call.
@@ -81,9 +155,14 @@ class AutonomousAPILogger:
             success: Whether the call succeeded
             error: Error message if call failed
             phase: Research phase ("topic_selection", "brainstorm", "paper_compilation", "tier3")
+            workflow: Workflow namespace for this call ("autonomous" or "leanoj")
         """
         async with self._lock:
             try:
+                prompt_meta = _payload_metadata(prompt, 1000)
+                response_meta = _payload_metadata(response_content, 2000)
+                store_full_payloads = bool(system_config.api_log_store_full_payloads)
+
                 log_entry = {
                     "timestamp": datetime.now().isoformat(),
                     "task_id": task_id,
@@ -91,15 +170,25 @@ class AutonomousAPILogger:
                     "model": model,
                     "provider": provider,
                     "phase": phase,
-                    "prompt_preview": prompt[:1000] if prompt else "",
-                    "prompt_full": prompt,
-                    "response_preview": response_content[:2000] if response_content else "",
-                    "response_full": response_content,
+                    "workflow": workflow,
+                    "prompt_preview": prompt_meta["preview"],
+                    "prompt_size": prompt_meta["size"],
+                    "prompt_sha256": prompt_meta["sha256"],
+                    "prompt_redacted": not store_full_payloads,
+                    "has_full_prompt": store_full_payloads and bool(prompt),
+                    "response_preview": response_meta["preview"],
+                    "response_size": response_meta["size"],
+                    "response_sha256": response_meta["sha256"],
+                    "response_redacted": not store_full_payloads,
+                    "has_full_response": store_full_payloads and bool(response_content),
                     "tokens_used": tokens_used,
                     "duration_ms": duration_ms,
                     "success": success,
-                    "error": error
+                    "error": redact_log_text(error, 1000)
                 }
+                if store_full_payloads:
+                    log_entry["prompt_full"] = prompt
+                    log_entry["response_full"] = response_content
                 
                 # Append to log file
                 with open(self._get_log_path(), "a", encoding="utf-8") as f:
@@ -129,7 +218,7 @@ class AutonomousAPILogger:
         except Exception as e:
             logger.error(f"Failed to trim autonomous API log: {e}")
     
-    async def get_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def get_logs(self, limit: int = 100, include_full: bool = True) -> List[Dict[str, Any]]:
         """
         Get recent autonomous API call logs.
         
@@ -146,7 +235,7 @@ class AutonomousAPILogger:
                     return []
                 
                 with open(log_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
+                    lines = deque(f, maxlen=max(1, limit))
                 
                 logs = []
                 for line in lines:
@@ -154,6 +243,17 @@ class AutonomousAPILogger:
                     if line:
                         try:
                             log_entry = json.loads(line)
+                            if not include_full or not system_config.api_log_store_full_payloads:
+                                prompt_full = str(log_entry.pop("prompt_full", "") or "")
+                                response_full = str(log_entry.pop("response_full", "") or "")
+                                log_entry["prompt_size"] = int(log_entry.get("prompt_size") or len(prompt_full))
+                                log_entry["response_size"] = int(log_entry.get("response_size") or len(response_full))
+                                log_entry["has_full_prompt"] = False
+                                log_entry["has_full_response"] = False
+                                if prompt_full and not log_entry.get("prompt_sha256"):
+                                    log_entry["prompt_sha256"] = hashlib.sha256(prompt_full.encode("utf-8", errors="replace")).hexdigest()
+                                if response_full and not log_entry.get("response_sha256"):
+                                    log_entry["response_sha256"] = hashlib.sha256(response_full.encode("utf-8", errors="replace")).hexdigest()
                             logs.append(log_entry)
                         except json.JSONDecodeError:
                             continue
@@ -165,11 +265,49 @@ class AutonomousAPILogger:
             except Exception as e:
                 logger.error(f"Failed to get autonomous API logs: {e}")
                 return []
-    
-    async def clear_logs(self) -> None:
-        """Clear all autonomous API logs."""
+
+    @staticmethod
+    def _entry_workflow(entry: Dict[str, Any]) -> str:
+        workflow = str(entry.get("workflow") or "").strip().lower()
+        if workflow:
+            return workflow
+
+        role_id = str(entry.get("role_id") or "")
+        task_id = str(entry.get("task_id") or "")
+        if role_id.startswith("leanoj_") or task_id.startswith("leanoj_"):
+            return "leanoj"
+        return "autonomous"
+
+    async def clear_logs(self, workflow: Optional[str] = None) -> None:
+        """Clear autonomous API logs, optionally scoped to one workflow."""
         async with self._lock:
             try:
+                if workflow:
+                    log_path = self._get_log_path()
+                    if not os.path.exists(log_path):
+                        return
+
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+
+                    retained_lines: List[str] = []
+                    for line in lines:
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        try:
+                            entry = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            retained_lines.append(line)
+                            continue
+                        if self._entry_workflow(entry) != workflow:
+                            retained_lines.append(line)
+
+                    with open(log_path, "w", encoding="utf-8") as f:
+                        f.writelines(retained_lines)
+                    logger.info("Autonomous API logs cleared for workflow %s", workflow)
+                    return
+
                 with open(self._get_log_path(), "w", encoding="utf-8") as f:
                     f.write("")
                 logger.info("Autonomous API logs cleared")

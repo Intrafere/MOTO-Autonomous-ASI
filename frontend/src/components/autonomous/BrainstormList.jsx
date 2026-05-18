@@ -267,17 +267,14 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
                     : proofCheckState?.status === 'running'
                       ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
                       : 'Try to prove with Lean 4 theorem prover';
-                  const disabledReason = brainstorm.status !== 'complete'
-                    ? 'Manual proof checks require a completed brainstorm.'
-                    : manualCheckReason;
                   return (
                     <button
                       className="btn-download-small"
                       onClick={(e) => handleProofCheck(e, brainstorm)}
-                      disabled={!manualCheckEnabled || Boolean(proofCheckState) || brainstorm.status !== 'complete'}
+                      disabled={!manualCheckEnabled || Boolean(proofCheckState)}
                       title={proofCheckState?.status === 'running'
                         ? 'A proof verification is already running for this brainstorm.'
-                        : disabledReason || 'Queue a manual proof check for this brainstorm.'}
+                        : manualCheckReason || 'Queue a manual proof check for this brainstorm.'}
                     >
                       {proofCheckLabel}
                     </button>

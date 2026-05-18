@@ -257,6 +257,14 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.token-stats-heading {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.6rem;
+}
+
 .research-timer {
   display: flex;
   justify-content: space-between;
@@ -373,6 +381,7 @@
 
 .model-tokens {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.75rem;
   font-family: 'Courier New', Courier, monospace;
   font-size: 0.7rem;

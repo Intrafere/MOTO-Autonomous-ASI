@@ -58,6 +58,7 @@ class ResearchMetadata:
             "total_brainstorms_completed": 0,
             "total_papers_completed": 0,
             "total_papers_archived": 0,
+            "total_papers_pruned": 0,
             "total_submissions_accepted": 0,
             "total_submissions_rejected": 0,
             "topic_selection_rejections": 0,
@@ -108,6 +109,9 @@ class ResearchMetadata:
             if self._stats is None:
                 self._stats = self._get_default_stats()
                 await self._save_stats()
+            else:
+                for key, value in self._get_default_stats().items():
+                    self._stats.setdefault(key, value)
     
     async def initialize(self, user_research_prompt: str = "") -> None:
         """Initialize or load research metadata."""
@@ -506,17 +510,47 @@ class ResearchMetadata:
     
     async def archive_paper(self, paper_id: str) -> None:
         """Mark a paper as archived in central metadata."""
+        await self.prune_paper(
+            paper_id,
+            reason="Legacy archive request treated as a pruned paper.",
+            pruned_by="system",
+        )
+
+    async def prune_paper(
+        self,
+        paper_id: str,
+        *,
+        reason: str = "",
+        pruned_by: str = "system",
+    ) -> None:
+        """Mark a paper as pruned in central metadata."""
         async with self._lock:
             for i, p in enumerate(self._data.get("papers", [])):
                 if p.get("paper_id") == paper_id:
-                    self._data["papers"][i]["status"] = "archived"
+                    self._data["papers"][i]["status"] = "pruned"
+                    self._data["papers"][i]["pruned_at"] = datetime.now().isoformat()
+                    self._data["papers"][i]["pruned_reason"] = reason or "No pruning reason recorded."
+                    self._data["papers"][i]["pruned_by"] = pruned_by
                     break
+            for i, b in enumerate(self._data.get("brainstorms", [])):
+                papers_generated = b.get("papers_generated", [])
+                if paper_id in papers_generated:
+                    papers_generated.remove(paper_id)
+                    self._data["brainstorms"][i]["papers_generated"] = papers_generated
             await self._save_metadata()
             
             # Update stats
             self._stats["total_papers_archived"] = sum(
                 1 for p in self._data.get("papers", [])
                 if p.get("status") == "archived"
+            )
+            self._stats["total_papers_pruned"] = sum(
+                1 for p in self._data.get("papers", [])
+                if p.get("status") == "pruned"
+            )
+            self._stats["total_papers_completed"] = sum(
+                1 for p in self._data.get("papers", [])
+                if p.get("status") == "complete"
             )
             await self._save_stats()
     
@@ -530,7 +564,10 @@ class ResearchMetadata:
             "source_brainstorm_ids": metadata.source_brainstorm_ids,
             "referenced_papers": metadata.referenced_papers,
             "status": metadata.status,
-            "created_at": metadata.created_at.isoformat() if metadata.created_at else None
+            "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
+            "pruned_at": metadata.pruned_at.isoformat() if metadata.pruned_at else None,
+            "pruned_reason": metadata.pruned_reason,
+            "pruned_by": metadata.pruned_by,
         }
     
     # ========================================================================
@@ -699,6 +736,10 @@ class ResearchMetadata:
                 self._stats["total_papers_archived"] = sum(
                     1 for p in self._data.get("papers", [])
                     if p.get("status") == "archived"
+                )
+                self._stats["total_papers_pruned"] = sum(
+                    1 for p in self._data.get("papers", [])
+                    if p.get("status") == "pruned"
                 )
                 await self._save_stats()
                 

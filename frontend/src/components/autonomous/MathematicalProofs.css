@@ -173,6 +173,25 @@
   color: #86efac;
 }
 
+.math-proofs-filter--platinum.active {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(120deg, rgba(226, 232, 240, 0.12), rgba(255, 255, 255, 0.24), rgba(148, 163, 184, 0.12));
+  border-color: rgba(226, 232, 240, 0.65);
+  color: #f8fafc;
+  box-shadow: 0 0 16px rgba(226, 232, 240, 0.18);
+}
+
+.math-proofs-filter--platinum.active::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.38) 48%, transparent 100%);
+  transform: translateX(-130%);
+  animation: platinum-shimmer 2.6s ease-in-out infinite;
+  pointer-events: none;
+}
+
 .math-proofs-filter--gold.active {
   background: rgba(255, 214, 92, 0.14);
   color: #ffd65c;
@@ -229,6 +248,31 @@
   border-color: rgba(96, 165, 250, 0.28);
 }
 
+.math-proof-card.platinum {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(226, 232, 240, 0.7);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(17, 24, 39, 0.98)),
+    linear-gradient(120deg, rgba(226, 232, 240, 0.2), rgba(255, 255, 255, 0.08), rgba(148, 163, 184, 0.16));
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.25), 0 0 24px rgba(226, 232, 240, 0.18);
+}
+
+.math-proof-card.platinum::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.12) 45%, transparent 70%);
+  transform: translateX(-120%);
+  animation: platinum-shimmer 3.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.math-proof-card.platinum > * {
+  position: relative;
+  z-index: 1;
+}
+
 .math-proof-card.gold {
   border-color: rgba(255, 214, 92, 0.45);
 }
@@ -246,6 +290,14 @@
   justify-content: space-between;
   gap: 1rem;
   align-items: flex-start;
+}
+
+.math-proof-card-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .math-proof-card-topline {
@@ -276,6 +328,25 @@
   border-color: rgba(96, 165, 250, 0.35);
 }
 
+.math-proof-badge.platinum {
+  position: relative;
+  overflow: hidden;
+  color: #f8fafc;
+  border-color: rgba(226, 232, 240, 0.65);
+  background: linear-gradient(120deg, rgba(226, 232, 240, 0.14), rgba(255, 255, 255, 0.26), rgba(148, 163, 184, 0.14));
+  box-shadow: 0 0 14px rgba(226, 232, 240, 0.18);
+}
+
+.math-proof-badge.platinum::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.45) 48%, transparent 100%);
+  transform: translateX(-130%);
+  animation: platinum-shimmer 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
 .math-proof-badge.gold {
   color: #ffd65c;
   border-color: rgba(255, 214, 92, 0.5);
@@ -292,6 +363,24 @@
   color: #e8a060;
   border-color: rgba(205, 127, 50, 0.45);
   background: rgba(205, 127, 50, 0.08);
+}
+
+@keyframes platinum-shimmer {
+  0% {
+    transform: translateX(-130%);
+  }
+  55%,
+  100% {
+    transform: translateX(130%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .math-proofs-filter--platinum.active::before,
+  .math-proof-card.platinum::before,
+  .math-proof-badge.platinum::after {
+    animation: none;
+  }
 }
 
 .math-proof-source {
@@ -343,18 +432,31 @@
 .math-proof-download {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   border-radius: 0.8rem;
   border: 1px solid rgba(34, 197, 94, 0.28);
   background: rgba(34, 197, 94, 0.08);
   color: #86efac;
   padding: 0.55rem 0.8rem;
+  font: inherit;
+  cursor: pointer;
   text-decoration: none;
   transition: border-color 0.2s ease, transform 0.2s ease;
 }
 
-.math-proof-download:hover {
+.math-proof-download--compact {
+  white-space: nowrap;
+}
+
+.math-proof-download:hover:not(:disabled) {
   border-color: rgba(34, 197, 94, 0.5);
   transform: translateY(-1px);
+}
+
+.math-proof-download:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
 }
 
 .math-proof-detail-block {
@@ -439,7 +541,9 @@
     flex-direction: column;
   }
 
-  .math-proof-expand {
+  .math-proof-card-actions,
+  .math-proof-expand,
+  .math-proof-download--compact {
     width: 100%;
   }
 }

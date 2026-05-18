@@ -7,6 +7,7 @@ import './AutonomousResearch.css';
 import LivePaperProgress from './LivePaperProgress';
 import LiveTier3Progress from './LiveTier3Progress';
 import TextFileUploader from '../TextFileUploader';
+import { getActivityClass as getSharedActivityClass, getActivityIcon as getSharedActivityIcon } from '../../utils/activityStyles';
 
 const AutonomousResearchInterface = ({
   isRunning,
@@ -254,9 +255,7 @@ const AutonomousResearchInterface = ({
         return '◎';
       case 'critique_progress':
         return '⊟';
-      case 'body_rewrite_started':
-        return '▬';
-      case 'partial_revision_complete':
+      case 'self_review_appended':
         return '◈';
       case 'critique_phase_ended':
         return '✓';
@@ -329,6 +328,10 @@ const AutonomousResearchInterface = ({
         return 'Z';
       case 'proof_attempt_started':
         return '>';
+      case 'proof_lean_accepted':
+        return '>';
+      case 'proof_integrity_rejected':
+        return '⚠';
       case 'proof_attempt_failed':
       case 'proof_attempts_exhausted':
         return '⚠';
@@ -355,7 +358,7 @@ const AutonomousResearchInterface = ({
         event === 'compiler_acceptance' ||
         event === 'outline_locked' ||
         event === 'paper_completed' || 
-        event === 'partial_revision_complete' ||
+        event === 'self_review_appended' ||
         event === 'topic_exploration_complete' ||
         event === 'paper_title_exploration_complete' ||
         event === 'tier3_chapter_complete' ||
@@ -363,6 +366,7 @@ const AutonomousResearchInterface = ({
         event === 'tier3_long_form_complete' ||
         event === 'reference_selection_complete' ||
         event === 'proof_verified' ||
+        event === 'proof_lean_accepted' ||
         event === 'novel_proof_discovered' ||
         event === 'known_proof_verified' ||
         event === 'proof_check_complete' ||
@@ -376,7 +380,8 @@ const AutonomousResearchInterface = ({
         event === 'compiler_rejection' ||
         event === 'tier3_rejection' ||
         event === 'proof_attempt_failed' ||
-        event === 'proof_attempts_exhausted'
+        event === 'proof_attempts_exhausted' ||
+        event === 'proof_integrity_rejected'
     ) {
       return 'activity-reject';
     }
@@ -413,7 +418,7 @@ const AutonomousResearchInterface = ({
   };
 
   return (
-    <div className="autonomous-interface">
+    <div className={`autonomous-interface workflow-main-interface ${isRunning || isStopping ? 'workflow-main-interface--running' : ''}`}>
       {/* Header */}
       <div className="autonomous-header">
         <h2>Autonomous Research</h2>
@@ -550,8 +555,10 @@ const AutonomousResearchInterface = ({
                     ? (isForcing ? 'Forcing...' : 'Confirm Force Paper Writing') 
                     : (
                       <span className="force-paper-text">
-                        <span className="force-paper-action">Skip AI Autonomy and Force Paper Writing</span>
-                        <span className="force-paper-hint">(We recommend at minimum 5 ACCEPTED submissions - it is normal for a very low % acceptance rate as the validator is only seeking novel solutions - higher parameter models may help submission acceptance rate, however optimizing for both speed (rapid submissions) and knowledge can also work well. The validator provides feedback on rejections to avoid rejection-loops. Harder problems may require hundreds or more of rejections before a single submission acceptance - the first submission acceptance often takes the longest. View brainstorms in the brainstorm tab.)</span>
+                        <span className="force-paper-action">Skip AI Autonomy</span>
+                        <span className="force-paper-hint" role="tooltip">
+                          We recommend at minimum 5 ACCEPTED submissions. A very low acceptance rate is normal because the validator is seeking novel solutions. Higher parameter models may improve acceptance, though optimizing for both speed and knowledge can also work well. Validator feedback on rejections helps avoid rejection loops. Harder problems may require hundreds or more rejections before a single acceptance, and the first acceptance often takes the longest. View brainstorms in the brainstorm tab.
+                        </span>
                       </span>
                     )}
                 </button>
@@ -731,15 +738,15 @@ const AutonomousResearchInterface = ({
         <div className="activity-feed" ref={activityFeedRef}>
           {activity.length === 0 ? (
             <div className="activity-empty">
-              No activity yet. Wait about 20 to 30 minutes. If you have not yet, press the start button under your prompt entry to begin research.
+              No activity yet. Wait about 20 to 30 minutes. If you have not yet, press the start button above your prompt entry to begin research.
             </div>
           ) : (
             activity.map((item, index) => (
               <div 
                 key={index} 
-                className={`activity-item ${getActivityClass(item.event)}`}
+                className={`activity-item ${getSharedActivityClass(item.event)}`}
               >
-                <span className="activity-icon">{getActivityIcon(item.event)}</span>
+                <span className="activity-icon">{getSharedActivityIcon(item.event)}</span>
                 <span className="activity-time">
                   {new Date(item.timestamp).toLocaleTimeString()}
                 </span>

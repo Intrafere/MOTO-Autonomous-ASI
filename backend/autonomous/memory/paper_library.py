@@ -18,6 +18,7 @@ from backend.shared.path_safety import (
     resolve_path_within_root,
     validate_single_path_component,
 )
+from backend.shared.log_redaction import redact_log_text
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class PaperLibrary:
         self._lock = asyncio.Lock()
         self._base_dir = Path(system_config.auto_papers_dir)
         self._archive_dir = Path(system_config.auto_papers_archive_dir)
+        self._pruned_dir = self._base_dir / "pruned"
         self._session_manager = None
     
     def set_session_manager(self, session_manager) -> None:
@@ -44,7 +46,8 @@ class PaperLibrary:
         if session_manager and session_manager.is_session_active:
             self._base_dir = session_manager.get_papers_dir()
             self._archive_dir = session_manager.get_papers_dir() / "archive"
-            logger.info(f"Paper library using session path: {self._base_dir}")
+            self._pruned_dir = session_manager.get_papers_dir() / "pruned"
+            logger.info("Paper library using session path: %s", redact_log_text(self._base_dir, 240))
     
     async def initialize(self) -> None:
         """Initialize the paper library directories."""
@@ -52,18 +55,39 @@ class PaperLibrary:
         if self._session_manager and self._session_manager.is_session_active:
             self._base_dir = self._session_manager.get_papers_dir()
             self._archive_dir = self._base_dir / "archive"
+            self._pruned_dir = self._base_dir / "pruned"
         
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._archive_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Paper library initialized at {self._base_dir}")
+        self._pruned_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Paper library initialized at %s", redact_log_text(self._base_dir, 240))
     
     def _safe_paper_id(self, paper_id: str) -> str:
         """Validate paper_id as a single path component."""
         return validate_single_path_component(paper_id, "paper ID")
 
+    def _paper_path(self, root: Path, paper_id: str, suffix: str, *, prefix: str = "paper_") -> Path:
+        """Build a paper-related path inside a trusted library root."""
+        safe_id = self._safe_paper_id(paper_id)
+        return resolve_path_within_root(root, f"{prefix}{safe_id}{suffix}")
+
+    def _ensure_library_path(self, path: Path, label: str = "library path") -> Path:
+        """Verify an existing helper-built path is still under this library's roots."""
+        candidate = Path(path)
+        for root in (self._base_dir, self._archive_dir, self._pruned_dir):
+            try:
+                return resolve_path_within_root(root, str(candidate))
+            except ValueError:
+                continue
+        raise ValueError(f"{label} escapes paper library roots")
+
     def _get_paper_path(self, paper_id: str) -> Path:
         """Get path to paper file."""
-        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}.txt"
+        return self._paper_path(self._base_dir, paper_id, ".txt")
+
+    def _get_pruned_paper_path(self, paper_id: str) -> Path:
+        """Get path to a pruned paper file."""
+        return self._paper_path(self._pruned_dir, paper_id, ".txt", prefix="pruned_paper_")
     
     def get_paper_path(self, paper_id: str) -> str:
         """
@@ -87,23 +111,55 @@ class PaperLibrary:
     
     def _get_abstract_path(self, paper_id: str) -> Path:
         """Get path to abstract file."""
-        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_abstract.txt"
+        return self._paper_path(self._base_dir, paper_id, "_abstract.txt")
+
+    def _get_pruned_abstract_path(self, paper_id: str) -> Path:
+        """Get path to pruned paper abstract file."""
+        return self._paper_path(self._pruned_dir, paper_id, "_abstract.txt", prefix="pruned_paper_")
     
     def _get_source_brainstorm_path(self, paper_id: str) -> Path:
         """Get path to cached source brainstorm file."""
-        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_source_brainstorm.txt"
+        return self._paper_path(self._base_dir, paper_id, "_source_brainstorm.txt")
+
+    def _get_pruned_source_brainstorm_path(self, paper_id: str) -> Path:
+        """Get path to pruned cached source brainstorm file."""
+        return self._paper_path(self._pruned_dir, paper_id, "_source_brainstorm.txt", prefix="pruned_paper_")
     
     def _get_outline_path(self, paper_id: str) -> Path:
         """Get path to paper outline file."""
-        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_outline.txt"
+        return self._paper_path(self._base_dir, paper_id, "_outline.txt")
+
+    def _get_pruned_outline_path(self, paper_id: str) -> Path:
+        """Get path to pruned paper outline file."""
+        return self._paper_path(self._pruned_dir, paper_id, "_outline.txt", prefix="pruned_paper_")
     
     def _get_metadata_path(self, paper_id: str) -> Path:
         """Get path to paper metadata JSON file."""
-        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_metadata.json"
+        return self._paper_path(self._base_dir, paper_id, "_metadata.json")
+
+    def _get_pruned_metadata_path(self, paper_id: str) -> Path:
+        """Get path to pruned paper metadata JSON file."""
+        return self._paper_path(self._pruned_dir, paper_id, "_metadata.json", prefix="pruned_paper_")
     
     def _get_rejections_path(self, paper_id: str) -> Path:
         """Get path to paper compiler rejections file."""
-        return self._base_dir / f"paper_{self._safe_paper_id(paper_id)}_last_10_rejections.txt"
+        return self._paper_path(self._base_dir, paper_id, "_last_10_rejections.txt")
+
+    def _get_pruned_rejections_path(self, paper_id: str) -> Path:
+        """Get path to pruned paper compiler rejections file."""
+        return self._paper_path(self._pruned_dir, paper_id, "_last_10_rejections.txt", prefix="pruned_paper_")
+
+    def _get_archive_paper_path(self, paper_id: str) -> Path:
+        """Get path to a legacy archived paper file."""
+        return self._paper_path(self._archive_dir, paper_id, ".txt")
+
+    def _get_archive_outline_path(self, paper_id: str) -> Path:
+        """Get path to a legacy archived outline file."""
+        return self._paper_path(self._archive_dir, paper_id, "_outline.txt")
+
+    def _get_archive_metadata_path(self, paper_id: str) -> Path:
+        """Get path to a legacy archived metadata file."""
+        return self._paper_path(self._archive_dir, paper_id, "_metadata.json")
 
     # ========================================================================
     # HISTORY HELPERS
@@ -115,6 +171,7 @@ class PaperLibrary:
         scoped_library = PaperLibrary()
         scoped_library._base_dir = base_dir
         scoped_library._archive_dir = base_dir / "archive"
+        scoped_library._pruned_dir = base_dir / "pruned"
         return scoped_library
 
     @staticmethod
@@ -188,7 +245,11 @@ class PaperLibrary:
                 metadata.get("user_research_prompt"),
             )
         except Exception as e:
-            logger.warning(f"Failed to read history prompt for session {session_id}: {e}")
+            logger.warning(
+                "Failed to read history prompt for session %s: %s",
+                redact_log_text(session_id, 120),
+                redact_log_text(e, 240),
+            )
             return self._derive_history_prompt_from_session_id(session_id)
 
     @staticmethod
@@ -222,6 +283,7 @@ class PaperLibrary:
         novelty_tier = str(cls._proof_value(proof, "novelty_tier", "") or "").strip()
 
         tier_labels = {
+            "major_mathematical_discovery": "Major Mathematical Discovery",
             "mathematical_discovery": "Mathematical Discovery",
             "novel_variant": "Novel Reformulation",
             "novel_formulation": "Novel Formalization",
@@ -294,9 +356,27 @@ class PaperLibrary:
             return before + appendix_block + after
 
         fallback_header = "=== PROOFS ATTACHED TO THIS PAPER (Lean 4 Verified) ==="
+        self_review_match = re.search(
+            r"(?:^|\n)\s*(?:#+\s*)?AI Self-Review and Limitations\s*\n",
+            existing_content,
+            re.IGNORECASE,
+        )
+
+        def insert_before_self_review(proof_block: str) -> str:
+            if not self_review_match:
+                return existing_content.rstrip() + "\n\n" + proof_block.rstrip() + "\n"
+            insert_at = self_review_match.start()
+            if insert_at > 0 and existing_content[insert_at] == "\n":
+                insert_at += 1
+            before_review = existing_content[:insert_at].rstrip()
+            review_and_after = existing_content[insert_at:].lstrip()
+            return f"{before_review}\n\n{proof_block.rstrip()}\n\n{review_and_after}"
+
         if fallback_header in existing_content:
-            return existing_content.rstrip() + "\n\n" + new_entries + "\n"
-        return existing_content.rstrip() + "\n\n" + fallback_header + "\n\n" + new_entries + "\n"
+            return insert_before_self_review(new_entries)
+
+        proof_section = f"{fallback_header}\n\n{new_entries}"
+        return insert_before_self_review(proof_section)
 
     @staticmethod
     def strip_verified_proofs_from_content(content: str) -> str:
@@ -328,40 +408,168 @@ class PaperLibrary:
 
         return stripped.rstrip()
 
-    async def _list_history_papers_from_directory(self, papers_dir: Path, session_id: str) -> List[Dict[str, Any]]:
-        """List complete, non-archived papers from one legacy/session papers directory."""
+    @staticmethod
+    def _pruned_banner(
+        *,
+        paper_id: str,
+        pruned_at: datetime,
+        pruned_by: str,
+        reason: str,
+    ) -> str:
+        """Build the raw-file banner that identifies a preserved pruned paper."""
+        actor_note = (
+            "The system decided autonomously that this paper hurt context cumulation."
+            if pruned_by in {"system", "legacy"}
+            else "The user removed this paper from model context accumulation."
+        )
+        return (
+            "PRUNED PAPER - REMOVED FROM MODEL CONTEXT\n\n"
+            f"{actor_note}\n"
+            "This file is preserved for user review and download only. "
+            "It must not be used as future model context.\n\n"
+            f"Original Paper ID: {paper_id}\n"
+            f"Pruned At: {pruned_at.isoformat()}\n"
+            f"Pruned By: {pruned_by}\n"
+            f"Prune Reason: {reason or 'No reason recorded.'}\n"
+            f"{'=' * 80}\n\n"
+        )
+
+    @staticmethod
+    def _strip_existing_pruned_banner(content: str) -> str:
+        """Avoid duplicating the pruned banner if a paper is pruned twice."""
+        if not content.startswith("PRUNED PAPER - REMOVED FROM MODEL CONTEXT"):
+            return content
+        marker = f"{'=' * 80}\n\n"
+        marker_index = content.find(marker)
+        if marker_index < 0:
+            return content
+        return content[marker_index + len(marker):]
+
+    @staticmethod
+    def _metadata_to_dict(metadata: PaperMetadata) -> Dict[str, Any]:
+        """Serialize metadata for JSON files across pydantic versions."""
+        if hasattr(metadata, "model_dump"):
+            return metadata.model_dump()
+        return metadata.dict()
+
+    async def _read_metadata_file(self, metadata_path: Path) -> Optional[PaperMetadata]:
+        """Read a metadata file into PaperMetadata."""
+        try:
+            metadata_path = self._ensure_library_path(metadata_path, "metadata path")
+        except ValueError as exc:
+            logger.warning("Rejected unsafe metadata path: %s", exc)
+            return None
+
+        # codeql[py/path-injection]: metadata_path is constrained to this paper library's roots.
+        if not metadata_path.exists():
+            return None
+        try:
+            # codeql[py/path-injection]: metadata_path is constrained to this paper library's roots.
+            async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+            return PaperMetadata(**json.loads(content))
+        except Exception as e:
+            logger.error(
+                "Failed to load paper metadata from %s: %s",
+                redact_log_text(metadata_path, 240),
+                redact_log_text(e, 240),
+            )
+            return None
+
+    async def _save_metadata_to_path(self, metadata: PaperMetadata, metadata_path: Path) -> None:
+        """Save paper metadata to a specific path."""
+        metadata_path = self._ensure_library_path(metadata_path, "metadata path")
+        # codeql[py/path-injection]: metadata_path is constrained to this paper library's roots.
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        # codeql[py/path-injection]: metadata_path is constrained to this paper library's roots.
+        async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
+            await f.write(json.dumps(self._metadata_to_dict(metadata), indent=2, default=str))
+
+    async def _read_text_file(self, path: Path) -> str:
+        """Read a text file if it exists."""
+        try:
+            path = self._ensure_library_path(path, "text path")
+        except ValueError as exc:
+            logger.warning("Rejected unsafe text path: %s", exc)
+            return ""
+
+        # codeql[py/path-injection]: path is constrained to this paper library's roots.
+        if not path.exists():
+            return ""
+        try:
+            # codeql[py/path-injection]: path is constrained to this paper library's roots.
+            async with aiofiles.open(path, 'r', encoding='utf-8') as f:
+                return await f.read()
+        except Exception as e:
+            logger.error(
+                "Failed to read %s: %s",
+                redact_log_text(path, 240),
+                redact_log_text(e, 240),
+            )
+            return ""
+
+    def _pruned_note_for(self, metadata: PaperMetadata) -> str:
+        """Return the user-facing pruned-paper note."""
+        if metadata.pruned_by == "system" or metadata.status == "archived":
+            return "The system decided autonomously that this paper hurt context cumulation."
+        return "The user removed this paper from model context accumulation."
+
+    async def _build_history_entry(
+        self,
+        *,
+        metadata: PaperMetadata,
+        session_id: str,
+        papers_dir: Path,
+        pruned: bool = False,
+    ) -> Dict[str, Any]:
+        """Build the shared Stage 2 history response shape."""
         from backend.shared.critique_memory import get_latest_critique
 
+        latest_critique = await get_latest_critique(
+            paper_type="autonomous_paper",
+            paper_id=metadata.paper_id,
+            base_dir=papers_dir
+        )
+
+        entry = {
+            "history_id": f"{session_id}:{metadata.paper_id}",
+            "session_id": session_id,
+            "paper_id": metadata.paper_id,
+            "title": metadata.title,
+            "abstract": metadata.abstract,
+            "word_count": metadata.word_count,
+            "source_brainstorm_ids": metadata.source_brainstorm_ids,
+            "referenced_papers": metadata.referenced_papers,
+            "status": metadata.status,
+            "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
+            "model_usage": metadata.model_usage,
+            "user_prompt": await self._get_history_user_prompt(session_id),
+            "critique_avg": self._calculate_critique_average(latest_critique),
+        }
+        if pruned:
+            entry.update({
+                "is_pruned": True,
+                "pruned_at": metadata.pruned_at.isoformat() if metadata.pruned_at else None,
+                "pruned_reason": metadata.pruned_reason,
+                "pruned_by": metadata.pruned_by or ("legacy" if metadata.status == "archived" else None),
+                "pruned_note": self._pruned_note_for(metadata),
+            })
+        return entry
+
+    async def _list_history_papers_from_directory(self, papers_dir: Path, session_id: str) -> List[Dict[str, Any]]:
+        """List complete, non-archived papers from one legacy/session papers directory."""
         scoped_library = self._build_scoped_library(papers_dir)
-        user_prompt = await self._get_history_user_prompt(session_id)
         papers = await scoped_library.get_all_papers(validate_completeness=True)
 
         history_papers = []
         for metadata in papers:
             if metadata.status != "complete":
                 continue
-
-            latest_critique = await get_latest_critique(
-                paper_type="autonomous_paper",
-                paper_id=metadata.paper_id,
-                base_dir=papers_dir
-            )
-
-            history_papers.append({
-                "history_id": f"{session_id}:{metadata.paper_id}",
-                "session_id": session_id,
-                "paper_id": metadata.paper_id,
-                "title": metadata.title,
-                "abstract": metadata.abstract,
-                "word_count": metadata.word_count,
-                "source_brainstorm_ids": metadata.source_brainstorm_ids,
-                "referenced_papers": metadata.referenced_papers,
-                "status": metadata.status,
-                "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
-                "model_usage": metadata.model_usage,
-                "user_prompt": user_prompt,
-                "critique_avg": self._calculate_critique_average(latest_critique),
-            })
+            history_papers.append(await scoped_library._build_history_entry(
+                metadata=metadata,
+                session_id=session_id,
+                papers_dir=papers_dir,
+            ))
 
         return history_papers
 
@@ -389,10 +597,71 @@ class PaperLibrary:
         history_papers.sort(key=lambda paper: paper.get("created_at") or "", reverse=True)
         return history_papers
 
+    async def _list_pruned_history_papers_from_directory(self, papers_dir: Path, session_id: str) -> List[Dict[str, Any]]:
+        """List pruned papers from one legacy/session papers directory."""
+        scoped_library = self._build_scoped_library(papers_dir)
+        pruned_papers: List[Dict[str, Any]] = []
+
+        if scoped_library._pruned_dir.exists():
+            for metadata_path in scoped_library._pruned_dir.glob("pruned_paper_*_metadata.json"):
+                metadata = await scoped_library._read_metadata_file(metadata_path)
+                if not metadata:
+                    continue
+                metadata.status = "pruned"
+                pruned_papers.append(await scoped_library._build_history_entry(
+                    metadata=metadata,
+                    session_id=session_id,
+                    papers_dir=papers_dir,
+                    pruned=True,
+                ))
+
+        # Legacy archived papers are exposed as pruned history for user access.
+        if scoped_library._archive_dir.exists():
+            for metadata_path in scoped_library._archive_dir.glob("paper_*_metadata.json"):
+                metadata = await scoped_library._read_metadata_file(metadata_path)
+                if not metadata:
+                    continue
+                metadata.status = "archived"
+                metadata.pruned_by = metadata.pruned_by or "legacy"
+                metadata.pruned_reason = metadata.pruned_reason or "Legacy archived paper preserved as pruned history."
+                pruned_papers.append(await scoped_library._build_history_entry(
+                    metadata=metadata,
+                    session_id=session_id,
+                    papers_dir=papers_dir,
+                    pruned=True,
+                ))
+
+        return pruned_papers
+
+    async def list_pruned_history_papers(self) -> List[Dict[str, Any]]:
+        """List all pruned Stage 2 papers from legacy and session storage."""
+        pruned_papers: List[Dict[str, Any]] = []
+
+        legacy_papers_dir = Path(system_config.auto_papers_dir)
+        if legacy_papers_dir.exists():
+            pruned_papers.extend(
+                await self._list_pruned_history_papers_from_directory(legacy_papers_dir, "legacy")
+            )
+
+        sessions_dir = Path(system_config.auto_sessions_base_dir)
+        if sessions_dir.exists():
+            for session_dir in sorted((p for p in sessions_dir.iterdir() if p.is_dir()), reverse=True):
+                papers_dir = session_dir / "papers"
+                if not papers_dir.exists():
+                    continue
+
+                pruned_papers.extend(
+                    await self._list_pruned_history_papers_from_directory(papers_dir, session_dir.name)
+                )
+
+        pruned_papers.sort(
+            key=lambda paper: paper.get("pruned_at") or paper.get("created_at") or "",
+            reverse=True,
+        )
+        return pruned_papers
+
     async def get_history_paper(self, session_id: str, paper_id: str) -> Optional[Dict[str, Any]]:
         """Get one complete, non-archived Stage 2 paper from legacy/session history."""
-        from backend.shared.critique_memory import get_latest_critique
-
         papers_dir = self.get_history_papers_dir(session_id)
         if papers_dir is None:
             return None
@@ -407,26 +676,64 @@ class PaperLibrary:
 
         content = await scoped_library.get_paper_content(paper_id)
         outline = await scoped_library.get_outline(paper_id)
-        latest_critique = await get_latest_critique(
-            paper_type="autonomous_paper",
-            paper_id=paper_id,
-            base_dir=papers_dir
+        entry = await scoped_library._build_history_entry(
+            metadata=metadata,
+            session_id=session_id,
+            papers_dir=papers_dir,
         )
 
         return {
-            "history_id": f"{session_id}:{paper_id}",
-            "session_id": session_id,
-            "paper_id": metadata.paper_id,
-            "title": metadata.title,
-            "abstract": metadata.abstract,
-            "word_count": metadata.word_count,
-            "source_brainstorm_ids": metadata.source_brainstorm_ids,
-            "referenced_papers": metadata.referenced_papers,
-            "status": metadata.status,
-            "created_at": metadata.created_at.isoformat() if metadata.created_at else None,
-            "model_usage": metadata.model_usage,
-            "user_prompt": await self._get_history_user_prompt(session_id),
-            "critique_avg": self._calculate_critique_average(latest_critique),
+            **entry,
+            "content": content,
+            "outline": outline,
+        }
+
+    async def get_pruned_history_paper(self, session_id: str, paper_id: str) -> Optional[Dict[str, Any]]:
+        """Get one pruned Stage 2 paper from legacy/session history."""
+        papers_dir = self.get_history_papers_dir(session_id)
+        if papers_dir is None:
+            return None
+
+        scoped_library = self._build_scoped_library(papers_dir)
+        metadata = await scoped_library._read_metadata_file(
+            scoped_library._get_pruned_metadata_path(paper_id)
+        )
+        content_path = scoped_library._get_pruned_paper_path(paper_id)
+        outline_path = scoped_library._get_pruned_outline_path(paper_id)
+        is_legacy_archive = False
+
+        # Legacy archives used the old paper_ prefix inside archive/.
+        if metadata is None:
+            archive_metadata_path = scoped_library._get_archive_metadata_path(paper_id)
+            metadata = await scoped_library._read_metadata_file(archive_metadata_path)
+            content_path = scoped_library._get_archive_paper_path(paper_id)
+            outline_path = scoped_library._get_archive_outline_path(paper_id)
+            if metadata:
+                is_legacy_archive = True
+                metadata.status = "archived"
+                metadata.pruned_by = metadata.pruned_by or "legacy"
+                metadata.pruned_reason = metadata.pruned_reason or "Legacy archived paper preserved as pruned history."
+
+        if metadata is None:
+            return None
+
+        content = await scoped_library._read_text_file(content_path)
+        if is_legacy_archive and content and not content.startswith("PRUNED PAPER - REMOVED FROM MODEL CONTEXT"):
+            content = scoped_library._pruned_banner(
+                paper_id=paper_id,
+                pruned_at=metadata.pruned_at or metadata.created_at or datetime.now(),
+                pruned_by=metadata.pruned_by or "legacy",
+                reason=metadata.pruned_reason or "Legacy archived paper preserved as pruned history.",
+            ) + content
+        outline = await scoped_library._read_text_file(outline_path)
+        entry = await scoped_library._build_history_entry(
+            metadata=metadata,
+            session_id=session_id,
+            papers_dir=papers_dir,
+            pruned=True,
+        )
+        return {
+            **entry,
             "content": content,
             "outline": outline,
         }
@@ -597,7 +904,11 @@ class PaperLibrary:
             return True
             
         except Exception as e:
-            logger.error(f"Failed to validate paper {paper_id}: {e}")
+            logger.error(
+                "Failed to validate paper %s: %s",
+                redact_log_text(paper_id, 120),
+                redact_log_text(e, 240),
+            )
             return False
     
     # ========================================================================
@@ -661,19 +972,19 @@ class PaperLibrary:
             paper_path = self._get_paper_path(paper_id)
             async with aiofiles.open(paper_path, 'w', encoding='utf-8') as f:
                 await f.write(content)
-            logger.info(f"Paper saved: {paper_path}")
+            logger.info("Paper saved: %s", redact_log_text(paper_path, 240))
             
             # Save outline
             outline_path = self._get_outline_path(paper_id)
             async with aiofiles.open(outline_path, 'w', encoding='utf-8') as f:
                 await f.write(outline)
-            logger.info(f"Outline saved: {outline_path}")
+            logger.info("Outline saved: %s", redact_log_text(outline_path, 240))
             
             # Save abstract
             abstract_path = self._get_abstract_path(paper_id)
             async with aiofiles.open(abstract_path, 'w', encoding='utf-8') as f:
                 await f.write(abstract)
-            logger.info(f"Abstract saved: {abstract_path}")
+            logger.info("Abstract saved: %s", redact_log_text(abstract_path, 240))
             
             # Save source brainstorm cache
             source_path = self._get_source_brainstorm_path(paper_id)
@@ -689,7 +1000,13 @@ class PaperLibrary:
             await self._save_metadata(metadata)
             
             model_count = len(model_usage) if model_usage else 0
-            logger.info(f"Saved paper {paper_id}: '{title}' ({word_count} words, {model_count} models tracked)")
+            logger.info(
+                "Saved paper %s: '%s' (%s words, %s models tracked)",
+                redact_log_text(paper_id, 120),
+                redact_log_text(title, 240),
+                word_count,
+                model_count,
+            )
             return metadata
     
     async def get_paper_content(self, paper_id: str, *, strip_proofs: bool = False) -> str:
@@ -709,13 +1026,16 @@ class PaperLibrary:
             return ""
 
         try:
-            async with aiofiles.open(paper_path, 'r', encoding='utf-8') as f:
-                content = await f.read()
+            content = await self._read_text_file(paper_path)
             if strip_proofs and content:
                 content = self.strip_verified_proofs_from_content(content)
             return content
         except Exception as e:
-            logger.error(f"Failed to read paper {paper_id}: {e}")
+            logger.error(
+                "Failed to read paper %s: %s",
+                redact_log_text(paper_id, 120),
+                redact_log_text(e, 240),
+            )
             return ""
 
     async def append_proofs_section(self, paper_id: str, proofs_data: Any) -> bool:
@@ -724,7 +1044,10 @@ class PaperLibrary:
             session_id, scoped_paper_id = paper_id.split(":", 1)
             papers_dir = self.get_history_papers_dir(session_id)
             if papers_dir is None:
-                logger.error(f"History paper directory not found for proof append: {paper_id}")
+                logger.error(
+                    "History paper directory not found for proof append: %s",
+                    redact_log_text(paper_id, 120),
+                )
                 return False
             scoped_library = self._build_scoped_library(papers_dir)
             return await scoped_library.append_proofs_section(scoped_paper_id, proofs_data)
@@ -732,7 +1055,7 @@ class PaperLibrary:
         async with self._lock:
             paper_path = self._get_paper_path(paper_id)
             if not paper_path.exists():
-                logger.error(f"Paper not found for proof append: {paper_id}")
+                logger.error("Paper not found for proof append: %s", redact_log_text(paper_id, 120))
                 return False
 
             proofs = proofs_data if isinstance(proofs_data, list) else [proofs_data]
@@ -747,93 +1070,69 @@ class PaperLibrary:
                     "this paper",
                 )
                 if updated_content == existing_content:
-                    logger.info("No new proof entries to append to paper %s", paper_id)
+                    logger.info("No new proof entries to append to paper %s", redact_log_text(paper_id, 120))
                     return True
 
                 async with aiofiles.open(paper_path, "w", encoding="utf-8") as handle:
                     await handle.write(updated_content)
 
-                logger.info("Appended %s proof(s) to paper %s", len(proofs), paper_id)
+                logger.info("Appended %s proof(s) to paper %s", len(proofs), redact_log_text(paper_id, 120))
                 return True
             except Exception as exc:
-                logger.error(f"Failed to append proofs to paper {paper_id}: {exc}")
+                logger.error(
+                    "Failed to append proofs to paper %s: %s",
+                    redact_log_text(paper_id, 120),
+                    redact_log_text(exc, 240),
+                )
                 return False
     
     async def get_abstract(self, paper_id: str) -> str:
         """Get paper abstract."""
         abstract_path = self._get_abstract_path(paper_id)
-        
-        if not abstract_path.exists():
-            return ""
-        
-        try:
-            async with aiofiles.open(abstract_path, 'r', encoding='utf-8') as f:
-                return await f.read()
-        except Exception as e:
-            logger.error(f"Failed to read abstract for {paper_id}: {e}")
-            return ""
+        return await self._read_text_file(abstract_path)
     
     async def get_outline(self, paper_id: str) -> str:
         """Get paper outline."""
         outline_path = self._get_outline_path(paper_id)
-        
-        if not outline_path.exists():
-            return ""
-        
-        try:
-            async with aiofiles.open(outline_path, 'r', encoding='utf-8') as f:
-                return await f.read()
-        except Exception as e:
-            logger.error(f"Failed to read outline for {paper_id}: {e}")
-            return ""
+        return await self._read_text_file(outline_path)
     
     async def get_source_brainstorm(self, paper_id: str) -> str:
         """Get cached source brainstorm content."""
         source_path = self._get_source_brainstorm_path(paper_id)
-        
-        if not source_path.exists():
-            return ""
-        
-        try:
-            async with aiofiles.open(source_path, 'r', encoding='utf-8') as f:
-                return await f.read()
-        except Exception as e:
-            logger.error(f"Failed to read source brainstorm for {paper_id}: {e}")
-            return ""
+        return await self._read_text_file(source_path)
     
     async def _save_metadata(self, metadata: PaperMetadata) -> None:
         """Save paper metadata to JSON file."""
         metadata_path = self._get_metadata_path(metadata.paper_id)
         
         try:
-            async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(metadata.dict(), indent=2, default=str))
+            await self._save_metadata_to_path(metadata, metadata_path)
         except Exception as e:
-            logger.error(f"Failed to save metadata for {metadata.paper_id}: {e}")
+            logger.error(
+                "Failed to save metadata for %s: %s",
+                redact_log_text(metadata.paper_id, 120),
+                redact_log_text(e, 240),
+            )
     
     async def get_metadata(self, paper_id: str) -> Optional[PaperMetadata]:
         """Get paper metadata."""
         metadata_path = self._get_metadata_path(paper_id)
-        
-        if not metadata_path.exists():
-            return None
-        
-        try:
-            async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
-                content = await f.read()
-                data = json.loads(content)
-                return PaperMetadata(**data)
-        except Exception as e:
-            logger.error(f"Failed to load metadata for {paper_id}: {e}")
-            return None
+        return await self._read_metadata_file(metadata_path)
     
-    async def get_all_papers(self, include_archived: bool = False, include_in_progress: bool = False, validate_completeness: bool = True) -> List[PaperMetadata]:
+    async def get_all_papers(
+        self,
+        include_archived: bool = False,
+        include_in_progress: bool = False,
+        include_pruned: bool = False,
+        validate_completeness: bool = True,
+    ) -> List[PaperMetadata]:
         """
         Get metadata for all papers.
         
         Args:
-            include_archived: If True, include archived papers
+            include_archived: If True, include legacy archived papers
             include_in_progress: If True, include papers with status="in_progress" (default False)
+            include_pruned: If True, include pruned papers from active metadata (legacy compatibility)
             validate_completeness: If True, only return papers with all required sections (default True)
         
         Returns:
@@ -852,11 +1151,10 @@ class PaperLibrary:
                     data = json.loads(content)
                     metadata = PaperMetadata(**data)
                     
-                    # Filter by archive status
                     if metadata.status == "archived" and not include_archived:
                         continue
-                    
-                    # Filter by in_progress status
+                    if metadata.status == "pruned" and not include_pruned:
+                        continue
                     if metadata.status == "in_progress" and not include_in_progress:
                         logger.debug(f"Skipping in_progress paper {metadata.paper_id}")
                         continue
@@ -870,7 +1168,11 @@ class PaperLibrary:
                     
                     papers.append(metadata)
             except Exception as e:
-                logger.error(f"Failed to load paper metadata from {path}: {e}")
+                logger.error(
+                    "Failed to load paper metadata from %s: %s",
+                    redact_log_text(path, 240),
+                    redact_log_text(e, 240),
+                )
         
         # Sort by creation time (most recent first)
         papers.sort(key=lambda x: x.created_at, reverse=True)
@@ -903,8 +1205,8 @@ class PaperLibrary:
                     data = json.loads(content)
                     metadata = PaperMetadata(**data)
                     
-                    # Skip archived papers
-                    if metadata.status == "archived":
+                    # Skip archived/pruned papers
+                    if metadata.status in {"archived", "pruned"}:
                         continue
                     
                     # Check if paper is incomplete
@@ -913,7 +1215,11 @@ class PaperLibrary:
                         incomplete_papers.append(metadata)
                         logger.debug(f"Found incomplete paper: {metadata.paper_id}")
             except Exception as e:
-                logger.error(f"Failed to check paper completeness from {path}: {e}")
+                logger.error(
+                    "Failed to check paper completeness from %s: %s",
+                    redact_log_text(path, 240),
+                    redact_log_text(e, 240),
+                )
         
         if not incomplete_papers:
             return None
@@ -935,46 +1241,102 @@ class PaperLibrary:
         return await self._is_paper_complete(paper_id)
     
     # ========================================================================
-    # ARCHIVE OPERATIONS
+    # PRUNE OPERATIONS
     # ========================================================================
-    
-    async def archive_paper(self, paper_id: str) -> bool:
-        """
-        Archive a paper (move to archive directory).
-        Used when paper is marked as redundant.
-        """
+
+    async def prune_paper(
+        self,
+        paper_id: str,
+        *,
+        reason: str = "",
+        pruned_by: str = "system",
+    ) -> bool:
+        """Soft-prune a paper from model context while preserving it for users."""
         async with self._lock:
             try:
-                # Get metadata
                 metadata = await self.get_metadata(paper_id)
+                pruned_metadata_path = self._get_pruned_metadata_path(paper_id)
                 if metadata is None:
-                    logger.error(f"Cannot archive paper {paper_id}: metadata not found")
+                    # codeql[py/path-injection]: paper_id is validated by _get_pruned_metadata_path.
+                    if pruned_metadata_path.exists():
+                        logger.info("Paper %s is already pruned", redact_log_text(paper_id, 120))
+                        return True
+                    logger.error("Cannot prune paper %s: metadata not found", redact_log_text(paper_id, 120))
                     return False
-                
-                # Update status
-                metadata.status = "archived"
-                await self._save_metadata(metadata)
-                
-                # Move files to archive directory
+
+                self._pruned_dir.mkdir(parents=True, exist_ok=True)
+
+                pruned_at = datetime.now()
+                metadata.status = "pruned"
+                metadata.pruned_at = pruned_at
+                metadata.pruned_reason = reason or "No pruning reason recorded."
+                metadata.pruned_by = pruned_by if pruned_by in {"system", "user", "legacy"} else "system"
+
+                paper_path = self._ensure_library_path(
+                    self._get_paper_path(paper_id),
+                    "paper path",
+                )
+                if paper_path.exists():
+                    content = await self._read_text_file(paper_path)
+                    clean_content = self._strip_existing_pruned_banner(content)
+                    pruned_content = self._pruned_banner(
+                        paper_id=paper_id,
+                        pruned_at=pruned_at,
+                        pruned_by=metadata.pruned_by,
+                        reason=metadata.pruned_reason,
+                    ) + clean_content
+                    pruned_paper_path = self._ensure_library_path(
+                        self._get_pruned_paper_path(paper_id),
+                        "pruned paper path",
+                    )
+                    async with aiofiles.open(pruned_paper_path, 'w', encoding='utf-8') as f:
+                        await f.write(pruned_content)
+                    paper_path.unlink(missing_ok=True)
+
                 files_to_move = [
-                    (self._get_paper_path(paper_id), self._archive_dir / f"paper_{paper_id}.txt"),
-                    (self._get_abstract_path(paper_id), self._archive_dir / f"paper_{paper_id}_abstract.txt"),
-                    (self._get_outline_path(paper_id), self._archive_dir / f"paper_{paper_id}_outline.txt"),
-                    (self._get_source_brainstorm_path(paper_id), self._archive_dir / f"paper_{paper_id}_source_brainstorm.txt"),
-                    (self._get_metadata_path(paper_id), self._archive_dir / f"paper_{paper_id}_metadata.json"),
-                    (self._get_rejections_path(paper_id), self._archive_dir / f"paper_{paper_id}_last_10_rejections.txt")
+                    (self._get_abstract_path(paper_id), self._get_pruned_abstract_path(paper_id)),
+                    (self._get_outline_path(paper_id), self._get_pruned_outline_path(paper_id)),
+                    (self._get_source_brainstorm_path(paper_id), self._get_pruned_source_brainstorm_path(paper_id)),
+                    (self._get_rejections_path(paper_id), self._get_pruned_rejections_path(paper_id)),
                 ]
-                
+
                 for source, dest in files_to_move:
                     if source.exists():
+                        source = self._ensure_library_path(source, "paper source path")
+                        dest = self._ensure_library_path(dest, "pruned destination path")
+                        dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(str(source), str(dest))
-                
-                logger.info(f"Paper {paper_id} archived successfully")
+
+                await self._save_metadata_to_path(metadata, pruned_metadata_path)
+                metadata_path = self._ensure_library_path(
+                    self._get_metadata_path(paper_id),
+                    "metadata path",
+                )
+                metadata_path.unlink(missing_ok=True)
+
+                logger.info("Paper %s pruned successfully", redact_log_text(paper_id, 120))
                 return True
-                
+
             except Exception as e:
-                logger.error(f"Failed to archive paper {paper_id}: {e}")
+                logger.error(
+                    "Failed to prune paper %s: %s",
+                    redact_log_text(paper_id, 120),
+                    redact_log_text(e, 240),
+                )
                 return False
+
+    async def archive_paper(self, paper_id: str) -> bool:
+        """
+        Legacy compatibility wrapper.
+
+        Redundancy removal is now a prune operation: the paper leaves model
+        context but remains downloadable and visibly labeled for users.
+        """
+        return await self.prune_paper(
+            paper_id,
+            reason="Legacy archive request treated as a pruned paper.",
+            pruned_by="system",
+        )
     
     async def get_papers_summary(self) -> List[Dict[str, Any]]:
         """
@@ -1021,24 +1383,66 @@ class PaperLibrary:
         return summaries
     
     async def count_papers(self) -> Dict[str, int]:
-        """Count total, archived, in_progress, and active (complete) papers."""
-        all_papers = await self.get_all_papers(include_archived=True, include_in_progress=True, validate_completeness=False)
+        """Count total, pruned, archived, in_progress, and active (complete) papers."""
+        all_papers = await self.get_all_papers(
+            include_archived=True,
+            include_in_progress=True,
+            include_pruned=True,
+            validate_completeness=False,
+        )
         
         total = len(all_papers)
         archived = sum(1 for p in all_papers if p.status == "archived")
+        pruned = sum(1 for p in all_papers if p.status == "pruned")
         in_progress = sum(1 for p in all_papers if p.status == "in_progress")
-        active = total - archived - in_progress  # Only "complete" papers are active
+
+        if self._pruned_dir.exists():
+            pruned += len(list(self._pruned_dir.glob("pruned_paper_*_metadata.json")))
+        if self._archive_dir.exists():
+            archived += len(list(self._archive_dir.glob("paper_*_metadata.json")))
+
+        total += pruned + archived
+        active = sum(1 for p in all_papers if p.status == "complete")
         
         return {
             "total": total,
             "active": active,
             "in_progress": in_progress,
-            "archived": archived
+            "archived": archived,
+            "pruned": pruned
         }
     
     # ========================================================================
     # DELETE OPERATIONS
     # ========================================================================
+
+    async def delete_all_pruned_papers(self) -> int:
+        """Permanently delete all pruned and legacy archived paper files in this scope."""
+        async with self._lock:
+            deleted_count = 0
+            try:
+                for directory in (self._pruned_dir, self._archive_dir):
+                    if not directory.exists():
+                        continue
+                    for metadata_path in directory.glob("*paper_*_metadata.json"):
+                        deleted_count += 1
+                    for path in directory.glob("*"):
+                        if path.is_file():
+                            path.unlink()
+                    # Leave the directory itself in place for future prunes.
+                logger.info(
+                    "Deleted %s pruned/archived paper records from %s",
+                    deleted_count,
+                    redact_log_text(self._base_dir, 240),
+                )
+                return deleted_count
+            except Exception as e:
+                logger.error(
+                    "Failed to delete pruned papers from %s: %s",
+                    redact_log_text(self._base_dir, 240),
+                    redact_log_text(e, 240),
+                )
+                return deleted_count
     
     async def delete_paper(self, paper_id: str) -> bool:
         """
@@ -1084,16 +1488,38 @@ class PaperLibrary:
                         path.unlink()
                         deleted_any = True
                         logger.debug(f"Deleted from archive: {path}")
+
+                pruned_files = [
+                    self._get_pruned_paper_path(paper_id),
+                    self._get_pruned_abstract_path(paper_id),
+                    self._get_pruned_outline_path(paper_id),
+                    self._get_pruned_source_brainstorm_path(paper_id),
+                    self._get_pruned_metadata_path(paper_id),
+                    self._get_pruned_rejections_path(paper_id),
+                ]
+
+                for path in pruned_files:
+                    if path.exists():
+                        path.unlink()
+                        deleted_any = True
+                        logger.debug(f"Deleted from pruned papers: {path}")
                 
                 if deleted_any:
-                    logger.info(f"Paper {paper_id} deleted successfully")
+                    logger.info("Paper %s deleted successfully", redact_log_text(paper_id, 120))
                     return True
                 else:
-                    logger.warning(f"Paper {paper_id} not found in active or archive directories")
+                    logger.warning(
+                        "Paper %s not found in active or archive directories",
+                        redact_log_text(paper_id, 120),
+                    )
                     return False
                     
             except Exception as e:
-                logger.error(f"Failed to delete paper {paper_id}: {e}")
+                logger.error(
+                    "Failed to delete paper %s: %s",
+                    redact_log_text(paper_id, 120),
+                    redact_log_text(e, 240),
+                )
                 return False
 
 

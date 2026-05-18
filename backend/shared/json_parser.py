@@ -10,9 +10,275 @@ Handles common LLM output quirks:
 import json
 import logging
 import re
+import hashlib
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+RETRY_CONTEXT_EMPTY_PLACEHOLDER = "[previous output contained no reusable visible answer text]"
+
+
+def _content_diagnostics(value: str) -> str:
+    """Return parse diagnostics without logging raw model output."""
+    text = value or ""
+    return f"length={len(text)}, sha256={hashlib.sha256(text.encode('utf-8', errors='replace')).hexdigest() if text else ''}"
+
+_PRIVATE_REASONING_OPEN_TAG_PATTERN = re.compile(r"^\s*<(?:think|thought)\b[^>]*>", re.IGNORECASE)
+_FINAL_CHANNEL_PATTERN = re.compile(r"<\|channel\|?>\s*final\b", re.IGNORECASE)
+_PRIVATE_CHANNEL_PATTERN = re.compile(r"<\|channel\|?>\s*(?:analysis|thought|commentary)\b", re.IGNORECASE)
+_LEGACY_CHANNEL_BOUNDARY_PATTERN = re.compile(r"<channel\|>", re.IGNORECASE)
+_KNOWN_CONTROL_TOKEN_NAMES = (
+    "channel",
+    "message",
+    "end",
+    "constrain",
+    "start",
+    "return",
+    "call",
+    "recipient",
+)
+_KNOWN_CONTROL_TOKEN_ALTERNATION = "|".join(_KNOWN_CONTROL_TOKEN_NAMES)
+_BROAD_CONTROL_TOKEN_PATTERN = re.compile(r"<\|[A-Za-z0-9_:-]+(?:\|>|>)", re.IGNORECASE)
+_LEGACY_CONTROL_TOKEN_PATTERN = re.compile(r"<(?:channel|message|end|constrain)\|>", re.IGNORECASE)
+_PARTIAL_CONTROL_TOKEN_PATTERN = re.compile(
+    rf"<\|(?:{_KNOWN_CONTROL_TOKEN_ALTERNATION})[A-Za-z_:-]*$|"
+    r"<(?:channel|message|end|constrain)\|?$",
+    re.IGNORECASE,
+)
+
+
+def _first_likely_visible_boundary(content: str) -> int:
+    """Return the first likely user-visible answer boundary, or -1 if absent."""
+    candidates = []
+    for marker in ("```", "{"):
+        idx = content.find(marker)
+        if idx >= 0:
+            candidates.append(idx)
+    if candidates:
+        return min(candidates)
+
+    for match in re.finditer(r"\[", content):
+        after_bracket = content[match.end():].lstrip()
+        if after_bracket and after_bracket[0] in '{["]-0123456789tfn':
+            return match.start()
+
+    return -1
+
+
+def _find_matches_outside_json_strings(pattern: re.Pattern, content: str) -> list[re.Match]:
+    """Find regex matches that start outside JSON-style quoted strings."""
+    matches = []
+    i = 0
+    in_string = False
+    escape_next = False
+
+    while i < len(content):
+        char = content[i]
+
+        if escape_next:
+            escape_next = False
+            i += 1
+            continue
+
+        if char == "\\" and in_string:
+            escape_next = True
+            i += 1
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            i += 1
+            continue
+
+        if not in_string:
+            match = pattern.match(content, i)
+            if match:
+                matches.append(match)
+                i = max(match.end(), i + 1)
+                continue
+
+        i += 1
+
+    return matches
+
+
+def _has_match_outside_json_strings(pattern: re.Pattern, content: str) -> bool:
+    """Return True when pattern matches outside JSON-style quoted strings."""
+    return bool(_find_matches_outside_json_strings(pattern, content))
+
+
+def _strip_control_tokens_outside_json_strings(content: str) -> str:
+    """Strip provider control tokens without touching visible JSON string values."""
+    result = []
+    i = 0
+    in_string = False
+    escape_next = False
+
+    while i < len(content):
+        char = content[i]
+
+        if escape_next:
+            result.append(char)
+            escape_next = False
+            i += 1
+            continue
+
+        if char == "\\" and in_string:
+            result.append(char)
+            escape_next = True
+            i += 1
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            result.append(char)
+            i += 1
+            continue
+
+        if not in_string:
+            if content.startswith("<|", i):
+                pipe_close = content.find("|>", i + 2)
+                angle_close = content.find(">", i + 2)
+                token_end = -1
+
+                if pipe_close >= 0 and (angle_close < 0 or pipe_close + 1 <= angle_close):
+                    token_end = pipe_close + 2
+                    token_body = content[i + 2:pipe_close]
+                elif angle_close >= 0:
+                    token_end = angle_close + 1
+                    token_body = content[i + 2:angle_close]
+                else:
+                    token_body = content[i + 2:]
+                    if re.fullmatch(r"[A-Za-z0-9_:-]+", token_body):
+                        i = len(content)
+                        continue
+
+                if token_end > 0 and re.fullmatch(r"[A-Za-z0-9_:-]+", token_body.strip()):
+                    i = token_end
+                    continue
+
+            for legacy_token in ("<channel|>", "<message|>", "<end|>", "<constrain|>"):
+                if content[i:i + len(legacy_token)].lower() == legacy_token:
+                    i += len(legacy_token)
+                    break
+            else:
+                result.append(char)
+                i += 1
+            continue
+
+        result.append(char)
+        i += 1
+
+    return "".join(result)
+
+
+def _strip_leading_private_reasoning_blocks(content: str) -> str:
+    """
+    Remove leading private reasoning transcript blocks without touching visible content.
+
+    Some providers expose private reasoning as a leading `<think>` or `<thought>`
+    block before the actual answer. Treat only leading blocks as transcript
+    scaffolding; preserve literal tags that appear inside visible JSON, code, or
+    prose because those may be the user's/model's actual content.
+    """
+    while True:
+        match = _PRIVATE_REASONING_OPEN_TAG_PATTERN.match(content)
+        if not match:
+            return content.strip()
+
+        tag_match = re.match(r"\s*<(?P<tag>think|thought)\b", content, re.IGNORECASE)
+        if not tag_match:
+            return content.strip()
+
+        tag_name = tag_match.group("tag")
+        close_match = re.search(rf"</{tag_name}\s*>", content[match.end():], re.IGNORECASE)
+        if close_match:
+            content = content[match.end() + close_match.end():].strip()
+            continue
+
+        # Unclosed private block: keep later likely answer text if it exists.
+        after_open_tag = content[match.end():]
+        boundary = _first_likely_visible_boundary(after_open_tag)
+        if boundary >= 0:
+            content = after_open_tag[boundary:].strip()
+            continue
+
+        return RETRY_CONTEXT_EMPTY_PLACEHOLDER
+
+
+def sanitize_model_output_for_retry_context(raw: str, max_chars: int = 2000) -> str:
+    """
+    Sanitize raw model output before replaying it as retry context.
+
+    This preserves useful visible failed-output excerpts for conversational retries
+    while stripping private reasoning/channel/control tokens that provider chat
+    templates may reject or that should not enter MOTO memory/context surfaces.
+    """
+    if raw is None:
+        return RETRY_CONTEXT_EMPTY_PLACEHOLDER
+
+    content = str(raw).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not content:
+        return RETRY_CONTEXT_EMPTY_PLACEHOLDER
+
+    original_content = content
+    private_marker_seen = bool(
+        _has_match_outside_json_strings(_PRIVATE_CHANNEL_PATTERN, content)
+        or _has_match_outside_json_strings(_FINAL_CHANNEL_PATTERN, content)
+        or _has_match_outside_json_strings(_LEGACY_CHANNEL_BOUNDARY_PATTERN, content)
+        or _has_match_outside_json_strings(_BROAD_CONTROL_TOKEN_PATTERN, content)
+        or _has_match_outside_json_strings(_LEGACY_CONTROL_TOKEN_PATTERN, content)
+        or _has_match_outside_json_strings(_PARTIAL_CONTROL_TOKEN_PATTERN, content)
+    )
+
+    # If a Harmony-style final channel is present, only the final-channel payload
+    # is reusable answer text. Earlier analysis/thought channels are private.
+    final_matches = _find_matches_outside_json_strings(_FINAL_CHANNEL_PATTERN, content)
+    if final_matches:
+        content = content[final_matches[-1].end():]
+    elif _has_match_outside_json_strings(_PRIVATE_CHANNEL_PATTERN, content):
+        legacy_boundaries = _find_matches_outside_json_strings(_LEGACY_CHANNEL_BOUNDARY_PATTERN, content)
+        if legacy_boundaries:
+            content = content[legacy_boundaries[-1].end():]
+        else:
+            boundary = _first_likely_visible_boundary(content)
+            if boundary >= 0:
+                content = content[boundary:]
+            else:
+                return RETRY_CONTEXT_EMPTY_PLACEHOLDER
+
+    content = _strip_leading_private_reasoning_blocks(content)
+    if content == RETRY_CONTEXT_EMPTY_PLACEHOLDER:
+        return content
+
+    # Remove complete and partial provider/private control tokens. Channel labels
+    # directly following token shapes are not user-visible answer content.
+    content = _strip_control_tokens_outside_json_strings(content)
+    content = re.sub(r"(?im)^\s*(analysis|thought|commentary|final)\s*$", "", content)
+    content = content.strip()
+
+    if private_marker_seen:
+        boundary = _first_likely_visible_boundary(content)
+        if boundary > 0:
+            content = content[boundary:].strip()
+
+    content = re.sub(r"\n{3,}", "\n\n", content).strip()
+    if not content:
+        logger.debug("Retry-context sanitizer removed private-only model output")
+        return RETRY_CONTEXT_EMPTY_PLACEHOLDER
+
+    if max_chars and max_chars > 0 and len(content) > max_chars:
+        content = content[:max_chars].rstrip() + "\n[...sanitized output truncated for retry...]"
+
+    if content != original_content:
+        logger.debug(
+            "Sanitized retry context output (%d -> %d chars)",
+            len(original_content),
+            len(content),
+        )
+
+    return content or RETRY_CONTEXT_EMPTY_PLACEHOLDER
 
 
 def sanitize_json_response(raw_content: str) -> str:
@@ -68,7 +334,7 @@ def sanitize_json_response(raw_content: str) -> str:
     
     if len(content) < original_len:
         logger.debug(f"Stripped <think>...</think> reasoning tokens ({original_len} -> {len(content)} chars)")
-        logger.debug(f"Content after think removal (first 300 chars): {repr(content[:300])}")
+        logger.debug("Content after think removal redacted (%s)", _content_diagnostics(content))
     
     # Extra safety: Remove any remaining thinking-related tags
     content = re.sub(r'</think\s*>', '', content, flags=re.IGNORECASE).strip()
@@ -122,8 +388,9 @@ def sanitize_json_response(raw_content: str) -> str:
         original_content = content
         content = re.sub(control_token_pattern, '', content).strip()
         logger.debug(
-            f"Stripped control tokens: "
-            f"'{original_content[:150]}...' -> '{content[:150]}...'"
+            "Stripped control tokens: before=(%s), after=(%s)",
+            _content_diagnostics(original_content),
+            _content_diagnostics(content),
         )
     
     # Additional cleanup: Remove any remaining angle bracket artifacts
@@ -146,14 +413,14 @@ def sanitize_json_response(raw_content: str) -> str:
     # If no JSON start found, raise explicit error
     if json_start < 0:
         logger.warning(f"No JSON start character found in content (length={len(content)})")
-        logger.warning(f"Content preview: {repr(content[:200])}...")
+        logger.warning("Content preview redacted (%s)", _content_diagnostics(content))
         
         # NEW: Don't continue - this is pure reasoning text with no JSON
         # Raise explicit error for retry mechanism
         raise ValueError(
             f"No JSON found in response - only conversational reasoning text "
             f"({len(content)} chars). Model likely hit max_tokens before writing JSON. "
-            f"Content starts with: {repr(content[:200])}"
+            "Raw content preview is withheld from retry prompts; use logs for diagnostics."
         )
     else:
         # Strip everything before the JSON start (handles reasoning models that output
@@ -163,7 +430,7 @@ def sanitize_json_response(raw_content: str) -> str:
             content = content[json_start:]
             json_start = 0  # Reset to 0 since we stripped the prefix
             logger.debug(f"Stripped {len(stripped_prefix)} chars of non-JSON prefix")
-            logger.debug(f"Stripped prefix preview: {repr(stripped_prefix[:200])}...")
+            logger.debug("Stripped prefix preview redacted (%s)", _content_diagnostics(stripped_prefix))
     
     if json_start >= 0:
         try:
@@ -220,7 +487,7 @@ def sanitize_json_response(raw_content: str) -> str:
                         f"JSON response truncated at max_tokens: {brace_count} unclosed braces, "
                         f"in_string={in_string}, response length {len(content)} chars. "
                         f"Model needs to generate more concise output that fits within token limits. "
-                        f"{last_complete_context}"
+                        "Raw content preview is withheld from retry prompts; use logs for diagnostics."
                     )
             
             elif start_char == '[':
@@ -277,7 +544,7 @@ def sanitize_json_response(raw_content: str) -> str:
     # Safety check: ensure content is not empty after preprocessing
     if not content or not content.strip():
         logger.error(f"Sanitization resulted in empty content! Original length: {len(raw_content)}")
-        logger.error(f"Original content preview: {raw_content[:500]}...")
+        logger.error("Original content preview redacted (%s)", _content_diagnostics(raw_content))
         # Return original content and let the caller handle the error
         return raw_content.strip()
     
@@ -683,7 +950,7 @@ def parse_json(response_content: str) -> dict:
     # Check for anomalously short response
     if len(response_content.strip()) < 10:
         logger.error(f"parse_json: Response too short ({len(response_content)} chars)")
-        logger.error(f"Short response content: {repr(response_content)}")
+        logger.error("Short response content redacted (%s)", _content_diagnostics(response_content))
         raise ValueError(f"Response too short ({len(response_content)} chars)")
     
     # Sanitize and parse
@@ -718,7 +985,7 @@ def parse_json(response_content: str) -> dict:
         stripped = sanitized_content.rstrip()
         if stripped and stripped[-1] not in '}]':
             is_likely_truncated = True
-            truncation_hints.append(f"JSON doesn't end with }} or ] (ends with: {repr(stripped[-20:])})")
+            truncation_hints.append("JSON doesn't end with } or ]")
         
         # Count unclosed braces/brackets (rough check)
         open_braces = sanitized_content.count('{') - sanitized_content.count('}')
@@ -737,23 +1004,14 @@ def parse_json(response_content: str) -> dict:
             logger.error(f"🚨 LIKELY TRUNCATED LLM OUTPUT: {', '.join(truncation_hints)}")
             logger.error("This usually means the LLM hit max_tokens limit before completing the JSON response")
         
-        logger.error(f"Original response length: {len(response_content)} chars")
-        logger.error(f"Original response (first 500 chars): {repr(response_content[:500])}")
-        logger.error(f"Original response (last 200 chars): {repr(response_content[-200:])}")
-        logger.error(f"Sanitized content length: {len(sanitized_content)} chars")
-        logger.error(f"Sanitized content (first 500 chars): {repr(sanitized_content[:500])}")
-        logger.error(f"Sanitized content (last 200 chars): {repr(sanitized_content[-200:])}")
+        logger.error("Original response content redacted (%s)", _content_diagnostics(response_content))
+        logger.error("Sanitized content redacted (%s)", _content_diagnostics(sanitized_content))
         logger.error(f"Error position: line {e.lineno}, column {e.colno}, char {e.pos}")
-        if e.pos is not None and e.pos < len(sanitized_content):
-            # Show context around error position
-            start = max(0, e.pos - 50)
-            end = min(len(sanitized_content), e.pos + 50)
-            logger.error(f"Error context: ...{repr(sanitized_content[start:end])}...")
         raise
     except Exception as e:
         # Catch any other parsing errors
         logger.error(f"parse_json: Unexpected error during parsing - {type(e).__name__}: {e}")
-        logger.error(f"Response content: {repr(response_content[:1000])}")
+        logger.error("Response content redacted (%s)", _content_diagnostics(response_content))
         raise
     
     # Handle array responses - extract first element

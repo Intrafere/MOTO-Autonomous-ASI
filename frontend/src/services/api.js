@@ -73,6 +73,22 @@ async function throwFromResponse(response, fallbackMessage) {
 
 // Aggregator API
 export const api = {
+  async get(path) {
+    if (/^https?:\/\//i.test(path)) {
+      const response = await fetch(path);
+      if (!response.ok) throw new Error(`Failed to fetch ${path}`);
+      return response.json();
+    }
+    const base = API_BASE.replace(/\/$/, '');
+    const normalizedPath = path.startsWith('/api/')
+      ? (base.endsWith('/api') ? path.slice(4) : path)
+      : (path.startsWith('/') ? path : `/${path}`);
+    const url = `${base}${normalizedPath}`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch ${path}`);
+    return response.json();
+  },
+
   // Get available models from LM Studio
   async getModels() {
     const response = await fetch(`${API_BASE}/aggregator/models`);
@@ -288,13 +304,6 @@ export const compilerAPI = {
     return { data: await response.json() };
   },
 
-  // Get previous versions
-  async getPreviousVersions() {
-    const response = await fetch(`${API_BASE}/compiler/previous-versions`);
-    if (!response.ok) throw new Error('Failed to get previous versions');
-    return { data: await response.json() };
-  },
-
   // Save paper
   async savePaper() {
     const response = await fetch(`${API_BASE}/compiler/save-paper`, {
@@ -345,6 +354,7 @@ export const compilerAPI = {
       body.validator_max_tokens = validatorConfig.validator_max_tokens;
       body.validator_provider = validatorConfig.validator_provider;
       body.validator_openrouter_provider = validatorConfig.validator_openrouter_provider;
+      body.validator_openrouter_reasoning_effort = validatorConfig.validator_openrouter_reasoning_effort || 'auto';
     }
 
     const response = await fetch(`${API_BASE}/compiler/critique-paper`, {
@@ -477,6 +487,20 @@ export const autonomousAPI = {
     return response.json();
   },
 
+  async getPrunedPaperHistory() {
+    const response = await fetch(`${API_BASE}/auto-research/paper-history/pruned`);
+    if (!response.ok) throw new Error('Failed to get pruned Stage 2 paper history');
+    return response.json();
+  },
+
+  async getPrunedHistoryPaper(sessionId, paperId) {
+    const response = await fetch(
+      `${API_BASE}/auto-research/paper-history/pruned/${encodeURIComponent(sessionId)}/${encodeURIComponent(paperId)}`
+    );
+    if (!response.ok) throw new Error(`Failed to get pruned history paper ${sessionId}/${paperId}`);
+    return response.json();
+  },
+
   // Get statistics
   async getStats() {
     const response = await fetch(`${API_BASE}/auto-research/stats`);
@@ -520,14 +544,19 @@ export const autonomousAPI = {
   },
 
   // Queue a manual proof check for one brainstorm or paper
-  async runProofCheck({ sourceType, sourceId }) {
+  async runProofCheck({ sourceType, sourceId, proofRuntimeConfig = null }) {
+    const body = {
+      source_type: sourceType,
+      source_id: sourceId,
+    };
+    if (proofRuntimeConfig) {
+      body.proof_runtime_config = proofRuntimeConfig;
+    }
+
     const response = await fetch(`${API_BASE}/proofs/check`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        source_type: sourceType,
-        source_id: sourceId,
-      }),
+      body: JSON.stringify(body),
     });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -681,6 +710,18 @@ export const autonomousAPI = {
     return response.json();
   },
 
+  async deleteAllPrunedPapers(sessionId = null) {
+    const endpoint = sessionId
+      ? `${API_BASE}/auto-research/paper-history/pruned/${encodeURIComponent(sessionId)}?confirm=true`
+      : `${API_BASE}/auto-research/pruned-papers?confirm=true`;
+    const response = await fetch(endpoint, { method: 'DELETE' });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || 'Failed to delete pruned papers');
+    }
+    return response.json();
+  },
+
   // Delete Stage 2 history paper by session-aware identifier
   async deleteHistoryPaper(sessionId, paperId) {
     const response = await fetch(
@@ -756,16 +797,38 @@ export const autonomousAPI = {
 
   // Get API logs
   async getApiLogs(limit = 100, options = {}) {
-    const response = await fetch(`${API_BASE}/auto-research/api-logs?limit=${limit}`, {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (options.workflow) {
+      params.append('workflow', options.workflow);
+    }
+    const response = await fetch(`${API_BASE}/auto-research/api-logs?${params.toString()}`, {
       signal: options.signal,
     });
     if (!response.ok) throw new Error('Failed to get API logs');
     return response.json();
   },
 
+  // Get one full API log entry on demand
+  async getApiLogDetail(logKey, options = {}) {
+    const params = new URLSearchParams();
+    if (options.workflow) {
+      params.append('workflow', options.workflow);
+    }
+    const response = await fetch(
+      `${API_BASE}/auto-research/api-logs/detail/${encodeURIComponent(logKey)}${params.toString() ? `?${params.toString()}` : ''}`,
+      { signal: options.signal }
+    );
+    if (!response.ok) throw new Error('Failed to get API log detail');
+    return response.json();
+  },
+
   // Clear API logs
-  async clearApiLogs() {
-    const response = await fetch(`${API_BASE}/auto-research/api-logs/clear`, {
+  async clearApiLogs(options = {}) {
+    const params = new URLSearchParams();
+    if (options.workflow) {
+      params.append('workflow', options.workflow);
+    }
+    const response = await fetch(`${API_BASE}/auto-research/api-logs/clear${params.toString() ? `?${params.toString()}` : ''}`, {
       method: 'POST',
     });
     if (!response.ok) throw new Error('Failed to clear API logs');
@@ -773,8 +836,12 @@ export const autonomousAPI = {
   },
 
   // Get API stats
-  async getApiStats() {
-    const response = await fetch(`${API_BASE}/auto-research/api-logs/stats`);
+  async getApiStats(options = {}) {
+    const params = new URLSearchParams();
+    if (options.workflow) {
+      params.append('workflow', options.workflow);
+    }
+    const response = await fetch(`${API_BASE}/auto-research/api-logs/stats${params.toString() ? `?${params.toString()}` : ''}`);
     if (!response.ok) throw new Error('Failed to get API stats');
     return response.json();
   },
@@ -797,6 +864,7 @@ export const autonomousAPI = {
       body.validator_max_tokens = validatorConfig.validator_max_tokens;
       body.validator_provider = validatorConfig.validator_provider;
       body.validator_openrouter_provider = validatorConfig.validator_openrouter_provider;
+      body.validator_openrouter_reasoning_effort = validatorConfig.validator_openrouter_reasoning_effort || 'auto';
     }
     
     const response = await fetch(`${API_BASE}/auto-research/paper/${paperId}/critique`, {
@@ -840,6 +908,7 @@ export const autonomousAPI = {
       body.validator_max_tokens = validatorConfig.validator_max_tokens;
       body.validator_provider = validatorConfig.validator_provider;
       body.validator_openrouter_provider = validatorConfig.validator_openrouter_provider;
+      body.validator_openrouter_reasoning_effort = validatorConfig.validator_openrouter_reasoning_effort || 'auto';
     }
 
     const response = await fetch(
@@ -882,6 +951,7 @@ export const autonomousAPI = {
       body.validator_max_tokens = validatorConfig.validator_max_tokens;
       body.validator_provider = validatorConfig.validator_provider;
       body.validator_openrouter_provider = validatorConfig.validator_openrouter_provider;
+      body.validator_openrouter_reasoning_effort = validatorConfig.validator_openrouter_reasoning_effort || 'auto';
     }
     
     const response = await fetch(`${API_BASE}/auto-research/final-answer-library/${answerId}/critique`, {
@@ -1057,6 +1127,99 @@ export const boostAPI = {
   },
 };
 
+// LeanOJ Proof Solver API
+export const leanojAPI = {
+  async start(config) {
+    const response = await fetch(`${API_BASE}/leanoj/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const error = new Error('Failed to start Proof Solver');
+      error.details = errorData.detail;
+      throw error;
+    }
+    return response.json();
+  },
+
+  async stop() {
+    const response = await fetch(`${API_BASE}/leanoj/stop`, { method: 'POST' });
+    if (!response.ok) throw new Error('Failed to stop Proof Solver');
+    return response.json();
+  },
+
+  async clear() {
+    const response = await fetch(`${API_BASE}/leanoj/clear?confirm=true`, { method: 'POST' });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || 'Failed to clear Proof Solver progress');
+    }
+    return response.json();
+  },
+
+  async getStatus() {
+    const response = await fetch(`${API_BASE}/leanoj/status`);
+    if (!response.ok) throw new Error('Failed to get Proof Solver status');
+    return response.json();
+  },
+
+  async getMasterProof() {
+    const response = await fetch(`${API_BASE}/leanoj/master-proof`);
+    if (!response.ok) throw new Error('Failed to get Proof Solver master proof');
+    return response.json();
+  },
+
+  async getMasterProofEdits(limit = 50) {
+    const response = await fetch(`${API_BASE}/leanoj/master-proof/edits?limit=${encodeURIComponent(limit)}`);
+    if (!response.ok) throw new Error('Failed to get Proof Solver master proof edit history');
+    return response.json();
+  },
+
+  async getProofs() {
+    const response = await fetch(`${API_BASE}/leanoj/proofs`);
+    if (response.status === 204) {
+      return { proofs: [], counts: { total: 0, final: 0, subproof: 0 } };
+    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to get Proof Solver proofs');
+    return response.json();
+  },
+
+  async getProofLibrary(includeSubproofs = true) {
+    const response = await fetch(`${API_BASE}/leanoj/library?include_subproofs=${includeSubproofs}`);
+    if (response.status === 204) {
+      return { proofs: [], sessions: [] };
+    }
+    if (!response.ok) await throwFromResponse(response, 'Failed to get Proof Solver proof works library');
+    return response.json();
+  },
+
+  async getLibraryProof(sessionId, proofId) {
+    const response = await fetch(`${API_BASE}/leanoj/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}`);
+    if (!response.ok) throw new Error(`Failed to get Proof Solver proof work ${proofId}`);
+    return response.json();
+  },
+
+  async skipBrainstorm() {
+    const response = await fetch(`${API_BASE}/leanoj/skip-brainstorm`, { method: 'POST' });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || 'Failed to skip Proof Solver brainstorming');
+    }
+    return response.json();
+  },
+
+  async forceBrainstorm() {
+    const response = await fetch(`${API_BASE}/leanoj/force-brainstorm`, { method: 'POST' });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || 'Failed to force Proof Solver recursive brainstorming');
+    }
+    return response.json();
+  },
+};
+
 // Workflow API
 export const workflowAPI = {
   // Get workflow predictions
@@ -1131,11 +1294,12 @@ export const openRouterAPI = {
   // Get available OpenRouter models (uses stored key or provided key)
   async getModels(apiKey = null, freeOnly = false) {
     const params = new URLSearchParams();
-    if (apiKey) params.append('api_key', apiKey);
     if (freeOnly) params.append('free_only', 'true');
     
     const url = `${API_BASE}/openrouter/models${params.toString() ? '?' + params.toString() : ''}`;
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}
+    });
     if (!response.ok) await throwFromResponse(response, 'Failed to fetch models');
     return response.json();
   },

@@ -151,7 +151,11 @@ class CompilerRAGManager:
                     chunks_by_size = await ingestion_pipeline.ingest_file(
                         aggregator_file_path,
                         rag_config.submitter_chunk_intervals,  # All 4 configs
-                        is_user_file=True
+                        is_user_file=True,
+                        trusted_roots=[
+                            system_config.data_dir,
+                            system_config.user_uploads_dir,
+                        ],
                     )
                     
                     # Add all chunks while holding the lock

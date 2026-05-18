@@ -39,6 +39,10 @@ export default function WorkflowPanel({ isRunning }) {
   // No persistence. Resets every time isRunning goes true.
   const hasPoppedThisSession = useRef(false);
 
+  // Auto-open: pop open exactly once, 10 minutes after user presses Start.
+  // No persistence. Resets every time isRunning goes true.
+  const hasPoppedThisSession = useRef(false);
+
   const expandPanel = useCallback(() => {
     setCollapsed(false);
     localStorage.setItem('workflow_panel_collapsed', 'false');
@@ -325,7 +329,7 @@ export default function WorkflowPanel({ isRunning }) {
                 <div className={`boost-section ${boostNextCount > 0 || boostAlwaysPrefer ? 'boost-mode-inactive' : ''}`}>
                   <label className="boost-label">Boost by Category:</label>
                   <div className="boost-categories">
-                    {['Aggregator', 'Compiler', 'Autonomous'].map(group => {
+                    {['Aggregator', 'Compiler', 'Autonomous', 'Proof Solver'].map(group => {
                       const groupCats = availableCategories.filter(cat => cat.group === group);
                       if (!groupCats.length) return null;
                       return (
@@ -355,6 +359,8 @@ export default function WorkflowPanel({ isRunning }) {
 
           {/* RESEARCH TIMER & TOKEN STATS */}
           <div className="token-stats-section">
+            <div className="token-stats-heading">Token Usage</div>
+
             <div className="research-timer">
               <span className="timer-label">Elapsed</span>
               <span className="timer-value">{formatTime(localElapsed)}</span>
@@ -362,15 +368,15 @@ export default function WorkflowPanel({ isRunning }) {
 
             <div className="token-totals">
               <div className="token-row">
-                <span className="token-label">Input</span>
+                <span className="token-label">Input tokens</span>
                 <span className="token-value">{formatNumber(tokenStats.total_input)}</span>
               </div>
               <div className="token-row">
-                <span className="token-label">Output</span>
+                <span className="token-label">Output tokens</span>
                 <span className="token-value">{formatNumber(tokenStats.total_output)}</span>
               </div>
               <div className="token-row token-total-row">
-                <span className="token-label">Total</span>
+                <span className="token-label">Total tokens</span>
                 <span className="token-value">{formatNumber(tokenStats.total_input + tokenStats.total_output)}</span>
               </div>
             </div>
@@ -381,7 +387,7 @@ export default function WorkflowPanel({ isRunning }) {
                   className="per-model-toggle"
                   onClick={() => setShowPerModel(prev => !prev)}
                 >
-                  {showPerModel ? '▾' : '▸'} Per Model ({Object.keys(tokenStats.by_model).length})
+                  {showPerModel ? '▾' : '▸'} Per-model tokens ({Object.keys(tokenStats.by_model).length})
                 </button>
                 {showPerModel && (
                   <div className="per-model-list">
@@ -391,8 +397,8 @@ export default function WorkflowPanel({ isRunning }) {
                         <div key={modelId} className="model-row">
                           <div className="model-name" title={modelId}>{modelId}</div>
                           <div className="model-tokens">
-                            <span className="model-in">In: {formatNumber(usage.input)}</span>
-                            <span className="model-out">Out: {formatNumber(usage.output)}</span>
+                            <span className="model-in">Input tokens: {formatNumber(usage.input)}</span>
+                            <span className="model-out">Output tokens: {formatNumber(usage.output)}</span>
                           </div>
                         </div>
                       ))}

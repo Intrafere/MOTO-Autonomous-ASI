@@ -164,9 +164,9 @@ class PaperRedundancyChecker:
                 self.task_tracking_callback("completed", task_id)
             return self._create_no_removal(f"Error: {str(e)}")
     
-    async def execute_removal(self, paper_id: str) -> bool:
+    async def execute_removal(self, paper_id: str, reason: str = "") -> bool:
         """
-        Execute paper removal by archiving it.
+        Execute paper removal by pruning it from model context.
         
         Args:
             paper_id: ID of paper to remove
@@ -175,15 +175,21 @@ class PaperRedundancyChecker:
             True if removal successful
         """
         try:
-            # Archive the paper
-            success = await paper_library.archive_paper(paper_id)
+            success = await paper_library.prune_paper(
+                paper_id,
+                reason=reason,
+                pruned_by="system",
+            )
             
             if success:
-                # Update central metadata
-                await research_metadata.archive_paper(paper_id)
-                logger.info(f"PaperRedundancyChecker: Successfully archived paper {paper_id}")
+                await research_metadata.prune_paper(
+                    paper_id,
+                    reason=reason,
+                    pruned_by="system",
+                )
+                logger.info(f"PaperRedundancyChecker: Successfully pruned paper {paper_id}")
             else:
-                logger.error(f"PaperRedundancyChecker: Failed to archive paper {paper_id}")
+                logger.error(f"PaperRedundancyChecker: Failed to prune paper {paper_id}")
             
             return success
             

@@ -13,6 +13,8 @@ Autonomous Research mode agents use the same role prefixes as their parent roles
 - Topic Validator, Redundancy Checker → agg_val (Agg Validator)
 - Brainstorm aggregation submitters/validator → agg_sub1..10, agg_val (via Coordinator)
 - Paper compilation → comp_hc, comp_hp, comp_val, comp_crit (via CompilerCoordinator)
+- LeanOJ path-decision calls use `leanoj_path_*` task IDs for workflow display, but belong to the
+  Final Solver boost category (`leanoj_final`) because that role owns final-readiness decisions.
 
 State is persisted to backend/data/boost_state.json for crash recovery.
 """
@@ -22,7 +24,7 @@ import logging
 import os
 from typing import Optional, Set, Callable, Any, Dict, List
 
-from backend.shared.config import system_config
+from backend.shared.config import rag_config, system_config
 from backend.shared.models import BoostConfig
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,38 @@ CATEGORY_PREFIXES = {
     "comp_hp": "High-Param Model",
     "comp_val": "Compiler Validator",
     "comp_crit": "Critique Submitter",
+    # LeanOJ
+    "leanoj_topic": "Proof Solver Topic Generator",
+    "leanoj_topic_val": "Proof Solver Topic Validator",
+    "leanoj_topic_sub1": "Proof Solver Topic Submitter 1",
+    "leanoj_topic_sub2": "Proof Solver Topic Submitter 2",
+    "leanoj_topic_sub3": "Proof Solver Topic Submitter 3",
+    "leanoj_topic_sub4": "Proof Solver Topic Submitter 4",
+    "leanoj_topic_sub5": "Proof Solver Topic Submitter 5",
+    "leanoj_topic_sub6": "Proof Solver Topic Submitter 6",
+    "leanoj_topic_sub7": "Proof Solver Topic Submitter 7",
+    "leanoj_topic_sub8": "Proof Solver Topic Submitter 8",
+    "leanoj_topic_sub9": "Proof Solver Topic Submitter 9",
+    "leanoj_topic_sub10": "Proof Solver Topic Submitter 10",
+    "leanoj_brainstorm_sub1": "Proof Solver Brainstorm Submitter 1",
+    "leanoj_brainstorm_sub2": "Proof Solver Brainstorm Submitter 2",
+    "leanoj_brainstorm_sub3": "Proof Solver Brainstorm Submitter 3",
+    "leanoj_brainstorm_sub4": "Proof Solver Brainstorm Submitter 4",
+    "leanoj_brainstorm_sub5": "Proof Solver Brainstorm Submitter 5",
+    "leanoj_brainstorm_sub6": "Proof Solver Brainstorm Submitter 6",
+    "leanoj_brainstorm_sub7": "Proof Solver Brainstorm Submitter 7",
+    "leanoj_brainstorm_sub8": "Proof Solver Brainstorm Submitter 8",
+    "leanoj_brainstorm_sub9": "Proof Solver Brainstorm Submitter 9",
+    "leanoj_brainstorm_sub10": "Proof Solver Brainstorm Submitter 10",
+    "leanoj_brainstorm_val": "Proof Solver Brainstorm Validator",
+    "leanoj_sufficiency": "Proof Solver Sufficiency Check",
+    "leanoj_path_val": "Proof Solver Path Validator",
+    "leanoj_final": "Proof Solver Final Solver",
+}
+
+CATEGORY_ALIASES = {
+    # Path decisions are absorbed into the dominant Final Solver role.
+    "leanoj_path": "leanoj_final",
 }
 
 
@@ -110,26 +144,36 @@ class BoostManager:
                 with open(state_file, 'r', encoding='utf-8') as f:
                     state = json.load(f)
                 
-                # Restore boost config if it was enabled
+                legacy_key_present = bool(state.get('api_key'))
+
+                # Restore boost config if it was enabled. Legacy plaintext
+                # `api_key` values are intentionally ignored and scrubbed below.
                 if state.get('enabled') and state.get('model_id'):
                     self.boost_config = BoostConfig(
                         enabled=True,
-                        openrouter_api_key=state.get('api_key', ''),
+                        openrouter_api_key='',
                         boost_model_id=state.get('model_id'),
                         boost_provider=state.get('provider'),
+                        boost_reasoning_effort=state.get('reasoning_effort', 'auto'),
                         boost_context_window=state.get('context_window', 131072),
                         boost_max_output_tokens=state.get('max_output_tokens', 25000)
                     )
                 
                 # Restore boost modes
                 self.boost_next_count = state.get('boost_next_count', 0)
-                self.boosted_categories = set(state.get('boosted_categories', []))
+                self.boosted_categories = {
+                    self._canonical_category(category)
+                    for category in state.get('boosted_categories', [])
+                }
                 self.boost_always_prefer = state.get('boost_always_prefer', False)
                 self.boosted_task_ids = set(state.get('boosted_task_ids', []))
                 
                 logger.info(f"Loaded boost state: enabled={state.get('enabled')}, model={state.get('model_id')}, "
                            f"next_count={self.boost_next_count}, categories={len(self.boosted_categories)}, "
                            f"always_prefer={self.boost_always_prefer}")
+                if legacy_key_present:
+                    self._save_state()
+                    logger.info("Scrubbed legacy plaintext boost API key from persisted state")
         except Exception as e:
             logger.warning(f"Failed to load boost state: {e}")
     
@@ -144,9 +188,9 @@ class BoostManager:
                 'enabled': self.boost_config is not None and self.boost_config.enabled,
                 'model_id': self.boost_config.boost_model_id if self.boost_config else None,
                 'provider': self.boost_config.boost_provider if self.boost_config else None,
+                'reasoning_effort': self.boost_config.boost_reasoning_effort if self.boost_config else 'auto',
                 'context_window': self.boost_config.boost_context_window if self.boost_config else 131072,
                 'max_output_tokens': self.boost_config.boost_max_output_tokens if self.boost_config else 25000,
-                'api_key': self.boost_config.openrouter_api_key if self.boost_config else '',
                 'boost_next_count': self.boost_next_count,
                 'boosted_categories': list(self.boosted_categories),
                 'boost_always_prefer': self.boost_always_prefer,
@@ -181,6 +225,7 @@ class BoostManager:
             provider_info = f", provider={config.boost_provider}" if config.boost_provider else " (auto-routing)"
             logger.info(
                 f"Boost enabled: model={config.boost_model_id}{provider_info}, "
+                f"reasoning={config.boost_reasoning_effort}, "
                 f"context={config.boost_context_window}, "
                 f"max_tokens={config.boost_max_output_tokens}"
             )
@@ -191,6 +236,7 @@ class BoostManager:
             await self._broadcast("boost_enabled", {
                 "model_id": config.boost_model_id,
                 "provider": config.boost_provider,
+                "reasoning_effort": config.boost_reasoning_effort,
                 "context_window": config.boost_context_window,
                 "max_output_tokens": config.boost_max_output_tokens
             })
@@ -307,6 +353,7 @@ class BoostManager:
         Returns:
             True if category is now boosted, False if unboosted
         """
+        category = self._canonical_category(category)
         async with self._lock:
             if category in self.boosted_categories:
                 self.boosted_categories.remove(category)
@@ -327,6 +374,11 @@ class BoostManager:
             })
             
             return boosted
+
+    @staticmethod
+    def _canonical_category(category: str) -> str:
+        """Map absorbed/legacy category prefixes to their owning role category."""
+        return CATEGORY_ALIASES.get(category, category)
     
     def _extract_role_prefix(self, task_id: str) -> str:
         """
@@ -340,8 +392,8 @@ class BoostManager:
         # Split on last underscore and take everything before it
         parts = task_id.rsplit('_', 1)
         if len(parts) == 2:
-            return parts[0]
-        return task_id
+            return self._canonical_category(parts[0])
+        return self._canonical_category(task_id)
     
     def should_use_boost(self, task_id: str) -> bool:
         """
@@ -410,6 +462,8 @@ class BoostManager:
             return {
                 "enabled": False,
                 "model_id": None,
+                "has_available_key": bool(rag_config.openrouter_api_key),
+                "needs_key": False,
                 "boosted_task_count": 0,
                 "boost_next_count": 0,
                 "boosted_categories": [],
@@ -417,12 +471,19 @@ class BoostManager:
                 "boosted_tasks": []
             }
         
+        has_available_key = bool(
+            (self.boost_config.openrouter_api_key or "").strip()
+            or (rag_config.openrouter_api_key or "").strip()
+        )
         return {
             "enabled": self.boost_config.enabled,
             "model_id": self.boost_config.boost_model_id,
             "provider": self.boost_config.boost_provider,
+            "reasoning_effort": self.boost_config.boost_reasoning_effort,
             "context_window": self.boost_config.boost_context_window,
             "max_output_tokens": self.boost_config.boost_max_output_tokens,
+            "has_available_key": has_available_key,
+            "needs_key": bool(self.boost_config.enabled and not has_available_key),
             "boosted_task_count": len(self.boosted_task_ids),
             "boosted_tasks": list(self.boosted_task_ids),
             "boost_next_count": self.boost_next_count,
@@ -470,6 +531,26 @@ class BoostManager:
             {"id": "comp_hp", "label": "High-Param Model", "group": "Compiler"},
             {"id": "comp_crit", "label": "Critique Submitter", "group": "Compiler"},
         ])
+
+        categories.extend([
+            {"id": "leanoj_topic", "label": "Topic Generator", "group": "Proof Solver"},
+            {"id": "leanoj_topic_val", "label": "Topic Validator", "group": "Proof Solver"},
+            {"id": "leanoj_brainstorm_val", "label": "Brainstorm Validator", "group": "Proof Solver"},
+            {"id": "leanoj_sufficiency", "label": "Sufficiency Check", "group": "Proof Solver"},
+            {"id": "leanoj_path_val", "label": "Path Validator", "group": "Proof Solver"},
+            {"id": "leanoj_final", "label": "Final Solver", "group": "Proof Solver"},
+        ])
+        for i in range(1, 11):
+            categories.append({
+                "id": f"leanoj_topic_sub{i}",
+                "label": f"Topic Submitter {i}",
+                "group": "Proof Solver",
+            })
+            categories.append({
+                "id": f"leanoj_brainstorm_sub{i}",
+                "label": f"Brainstorm Submitter {i}",
+                "group": "Proof Solver",
+            })
         
         return categories
     

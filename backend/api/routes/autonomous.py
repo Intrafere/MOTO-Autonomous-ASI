@@ -3,6 +3,7 @@ Autonomous Research API Routes - REST endpoints for autonomous research mode.
 Includes Tier 1 (Brainstorm), Tier 2 (Paper Writing), and Tier 3 (Final Answer) endpoints.
 """
 import logging
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any, Dict, List
@@ -21,8 +22,11 @@ from backend.autonomous.memory.final_answer_memory import final_answer_memory, F
 from backend.autonomous.memory.session_manager import session_manager
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
 from backend.aggregator.core.coordinator import coordinator
+from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
+from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 from backend.shared.boost_logger import boost_logger
+from backend.shared.workflow_start_guard import workflow_start_guard
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +55,19 @@ def _parse_api_log_timestamp(timestamp: Optional[str]) -> datetime:
         return datetime.min
 
 
+def _infer_api_log_workflow(entry: Dict[str, Any]) -> str:
+    """Infer workflow namespace for legacy API log entries."""
+    workflow = str(entry.get("workflow") or "").strip().lower()
+    if workflow:
+        return workflow
+
+    role_id = str(entry.get("role_id") or "")
+    task_id = str(entry.get("task_id") or "")
+    if role_id.startswith("leanoj_") or task_id.startswith("leanoj_"):
+        return "leanoj"
+    return "autonomous"
+
+
 def _normalize_autonomous_api_log(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize autonomous log entries into the combined API log shape."""
     return {
@@ -60,10 +77,11 @@ def _normalize_autonomous_api_log(entry: Dict[str, Any]) -> Dict[str, Any]:
         "boost_mode": entry.get("boost_mode"),
         "provider": entry.get("provider") or "unknown",
         "phase": entry.get("phase") or "unknown",
+        "workflow": _infer_api_log_workflow(entry),
         "prompt_preview": entry.get("prompt_preview") or "",
-        "prompt_full": entry.get("prompt_full") or entry.get("prompt_preview") or "",
+        "prompt_full": entry.get("prompt_full") or "",
         "response_preview": entry.get("response_preview") or "",
-        "response_full": entry.get("response_full") or entry.get("response_preview") or "",
+        "response_full": entry.get("response_full") or "",
     }
 
 
@@ -71,7 +89,7 @@ def _normalize_boost_api_log(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize boost log entries so they can be shown in the main API log view."""
     prompt_preview = entry.get("prompt_preview") or ""
     response_preview = entry.get("response_preview") or ""
-    response_full = entry.get("response_full") or response_preview
+    response_full = entry.get("response_full") or ""
 
     return {
         **entry,
@@ -79,8 +97,9 @@ def _normalize_boost_api_log(entry: Dict[str, Any]) -> Dict[str, Any]:
         "boosted": True,
         "provider": entry.get("provider") or "openrouter",
         "phase": entry.get("phase") or "boost",
+        "workflow": _infer_api_log_workflow(entry),
         "prompt_preview": prompt_preview,
-        "prompt_full": entry.get("prompt_full") or prompt_preview,
+        "prompt_full": entry.get("prompt_full") or "",
         "response_preview": response_preview,
         "response_full": response_full,
     }
@@ -214,20 +233,73 @@ def _build_combined_api_stats(logs: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-async def _get_combined_api_logs(limit: int = 100) -> Dict[str, Any]:
+def _normalize_api_log_workflow_filter(workflow: Optional[str]) -> Optional[str]:
+    if workflow is None:
+        return None
+
+    normalized = workflow.strip().lower()
+    if not normalized:
+        return None
+    if normalized not in {"autonomous", "leanoj"}:
+        raise HTTPException(status_code=400, detail="Invalid workflow filter")
+    return normalized
+
+
+def _get_api_log_key(entry: Dict[str, Any]) -> str:
+    """Build a stable opaque key for a combined API log entry."""
+    parts = [
+        str(entry.get("timestamp") or ""),
+        str(entry.get("task_id") or ""),
+        str(entry.get("role_id") or ""),
+        str(entry.get("model") or ""),
+        str(entry.get("source") or ""),
+        str(entry.get("boost_mode") or ""),
+    ]
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:24]
+
+
+def _summarize_api_log_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a UI-safe log-list entry without large prompt/response bodies."""
+    prompt_full = str(entry.get("prompt_full") or "")
+    response_full = str(entry.get("response_full") or "")
+    prompt_size = int(entry.get("prompt_size") or len(prompt_full))
+    response_size = int(entry.get("response_size") or len(response_full))
+    summary = {
+        **entry,
+        "log_key": _get_api_log_key(entry),
+        "prompt_full": "",
+        "response_full": "",
+        "prompt_size": prompt_size,
+        "response_size": response_size,
+        "has_full_prompt": bool(entry.get("has_full_prompt", bool(prompt_full))),
+        "has_full_response": bool(entry.get("has_full_response", bool(response_full))),
+    }
+    return summary
+
+
+async def _get_combined_api_logs(
+    limit: int = 100,
+    workflow: Optional[str] = None,
+    include_full: bool = True,
+) -> Dict[str, Any]:
     """Fetch, deduplicate, and summarize the combined autonomous + boost API logs."""
     fetch_limit = max(limit * 3, 300)
-    autonomous_logs = await autonomous_api_logger.get_logs(limit=fetch_limit)
-    boost_logs = await boost_logger.get_logs(limit=fetch_limit)
-    combined_logs = _merge_combined_api_logs(autonomous_logs, boost_logs, limit=limit)
-    combined_stats = _build_combined_api_stats(
-        _merge_combined_api_logs(
-            autonomous_logs,
-            boost_logs,
-            limit=max(fetch_limit, len(autonomous_logs) + len(boost_logs)),
-        )
+    autonomous_logs = await autonomous_api_logger.get_logs(limit=fetch_limit, include_full=include_full)
+    boost_logs = await boost_logger.get_logs(limit=fetch_limit, include_full=include_full)
+    all_combined_logs = _merge_combined_api_logs(
+        autonomous_logs,
+        boost_logs,
+        limit=max(fetch_limit, len(autonomous_logs) + len(boost_logs)),
     )
-    return {"logs": combined_logs, "stats": combined_stats}
+    if workflow:
+        all_combined_logs = [
+            log for log in all_combined_logs
+            if log.get("workflow") == workflow
+        ]
+    return {
+        "logs": all_combined_logs[:limit],
+        "stats": _build_combined_api_stats(all_combined_logs),
+    }
 
     if session_id == "legacy":
         return
@@ -249,6 +321,9 @@ def _get_start_conflict() -> Optional[str]:
 
     if compiler_coordinator.is_running:
         return "Cannot start Autonomous Research while Compiler is running. Stop Compiler first."
+
+    if leanoj_coordinator.is_active:
+        return "Cannot start Autonomous Research while Proof Solver is running. Stop Proof Solver first."
 
     return None
 
@@ -379,16 +454,20 @@ def _resolve_validator_config(request: Optional[CritiqueRequest]) -> Dict[str, A
     validator_max_tokens = None
     validator_provider = None
     validator_openrouter_provider = None
+    validator_openrouter_reasoning_effort = "auto"
+    validator_supercharge_enabled = False
     custom_prompt = None
 
     if request:
         custom_prompt = request.custom_prompt
+        validator_supercharge_enabled = bool(request.validator_supercharge_enabled)
         if request.validator_model:
             validator_model = request.validator_model
             validator_context_window = request.validator_context_window or 131072
             validator_max_tokens = request.validator_max_tokens or 25000
             validator_provider = request.validator_provider or "lm_studio"
             validator_openrouter_provider = request.validator_openrouter_provider
+            validator_openrouter_reasoning_effort = request.validator_openrouter_reasoning_effort
 
     if not validator_model:
         coordinator_config = autonomous_coordinator.get_validator_config()
@@ -398,6 +477,8 @@ def _resolve_validator_config(request: Optional[CritiqueRequest]) -> Dict[str, A
             validator_max_tokens = coordinator_config["validator_max_tokens"]
             validator_provider = coordinator_config["validator_provider"]
             validator_openrouter_provider = coordinator_config.get("validator_openrouter_provider")
+            validator_openrouter_reasoning_effort = coordinator_config.get("validator_openrouter_reasoning_effort", "auto")
+            validator_supercharge_enabled = bool(coordinator_config.get("validator_supercharge_enabled", False))
 
     if not validator_model:
         raise HTTPException(
@@ -412,6 +493,8 @@ def _resolve_validator_config(request: Optional[CritiqueRequest]) -> Dict[str, A
         "validator_max_tokens": validator_max_tokens,
         "validator_provider": validator_provider,
         "validator_openrouter_provider": validator_openrouter_provider,
+        "validator_openrouter_reasoning_effort": validator_openrouter_reasoning_effort,
+        "validator_supercharge_enabled": validator_supercharge_enabled,
     }
 
 
@@ -465,9 +548,11 @@ async def _generate_autonomous_paper_critique(
             model_id=config["validator_model"],
             openrouter_model_id=config["validator_model"] if config["validator_provider"] == "openrouter" else None,
             openrouter_provider=config["validator_openrouter_provider"],
+            openrouter_reasoning_effort=config["validator_openrouter_reasoning_effort"],
             lm_studio_fallback_id=None,
             context_window=config["validator_context_window"],
             max_output_tokens=config["validator_max_tokens"],
+            supercharge_enabled=bool(config.get("validator_supercharge_enabled", False)),
         )
     )
 
@@ -544,9 +629,7 @@ async def _delete_autonomous_paper_from_scope(
     scoped_research_metadata: ResearchMetadata,
     paper_id: str,
 ) -> Dict[str, Any]:
-    """Delete a Stage 2 paper and clean its related metadata/critique state."""
-    from backend.shared.critique_memory import clear_critiques
-
+    """Soft-prune a Stage 2 paper and remove it from future model context."""
     state = autonomous_coordinator.get_state()
     active_session_id = _get_active_autonomous_session_id()
     if (
@@ -564,18 +647,25 @@ async def _delete_autonomous_paper_from_scope(
     if not metadata:
         raise HTTPException(status_code=404, detail=f"Paper not found: {paper_id}")
 
-    paper_path = scoped_paper_library.get_paper_path(paper_id)
-    base_dir = Path(paper_path).parent
     source_brainstorms = metadata.source_brainstorm_ids or []
 
-    success = await scoped_paper_library.delete_paper(paper_id)
+    prune_reason = "The user removed this paper from model context accumulation."
+    success = await scoped_paper_library.prune_paper(
+        paper_id,
+        reason=prune_reason,
+        pruned_by="user",
+    )
     if not success:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to delete paper files for {paper_id}"
+            detail=f"Failed to prune paper files for {paper_id}"
         )
 
-    await scoped_research_metadata.delete_paper(paper_id)
+    await scoped_research_metadata.prune_paper(
+        paper_id,
+        reason=prune_reason,
+        pruned_by="user",
+    )
 
     for topic_id in source_brainstorms:
         try:
@@ -586,22 +676,23 @@ async def _delete_autonomous_paper_from_scope(
             )
 
     try:
-        await clear_critiques("autonomous_paper", paper_id, base_dir)
-        logger.info(f"Cleared critiques for deleted paper {paper_id}")
+        from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
+        await autonomous_rag_manager.remove_paper_from_rag(paper_id)
     except Exception as e:
-        logger.warning(f"Failed to clear critiques for paper {paper_id}: {e}")
+        logger.warning(f"Failed to remove pruned paper {paper_id} from RAG: {e}")
 
     logger.info(
-        f"Deleted paper {paper_id} from session {session_id} "
+        f"Pruned paper {paper_id} from session {session_id} "
         f"(from brainstorms: {', '.join(source_brainstorms)})"
     )
 
     return {
         "success": True,
-        "message": f"Paper {paper_id} deleted successfully",
+        "message": f"Paper {paper_id} was pruned from model context and preserved for download",
         "paper_id": paper_id,
         "session_id": session_id,
         "source_brainstorms": source_brainstorms,
+        "pruned": True,
     }
 
 
@@ -611,71 +702,80 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
     try:
         from backend.shared.config import system_config
 
-        conflict = _get_start_conflict()
-        if conflict:
-            raise HTTPException(status_code=400, detail=conflict)
-        
-        # Validate submitter configs
-        num_submitters = len(request.submitter_configs)
-        if not (system_config.min_submitters <= num_submitters <= system_config.max_submitters):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Number of submitters must be {system_config.min_submitters}-{system_config.max_submitters}, got {num_submitters}"
-            )
-        
-        # Log submitter configurations
-        for config in request.submitter_configs:
-            label = "(Main Submitter)" if config.submitter_id == 1 else ""
+        async with workflow_start_guard.reserve():
+            conflict = _get_start_conflict()
+            if conflict:
+                raise HTTPException(status_code=400, detail=conflict)
+
+            # Validate submitter configs
+            num_submitters = len(request.submitter_configs)
+            if not (system_config.min_submitters <= num_submitters <= system_config.max_submitters):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Number of submitters must be {system_config.min_submitters}-{system_config.max_submitters}, got {num_submitters}"
+                )
+
+            # Log submitter configurations
+            for config in request.submitter_configs:
+                label = "(Main Submitter)" if config.submitter_id == 1 else ""
+                logger.info(
+                    f"Brainstorm Submitter {config.submitter_id} {label}: model={config.model_id}, "
+                    f"context={config.context_window}, max_tokens={config.max_output_tokens}"
+                )
             logger.info(
-                f"Brainstorm Submitter {config.submitter_id} {label}: model={config.model_id}, "
-                f"context={config.context_window}, max_tokens={config.max_output_tokens}"
+                f"Validator: model={request.validator_model}, "
+                f"context={request.validator_context_window}, max_tokens={request.validator_max_tokens}"
             )
-        logger.info(
-            f"Validator: model={request.validator_model}, "
-            f"context={request.validator_context_window}, max_tokens={request.validator_max_tokens}"
-        )
-        
-        # Initialize coordinator
-        await autonomous_coordinator.initialize(
-            user_research_prompt=request.user_research_prompt,
-            submitter_configs=request.submitter_configs,
-            validator_model=request.validator_model,
-            validator_context_window=request.validator_context_window,
-            validator_max_tokens=request.validator_max_tokens,
-            high_context_model=request.high_context_model,
-            high_context_context_window=request.high_context_context_window,
-            high_context_max_tokens=request.high_context_max_tokens,
-            high_param_model=request.high_param_model,
-            high_param_context_window=request.high_param_context_window,
-            high_param_max_tokens=request.high_param_max_tokens,
-            critique_submitter_model=request.critique_submitter_model,
-            critique_submitter_context_window=request.critique_submitter_context_window,
-            critique_submitter_max_tokens=request.critique_submitter_max_tokens,
-            # OpenRouter provider configs for each role
-            validator_provider=request.validator_provider,
-            validator_openrouter_provider=request.validator_openrouter_provider,
-            validator_lm_studio_fallback=request.validator_lm_studio_fallback,
-            high_context_provider=request.high_context_provider,
-            high_context_openrouter_provider=request.high_context_openrouter_provider,
-            high_context_lm_studio_fallback=request.high_context_lm_studio_fallback,
-            high_param_provider=request.high_param_provider,
-            high_param_openrouter_provider=request.high_param_openrouter_provider,
-            high_param_lm_studio_fallback=request.high_param_lm_studio_fallback,
-            critique_submitter_provider=request.critique_submitter_provider,
-            critique_submitter_openrouter_provider=request.critique_submitter_openrouter_provider,
-            critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback,
-            tier3_enabled=request.tier3_enabled
-        )
-        
-        # Start in background with a retained task handle so Stop can cancel it.
-        if not autonomous_coordinator.start_in_background():
-            raise HTTPException(status_code=400, detail="Autonomous research is already running")
-        
-        return {
-            "success": True,
-            "message": f"Autonomous research started with {num_submitters} brainstorm submitters",
-            "num_submitters": num_submitters
-        }
+
+            # Initialize coordinator
+            await autonomous_coordinator.initialize(
+                user_research_prompt=request.user_research_prompt,
+                submitter_configs=request.submitter_configs,
+                validator_model=request.validator_model,
+                validator_context_window=request.validator_context_window,
+                validator_max_tokens=request.validator_max_tokens,
+                high_context_model=request.high_context_model,
+                high_context_context_window=request.high_context_context_window,
+                high_context_max_tokens=request.high_context_max_tokens,
+                high_param_model=request.high_param_model,
+                high_param_context_window=request.high_param_context_window,
+                high_param_max_tokens=request.high_param_max_tokens,
+                critique_submitter_model=request.critique_submitter_model,
+                critique_submitter_context_window=request.critique_submitter_context_window,
+                critique_submitter_max_tokens=request.critique_submitter_max_tokens,
+                # OpenRouter provider configs for each role
+                validator_provider=request.validator_provider,
+                validator_openrouter_provider=request.validator_openrouter_provider,
+                validator_openrouter_reasoning_effort=request.validator_openrouter_reasoning_effort,
+                validator_lm_studio_fallback=request.validator_lm_studio_fallback,
+                high_context_provider=request.high_context_provider,
+                high_context_openrouter_provider=request.high_context_openrouter_provider,
+                high_context_openrouter_reasoning_effort=request.high_context_openrouter_reasoning_effort,
+                high_context_lm_studio_fallback=request.high_context_lm_studio_fallback,
+                high_param_provider=request.high_param_provider,
+                high_param_openrouter_provider=request.high_param_openrouter_provider,
+                high_param_openrouter_reasoning_effort=request.high_param_openrouter_reasoning_effort,
+                high_param_lm_studio_fallback=request.high_param_lm_studio_fallback,
+                critique_submitter_provider=request.critique_submitter_provider,
+                critique_submitter_openrouter_provider=request.critique_submitter_openrouter_provider,
+                critique_submitter_openrouter_reasoning_effort=request.critique_submitter_openrouter_reasoning_effort,
+                critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback,
+                tier3_enabled=request.tier3_enabled,
+                validator_supercharge_enabled=request.validator_supercharge_enabled,
+                high_context_supercharge_enabled=request.high_context_supercharge_enabled,
+                high_param_supercharge_enabled=request.high_param_supercharge_enabled,
+                critique_submitter_supercharge_enabled=request.critique_submitter_supercharge_enabled
+            )
+
+            # Start in background with a retained task handle so Stop can cancel it.
+            if not autonomous_coordinator.start_in_background():
+                raise HTTPException(status_code=400, detail="Autonomous research is already running")
+
+            return {
+                "success": True,
+                "message": f"Autonomous research started with {num_submitters} brainstorm submitters",
+                "num_submitters": num_submitters
+            }
         
     except HTTPException:
         raise
@@ -791,14 +891,28 @@ async def get_autonomous_status():
                 
                 # Try to get aggregator queue size
                 if autonomous_coordinator._brainstorm_aggregator:
-                    from backend.aggregator.core.queue_manager import queue_manager
                     try:
-                        queue_size = await queue_manager.size()
+                        aggregator_status = await autonomous_coordinator._brainstorm_aggregator.get_status()
+                        queue_size = aggregator_status.queue_size
+                        aggregator_offset = autonomous_coordinator._brainstorm_aggregator.acceptance_count_offset
+                        acceptance_count = max(
+                            acceptance_count,
+                            aggregator_offset + aggregator_status.total_acceptances,
+                            aggregator_status.shared_training_size,
+                        )
                     except Exception:
-                        pass
+                        from backend.aggregator.core.queue_manager import queue_manager
+                        try:
+                            queue_size = await queue_manager.size()
+                        except Exception:
+                            pass
                 
                 # Get counts from autonomous coordinator internal state
-                acceptance_count = autonomous_coordinator._acceptance_count
+                acceptance_count = max(
+                    acceptance_count,
+                    autonomous_coordinator._acceptance_count,
+                    metadata.submission_count or 0,
+                )
                 rejection_count = autonomous_coordinator._rejection_count
                 cleanup_removals = autonomous_coordinator._cleanup_removals
                 
@@ -1013,6 +1127,75 @@ async def get_paper_history():
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.get("/paper-history/pruned")
+async def get_pruned_paper_history():
+    """Get all pruned Stage 2 papers from legacy and session history."""
+    try:
+        papers = await paper_library.list_pruned_history_papers()
+        return {
+            "success": True,
+            "papers": papers,
+            "total_count": len(papers)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get pruned Stage 2 paper history: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/paper-history/pruned/{session_id}/{paper_id}")
+async def get_pruned_history_paper(session_id: str, paper_id: str):
+    """Get one pruned Stage 2 paper from legacy/session history."""
+    try:
+        paper = await paper_library.get_pruned_history_paper(session_id, paper_id)
+        if not paper:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Pruned paper not found in history: session={session_id}, paper={paper_id}"
+            )
+
+        return {
+            "success": True,
+            **paper
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get pruned history paper {session_id}/{paper_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.delete("/paper-history/pruned/{session_id}")
+async def delete_pruned_history_papers(session_id: str, confirm: bool = False):
+    """Permanently delete all pruned Stage 2 paper files in one legacy/session scope."""
+    try:
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Must confirm deletion with confirm=true"
+            )
+        paths = _resolve_history_session_paths(session_id)
+        scoped_paper_library = _build_scoped_paper_library(paths)
+        scoped_research_metadata = await _build_scoped_research_metadata(paths)
+        pruned_papers = await scoped_paper_library._list_pruned_history_papers_from_directory(
+            paths["papers_dir"],
+            session_id,
+        )
+        deleted_count = await scoped_paper_library.delete_all_pruned_papers()
+        for paper in pruned_papers:
+            await scoped_research_metadata.delete_paper(paper["paper_id"])
+        return {
+            "success": True,
+            "session_id": session_id,
+            "deleted_count": deleted_count,
+            "message": f"Deleted {deleted_count} pruned paper records"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete pruned history papers for {session_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/paper-history/{session_id}/{paper_id}")
 async def get_history_paper(session_id: str, paper_id: str):
     """Get one completed, non-archived Stage 2 paper from legacy/session history."""
@@ -1179,7 +1362,7 @@ async def get_current_session():
         return {
             "is_active": True,
             "session_id": session_manager.session_id,
-            "path": str(session_manager.session_path) if session_manager.session_path else None
+            "path": session_manager.session_id
         }
         
     except Exception as e:
@@ -1523,15 +1706,23 @@ async def delete_brainstorm(topic_id: str, confirm: bool = False):
                 detail="Must confirm deletion with confirm=true"
             )
         
-        # Check if running
-        state = autonomous_coordinator.get_state()
-        if state.is_running and state.current_tier == "tier1_aggregation":
-            # Check if this is the active brainstorm
-            if autonomous_coordinator._current_topic_id == topic_id:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot delete active brainstorm while it's being aggregated. Stop autonomous research first."
-                )
+        # Check if this brainstorm is still owned by the running coordinator.
+        # The live aggregator keeps a direct file handle path through shared_training_memory;
+        # deleting it while active can recreate an unlisted "invisible" brainstorm DB.
+        active_topic_id = autonomous_coordinator._current_topic_id
+        active_aggregator = autonomous_coordinator._brainstorm_aggregator
+        aggregator_running = bool(active_aggregator and active_aggregator.is_running)
+        target_db_path = Path(brainstorm_memory.get_database_path(topic_id)).resolve()
+        active_shared_path = Path(shared_training_memory.file_path).resolve()
+        active_shared_path_matches = active_shared_path == target_db_path
+        if (
+            (active_topic_id == topic_id or active_shared_path_matches)
+            and (autonomous_coordinator.is_active or aggregator_running)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete the active brainstorm while autonomous research is running. Stop autonomous research first."
+            )
         
         # Get brainstorm metadata
         metadata = await brainstorm_memory.get_metadata(topic_id)
@@ -1554,6 +1745,15 @@ async def delete_brainstorm(topic_id: str, confirm: bool = False):
         
         # Remove from central metadata
         await research_metadata.delete_brainstorm(topic_id)
+        if active_topic_id == topic_id:
+            await autonomous_coordinator.clear_deleted_brainstorm_reference(
+                topic_id,
+                "brainstorm deleted through API while coordinator was stopped"
+            )
+        else:
+            stats = await research_metadata.get_stats()
+            if stats.get("current_brainstorm_id") == topic_id:
+                await research_metadata.set_current_brainstorm(None)
         
         logger.info(f"Deleted brainstorm {topic_id} (had {len(associated_papers)} associated papers)")
         
@@ -1574,7 +1774,7 @@ async def delete_brainstorm(topic_id: str, confirm: bool = False):
 @router.delete("/paper/{paper_id}")
 async def delete_paper(paper_id: str, confirm: bool = False):
     """
-    Delete a paper and optionally its source brainstorm.
+    Prune a paper from model context while preserving it for user download.
     
     Query params:
         confirm: Must be True to execute deletion (safety check)
@@ -1600,9 +1800,39 @@ async def delete_paper(paper_id: str, confirm: bool = False):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.delete("/pruned-papers")
+async def delete_current_pruned_papers(confirm: bool = False):
+    """Permanently delete all pruned papers in the active autonomous paper scope."""
+    try:
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Must confirm deletion with confirm=true"
+            )
+
+        pruned_papers = await paper_library._list_pruned_history_papers_from_directory(
+            paper_library._base_dir,
+            _get_active_autonomous_session_id(),
+        )
+        deleted_count = await paper_library.delete_all_pruned_papers()
+        for paper in pruned_papers:
+            await research_metadata.delete_paper(paper["paper_id"])
+        return {
+            "success": True,
+            "session_id": _get_active_autonomous_session_id(),
+            "deleted_count": deleted_count,
+            "message": f"Deleted {deleted_count} pruned paper records"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete current pruned papers: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.delete("/paper-history/{session_id}/{paper_id}")
 async def delete_history_paper(session_id: str, paper_id: str, confirm: bool = False):
-    """Delete a completed Stage 2 history paper from a specific legacy/session scope."""
+    """Prune a completed Stage 2 history paper from a specific legacy/session scope."""
     try:
         if not confirm:
             raise HTTPException(
@@ -1994,6 +2224,10 @@ async def get_final_answer_archived_papers(answer_id: str):
         memory = _build_scoped_final_answer_memory(answer_id)
         papers = await memory.get_archived_papers_list()
         return {"papers": papers}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to get archived papers for {answer_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2020,6 +2254,8 @@ async def get_final_answer_archived_paper(answer_id: str, paper_id: str):
         return paper
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to get archived paper {paper_id} for {answer_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2040,6 +2276,10 @@ async def get_final_answer_archived_brainstorms(answer_id: str):
         memory = _build_scoped_final_answer_memory(answer_id)
         brainstorms = await memory.get_archived_brainstorms_list()
         return {"brainstorms": brainstorms}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to get archived brainstorms for {answer_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2066,6 +2306,8 @@ async def get_final_answer_archived_brainstorm(answer_id: str, topic_id: str):
         return brainstorm
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to get archived brainstorm {topic_id} for {answer_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2315,10 +2557,13 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         validator_max_tokens = None
         validator_provider = None
         validator_openrouter_provider = None
+        validator_openrouter_reasoning_effort = "auto"
+        validator_supercharge_enabled = False
         custom_prompt = None
         
         if request:
             custom_prompt = request.custom_prompt
+            validator_supercharge_enabled = bool(request.validator_supercharge_enabled)
             # Check if request provides validator config
             if request.validator_model:
                 validator_model = request.validator_model
@@ -2326,6 +2571,7 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
                 validator_max_tokens = request.validator_max_tokens or 25000
                 validator_provider = request.validator_provider or "lm_studio"
                 validator_openrouter_provider = request.validator_openrouter_provider
+                validator_openrouter_reasoning_effort = request.validator_openrouter_reasoning_effort
         
         # If no validator config from request, try coordinator
         if not validator_model:
@@ -2336,6 +2582,8 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
                 validator_max_tokens = coordinator_config["validator_max_tokens"]
                 validator_provider = coordinator_config["validator_provider"]
                 validator_openrouter_provider = coordinator_config.get("validator_openrouter_provider")
+                validator_openrouter_reasoning_effort = coordinator_config.get("validator_openrouter_reasoning_effort", "auto")
+                validator_supercharge_enabled = bool(coordinator_config.get("validator_supercharge_enabled", False))
         
         # If still no config, error
         if not validator_model:
@@ -2386,9 +2634,11 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
                 model_id=validator_model,
                 openrouter_model_id=validator_model if validator_provider == "openrouter" else None,
                 openrouter_provider=validator_openrouter_provider,
+                openrouter_reasoning_effort=validator_openrouter_reasoning_effort,
                 lm_studio_fallback_id=None,  # No fallback for direct critique calls
                 context_window=validator_context_window,
-                max_output_tokens=validator_max_tokens
+                max_output_tokens=validator_max_tokens,
+                supercharge_enabled=validator_supercharge_enabled
             )
         )
         
@@ -2559,7 +2809,7 @@ async def get_default_critique_prompt():
 # ============================================================================
 
 @router.get("/api-logs")
-async def get_autonomous_api_logs(limit: int = 100):
+async def get_autonomous_api_logs(limit: int = 100, workflow: Optional[str] = None):
     """
     Get autonomous research API call logs.
     
@@ -2570,20 +2820,57 @@ async def get_autonomous_api_logs(limit: int = 100):
         Dict with logs and statistics
     """
     try:
-        combined = await _get_combined_api_logs(limit=limit)
+        safe_limit = max(1, min(limit, 100))
+        workflow_filter = _normalize_api_log_workflow_filter(workflow)
+        combined = await _get_combined_api_logs(
+            limit=safe_limit,
+            workflow=workflow_filter,
+            include_full=False,
+        )
         
         return {
             "success": True,
-            "logs": combined["logs"],
+            "logs": [_summarize_api_log_entry(log) for log in combined["logs"]],
             "stats": combined["stats"],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get autonomous API logs: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.get("/api-logs/detail/{log_key}")
+async def get_autonomous_api_log_detail(log_key: str, workflow: Optional[str] = None):
+    """Get one full API log entry by key for explicit user inspection/copy."""
+    try:
+        if not log_key or len(log_key) > 128:
+            raise HTTPException(status_code=400, detail="Invalid API log key")
+
+        workflow_filter = _normalize_api_log_workflow_filter(workflow)
+        combined = await _get_combined_api_logs(limit=1000, workflow=workflow_filter)
+        for log in combined["logs"]:
+            if _get_api_log_key(log) == log_key:
+                return {
+                    "success": True,
+                    "log": {
+                        **log,
+                        "log_key": log_key,
+                        "prompt_size": len(str(log.get("prompt_full") or "")),
+                        "response_size": len(str(log.get("response_full") or "")),
+                    },
+                }
+
+        raise HTTPException(status_code=404, detail="API log entry not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get autonomous API log detail: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.post("/api-logs/clear")
-async def clear_autonomous_api_logs():
+async def clear_autonomous_api_logs(workflow: Optional[str] = None):
     """
     Clear all autonomous API logs.
     
@@ -2591,20 +2878,23 @@ async def clear_autonomous_api_logs():
         Success status
     """
     try:
-        await autonomous_api_logger.clear_logs()
-        await boost_logger.clear_logs()
+        workflow_filter = _normalize_api_log_workflow_filter(workflow)
+        await autonomous_api_logger.clear_logs(workflow=workflow_filter)
+        await boost_logger.clear_logs(workflow=workflow_filter)
         
         return {
             "success": True,
             "message": "Combined API logs cleared successfully"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to clear autonomous API logs: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/api-logs/stats")
-async def get_autonomous_api_stats():
+async def get_autonomous_api_stats(workflow: Optional[str] = None):
     """
     Get statistics about autonomous API calls.
     
@@ -2612,12 +2902,19 @@ async def get_autonomous_api_stats():
         Statistics dict (total calls, by phase, by model, success rate, etc.)
     """
     try:
-        combined = await _get_combined_api_logs(limit=1000)
+        workflow_filter = _normalize_api_log_workflow_filter(workflow)
+        combined = await _get_combined_api_logs(
+            limit=1000,
+            workflow=workflow_filter,
+            include_full=False,
+        )
         
         return {
             "success": True,
             "stats": combined["stats"]
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get autonomous API stats: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

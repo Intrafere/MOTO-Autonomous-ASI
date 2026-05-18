@@ -17,6 +17,7 @@ from backend.shared.models import CompilerState, CompilerSubmission, CompilerVal
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
+from backend.shared.brainstorm_proof_gate import BRAINSTORM_LEAN_PROOF_MARKER
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
@@ -38,6 +39,21 @@ from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
 from backend.autonomous.memory.paper_model_tracker import PaperModelTracker
 
 logger = logging.getLogger(__name__)
+
+CRITIQUE_ATTEMPT_TARGET = 3
+
+LEAN_PROOF_EDIT_DENIAL_REASON = (
+    "REJECTION REASON: Protected Lean 4 Proof\n\n"
+    "ISSUE: The paper-writing retroactive brainstorm operation attempted to edit, delete, "
+    "or add context to a Lean 4 verified proof in the brainstorm database.\n\n"
+    "WHY THIS IS AN ISSUE: Lean 4 proof blocks are immutable from paper-writing modes. "
+    "Paper writing may cite or discuss verified proofs in the paper, but it cannot mutate "
+    "the proof text or attach context to the proof record. Only the normal brainstorm prune "
+    "system may remove Lean 4 proof entries.\n\n"
+    "FIX REQUIRED: Do not target Lean 4 proof submissions with brainstorm_operation. If a proof "
+    "is unhelpful, let the scheduled brainstorm prune system handle removal. If the paper needs "
+    "commentary, write that commentary in the paper prose instead of editing the proof."
+)
 
 
 def _classify_submitter_error(err: BaseException) -> tuple[str, str]:
@@ -113,7 +129,7 @@ class CompilerCoordinator:
         self.autonomous_mode = False
         self.autonomous_section_phase = None  # "body", "conclusion", "introduction", "abstract"
         self._current_topic_id = None  # Set by autonomous coordinator for retroactive brainstorm corrections
-        self._current_reference_paper_ids: List[str] = []  # Autonomous/Tier 3 references preserved for critique and rewrite context
+        self._current_reference_paper_ids: List[str] = []  # Autonomous/Tier 3 references preserved for critique context
         
         # Critique phase state (post-body peer review)
         self.critique_submitter = None  # CritiqueSubmitterAgent instance
@@ -121,15 +137,8 @@ class CompilerCoordinator:
         self.in_critique_phase = False
         self.critique_acceptances = 0
         self.paper_version = 1  # Track version number
-        self.rewrite_count = 0  # Track COMPLETED rewrites (max 1)
-        self.rewrite_pending = False  # Track if rewrite initiated but not yet succeeded
-        self.accumulated_critique_history: List[Dict] = []  # Store all critiques from all versions
-        self.previous_body_versions: List[Dict] = []  # Store prior versions
-        self.needs_critique_after_rewrite = False  # Flag to trigger another critique round
         self.paper_title: Optional[str] = None  # Track current paper title
         self._skip_critique_requested = False  # Pre-emptive skip flag (user can set before critique phase)
-        self.pre_critique_paper: Optional[str] = None  # Snapshot of paper at critique phase start
-        self.current_critique_feedback: Optional[str] = None  # Accepted critiques for current version (for rewrite context)
         
         # Aggregator monitoring for incremental re-RAG
         self.aggregator_acceptances_last_rag = 0
@@ -162,19 +171,27 @@ class CompilerCoordinator:
         # OpenRouter provider config for validator
         validator_provider: str = "lm_studio",
         validator_openrouter_provider: Optional[str] = None,
+        validator_openrouter_reasoning_effort: str = "auto",
         validator_lm_studio_fallback: Optional[str] = None,
         # OpenRouter provider config for high-context submitter
         high_context_provider: str = "lm_studio",
         high_context_openrouter_provider: Optional[str] = None,
+        high_context_openrouter_reasoning_effort: str = "auto",
         high_context_lm_studio_fallback: Optional[str] = None,
         # OpenRouter provider config for high-param submitter
         high_param_provider: str = "lm_studio",
         high_param_openrouter_provider: Optional[str] = None,
+        high_param_openrouter_reasoning_effort: str = "auto",
         high_param_lm_studio_fallback: Optional[str] = None,
         # OpenRouter provider config for critique submitter
         critique_submitter_provider: str = "lm_studio",
         critique_submitter_openrouter_provider: Optional[str] = None,
-        critique_submitter_lm_studio_fallback: Optional[str] = None
+        critique_submitter_openrouter_reasoning_effort: str = "auto",
+        critique_submitter_lm_studio_fallback: Optional[str] = None,
+        validator_supercharge_enabled: bool = False,
+        high_context_supercharge_enabled: bool = False,
+        high_param_supercharge_enabled: bool = False,
+        critique_submitter_supercharge_enabled: bool = False
     ) -> None:
         """
         Initialize the compiler coordinator.
@@ -184,19 +201,23 @@ class CompilerCoordinator:
             validator_model: Model for validator
             high_context_model: Model for high-context submitter
             high_param_model: Model for high-param submitter
-            critique_submitter_model: Model for critique generation and rewrite decisions
+            critique_submitter_model: Model for critique generation
             skip_aggregator_db: If True, don't load Part 1 aggregator database (for autonomous mode)
             validator_provider: Provider for validator ("lm_studio" or "openrouter")
             validator_openrouter_provider: OpenRouter host provider for validator
+            validator_openrouter_reasoning_effort: OpenRouter reasoning effort for validator
             validator_lm_studio_fallback: LM Studio fallback model for validator
             high_context_provider: Provider for high-context submitter
             high_context_openrouter_provider: OpenRouter host provider for high-context submitter
+            high_context_openrouter_reasoning_effort: OpenRouter reasoning effort for high-context submitter
             high_context_lm_studio_fallback: LM Studio fallback model for high-context submitter
             high_param_provider: Provider for high-param submitter
             high_param_openrouter_provider: OpenRouter host provider for high-param submitter
+            high_param_openrouter_reasoning_effort: OpenRouter reasoning effort for high-param submitter
             high_param_lm_studio_fallback: LM Studio fallback model for high-param submitter
             critique_submitter_provider: Provider for critique submitter
             critique_submitter_openrouter_provider: OpenRouter host provider for critique submitter
+            critique_submitter_openrouter_reasoning_effort: OpenRouter reasoning effort for critique submitter
             critique_submitter_lm_studio_fallback: LM Studio fallback model for critique submitter
         """
         logger.info("Initializing compiler coordinator...")
@@ -212,16 +233,24 @@ class CompilerCoordinator:
         # Store OpenRouter provider configs for all roles
         self.validator_provider = validator_provider
         self.validator_openrouter_provider = validator_openrouter_provider
+        self.validator_openrouter_reasoning_effort = validator_openrouter_reasoning_effort
         self.validator_lm_studio_fallback = validator_lm_studio_fallback
         self.high_context_provider = high_context_provider
         self.high_context_openrouter_provider = high_context_openrouter_provider
+        self.high_context_openrouter_reasoning_effort = high_context_openrouter_reasoning_effort
         self.high_context_lm_studio_fallback = high_context_lm_studio_fallback
         self.high_param_provider = high_param_provider
         self.high_param_openrouter_provider = high_param_openrouter_provider
+        self.high_param_openrouter_reasoning_effort = high_param_openrouter_reasoning_effort
         self.high_param_lm_studio_fallback = high_param_lm_studio_fallback
         self.critique_submitter_provider = critique_submitter_provider
         self.critique_submitter_openrouter_provider = critique_submitter_openrouter_provider
+        self.critique_submitter_openrouter_reasoning_effort = critique_submitter_openrouter_reasoning_effort
         self.critique_submitter_lm_studio_fallback = critique_submitter_lm_studio_fallback
+        self.validator_supercharge_enabled = validator_supercharge_enabled
+        self.high_context_supercharge_enabled = high_context_supercharge_enabled
+        self.high_param_supercharge_enabled = high_param_supercharge_enabled
+        self.critique_submitter_supercharge_enabled = critique_submitter_supercharge_enabled
         
         # Reset workflow state for fresh start
         self.outline_accepted = False
@@ -321,16 +350,21 @@ class CompilerCoordinator:
                 provider=self.high_context_provider,
                 model_id=high_context_model,
                 openrouter_provider=self.high_context_openrouter_provider,
+                openrouter_reasoning_effort=self.high_context_openrouter_reasoning_effort,
                 lm_studio_fallback_id=self.high_context_lm_studio_fallback,
                 context_window=system_config.compiler_high_context_context_window,
-                max_output_tokens=system_config.compiler_high_context_max_output_tokens
+                max_output_tokens=system_config.compiler_high_context_max_output_tokens,
+                supercharge_enabled=self.high_context_supercharge_enabled
             )
         )
         
         self.high_param_submitter = HighParamSubmitter(
             high_param_model, 
             compiler_prompt,
-            websocket_broadcaster=self.websocket_broadcaster
+            websocket_broadcaster=self.websocket_broadcaster,
+            validator_model=validator_model,
+            validator_context_window=self.validator_context_window,
+            validator_max_tokens=self.validator_max_tokens,
         )
         await self.high_param_submitter.initialize()
         # Set up task tracking callback for workflow panel integration
@@ -342,10 +376,40 @@ class CompilerCoordinator:
                 provider=self.high_param_provider,
                 model_id=high_param_model,
                 openrouter_provider=self.high_param_openrouter_provider,
+                openrouter_reasoning_effort=self.high_param_openrouter_reasoning_effort,
                 lm_studio_fallback_id=self.high_param_lm_studio_fallback,
                 context_window=system_config.compiler_high_param_context_window,
-                max_output_tokens=system_config.compiler_high_param_max_output_tokens
+                max_output_tokens=system_config.compiler_high_param_max_output_tokens,
+                supercharge_enabled=self.high_param_supercharge_enabled
             )
+        )
+        high_param_role_config = ModelConfig(
+            provider=self.high_param_provider,
+            model_id=high_param_model,
+            openrouter_provider=self.high_param_openrouter_provider,
+            openrouter_reasoning_effort=self.high_param_openrouter_reasoning_effort,
+            lm_studio_fallback_id=self.high_param_lm_studio_fallback,
+            context_window=system_config.compiler_high_param_context_window,
+            max_output_tokens=system_config.compiler_high_param_max_output_tokens,
+            supercharge_enabled=self.high_param_supercharge_enabled
+        )
+        api_client_manager.configure_role(
+            role_id="compiler_rigor_formalization",
+            config=high_param_role_config,
+        )
+        validator_role_config = ModelConfig(
+            provider=self.validator_provider,
+            model_id=validator_model,
+            openrouter_provider=self.validator_openrouter_provider,
+            openrouter_reasoning_effort=self.validator_openrouter_reasoning_effort,
+            lm_studio_fallback_id=self.validator_lm_studio_fallback,
+            context_window=self.validator_context_window,
+            max_output_tokens=self.validator_max_tokens,
+            supercharge_enabled=self.validator_supercharge_enabled
+        )
+        api_client_manager.configure_role(
+            role_id="compiler_rigor_novelty",
+            config=validator_role_config,
         )
         
         self.validator = CompilerValidator(
@@ -363,9 +427,11 @@ class CompilerCoordinator:
                 provider=self.validator_provider,
                 model_id=validator_model,
                 openrouter_provider=self.validator_openrouter_provider,
+                openrouter_reasoning_effort=self.validator_openrouter_reasoning_effort,
                 lm_studio_fallback_id=self.validator_lm_studio_fallback,
                 context_window=self.validator_context_window,
-                max_output_tokens=self.validator_max_tokens
+                max_output_tokens=self.validator_max_tokens,
+                supercharge_enabled=self.validator_supercharge_enabled
             )
         )
         
@@ -577,15 +643,6 @@ class CompilerCoordinator:
         Returns:
             True if body is complete (should skip rigor/outline updates), False otherwise
         """
-        # If rewrite is pending (initiated but not yet succeeded), body is NOT complete
-        if self.rewrite_pending:
-            return False
-        
-        # Check if max rewrites completed - skip critique entirely
-        if self.rewrite_count >= 1:
-            logger.info("Max rewrites completed (1) - treating body as complete")
-            return True
-        
         # Autonomous mode: use explicit phase tracking
         if self.autonomous_mode:
             return self.autonomous_section_phase != "body"
@@ -615,8 +672,12 @@ class CompilerCoordinator:
         # Start main workflow loop
         self._main_task = asyncio.create_task(self._main_workflow())
         
-        # Start aggregator monitoring for incremental re-RAG
-        self._aggregator_monitor_task = asyncio.create_task(self._monitor_aggregator_for_rerag())
+        # Manual Part 2 can watch Part 1 for incremental context. Autonomous/Tier 3
+        # paper writing owns its brainstorm context and must not spawn child monitors.
+        if not self.autonomous_mode:
+            self._aggregator_monitor_task = asyncio.create_task(self._monitor_aggregator_for_rerag())
+        else:
+            self._aggregator_monitor_task = None
         
         await self._broadcast("compiler_started", {"message": "Compiler started"})
         logger.info("Compiler started successfully")
@@ -711,7 +772,7 @@ class CompilerCoordinator:
             })
             await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             if self.is_running:
-                asyncio.create_task(self._main_workflow())
+                self._main_task = asyncio.create_task(self._main_workflow())
         except Exception as e:
             logger.error(f"Compiler workflow error: {e}", exc_info=True)
             self.is_running = False
@@ -1244,14 +1305,6 @@ INVALID:
         # Single attempt - None means no work needed, not error
         section_phase = self.autonomous_section_phase if self.autonomous_mode else None
         
-        # Pass critique context during body rewrite (when critique_feedback is set)
-        critique_feedback_for_construction = None
-        pre_critique_paper_for_construction = None
-        if section_phase == "body" and self.current_critique_feedback:
-            critique_feedback_for_construction = self.current_critique_feedback
-            pre_critique_paper_for_construction = self.pre_critique_paper
-            logger.info("Body construction with critique context (rewrite mode)")
-        
         # Load brainstorm content for retroactive corrections (autonomous mode only)
         brainstorm_content_for_submitter = None
         brainstorm_source_for_submitter = None
@@ -1271,8 +1324,6 @@ INVALID:
                 is_first_portion=False,
                 section_phase=section_phase,
                 rejection_feedback=rejection_feedback,
-                critique_feedback=critique_feedback_for_construction,
-                pre_critique_paper=pre_critique_paper_for_construction,
                 brainstorm_content=brainstorm_content_for_submitter,
                 brainstorm_source_name=brainstorm_source_for_submitter
             )
@@ -1608,12 +1659,6 @@ INVALID:
             self.construction_acceptances += 1
             self._track_submission_wolfram_calls(submission)
             
-            # If rewrite was pending, mark it as completed now (first successful acceptance)
-            if self.rewrite_pending:
-                self.rewrite_count += 1
-                self.rewrite_pending = False
-                logger.info(f"Rewrite #{self.rewrite_count} completed successfully (first acceptance after rewrite)")
-            
             await compiler_rejection_log.add_acceptance(
                 submission.submission_id,
                 "construction",
@@ -1684,6 +1729,18 @@ INVALID:
                 logger.warning(f"Brainstorm {topic_id} is empty, skipping retroactive operation")
                 return
             
+            denial_reason = self._get_lean_proof_retroactive_denial_reason(
+                brainstorm_op,
+                brainstorm_content,
+            )
+            if denial_reason:
+                await self._reject_brainstorm_retroactive_operation(
+                    brainstorm_op,
+                    topic_id,
+                    denial_reason,
+                )
+                return
+
             result = await self.validator.validate_brainstorm_operation(
                 brainstorm_op, brainstorm_content
             )
@@ -1738,6 +1795,109 @@ INVALID:
                 })
         except Exception as e:
             logger.error(f"Error handling retroactive brainstorm operation: {e}")
+
+    @staticmethod
+    def _parse_brainstorm_submission_content(brainstorm_content: str, submission_number: int) -> str:
+        separator = "=" * 80
+        parts = (brainstorm_content or "").split(separator)
+        for index, part in enumerate(parts):
+            if "SUBMISSION #" not in part:
+                continue
+            match = re.search(r"SUBMISSION #(\d+)\s*\|", part)
+            if not match or int(match.group(1)) != submission_number:
+                continue
+            if index + 1 < len(parts):
+                return parts[index + 1].strip()
+        return ""
+
+    @staticmethod
+    def _is_lean_verified_brainstorm_content(content: str) -> bool:
+        text = content or ""
+        if BRAINSTORM_LEAN_PROOF_MARKER in text:
+            return True
+        lowered = text.lower()
+        return (
+            "lean 4 code:" in lowered
+            and "lean verification: accepted" in lowered
+            and "theorem statement:" in lowered
+        )
+
+    @staticmethod
+    def _looks_like_lean_proof_annotation_attempt(brainstorm_op) -> bool:
+        text = f"{getattr(brainstorm_op, 'new_content', '')}\n{getattr(brainstorm_op, 'reasoning', '')}".lower()
+        if BRAINSTORM_LEAN_PROOF_MARKER.lower() in text:
+            return True
+        proof_reference = (
+            "lean 4 proof" in text
+            or "lean-verified proof" in text
+            or "lean verified proof" in text
+            or "verified proof" in text
+            or "proof id:" in text
+        )
+        annotation_intent = any(
+            phrase in text
+            for phrase in (
+                "add context",
+                "additional context",
+                "annotate",
+                "annotation",
+                "clarify proof",
+                "context for proof",
+                "context to proof",
+                "update proof",
+                "edit proof",
+            )
+        )
+        return proof_reference and annotation_intent
+
+    def _get_lean_proof_retroactive_denial_reason(self, brainstorm_op, brainstorm_content: str) -> str:
+        action = getattr(brainstorm_op, "action", "")
+        if action in {"edit", "delete"}:
+            submission_number = getattr(brainstorm_op, "submission_number", None)
+            if submission_number is None:
+                return ""
+            target_content = self._parse_brainstorm_submission_content(
+                brainstorm_content,
+                int(submission_number),
+            )
+            if self._is_lean_verified_brainstorm_content(target_content):
+                return LEAN_PROOF_EDIT_DENIAL_REASON
+        if action == "add" and self._looks_like_lean_proof_annotation_attempt(brainstorm_op):
+            return LEAN_PROOF_EDIT_DENIAL_REASON
+        return ""
+
+    async def _reject_brainstorm_retroactive_operation(
+        self,
+        brainstorm_op,
+        topic_id: str,
+        reasoning: str,
+    ) -> None:
+        logger.info(
+            "Retroactive brainstorm %s automatically rejected for protected Lean 4 proof mutation: %s",
+            getattr(brainstorm_op, "action", ""),
+            getattr(brainstorm_op, "submission_number", None),
+        )
+        result = CompilerValidationResult(
+            submission_id=str(uuid.uuid4()),
+            decision="reject",
+            reasoning=reasoning,
+            summary=reasoning[:750],
+            json_valid=True,
+            validation_stage="pre-validation",
+        )
+        await compiler_rejection_log.add_rejection(
+            result,
+            "brainstorm_retroactive",
+            getattr(brainstorm_op, "new_content", "") or getattr(brainstorm_op, "reasoning", ""),
+        )
+        await self._broadcast("brainstorm_retroactive_rejected", {
+            "action": getattr(brainstorm_op, "action", ""),
+            "topic_id": topic_id,
+            "submission_number": getattr(brainstorm_op, "submission_number", None),
+            "reasoning": reasoning[:500],
+            "automatic": True,
+            "protected_lean_proof": True,
+        })
     
     async def _submit_and_validate_outline_update(self) -> bool:
         """Submit and validate outline update. Returns True if accepted."""
@@ -2089,9 +2249,9 @@ INVALID:
     async def _place_or_appendix_fallback(self, lean_result) -> bool:
         """Drive the 2-attempt placement validator loop.
 
-        On double rejection (or when the submitter never produced a legal
-        attempt), the theorem is appended to the Theorems Appendix and the
-        cycle is counted as a rigor_acceptance.
+        On explicit appendix-only discovery, double rejection, or when the
+        submitter never produced a legal attempt, the theorem is appended to
+        the Theorems Appendix and the cycle is counted as a rigor_acceptance.
         """
         from backend.compiler.agents.high_param_submitter import (
             format_theorem_appendix_entry,
@@ -2099,13 +2259,26 @@ INVALID:
 
         submission = lean_result.initial_placement_submission
         validator_feedback = ""
+        requested_appendix_only = (
+            getattr(lean_result, "placement_preference", "") == "appendix_only"
+            or (getattr(lean_result, "metadata", {}) or {}).get("placement_preference")
+            == "appendix_only"
+        )
+        appendix_outcome = (
+            "appendix_requested" if requested_appendix_only else "appendix_fallback"
+        )
 
         for placement_attempt in (1, 2):
             if submission is None:
+                route_reason = (
+                    "discovery requested appendix-only placement"
+                    if requested_appendix_only
+                    else "submitter returned no placement submission"
+                )
                 logger.info(
-                    "Rigor placement attempt %s: submitter returned no placement submission; "
-                    "routing directly to appendix fallback",
+                    "Rigor placement attempt %s: %s; routing directly to appendix",
                     placement_attempt,
+                    route_reason,
                 )
                 break
 
@@ -2251,9 +2424,10 @@ INVALID:
                     lean_result, validator_feedback
                 )
 
-        # Appendix fallback: both placement attempts failed (or attempt 1 was
-        # impossible). The math is already Lean-verified, so the theorem is
-        # preserved in the Theorems Appendix and counted as a rigor_acceptance.
+        # Appendix storage: either explicitly requested by discovery or used
+        # as fallback when inline placement failed / was impossible. The math
+        # is already Lean-verified, so the theorem is preserved and counted as
+        # a rigor_acceptance.
         appendix_entry = format_theorem_appendix_entry(
             proof_id=lean_result.proof_id,
             theorem_statement=lean_result.theorem_statement,
@@ -2261,7 +2435,7 @@ INVALID:
             is_novel=lean_result.is_novel,
             theorem_name=lean_result.theorem_name,
             novelty_tier=lean_result.novelty_tier,
-            placement_outcome="appendix_fallback",
+            placement_outcome=appendix_outcome,
         )
         appended = await paper_memory.append_to_theorems_appendix(appendix_entry)
         if not appended:
@@ -2281,18 +2455,18 @@ INVALID:
                 "submission_id": (
                     lean_result.initial_placement_submission.submission_id
                     if lean_result.initial_placement_submission
-                    else f"rigor_appendix_{lean_result.proof_id}"
+                    else f"rigor_{appendix_outcome}_{lean_result.proof_id}"
                 ),
-                "placement_outcome": "appendix_fallback",
+                "placement_outcome": appendix_outcome,
                 "lean_proof_id": lean_result.proof_id,
                 "is_novel": lean_result.is_novel,
             },
         )
         await self._broadcast("paper_updated", {"word_count": word_count})
         logger.info(
-            "Rigor theorem %s stored in Theorems Appendix (both placement attempts "
-            "failed or unavailable)",
+            "Rigor theorem %s stored in Theorems Appendix (%s)",
             lean_result.proof_id,
+            appendix_outcome,
         )
         return True
 
@@ -2614,31 +2788,11 @@ INVALID:
         self.in_critique_phase = True
         self.critique_acceptances = 0
         
-        # Snapshot paper at critique phase start (for rewrite context)
-        self.pre_critique_paper = await paper_memory.get_paper()
-        logger.info(f"Snapshot pre-critique paper: {len(self.pre_critique_paper)} chars")
-        
-        # Clear current critique feedback for this round
-        self.current_critique_feedback = None
-        
         # Initialize critique memory
         paper_id = f"paper_v{self.paper_version}"
         critique_memory.initialize(paper_id)
-        
-        # Before clearing, accumulate any existing critiques from previous phases
-        existing = await critique_memory.get_all_critiques()
-        if existing.strip():
-            self.accumulated_critique_history.append({
-                "version": self.paper_version,
-                "critiques": existing
-            })
-            logger.info(f"Accumulated {len(self.accumulated_critique_history)} critique history version(s)")
-        
         await critique_memory.clear()
-        
-        # Load from file for crash recovery (if file exists)
-        await critique_memory.load_from_file()
-        
+
         logger.info(f"Critique memory initialized for {paper_id}")
         
         # Create critique submitter agent
@@ -2668,9 +2822,11 @@ INVALID:
                 provider=self.critique_submitter_provider,
                 model_id=self.critique_submitter_model,
                 openrouter_provider=self.critique_submitter_openrouter_provider,
+                openrouter_reasoning_effort=self.critique_submitter_openrouter_reasoning_effort,
                 lm_studio_fallback_id=self.critique_submitter_lm_studio_fallback,
                 context_window=system_config.compiler_critique_submitter_context_window,
-                max_output_tokens=system_config.compiler_critique_submitter_max_tokens
+                max_output_tokens=system_config.compiler_critique_submitter_max_tokens,
+                supercharge_enabled=self.critique_submitter_supercharge_enabled
             )
         )
         
@@ -2681,9 +2837,11 @@ INVALID:
                 provider=self.validator_provider,
                 model_id=self.validator_model,
                 openrouter_provider=self.validator_openrouter_provider,
+                openrouter_reasoning_effort=self.validator_openrouter_reasoning_effort,
                 lm_studio_fallback_id=self.validator_lm_studio_fallback,
                 context_window=self.validator_context_window,
-                max_output_tokens=self.validator_max_tokens
+                max_output_tokens=self.validator_max_tokens,
+                supercharge_enabled=self.validator_supercharge_enabled
             )
         )
         
@@ -2694,16 +2852,18 @@ INVALID:
                 provider=self.validator_provider,
                 model_id=self.validator_model,
                 openrouter_provider=self.validator_openrouter_provider,
+                openrouter_reasoning_effort=self.validator_openrouter_reasoning_effort,
                 lm_studio_fallback_id=self.validator_lm_studio_fallback,
                 context_window=self.validator_context_window,
-                max_output_tokens=self.validator_max_tokens
+                max_output_tokens=self.validator_max_tokens,
+                supercharge_enabled=self.validator_supercharge_enabled
             )
         )
         
         # Broadcast critique phase started
         await self._broadcast("critique_phase_started", {
             "paper_version": self.paper_version,
-            "target_critiques": 5
+            "target_critiques": CRITIQUE_ATTEMPT_TARGET
         })
         
         # Start critique aggregation loop
@@ -2714,12 +2874,10 @@ INVALID:
         current_outline: str = "",
         current_body: str = "",
         aggregator_db: str = "",
-        critique_feedback: str = "",
-        pre_critique_paper: str = "",
-        accumulated_history: str = ""
+        critique_feedback: str = ""
     ) -> Optional[str]:
         """
-        Prepare reference-paper context for critique/rewrite prompts in autonomous mode.
+        Prepare reference-paper context for critique prompts in autonomous mode.
 
         This preserves the reference papers selected for the paper instead of
         silently dropping them once the critique phase begins.
@@ -2744,8 +2902,6 @@ INVALID:
                     current_body or "",
                     aggregator_db or "",
                     critique_feedback or "",
-                    pre_critique_paper or "",
-                    accumulated_history or "",
                 ]
                 if part
             )
@@ -2773,7 +2929,6 @@ INVALID:
                     current_outline or "",
                     current_body or "",
                     critique_feedback or "",
-                    pre_critique_paper or "",
                 ]
                 if part
             )
@@ -2792,10 +2947,13 @@ INVALID:
     
     async def _run_critique_aggregation(self) -> None:
         """
-        Run critique aggregation until 5 total attempts.
+        Run critique aggregation until the configured total attempt target.
         Uses simple generate-validate loop similar to aggregator workflow.
         """
-        logger.info("Starting critique aggregation loop (target: 5 total attempts, accepted OR rejected)")
+        logger.info(
+            "Starting critique aggregation loop "
+            f"(target: {CRITIQUE_ATTEMPT_TARGET} total attempts, accepted OR rejected)"
+        )
         
         rejection_count = 0
         consecutive_rejections = 0
@@ -2812,25 +2970,26 @@ INVALID:
                     "acceptances": critique_count,
                     "rejections": rejection_count,
                     "total_attempts": total_attempts,
-                    "target": 5,  # Now means total attempts, not just acceptances
+                    "target": CRITIQUE_ATTEMPT_TARGET,
                     "version": self.paper_version
                 })
                 
                 # Check if target reached
-                if total_attempts >= 5:
+                if total_attempts >= CRITIQUE_ATTEMPT_TARGET:
                     logger.info(f"Critique phase complete: {total_attempts} total attempts ({critique_count} accepted, {rejection_count} rejected)")
-                    
-                    # If 0 acceptances, skip rewrite and continue
+
                     if critique_count == 0:
-                        logger.info("No critiques accepted - skipping rewrite phase, moving to next section")
-                        await self._skip_rewrite_and_continue()
+                        logger.info("No critiques accepted - moving to next section")
+                        await self._continue_without_self_review()
                     else:
-                        # Trigger rewrite decision with accepted critiques
-                        await self._trigger_rewrite_decision()
+                        await self._append_accepted_critiques_as_self_review()
                     break
                 
                 # Generate critique
-                logger.info(f"Generating critique (attempts: {total_attempts}/5, accepted: {critique_count}, rejected: {rejection_count})")
+                logger.info(
+                    f"Generating critique (attempts: {total_attempts}/{CRITIQUE_ATTEMPT_TARGET}, "
+                    f"accepted: {critique_count}, rejected: {rejection_count})"
+                )
                 
                 current_body = await paper_memory.get_paper()
                 current_outline = await outline_memory.get_outline()
@@ -2842,16 +3001,12 @@ INVALID:
                 # Get existing critiques
                 existing_critiques = await critique_memory.get_all_critiques()
                 
-                # Format accumulated critique history from previous failed versions
-                accumulated_history = self._format_accumulated_critique_history()
-
-                # Keep autonomous reference papers available during critique/rewrite.
+                # Keep autonomous reference papers available during critique.
                 reference_papers = await self._get_reference_papers_context_for_critique(
                     current_outline=current_outline,
                     current_body=current_body,
                     aggregator_db=aggregator_db,
-                    critique_feedback=existing_critiques,
-                    accumulated_history=accumulated_history
+                    critique_feedback=existing_critiques
                 )
                 
                 # Generate critique submission
@@ -2861,8 +3016,7 @@ INVALID:
                     current_outline=current_outline,
                     aggregator_db=aggregator_db,
                     reference_papers=reference_papers,
-                    existing_critiques=existing_critiques,
-                    accumulated_history=accumulated_history
+                    existing_critiques=existing_critiques
                 )
                 
                 if submission is None:
@@ -2872,13 +3026,7 @@ INVALID:
                 
                 logger.info(f"Critique generated: {submission.submission_id}")
                 
-                # Validate critique using aggregator validator prompts
-                from backend.aggregator.agents.validator import ValidatorAgent
-                from backend.aggregator.memory.shared_training import shared_training_memory
-                from backend.aggregator.prompts.validator_prompts import build_validator_prompt
-                
-                # Build critique validation prompt (reuses aggregator validator structure)
-                # We'll use the validator's validate method but with critique-specific context
+                # Validate critique using critique-specific validator prompts.
                 validation_result = await self._validate_critique(submission)
                 
                 # Handle decline submissions differently
@@ -2894,7 +3042,7 @@ INVALID:
                             "reasoning": submission.reasoning,
                             "version": self.paper_version,
                             "total_attempts": total_attempts,
-                            "target": 5
+                            "target": CRITIQUE_ATTEMPT_TARGET
                         })
                     else:
                         # Validator disagrees - there ARE issues that need critique
@@ -2907,7 +3055,7 @@ INVALID:
                             "reasoning": validation_result.reasoning if validation_result else "Unknown",
                             "consecutive": consecutive_rejections,
                             "total_attempts": total_attempts,
-                            "target": 5
+                            "target": CRITIQUE_ATTEMPT_TARGET
                         })
                 else:
                     # Regular critique submission
@@ -2919,12 +3067,12 @@ INVALID:
                         await critique_memory.add_accepted_critique(submission.content)
                         
                         new_count = await critique_memory.get_critique_count()
-                        logger.info(f"Critique ACCEPTED ({new_count}/5): {submission.submission_id}")
+                        logger.info(f"Critique ACCEPTED ({new_count}/{CRITIQUE_ATTEMPT_TARGET}): {submission.submission_id}")
                         
                         await self._broadcast("critique_accepted", {
                             "critique_id": submission.submission_id,
                             "count": new_count,
-                            "target": 5,
+                            "target": CRITIQUE_ATTEMPT_TARGET,
                             "version": self.paper_version,
                             "total_attempts": total_attempts,
                             "rejections": rejection_count
@@ -2953,7 +3101,7 @@ INVALID:
                             "reasoning": validation_result.reasoning if validation_result else "Unknown",
                             "consecutive": consecutive_rejections,
                             "total_attempts": total_attempts,
-                            "target": 5
+                            "target": CRITIQUE_ATTEMPT_TARGET
                         })
                 
                 # Brief delay between critiques
@@ -2975,9 +3123,6 @@ INVALID:
             ValidationResult or None
         """
         try:
-            # Import prompt builders
-            from backend.aggregator.prompts.validator_prompts import build_validator_prompt
-            
             # Build validation prompt for critique
             # We pass the critique as "submission" and existing critiques as "context"
             current_body = await paper_memory.get_paper()
@@ -3132,480 +3277,29 @@ INVALID:
         except Exception as e:
             logger.error(f"Error in critique cleanup: {e}", exc_info=True)
     
-    async def _trigger_rewrite_decision(self) -> None:
-        """
-        Trigger rewrite vs continue decision after 5 critiques.
-        Includes retry logic if decision is rejected by validator.
-        """
-        max_retries = 5
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            try:
-                logger.info("=" * 80)
-                logger.info(f"Critique phase complete (5 total attempts) - triggering rewrite decision (attempt {retry_count + 1})")
-                logger.info("=" * 80)
-                
-                # Get all critiques
-                critique_feedback = await critique_memory.get_all_critiques()
-                current_body = await paper_memory.get_paper()
-                current_outline = await outline_memory.get_outline()
-                current_title = self.paper_title if self.paper_title else self.user_prompt
-                
-                # Get context (aggregator DB, reference papers, etc.)
-                from backend.aggregator.memory.shared_training import shared_training_memory
-                aggregator_db = await shared_training_memory.get_all_content()
-                # Format accumulated critique history from previous failed versions
-                accumulated_history = self._format_accumulated_critique_history()
+    async def _append_accepted_critiques_as_self_review(self) -> None:
+        """Append validator-accepted critiques as an honest AI self-review section."""
+        critique_feedback = await critique_memory.get_all_critiques()
+        if not critique_feedback.strip():
+            await self._continue_without_self_review()
+            return
 
-                reference_papers = await self._get_reference_papers_context_for_critique(
-                    current_outline=current_outline,
-                    current_body=current_body,
-                    aggregator_db=aggregator_db,
-                    critique_feedback=critique_feedback,
-                    pre_critique_paper=self.pre_critique_paper or "",
-                    accumulated_history=accumulated_history
-                )
-                
-                # Critique submitter makes decision
-                logger.info("Critique submitter generating rewrite decision...")
-                decision_result = await self.critique_submitter.submit_rewrite_decision(
-                    user_prompt=self.user_prompt,
-                    current_body=current_body,
-                    current_outline=current_outline,
-                    current_title=current_title,
-                    aggregator_db=aggregator_db,
-                    critique_feedback=critique_feedback,
-                    pre_critique_paper=self.pre_critique_paper,  # Paper snapshot from start of critique phase
-                    reference_papers=reference_papers,
-                    accumulated_history=accumulated_history
-                )
-                
-                if decision_result is None:
-                    logger.error("Rewrite decision generation returned None")
-                    retry_count += 1
-                    await asyncio.sleep(5)
-                    continue
-                
-                logger.info(f"Rewrite decision: {decision_result['decision']}")
-                
-                # Validator reviews decision
-                logger.info("Validator reviewing rewrite decision...")
-                validated = await self.validator.validate_rewrite_decision(
-                    decision_result=decision_result,
-                    user_prompt=self.user_prompt,
-                    current_body=current_body,
-                    current_outline=current_outline,
-                    current_title=current_title,
-                    critique_feedback=critique_feedback,
-                    aggregator_db=aggregator_db
-                )
-                
-                if not validated:
-                    # Decision rejected - retry
-                    logger.warning("Rewrite decision rejected by validator - retrying")
-                    await self._broadcast("rewrite_decision_rejected", {
-                        "attempt": retry_count + 1,
-                        "max_retries": max_retries
-                    })
-                    retry_count += 1
-                    await asyncio.sleep(5)
-                    continue
-                
-                # Decision validated - execute it
-                logger.info("Rewrite decision validated - executing")
-                
-                # Execute decision
-                if decision_result["decision"] == "continue":
-                    logger.info("Decision: CONTINUE to conclusion (critiques minor/incorrect)")
-                    await self._end_critique_phase(rewrite=False)
-                    
-                elif decision_result["decision"] == "partial_revision":
-                    logger.info("Decision: PARTIAL REVISION (iterative targeted edits)")
-                    await self._execute_partial_revision(
-                        new_title=decision_result.get("new_title"),
-                        new_outline=decision_result.get("new_outline"),
-                        critique_feedback=critique_feedback,
-                        accumulated_history=accumulated_history
-                    )
-                    
-                elif decision_result["decision"] == "total_rewrite":
-                    logger.info("Decision: TOTAL REWRITE body section")
-                    await self._execute_body_rewrite(
-                        new_title=decision_result.get("new_title"),
-                        new_outline=decision_result.get("new_outline"),
-                        critique_feedback=critique_feedback
-                    )
-                
-                # Success - break out of retry loop
-                break
-                
-            except Exception as e:
-                logger.error(f"Error in rewrite decision (attempt {retry_count + 1}): {e}", exc_info=True)
-                retry_count += 1
-                if retry_count < max_retries:
-                    await asyncio.sleep(5)
-                # Note: Don't call _end_critique_phase here - let it fall through to unified fallback below
-        
-        # Unified fallback if while loop exited due to retry exhaustion
-        # Handles both: validation failures (returned False 5 times) OR exceptions (5 exceptions occurred)
-        if retry_count >= max_retries:
-            logger.error("Rewrite decision validation failed after max retries - defaulting to CONTINUE")
-            await self._broadcast("rewrite_decision_max_retries_exceeded", {
-                "action": "continue_to_conclusion"
-            })
-            await self._end_critique_phase(rewrite=False)
-    
-    async def _execute_body_rewrite(
-        self,
-        new_title: Optional[str],
-        new_outline: Optional[str],
-        critique_feedback: str
-    ) -> None:
-        """
-        Execute full body section rewrite.
-        
-        Args:
-            new_title: New paper title (or None to keep current)
-            new_outline: Updated outline (or None to keep current)
-            critique_feedback: All accepted critiques
-        """
-        logger.info("=" * 80)
-        logger.info("EXECUTING BODY REWRITE")
-        logger.info("=" * 80)
-        
-        # Mark rewrite as pending (will count as completed only after first successful body acceptance)
-        self.rewrite_pending = True
-        logger.info(f"Rewrite initiated (pending successful completion, max: 1)")
-        
-        # Store previous version
-        current_body = await paper_memory.get_paper()
-        old_title = self.paper_title if self.paper_title else self.user_prompt
-        
-        await paper_memory.store_previous_version(
-            version=self.paper_version,
-            title=old_title,
-            body=current_body,
-            critique_feedback=critique_feedback
-        )
-        
-        logger.info(f"Stored Version {self.paper_version}: {old_title}")
-        
-        # Update title if changed
-        title_changed = False
-        if new_title and new_title != old_title:
-            self.paper_title = new_title
-            self.paper_version += 1
-            title_changed = True
-            logger.info(f"Paper title changed: {new_title} (Version {self.paper_version})")
-        else:
-            logger.info("Paper title unchanged")
-        
-        # Update outline if provided
-        if new_outline:
-            await outline_memory.update_outline(new_outline)
-            logger.info("Outline updated with new structure")
-        
-        # Clear paper body (keep only placeholders)
-        await paper_memory.clear_body_section()
-        logger.info("Body section cleared - preserving placeholders")
-        
-        # Broadcast rewrite started
-        await self._broadcast("body_rewrite_started", {
+        appended = await paper_memory.append_self_review_section(critique_feedback)
+        await self._broadcast("self_review_appended", {
             "version": self.paper_version,
-            "title": self.paper_title if self.paper_title else self.user_prompt,
-            "title_changed": title_changed,
-            "critique_feedback_preview": critique_feedback[:500]
+            "critique_count": await critique_memory.get_critique_count(),
+            "appended": appended,
         })
-        
-        # End critique phase
-        await self._end_critique_phase(rewrite=True)
-        
-        # Reset to body phase with new context
-        self.autonomous_section_phase = "body"
-        
-        # Store critique feedback for passing to construction prompts
-        # This provides rewrite context so the model knows what to fix
-        self.current_critique_feedback = critique_feedback
-        logger.info(f"Stored critique feedback for construction: {len(critique_feedback)} chars")
-        
-        # Set flag for re-critique if title changed
-        if title_changed:
-            logger.info("Title changed - will run critique phase again after rewrite completes")
-            self.needs_critique_after_rewrite = True
-        else:
-            logger.info("Title unchanged - will continue to conclusion after rewrite completes")
-            self.needs_critique_after_rewrite = False
-        
-        logger.info("=" * 80)
-        logger.info(f"BODY REWRITE PREPARED - Starting body construction for Version {self.paper_version}")
-        logger.info("Body reconstruction will have: pre_critique_paper + accepted critique feedback")
-        logger.info("=" * 80)
+        await self._end_critique_phase(self_review_appended=appended)
     
-    async def _execute_partial_revision(
-        self,
-        new_title: Optional[str],
-        new_outline: Optional[str],
-        critique_feedback: str,
-        accumulated_history: Optional[str] = None
-    ) -> None:
-        """
-        Execute partial revision using ITERATIVE targeted edit operations.
-        
-        Proposes edits one at a time, validates each, applies, and shows updated paper
-        before proposing the next edit.
-        
-        Args:
-            new_title: New paper title (or None to keep current)
-            new_outline: Updated outline (or None to keep current)
-            critique_feedback: All accepted critiques
-            accumulated_history: Optional accumulated critique history from previous versions
-        """
-        logger.info("=" * 80)
-        logger.info("EXECUTING PARTIAL REVISION (ITERATIVE EDITS)")
-        logger.info("=" * 80)
-        
-        # Mark rewrite as pending (will count as completed only after first successful edit acceptance)
-        self.rewrite_pending = True
-        logger.info(f"Partial revision initiated (pending successful completion, max: 1)")
-        
-        # Store current state (for history tracking)
-        old_title = self.paper_title if self.paper_title else self.user_prompt
-        
-        # Update title if changed
-        title_changed = False
-        if new_title and new_title != old_title:
-            self.paper_title = new_title
-            self.paper_version += 1
-            title_changed = True
-            logger.info(f"Paper title changed: {new_title} (Version {self.paper_version})")
-        else:
-            logger.info("Paper title unchanged")
-        
-        # Update outline if provided
-        if new_outline:
-            await outline_memory.update_outline(new_outline)
-            logger.info("Outline updated with new structure")
-        
-        # Get current outline
-        current_outline = await outline_memory.get_outline()
-
-        reference_papers = await self._get_reference_papers_context_for_critique(
-            current_outline=current_outline,
-            current_body=self.pre_critique_paper or "",
-            critique_feedback=critique_feedback,
-            pre_critique_paper=self.pre_critique_paper or "",
-            accumulated_history=accumulated_history or ""
-        )
-        
-        # ITERATIVE EDIT LOOP
-        MAX_EDITS = 20  # Safety limit to prevent infinite loops
-        edits_applied: List[Dict] = []
-        successful_edits = 0
-        failed_edits = 0
-        consecutive_failures = 0
-        MAX_CONSECUTIVE_FAILURES = 3
-        
-        logger.info("Starting iterative edit loop...")
-        
-        more_edits_needed = True
-        while more_edits_needed and len(edits_applied) < MAX_EDITS:
-            try:
-                # Get current paper state
-                current_paper = await paper_memory.get_paper()
-                
-                # Ask critique submitter for next edit
-                logger.info(f"Requesting edit #{len(edits_applied) + 1}...")
-                edit_proposal = await self.critique_submitter.submit_iterative_edit(
-                    user_prompt=self.user_prompt,
-                    pre_critique_paper=self.pre_critique_paper,
-                    current_paper=current_paper,
-                    current_outline=current_outline,
-                    critique_feedback=critique_feedback,
-                    edits_applied=edits_applied,
-                    reference_papers=reference_papers,
-                    accumulated_history=accumulated_history
-                )
-                
-                if edit_proposal is None:
-                    logger.error("Failed to get edit proposal - stopping iterative loop")
-                    break
-                
-                operation = edit_proposal.get("operation")
-                old_string = edit_proposal.get("old_string", "")
-                new_string = edit_proposal.get("new_string", "")
-                reasoning = edit_proposal.get("reasoning", "")
-                more_edits_needed = edit_proposal.get("more_edits_needed", False)
-                
-                logger.info(f"Edit proposal: {operation} - {reasoning[:100]}...")
-                
-                # Validate the edit via validator
-                is_valid, validation_reason = await self._validate_partial_revision_edit(
-                    edit_proposal=edit_proposal,
-                    current_paper=current_paper,
-                    current_outline=current_outline,
-                    critique_feedback=critique_feedback
-                )
-                
-                if not is_valid:
-                    logger.warning(f"Edit #{len(edits_applied) + 1} rejected by validator: {validation_reason}")
-                    consecutive_failures += 1
-                    
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                        logger.error(f"Max consecutive failures ({MAX_CONSECUTIVE_FAILURES}) reached - stopping iterative loop")
-                        break
-                    
-                    # Don't add to edits_applied, loop will retry with same state
-                    failed_edits += 1
-                    continue
-                
-                # Apply the validated edit
-                edit_submission = CompilerSubmission(
-                    submission_id=f"partial_revision_edit_{len(edits_applied) + 1}",
-                    mode="review",
-                    content=new_string,
-                    operation=operation,
-                    old_string=old_string,
-                    new_string=new_string,
-                    reasoning=reasoning
-                )
-                updated_paper = self._apply_edit(current_paper, edit_submission)
-                
-                if updated_paper is not None:
-                    await paper_memory.update_paper(updated_paper)
-                    logger.info(f"Edit #{len(edits_applied) + 1} applied successfully")
-                    edits_applied.append(edit_proposal)
-                    successful_edits += 1
-                    consecutive_failures = 0  # Reset on success
-                    
-                    # Broadcast progress
-                    await self._broadcast("partial_revision_edit_applied", {
-                        "edit_number": len(edits_applied),
-                        "operation": operation,
-                        "reasoning": reasoning[:200],
-                        "more_edits_needed": more_edits_needed
-                    })
-                else:
-                    logger.warning(f"Edit #{len(edits_applied) + 1} failed to apply (old_string not found)")
-                    consecutive_failures += 1
-                    failed_edits += 1
-                    
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                        logger.error(f"Max consecutive failures ({MAX_CONSECUTIVE_FAILURES}) reached - stopping iterative loop")
-                        break
-                
-            except Exception as e:
-                logger.error(f"Error in iterative edit loop: {e}", exc_info=True)
-                consecutive_failures += 1
-                failed_edits += 1
-                
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    logger.error(f"Max consecutive failures ({MAX_CONSECUTIVE_FAILURES}) reached - stopping iterative loop")
-                    break
-        
-        logger.info(f"Iterative edit loop complete: {successful_edits} successful, {failed_edits} failed")
-        
-        if len(edits_applied) >= MAX_EDITS:
-            logger.warning(f"Reached max edit limit ({MAX_EDITS}) - stopping iterative loop")
-        
-        # Mark rewrite completion on first successful edit
-        if self.rewrite_pending:
-            if successful_edits > 0:
-                self.rewrite_count += 1
-                logger.info(f"Rewrite #{self.rewrite_count} completed successfully (first accepted partial edit)")
-            self.rewrite_pending = False
-        
-        # Broadcast partial revision complete
-        await self._broadcast("partial_revision_complete", {
-            "version": self.paper_version,
-            "title": self.paper_title if self.paper_title else self.user_prompt,
-            "title_changed": title_changed,
-            "edits_applied": successful_edits,
-            "edits_failed": failed_edits,
-            "critique_feedback_preview": critique_feedback[:500]
-        })
-        
-        # End critique phase
-        await self._end_critique_phase(rewrite=False)
-        
-        # Set flag for re-critique if title changed
-        if title_changed:
-            logger.info("Title changed - would run critique phase again, but max rewrites reached")
-            # Note: With max 1 rewrite, title changes won't trigger re-critique
-            self.needs_critique_after_rewrite = False
-        else:
-            logger.info("Title unchanged - continuing to conclusion")
-            self.needs_critique_after_rewrite = False
-        
-        # Continue to conclusion (partial revision doesn't loop back to body phase)
-        # Clear critique context (no longer needed after body phase)
-        self.current_critique_feedback = None
-        self.autonomous_section_phase = "conclusion"
-        
-        logger.info("=" * 80)
-        logger.info("PARTIAL REVISION COMPLETE - Continuing to CONCLUSION")
-        logger.info("=" * 80)
-    
-    async def _validate_partial_revision_edit(
-        self,
-        edit_proposal: Dict,
-        current_paper: str,
-        current_outline: str,
-        critique_feedback: str
-    ) -> Tuple[bool, str]:
-        """
-        Validate a single partial revision edit using the compiler validator.
-        
-        Args:
-            edit_proposal: The proposed edit with operation, old_string, new_string, reasoning
-            current_paper: Current paper content
-            current_outline: Paper outline
-            critique_feedback: All accepted critiques
-            
-        Returns:
-            Tuple of (is_valid: bool, rejection_reason: str)
-        """
-        try:
-            # Delegate to the compiler validator which has comprehensive validation logic
-            return await self.validator.validate_partial_revision_edit(
-                edit_proposal=edit_proposal,
-                current_paper=current_paper,
-                current_outline=current_outline,
-                critique_feedback=critique_feedback
-            )
-            
-        except Exception as e:
-            logger.error(f"Error validating partial revision edit: {e}", exc_info=True)
-            return False, f"Validation error: {str(e)}"
-    
-    def _format_accumulated_critique_history(self) -> str:
-        """
-        Format all historical critiques from previous failed versions.
-        Returns formatted string with clear version labeling.
-        """
-        if not self.accumulated_critique_history:
-            return ""
-        
-        parts = ["=" * 80]
-        parts.append("CRITIQUE HISTORY FROM PREVIOUS FAILED VERSIONS")
-        parts.append("(These critiques are from earlier attempts that were rewritten)")
-        parts.append("=" * 80 + "\n")
-        
-        for i, entry in enumerate(self.accumulated_critique_history, 1):
-            parts.append(f"--- FAILED VERSION #{i} (REWRITTEN) ---")
-            parts.append(entry['critiques'])
-            parts.append("")
-        
-        return "\n".join(parts)
-    
-    async def _end_critique_phase(self, rewrite: bool) -> None:
+    async def _end_critique_phase(self, self_review_appended: bool = False) -> None:
         """
         End critique phase and clean up.
         
         Args:
-            rewrite: Whether a rewrite was approved
+            self_review_appended: Whether accepted critiques were appended to the paper
         """
-        logger.info(f"Ending critique phase (rewrite={rewrite})")
+        logger.info(f"Ending critique phase (self_review_appended={self_review_appended})")
         
         self.in_critique_phase = False
         
@@ -3620,32 +3314,25 @@ INVALID:
         
         # Broadcast end
         await self._broadcast("critique_phase_ended", {
-            "rewrite": rewrite,
+            "self_review_appended": self_review_appended,
             "version": self.paper_version
         })
-        
-        if not rewrite:
-            # Continue to conclusion
-            # Clear critique context (no longer needed after body phase)
-            self.current_critique_feedback = None
-            self.autonomous_section_phase = "conclusion"
-            logger.info("Critique phase complete - transitioning to CONCLUSION phase")
-            await self._broadcast("phase_transition", {
-                "from_phase": "critique",
-                "to_phase": "conclusion",
-                "trigger": "critiques_reviewed",
-                "paper_word_count": await paper_memory.get_word_count()
-            })
-        else:
-            logger.info("Critique phase complete - body will be rewritten")
+
+        self.autonomous_section_phase = "conclusion"
+        logger.info("Critique phase complete - transitioning to CONCLUSION phase")
+        await self._broadcast("phase_transition", {
+            "from_phase": "critique",
+            "to_phase": "conclusion",
+            "trigger": "critiques_reviewed",
+            "paper_word_count": await paper_memory.get_word_count()
+        })
     
-    async def _skip_rewrite_and_continue(self) -> None:
+    async def _continue_without_self_review(self) -> None:
         """
-        Skip rewrite phase when body is academically acceptable.
-        Called when 5 total attempts complete with 0 accepted critiques.
+        Continue when no critiques were accepted for the self-review section.
         """
         logger.info("=" * 80)
-        logger.info("SKIPPING REWRITE - No critiques accepted, body is acceptable")
+        logger.info("NO SELF-REVIEW APPENDED - No critiques accepted")
         logger.info("=" * 80)
         
         await self._broadcast("critique_phase_skipped", {
@@ -3653,16 +3340,15 @@ INVALID:
             "version": self.paper_version
         })
         
-        # End critique phase without rewrite
-        await self._end_critique_phase(rewrite=False)
+        await self._end_critique_phase(self_review_appended=False)
         
-        # The _end_critique_phase already transitions to conclusion when rewrite=False
+        # The _end_critique_phase already transitions to conclusion.
         logger.info("Transitioning to CONCLUSION phase (body accepted as-is)")
     
     async def skip_critique_phase(self) -> bool:
         """
         Skip the critique phase and continue to conclusion.
-        User override to bypass peer review and rewrite cycle.
+        User override to bypass peer review and self-review appending.
         
         Can be called:
         - During critique phase: immediately skips
@@ -3682,7 +3368,7 @@ INVALID:
                 "version": self.paper_version
             })
             
-            await self._end_critique_phase(rewrite=False)
+            await self._end_critique_phase(self_review_appended=False)
             return True
         else:
             # Not in critique phase yet - set flag to skip when reached
@@ -3764,57 +3450,7 @@ INVALID:
         
         # Phase transition logic based on explicit completion signal
         if current_phase == "body":
-            # Check if max rewrites reached - skip critique phase entirely
-            if self.rewrite_count >= 1:
-                logger.info(f"Max rewrites ({self.rewrite_count}) reached - skipping critique phase, proceeding to conclusion")
-                # Clear critique context (no longer needed after body phase)
-                self.current_critique_feedback = None
-                self.autonomous_section_phase = "conclusion"
-                await self._broadcast("phase_transition", {
-                    "from_phase": "body",
-                    "to_phase": "conclusion",
-                    "trigger": "section_complete",
-                    "reason": "max_rewrites_reached",
-                    "rewrite_count": self.rewrite_count,
-                    "paper_word_count": word_count
-                })
-                return False
-            
-            # Check if this is a rewrite completion that needs another critique round
-            if self.needs_critique_after_rewrite:
-                # Body rewrite complete, title changed - run critique phase again
-                logger.info(f"Body rewrite complete (Version {self.paper_version}) - triggering ANOTHER critique phase (title changed)")
-                self.needs_critique_after_rewrite = False  # Reset flag
-                
-                await self._broadcast("phase_transition", {
-                    "from_phase": "body",
-                    "to_phase": "critique",
-                    "trigger": "rewrite_complete_title_changed",
-                    "paper_word_count": word_count,
-                    "version": self.paper_version
-                })
-                
-                # Start critique aggregation sub-workflow again
-                await self._start_critique_phase()
-                return False
-            
-            # Check if this is a rewrite completion with unchanged title - skip to conclusion
-            if self.rewrite_count > 0:
-                # Rewrite completed but title unchanged - critique loop ends, proceed to conclusion
-                logger.info(f"Rewrite #{self.rewrite_count} complete (title unchanged) - skipping additional critique, proceeding to conclusion")
-                # Clear critique context (no longer needed after body phase)
-                self.current_critique_feedback = None
-                self.autonomous_section_phase = "conclusion"
-                await self._broadcast("phase_transition", {
-                    "from_phase": "body",
-                    "to_phase": "conclusion",
-                    "trigger": "rewrite_complete_title_unchanged",
-                    "rewrite_count": self.rewrite_count,
-                    "paper_word_count": word_count
-                })
-                return False
-            
-            # BODY COMPLETE - TRIGGER CRITIQUE PHASE BEFORE CONCLUSION (first time only)
+            # BODY COMPLETE - TRIGGER CRITIQUE PHASE BEFORE CONCLUSION
             logger.info("Body section complete - transitioning to CRITIQUE PHASE")
             await self._broadcast("phase_transition", {
                 "from_phase": "body",
@@ -4005,15 +3641,8 @@ INVALID:
         self.in_critique_phase = False
         self.critique_acceptances = 0
         self.paper_version = 1
-        self.rewrite_count = 0
-        self.rewrite_pending = False
-        self.accumulated_critique_history.clear()
-        self.previous_body_versions.clear()
-        self.needs_critique_after_rewrite = False
         self.paper_title = None
         self._skip_critique_requested = False
-        self.pre_critique_paper = None
-        self.current_critique_feedback = None
         logger.info("Reset critique phase state")
         
         logger.info("Paper and outline cleared - system reset to fresh start")

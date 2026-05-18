@@ -3,6 +3,7 @@ FastAPI main application.
 """
 import asyncio
 import os
+import secrets
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI
@@ -23,6 +24,7 @@ from backend.api.routes import (
     health,
     proofs,
     update,
+    leanoj,
 )
 from backend.shared.build_info import get_build_info
 from backend.shared.lm_studio_client import lm_studio_client
@@ -31,6 +33,7 @@ from backend.shared.lean4_client import clear_lean4_client, close_lean4_client, 
 from backend.aggregator.core.coordinator import coordinator
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
+from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 
 # Setup logging with millisecond precision for log correlation
 logging.basicConfig(
@@ -76,6 +79,19 @@ def _validate_generic_mode_startup_env() -> None:
         joined = ", ".join(missing)
         raise RuntimeError(
             f"Generic mode requires the following environment variables before startup: {joined}."
+        )
+
+
+def _ensure_desktop_api_token() -> None:
+    """Ensure default-mode HTTP/WebSocket routes have an instance token."""
+    if system_config.generic_mode:
+        return
+
+    if not system_config.desktop_api_token:
+        system_config.desktop_api_token = secrets.token_urlsafe(32)
+        logger.warning(
+            "Generated a runtime desktop API token because MOTO_DESKTOP_API_TOKEN was not provided. "
+            "Launch through moto_launcher.py so the frontend receives the same token."
         )
 
 
@@ -149,6 +165,7 @@ async def lifespan(app: FastAPI):
     """Lifespan events for the FastAPI app."""
     _apply_generic_mode_from_env()
     _validate_generic_mode_startup_env()
+    _ensure_desktop_api_token()
 
     # Startup
     logger.info(
@@ -218,6 +235,7 @@ async def lifespan(app: FastAPI):
     coordinator.set_websocket_broadcaster(websocket.broadcast_event)
     compiler_coordinator.set_websocket_broadcaster(websocket.broadcast_event)
     autonomous_coordinator.set_broadcast_callback(websocket.broadcast_event)
+    leanoj_coordinator.set_broadcast_callback(websocket.broadcast_event)
     
     # Set boost manager broadcaster
     from backend.shared.boost_manager import boost_manager
@@ -225,6 +243,16 @@ async def lifespan(app: FastAPI):
     
     # Set API client manager broadcaster (token tracking, rate limits, fallbacks)
     api_client_manager.set_broadcast_callback(websocket.broadcast_event)
+
+    try:
+        # Restore saved LeanOJ state for the UI, but only launch model work when
+        # explicitly requested. Lean 4 being enabled is not enough to imply that
+        # LM Studio/OpenRouter models are loaded and ready at backend startup.
+        await leanoj_coordinator.restore_latest_session(
+            auto_resume=system_config.lean4_enabled and system_config.leanoj_auto_resume_enabled
+        )
+    except Exception as exc:
+        logger.warning("Failed to restore LeanOJ session state on startup: %s", exc)
 
     # Lean 4 warm start must NEVER block the FastAPI lifespan. A cold Mathlib
     # workspace can spend many minutes inside `lake update` / `lake exe cache
@@ -264,6 +292,7 @@ async def lifespan(app: FastAPI):
     await coordinator.stop()
     await compiler_coordinator.stop()
     await autonomous_coordinator.stop()
+    await leanoj_coordinator.stop()
     await close_lean4_client()
     clear_lean4_client()
     await lm_studio_client.close()
@@ -293,6 +322,7 @@ app.include_router(proofs.router)
 app.include_router(openrouter.router)
 app.include_router(download.router)
 app.include_router(update.router)
+app.include_router(leanoj.router)
 app.include_router(websocket.router)
 
 

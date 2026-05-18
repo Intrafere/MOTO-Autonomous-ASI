@@ -44,6 +44,10 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 YOUR TASK:
 Review all existing research papers and determine what can be answered WITH CERTAINTY - without speculation or theoretical hand-waving.
 
+DIRECT-ANSWER-FIRST REQUIREMENT:
+- Identify the strongest direct answer the papers justify, not just nearby facts
+- Prefer a precise answer, partial answer, impossibility result, or sharp limitation statement over broad summary
+
 ASSESSMENT CRITERIA:
 
 1. TOTAL_ANSWER - The user's question can be FULLY answered with high confidence
@@ -74,6 +78,7 @@ CRITICAL REQUIREMENTS:
 - Identify what is KNOWN WITH CERTAINTY vs what is SPECULATIVE
 - Do not claim certainty where uncertainty exists
 - Summarize the key certainties that have been established
+- State the best direct answer those certainties support
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -144,6 +149,7 @@ ACCEPT the assessment if:
 - The reasoning properly references the papers
 - No overclaiming certainty where uncertainty exists
 - No underclaiming (missing obvious certainties)
+- The assessment captures the strongest direct answer the papers justify
 
 REJECT the assessment if:
 - Certainty level doesn't match the evidence
@@ -222,6 +228,8 @@ DECISION FACTORS:
 - Whether a single coherent narrative is possible
 - Whether the papers naturally form a cohesive volume
 - The certainty level from Phase 1
+- Prefer short form whenever one paper can honestly provide the strongest direct answer
+- Choose long form only when multiple chapters are genuinely necessary to deliver that answer well
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -287,12 +295,14 @@ ACCEPT the selection if:
 - The reasoning is sound
 - Short form is chosen only when a single paper suffices
 - Long form is chosen when multiple perspectives are needed
+- The choice preserves the clearest path to a direct answer
 
 REJECT the selection if:
 - Short form is chosen for a question requiring extensive treatment
 - Long form is chosen unnecessarily for a focused question
 - The reasoning doesn't support the choice
 - The selection ignores important factors
+- The selection adds unnecessary structural breadth instead of optimizing for a direct answer
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -415,6 +425,10 @@ Create a volume structure that:
 3. Plans an INTRODUCTION paper that frames the collection
 4. Plans a CONCLUSION paper that synthesizes findings and answers the question
 
+DIRECT-ANSWER-FIRST REQUIREMENT:
+- Include only the chapters needed to deliver the strongest rigorous direct answer
+- Do not add gap papers for breadth alone; add them only when they are necessary to close a real answer gap
+
 VOLUME STRUCTURE REQUIREMENTS:
 
 BODY CHAPTERS (from existing papers or gaps):
@@ -422,6 +436,7 @@ BODY CHAPTERS (from existing papers or gaps):
 - Order them logically (foundations → main results → applications)
 - Identify gaps: topics that need coverage but no paper exists
 - Gap papers will be written before introduction/conclusion
+- Exclude chapters that are merely adjacent if they do not materially strengthen the answer
 
 INTRODUCTION PAPER:
 - Frames the user's question
@@ -565,6 +580,7 @@ ACCEPT the organization if:
 - Introduction and conclusion are properly planned
 - The reasoning is sound
 - If outline_complete=true, the structure is ready for writing
+- The structure stays focused on the strongest rigorous direct answer without unnecessary breadth
 
 REJECT the organization if:
 - Important existing papers are missing
@@ -573,6 +589,7 @@ REJECT the organization if:
 - Introduction/conclusion are missing or poorly planned
 - The structure doesn't effectively answer the question
 - outline_complete=true but structure has issues
+- The structure includes chapters that broaden scope without materially improving the answer
 
 Provide specific feedback for rejected organizations.
 
@@ -615,6 +632,7 @@ CRITICAL CONTEXT:
 - Use ONLY existing Tier 2 papers as references (no brainstorm databases)
 - The paper must integrate with the volume's other chapters
 - Focus on the specific gap identified in the chapter description
+- Write only the material needed to close that answer gap directly and rigorously
 
 REFERENCE PAPERS:
 The papers listed are from the existing Tier 2 library. Use them as context and references.
@@ -641,6 +659,7 @@ CRITICAL:
 - You have access to ALL chapter content to accurately describe them
 - The introduction should make the volume's value clear
 - Frame the answer that will be provided
+- Keep the framing centered on the direct answer, not on exploratory wanderings
 
 REFERENCE: Use the chapter papers as context for accurate descriptions."""
 
@@ -665,6 +684,7 @@ CRITICAL:
 - All body chapters exist, so you can reference their content
 - Be definitive about certainties, honest about uncertainties
 - This is the climactic answer to the user's question
+- Make the direct answer explicit as early and clearly as the evidence allows
 
 REFERENCE: Use the body chapter papers to inform the synthesis."""
 

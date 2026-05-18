@@ -222,6 +222,83 @@
   box-shadow: 0 8px 24px rgba(30, 255, 28, 0.12);
 }
 
+.pruned-papers-expansion {
+  margin-top: 16px;
+  border-top: 1px solid rgba(156, 163, 175, 0.18);
+  padding-top: 14px;
+}
+
+.pruned-papers-toggle {
+  width: 100%;
+  text-align: left;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(156, 163, 175, 0.28);
+  background: rgba(75, 85, 99, 0.22);
+  color: #d1d5db;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.pruned-papers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.pruned-paper-card {
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(156, 163, 175, 0.26);
+  background: linear-gradient(180deg, rgba(75, 85, 99, 0.2) 0%, rgba(31, 41, 55, 0.6) 100%);
+  color: #d1d5db;
+  cursor: pointer;
+  opacity: 0.78;
+}
+
+.pruned-paper-card.expanded {
+  border-color: rgba(209, 213, 219, 0.45);
+  opacity: 0.95;
+}
+
+.pruned-paper-card h4 {
+  margin: 8px 0;
+  color: #e5e7eb;
+}
+
+.pruned-paper-card p {
+  margin: 0 0 10px;
+  color: #cbd5e1;
+  font-size: 0.86rem;
+}
+
+.pruned-paper-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+}
+
+.stage2-history-pruned-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(156, 163, 175, 0.18);
+  border: 1px solid rgba(156, 163, 175, 0.34);
+  color: #d1d5db;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pruned-paper-content {
+  margin-top: 12px;
+}
+
 .run-history-group .answer-list {
   gap: 14px;
 }

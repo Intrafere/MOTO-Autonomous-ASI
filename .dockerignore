@@ -31,7 +31,7 @@ commits_pending.txt
 proof-integration-build*-plan.md
 
 Click To Launch MOTO.bat
-Launch MOTO.sh
+linux-ubuntu-launcher.sh
 moto_launcher.py
 moto_updater.py
 

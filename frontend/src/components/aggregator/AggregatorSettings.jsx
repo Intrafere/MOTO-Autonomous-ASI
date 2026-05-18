@@ -2,11 +2,21 @@ import React, { useState, useEffect } from 'react';
 import { api, openRouterAPI } from '../../services/api';
 import {
   computeOpenRouterAutoSettings,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
   getProviderNames,
+  getReasoningSupportInfo,
   hasEndpointMetadata,
+  normalizeOpenRouterReasoningEffort,
+  OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import HelpTooltip from '../HelpTooltip';
+import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
+import ProofStrengthBadge from '../ProofStrengthBadge';
+import RawSettingsEditor from '../RawSettingsEditor';
+import '../autonomous/AutonomousResearch.css';
 import '../settings-common.css';
 
 const DEFAULT_SUBMITTER_CONFIG = {
@@ -14,12 +24,24 @@ const DEFAULT_SUBMITTER_CONFIG = {
   provider: 'lm_studio',
   modelId: '',
   openrouterProvider: null,
+  openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
   lmStudioFallbackId: null,
-  contextWindow: 131072,
-  maxOutputTokens: 25000
+  contextWindow: DEFAULT_CONTEXT_WINDOW,
+  maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  superchargeEnabled: false
 };
 
-export default function AggregatorSettings({ config, setConfig, capabilities }) {
+const RAW_VIEW_EXIT_WARNING = 'Switching back to the GUI view will restore your last GUI settings/profile and discard raw-only changes. Continue?';
+const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer attempts, then run a 5th same-model call to choose or synthesize the best final answer. It uses 5x the API calls, so it is about 5x slower and 5x more costly, but can produce more intelligent answers.';
+
+const formatRawSettings = (value) => JSON.stringify(value, null, 2);
+
+export default function AggregatorSettings({
+  config,
+  setConfig,
+  capabilities,
+  developerModeEnabled = false,
+}) {
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({}); // { modelId: { providers: [], endpoints: [] } }
@@ -35,12 +57,14 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       { ...DEFAULT_SUBMITTER_CONFIG, submitterId: 3 }
     ]
   );
-  const [validatorMaxOutput, setValidatorMaxOutput] = useState(config.validatorMaxOutput || 25000);
+  const [validatorMaxOutput, setValidatorMaxOutput] = useState(config.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS);
   
   // Validator OpenRouter state
   const [validatorProvider, setValidatorProvider] = useState(config.validatorProvider || 'lm_studio');
   const [validatorOpenrouterProvider, setValidatorOpenrouterProvider] = useState(config.validatorOpenrouterProvider || null);
+  const [validatorOpenrouterReasoningEffort, setValidatorOpenrouterReasoningEffort] = useState(normalizeOpenRouterReasoningEffort(config.validatorOpenrouterReasoningEffort));
   const [validatorLmStudioFallback, setValidatorLmStudioFallback] = useState(config.validatorLmStudioFallback || null);
+  const [validatorSuperchargeEnabled, setValidatorSuperchargeEnabled] = useState(Boolean(config.validatorSuperchargeEnabled));
   
   // OpenRouter API key status
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
@@ -49,7 +73,18 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
   const [freeModelLooping, setFreeModelLooping] = useState(true);
   const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(true);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [editRawSettings, setEditRawSettings] = useState(false);
+  const [rawSettingsText, setRawSettingsText] = useState('');
+  const [rawSettingsMessage, setRawSettingsMessage] = useState('');
+  const [guiSettingsBeforeRaw, setGuiSettingsBeforeRaw] = useState(null);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+
+  useEffect(() => {
+    if (!developerModeEnabled && editRawSettings) {
+      setEditRawSettings(false);
+      setRawSettingsMessage('');
+    }
+  }, [developerModeEnabled, editRawSettings]);
 
   // Load settings from localStorage on mount
   useEffect(() => {
@@ -60,10 +95,17 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
           const settings = JSON.parse(savedSettings);
           // Restore all state variables
           if (settings.numSubmitters) setNumSubmitters(settings.numSubmitters);
-          if (settings.submitterConfigs) setSubmitterConfigs(settings.submitterConfigs);
+          if (settings.submitterConfigs) {
+            setSubmitterConfigs(settings.submitterConfigs.map((item) => ({
+              ...item,
+              openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(item.openrouterReasoningEffort),
+            })));
+          }
           if (settings.validatorProvider) setValidatorProvider(settings.validatorProvider);
           if (settings.validatorOpenrouterProvider) setValidatorOpenrouterProvider(settings.validatorOpenrouterProvider);
+          if (settings.validatorOpenrouterReasoningEffort) setValidatorOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.validatorOpenrouterReasoningEffort));
           if (settings.validatorLmStudioFallback) setValidatorLmStudioFallback(settings.validatorLmStudioFallback);
+          if (settings.validatorSuperchargeEnabled !== undefined) setValidatorSuperchargeEnabled(settings.validatorSuperchargeEnabled);
           if (settings.validatorMaxOutput) setValidatorMaxOutput(settings.validatorMaxOutput);
           if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
           if (settings.freeModelLooping !== undefined) setFreeModelLooping(settings.freeModelLooping);
@@ -104,7 +146,9 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       submitterConfigs,
       validatorProvider,
       validatorOpenrouterProvider,
+      validatorOpenrouterReasoningEffort,
       validatorLmStudioFallback,
+      validatorSuperchargeEnabled,
       validatorMaxOutput,
       freeOnly,
       freeModelLooping,
@@ -112,7 +156,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       modelProviders
     };
     localStorage.setItem('aggregator_settings', JSON.stringify(settings));
-  }, [isLoaded, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorLmStudioFallback, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders]);
+  }, [isLoaded, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback, validatorSuperchargeEnabled, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders]);
 
   useEffect(() => {
     if (lmStudioEnabled) {
@@ -136,6 +180,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
         provider: 'openrouter',
         modelId: keepOpenRouterState ? (submitterConfig.modelId || '') : '',
         openrouterProvider: keepOpenRouterState ? (submitterConfig.openrouterProvider || null) : null,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(submitterConfig.openrouterReasoningEffort),
         lmStudioFallbackId: null,
       };
     });
@@ -163,6 +208,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
         validatorOpenrouterProvider: keepValidatorOpenRouterState
           ? (prev.validatorOpenrouterProvider || null)
           : null,
+        validatorOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(prev.validatorOpenrouterReasoningEffort),
         validatorLmStudioFallback: null,
       };
       return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
@@ -257,7 +303,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
   const handleSubmitterModelChange = async (submitterId, modelId) => {
     const baseConfigs = submitterConfigs.map(c =>
       c.submitterId === submitterId
-        ? { ...c, modelId, openrouterProvider: null }
+        ? { ...c, modelId, openrouterProvider: null, openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT }
         : c
     );
     setSubmitterConfigs(baseConfigs);
@@ -323,8 +369,10 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       ...prev,
       validatorModel: modelId,
       validatorOpenrouterProvider: null,
+      validatorOpenrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
     }));
     setValidatorOpenrouterProvider(null);
+    setValidatorOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
 
     if (validatorProvider !== 'openrouter' || !modelId) {
       return;
@@ -342,6 +390,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       ...prev,
       validatorModel: modelId,
       validatorOpenrouterProvider: null,
+      validatorOpenrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
       ...(autoSettings.contextWindowKnown ? { validatorContextSize: autoSettings.contextWindow } : {}),
       ...(autoSettings.outputCapKnown ? { validatorMaxOutput: autoSettings.maxOutputTokens } : {}),
     }));
@@ -368,7 +417,6 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
     }
     setConfig(prev => ({
       ...prev,
-      validatorOpenrouterProvider: providerName,
       ...(autoSettings.contextWindowKnown ? { validatorContextSize: autoSettings.contextWindow } : {}),
       ...(autoSettings.outputCapKnown ? { validatorMaxOutput: autoSettings.maxOutputTokens } : {}),
     }));
@@ -376,7 +424,8 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
 
   // Handle number of submitters change - expand/contract configs
   const handleNumSubmittersChange = (newNum) => {
-    const num = parseInt(newNum);
+    const parsed = parseInt(newNum, 10);
+    const num = Number.isFinite(parsed) ? Math.min(10, Math.max(1, parsed)) : 1;
     setNumSubmitters(num);
     
     const newConfigs = [];
@@ -393,9 +442,11 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
           provider: template.provider,
           modelId: template.modelId,
           openrouterProvider: template.openrouterProvider,
+          openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(template.openrouterReasoningEffort),
           lmStudioFallbackId: template.lmStudioFallbackId,
           contextWindow: template.contextWindow,
-          maxOutputTokens: template.maxOutputTokens
+          maxOutputTokens: template.maxOutputTokens,
+          superchargeEnabled: Boolean(template.superchargeEnabled)
         });
       }
     }
@@ -443,9 +494,9 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
     // Handle NaN for numeric fields - use defaults
     let safeValue = value;
     if (field === 'contextWindow' && isNaN(value)) {
-      safeValue = 131072;
+      safeValue = DEFAULT_CONTEXT_WINDOW;
     } else if (field === 'maxOutputTokens' && isNaN(value)) {
-      safeValue = 25000;
+      safeValue = DEFAULT_MAX_OUTPUT_TOKENS;
     }
     
     const newConfigs = submitterConfigs.map(c => {
@@ -457,6 +508,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       if (field === 'provider') {
         updated.modelId = '';
         updated.openrouterProvider = null;
+        updated.openrouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT;
         updated.lmStudioFallbackId = null;
       }
 
@@ -476,9 +528,11 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       provider: source.provider,
       modelId: source.modelId,
       openrouterProvider: source.openrouterProvider,
+      openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(source.openrouterReasoningEffort),
       lmStudioFallbackId: source.lmStudioFallbackId,
       contextWindow: source.contextWindow,
-      maxOutputTokens: source.maxOutputTokens
+      maxOutputTokens: source.maxOutputTokens,
+      superchargeEnabled: Boolean(source.superchargeEnabled)
     }));
     setSubmitterConfigs(newConfigs);
     setConfig(prev => ({ ...prev, submitterConfigs: newConfigs }));
@@ -490,6 +544,7 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
     setValidatorProvider(provider);
     if (provider === 'lm_studio') {
       setValidatorOpenrouterProvider(null);
+      setValidatorOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
       setValidatorLmStudioFallback(null);
     }
     setConfig(prev => ({
@@ -497,8 +552,118 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
       validatorProvider: provider,
       validatorModel: '',
       validatorOpenrouterProvider: null,
+      validatorOpenrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
       validatorLmStudioFallback: null
     }));
+  };
+
+  const getAggregatorRawSettings = () => ({
+    userPrompt: config.userPrompt || '',
+    numSubmitters,
+    submitterConfigs,
+    validatorModel: config.validatorModel || '',
+    validatorProvider,
+    validatorOpenrouterProvider,
+    validatorOpenrouterReasoningEffort,
+    validatorLmStudioFallback,
+    validatorSuperchargeEnabled,
+    validatorContextSize: config.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
+    validatorMaxOutput,
+    freeOnly,
+    freeModelLooping,
+    freeModelAutoSelector,
+    modelProviders,
+  });
+
+  const applyAggregatorRawSettings = (rawSettings, { updateRawText = true } = {}) => {
+    const nextSubmitters = Array.isArray(rawSettings.submitterConfigs) && rawSettings.submitterConfigs.length > 0
+      ? rawSettings.submitterConfigs.map((item) => ({
+          ...item,
+          openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(item.openrouterReasoningEffort),
+        }))
+      : submitterConfigs;
+    const nextNumSubmitters = Number(rawSettings.numSubmitters || nextSubmitters.length || 3);
+    const nextValidatorProvider = rawSettings.validatorProvider || 'lm_studio';
+    const nextValidatorOpenrouterProvider = rawSettings.validatorOpenrouterProvider || null;
+    const nextValidatorOpenrouterReasoningEffort = normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort);
+    const nextValidatorLmStudioFallback = rawSettings.validatorLmStudioFallback || null;
+    const nextValidatorSuperchargeEnabled = Boolean(rawSettings.validatorSuperchargeEnabled);
+    const nextValidatorContextSize = Number(rawSettings.validatorContextSize || DEFAULT_CONTEXT_WINDOW);
+    const nextValidatorMaxOutput = Number(rawSettings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS);
+    const nextModelProviders = rawSettings.modelProviders || {};
+
+    setNumSubmitters(nextNumSubmitters);
+    setSubmitterConfigs(nextSubmitters);
+    setValidatorProvider(nextValidatorProvider);
+    setValidatorOpenrouterProvider(nextValidatorOpenrouterProvider);
+    setValidatorOpenrouterReasoningEffort(nextValidatorOpenrouterReasoningEffort);
+    setValidatorLmStudioFallback(nextValidatorLmStudioFallback);
+    setValidatorSuperchargeEnabled(nextValidatorSuperchargeEnabled);
+    setValidatorMaxOutput(nextValidatorMaxOutput);
+    setFreeOnly(rawSettings.freeOnly ?? false);
+    setFreeModelLooping(rawSettings.freeModelLooping ?? true);
+    setFreeModelAutoSelector(rawSettings.freeModelAutoSelector ?? true);
+    setModelProviders(nextModelProviders);
+
+    const nextConfig = {
+      ...config,
+      userPrompt: rawSettings.userPrompt || '',
+      submitterConfigs: nextSubmitters,
+      validatorModel: rawSettings.validatorModel || '',
+      validatorProvider: nextValidatorProvider,
+      validatorOpenrouterProvider: nextValidatorOpenrouterProvider,
+      validatorOpenrouterReasoningEffort: nextValidatorOpenrouterReasoningEffort,
+      validatorLmStudioFallback: nextValidatorLmStudioFallback,
+      validatorSuperchargeEnabled: nextValidatorSuperchargeEnabled,
+      validatorContextSize: nextValidatorContextSize,
+      validatorMaxOutput: nextValidatorMaxOutput,
+    };
+    setConfig(nextConfig);
+
+    if (updateRawText) {
+      setRawSettingsText(formatRawSettings({
+        ...rawSettings,
+        ...nextConfig,
+        numSubmitters: nextNumSubmitters,
+        freeOnly: rawSettings.freeOnly ?? false,
+        validatorOpenrouterReasoningEffort: nextValidatorOpenrouterReasoningEffort,
+        validatorSuperchargeEnabled: nextValidatorSuperchargeEnabled,
+        freeModelLooping: rawSettings.freeModelLooping ?? true,
+        freeModelAutoSelector: rawSettings.freeModelAutoSelector ?? true,
+        modelProviders: nextModelProviders,
+      }));
+    }
+  };
+
+  const handleRawEditToggle = (checked) => {
+    if (checked) {
+      const currentSettings = getAggregatorRawSettings();
+      setGuiSettingsBeforeRaw(currentSettings);
+      setRawSettingsText(formatRawSettings(currentSettings));
+      setRawSettingsMessage('');
+      setEditRawSettings(true);
+      return;
+    }
+
+    if (!confirm(RAW_VIEW_EXIT_WARNING)) {
+      return;
+    }
+
+    if (guiSettingsBeforeRaw) {
+      applyAggregatorRawSettings(guiSettingsBeforeRaw, { updateRawText: false });
+    }
+    setRawSettingsMessage('');
+    setEditRawSettings(false);
+  };
+
+  const saveRawSettings = () => {
+    try {
+      const parsed = JSON.parse(rawSettingsText);
+      applyAggregatorRawSettings(parsed);
+      setRawSettingsMessage('Saved raw settings.');
+    } catch (error) {
+      setRawSettingsMessage(`Invalid JSON: ${error.message}`);
+    }
   };
 
   // Model selector component for either provider
@@ -506,10 +671,12 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
     provider, 
     modelId, 
     openrouterProvider: orProvider, 
+    openrouterReasoningEffort,
     lmStudioFallbackId, 
     onModelChange, 
     onProviderChange, 
     onOpenrouterProviderChange, 
+    onOpenrouterReasoningEffortChange,
     onFallbackChange,
     label = 'Model'
   }) => {
@@ -518,12 +685,15 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
     const providers = modelId && effectiveProvider === 'openrouter'
       ? getProviderNames(modelProviders[modelId])
       : [];
+    const reasoningInfo = effectiveProvider === 'openrouter'
+      ? getReasoningSupportInfo(modelProviders[modelId], orProvider || null)
+      : { hasEndpointMetadata: false, supportsReasoning: false };
     
     return (
       <>
         {/* Provider Toggle */}
-        <div className="form-group form-group--compact">
-          <label className="label--sm">Provider</label>
+        <div className="settings-row">
+          <label>Provider</label>
           {lmStudioEnabled ? (
             <div className="provider-toggle-group">
               <button
@@ -537,26 +707,25 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                 type="button"
                 onClick={() => hasOpenRouterKey && onProviderChange('openrouter')}
                 disabled={!hasOpenRouterKey}
-                className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or' : ''}`}
+                className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
                 title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
               >
                 OpenRouter
               </button>
             </div>
           ) : (
-            <small className="hint-text hint-text--dim">
+            <small className="settings-hint">
               OpenRouter is required in this deployment.
             </small>
           )}
         </div>
 
         {/* Model Selection */}
-        <div className="form-group form-group--compact">
-          <label className="label--sm">{label}</label>
+        <div className="settings-row">
+          <label>{label}</label>
           <select
             value={modelId || ''}
             onChange={(e) => onModelChange(e.target.value)}
-            className="select--sm"
           >
             <option value="">Select model...</option>
             {models.map(model => {
@@ -577,12 +746,11 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
 
         {/* OpenRouter Provider Selection (only for OpenRouter) */}
         {effectiveProvider === 'openrouter' && modelId && (
-          <div className="form-group form-group--compact">
-            <label className="label--sm">Host Provider (optional)</label>
+          <div className="settings-row">
+            <label>Host Provider (optional)</label>
             <select
               value={orProvider || ''}
               onChange={(e) => onOpenrouterProviderChange(e.target.value || null)}
-              className="select--sm"
             >
               <option value="">Auto (let OpenRouter choose)</option>
               {providers.map(p => (
@@ -592,23 +760,41 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
           </div>
         )}
 
+        {effectiveProvider === 'openrouter' && modelId && (
+          <div className="settings-row">
+            <label>Reasoning Effort</label>
+            <select
+              value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
+              onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
+            >
+              {OPENROUTER_REASONING_EFFORT_OPTIONS.map(option => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <small className="settings-hint">
+              {reasoningInfo.hasEndpointMetadata && !reasoningInfo.supportsReasoning
+                ? 'This selected host does not advertise reasoning support; OpenRouter may ignore the setting.'
+                : 'Auto sends OpenRouter max reasoning effort by default.'}
+            </small>
+          </div>
+        )}
+
         {/* LM Studio Fallback (only for OpenRouter) */}
         {effectiveProvider === 'openrouter' && lmStudioEnabled && (
-          <div className="form-group form-group--compact">
-            <label className="label--sm label--muted">
+          <div className="settings-row">
+            <label className="label--muted">
               LM Studio Fallback (optional)
             </label>
             <select
               value={lmStudioFallbackId || ''}
               onChange={(e) => onFallbackChange(e.target.value || null)}
-              className="select--sm"
             >
               <option value="">No fallback</option>
               {lmStudioModels.map(model => (
                 <option key={model.id} value={model.id}>{model.id}</option>
               ))}
             </select>
-            <small className="hint-text hint-text--dim" style={{ marginTop: '0.25rem' }}>
+            <small className="settings-hint" style={{ marginTop: '0.25rem' }}>
               Used if OpenRouter credits run out
             </small>
           </div>
@@ -618,15 +804,17 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
   };
 
   return (
-    <div>
-      <div className="settings-header-row">
-        <h1>Aggregator Settings</h1>
-        {saveMessage && (
-          <div className="save-message">
-            {saveMessage}
+    <div className="autonomous-settings-layout">
+      <HighlightedModelsSidebar />
+      <div className="autonomous-settings">
+          <div className="settings-header-row">
+            <h2>Aggregator Settings</h2>
+            {saveMessage && (
+              <div className="save-message">
+                {saveMessage}
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
       {/* OpenRouter Status Banner */}
       {!hasOpenRouterKey && (
@@ -650,70 +838,113 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
         </div>
       ) : (
         <>
-          {/* Number of Submitters Slider */}
-          <div className="form-group settings-panel settings-panel--blue">
-            <label className="label--lg">
-              Number of Aggregator Submitters: {numSubmitters}
-            </label>
-            <input
-              type="range"
-              min="1"
-              max="10"
-              value={numSubmitters}
-              onChange={(e) => handleNumSubmittersChange(e.target.value)}
-              className="range-slider"
-            />
-            <div className="range-labels">
-              <span>1</span>
-              <span>5</span>
-              <span>10</span>
-            </div>
-            <small className="hint-text">
-              Multiple submitters run in parallel exploring different avenues. Each can use a different model.
-            </small>
+          <div className="model-refresh-controls">
+            {lmStudioEnabled && (
+              <button onClick={fetchModels} className="secondary">
+                Refresh LM Studio Models
+              </button>
+            )}
+            {hasOpenRouterKey && (
+              <>
+                <button onClick={() => fetchOpenRouterModels(freeOnly)} className="secondary" disabled={loadingOpenRouter}>
+                  {loadingOpenRouter ? 'Loading...' : 'Refresh OpenRouter Models'}
+                </button>
+                <label className="settings-checkbox-label model-refresh-controls__toggle">
+                  <input
+                    type="checkbox"
+                    checked={freeOnly}
+                    onChange={(e) => setFreeOnly(e.target.checked)}
+                  />
+                  Free models only
+                </label>
+              </>
+            )}
+            {developerModeEnabled ? (
+              <label className="settings-checkbox-label model-refresh-controls__toggle">
+                <input
+                  type="checkbox"
+                  checked={editRawSettings}
+                  onChange={(e) => handleRawEditToggle(e.target.checked)}
+                />
+                Edit Raw
+              </label>
+            ) : (
+              <span className="settings-developer-mode-hint">
+                Developer mode: press Shift + Z + X to toggle raw JSON settings.
+              </span>
+            )}
           </div>
 
-          {/* Per-Submitter Configuration Cards */}
-          <div className="mb-2">
-            <h3 className="section-heading--bordered">
-              Submitter Configurations
-            </h3>
+          {editRawSettings ? (
+            <RawSettingsEditor
+              value={rawSettingsText}
+              onChange={setRawSettingsText}
+              onSave={saveRawSettings}
+              message={rawSettingsMessage}
+            />
+          ) : (
+            <>
+          <div className="settings-group">
+            <h4>Brainstorm Submitters (Tier 1 Aggregation)</h4>
+            <p className="settings-info">
+              Configure multiple parallel submitters for brainstorm exploration. Each submitter can use a different model or provider.
+            </p>
+
+            <div className="settings-row">
+              <label title="Number of parallel brainstorm submitters (1-10)">
+                Number of Submitters
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                step={1}
+                value={numSubmitters}
+                onChange={(e) => handleNumSubmittersChange(e.target.value)}
+              />
+              {numSubmitters > 1 && (
+                <button
+                  type="button"
+                  className="copy-btn"
+                  onClick={() => applyToAll(1)}
+                  title="Copy Main Submitter settings to all others"
+                >
+                  Copy Main to All
+                </button>
+              )}
+            </div>
             
             {submitterConfigs.map((cfg, idx) => (
+              (() => {
+                const effectiveProvider = lmStudioEnabled ? cfg.provider : 'openrouter';
+                return (
               <div 
                 key={cfg.submitterId}
-                className={`role-config-card${cfg.provider === 'openrouter' ? ' role-config-card--openrouter role-config-card--highlight' : (cfg.submitterId === 1 ? ' role-config-card--main role-config-card--highlight' : '')}`}
+                className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : (idx === 0 ? ' role-config-card--main' : '')}`}
               >
-                <div className="card-header-row">
-                  <h4 style={{ margin: 0 }} className={cfg.provider === 'openrouter' ? 'card-title--purple' : (cfg.submitterId === 1 ? 'card-title--green' : '')}>
-                    Submitter {cfg.submitterId} 
-                    {cfg.submitterId === 1 && <span className="provider-badge-inline"> (Main Submitter)</span>}
-                    {cfg.provider === 'openrouter' && <span className="provider-badge-inline" style={{ color: '#18cc17' }}> [OpenRouter]</span>}
-                  </h4>
-                  {cfg.submitterId === 1 && numSubmitters > 1 && (
-                    <button 
-                      onClick={() => applyToAll(1)}
-                      className="btn-apply-all"
-                    >
-                      Apply to All
-                    </button>
-                  )}
-                </div>
+                <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : (idx === 0 ? 'card-title--green' : '')}>
+                  <span className="role-title-with-badges">
+                    <span>{idx === 0 ? 'Submitter 1 (Main Submitter)' : `Submitter ${idx + 1}`}</span>
+                    {idx === 0 && <ProofStrengthBadge />}
+                  </span>
+                  {effectiveProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
+                </h5>
 
-                <div className={`config-grid ${cfg.provider === 'openrouter' ? 'config-grid--2col' : 'config-grid--3col'}`}>
                   <ModelSelector
                     provider={cfg.provider}
                     modelId={cfg.modelId}
                     openrouterProvider={cfg.openrouterProvider}
+                    openrouterReasoningEffort={cfg.openrouterReasoningEffort}
                     lmStudioFallbackId={cfg.lmStudioFallbackId}
                     onProviderChange={(p) => updateSubmitterConfig(cfg.submitterId, 'provider', p)}
                     onModelChange={(m) => handleSubmitterModelChange(cfg.submitterId, m)}
                     onOpenrouterProviderChange={(p) => handleSubmitterOpenRouterProviderChange(cfg.submitterId, p)}
+                    onOpenrouterReasoningEffortChange={(effort) => updateSubmitterConfig(cfg.submitterId, 'openrouterReasoningEffort', effort)}
                     onFallbackChange={(f) => updateSubmitterConfig(cfg.submitterId, 'lmStudioFallbackId', f)}
                   />
 
-                  <div className="form-group form-group--compact">
-                    <label className="label--sm">Context Window</label>
+                  <div className="settings-row">
+                    <label>Context Window</label>
                     <input
                       type="number"
                       value={cfg.contextWindow}
@@ -721,12 +952,11 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                       min="4096"
                       max="50000000"
                       step="1024"
-                      className="input--sm"
                     />
                   </div>
 
-                  <div className="form-group form-group--compact">
-                    <label className="label--sm">Max Output Tokens</label>
+                  <div className="settings-row">
+                    <label>Max Output Tokens</label>
                     <input
                       type="number"
                       value={cfg.maxOutputTokens}
@@ -734,109 +964,147 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                       min="1000"
                       max="50000000"
                       step="1000"
-                      className="input--sm"
                     />
                   </div>
-                </div>
+
+                  {developerModeEnabled && (
+                    <div className="settings-row settings-row--inline-checkbox">
+                      <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(cfg.superchargeEnabled)}
+                          onChange={(e) => updateSubmitterConfig(cfg.submitterId, 'superchargeEnabled', e.target.checked)}
+                        />
+                        <HelpTooltip
+                          label="Learn about Supercharge"
+                          buttonContent="Supercharge"
+                          buttonClassName="help-tooltip-btn--text"
+                          popupClassName="help-tooltip-popup--fixed"
+                          useFixedPosition
+                        >
+                          {SUPERCHARGE_TOOLTIP}
+                        </HelpTooltip>
+                      </label>
+                    </div>
+                  )}
               </div>
+                );
+              })()
             ))}
           </div>
 
           {/* Validator Configuration (Single) */}
-          <div className={`role-config-card${validatorProvider === 'openrouter' ? ' role-config-card--openrouter role-config-card--highlight' : ' settings-panel--validator'}`}>
-            <h3 className={validatorProvider === 'openrouter' ? 'card-title--purple' : ''} style={{ marginBottom: '1rem', color: validatorProvider === 'openrouter' ? undefined : '#ff6b6b' }}>
-              Validator Configuration (Single)
-              {validatorProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
-            </h3>
-            <small className="hint-text" style={{ marginBottom: '1rem' }}>
+          <div className="settings-group">
+            <h4>Validator (Single Instance)</h4>
+            <p className="settings-info">
               Only one validator is allowed to maintain a single Markov chain evolution of the database.
-            </small>
+            </p>
 
-            <div className={`config-grid ${validatorProvider === 'openrouter' ? 'config-grid--2col' : 'config-grid--1col'}`}>
+            <div
+              className={`submitter-config-section${validatorProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
+              style={{ borderColor: validatorProvider === 'openrouter' ? undefined : '#ff6b6b' }}
+            >
+              <h5 className={validatorProvider === 'openrouter' ? 'card-title--orange' : ''} style={validatorProvider === 'openrouter' ? undefined : { color: '#ff6b6b' }}>
+                Validator
+                {validatorProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
+              </h5>
+
               <ModelSelector
                 provider={validatorProvider}
                 modelId={config.validatorModel}
                 openrouterProvider={validatorOpenrouterProvider}
+                openrouterReasoningEffort={validatorOpenrouterReasoningEffort}
                 lmStudioFallbackId={validatorLmStudioFallback}
                 onProviderChange={updateValidatorProvider}
                 onModelChange={handleValidatorModelChange}
                 onOpenrouterProviderChange={handleValidatorOpenRouterProviderChange}
+                onOpenrouterReasoningEffortChange={(effort) => {
+                  const normalized = normalizeOpenRouterReasoningEffort(effort);
+                  setValidatorOpenrouterReasoningEffort(normalized);
+                  setConfig({ ...config, validatorOpenrouterReasoningEffort: normalized });
+                }}
                 onFallbackChange={(f) => {
                   setValidatorLmStudioFallback(f);
                   setConfig({ ...config, validatorLmStudioFallback: f });
                 }}
                 label="Validator Model"
               />
-            </div>
 
-            <div className="form-group" style={{ marginTop: '1rem' }}>
-              <label>Validator Context Window Size (tokens)</label>
-              <input
-                type="number"
-                value={config.validatorContextSize}
-                onChange={(e) => {
-                  const parsed = parseInt(e.target.value);
-                  setConfig({ ...config, validatorContextSize: isNaN(parsed) ? 131072 : parsed });
-                }}
-                min="4096"
-                max="50000000"
-                step="1024"
-              />
-              <small className="hint-text">
-                {validatorProvider === 'lm_studio' && lmStudioEnabled
-                  ? 'Must match the context length you set in LM Studio for this model.'
-                  : 'Set based on the OpenRouter model\'s context window.'
-                }
-              </small>
-            </div>
+              <div className="settings-row">
+                <label>Context Window</label>
+                <input
+                  type="number"
+                  value={config.validatorContextSize}
+                  onChange={(e) => {
+                    const parsed = parseInt(e.target.value);
+                    setConfig({ ...config, validatorContextSize: isNaN(parsed) ? DEFAULT_CONTEXT_WINDOW : parsed });
+                  }}
+                  min="4096"
+                  max="50000000"
+                  step="1024"
+                />
+              </div>
 
-            <div className="form-group">
-              <label>
-                Validator Max Output Tokens{' '}
-                <HelpTooltip
-                  label="Learn about validator max output tokens"
-                  anchorClassName="help-tooltip-anchor--inline"
-                  buttonContent="?"
-                >
-                  Default: 25000
-                </HelpTooltip>
-              </label>
-              <input
-                type="number"
-                value={validatorMaxOutput}
-                onChange={(e) => {
-                  const parsed = parseInt(e.target.value);
-                  const value = isNaN(parsed) ? 25000 : parsed;
-                  setValidatorMaxOutput(value);
-                  setConfig({ ...config, validatorMaxOutput: value });
-                }}
-                min="1000"
-                max="50000000"
-                step="1000"
-              />
+              <div className="settings-row">
+                <label>
+                  Max Output Tokens{' '}
+                  <HelpTooltip
+                    label="Learn about validator max output tokens"
+                    anchorClassName="help-tooltip-anchor--inline"
+                    buttonContent="?"
+                  >
+                    LM Studio default: {DEFAULT_MAX_OUTPUT_TOKENS}. OpenRouter selections auto-fill from provider metadata when available.
+                  </HelpTooltip>
+                </label>
+                <input
+                  type="number"
+                  value={validatorMaxOutput}
+                  onChange={(e) => {
+                    const parsed = parseInt(e.target.value);
+                    const value = isNaN(parsed) ? DEFAULT_MAX_OUTPUT_TOKENS : parsed;
+                    setValidatorMaxOutput(value);
+                    setConfig({ ...config, validatorMaxOutput: value });
+                  }}
+                  min="1000"
+                  max="50000000"
+                  step="1000"
+                />
+              </div>
+
+              {developerModeEnabled && (
+                <div className="settings-row settings-row--inline-checkbox">
+                  <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+                    <input
+                      type="checkbox"
+                      checked={validatorSuperchargeEnabled}
+                      onChange={(e) => {
+                        setValidatorSuperchargeEnabled(e.target.checked);
+                        setConfig({ ...config, validatorSuperchargeEnabled: e.target.checked });
+                      }}
+                    />
+                    <HelpTooltip
+                      label="Learn about Supercharge"
+                      buttonContent="Supercharge"
+                      buttonClassName="help-tooltip-btn--text"
+                      popupClassName="help-tooltip-popup--fixed"
+                      useFixedPosition
+                    >
+                      {SUPERCHARGE_TOOLTIP}
+                    </HelpTooltip>
+                  </label>
+                </div>
+              )}
             </div>
           </div>
 
-          {lmStudioEnabled && (
-            <button onClick={fetchModels} className="secondary mr-05">
-              Refresh LM Studio Models
-            </button>
-          )}
           {hasOpenRouterKey && (
-            <>
-              <button onClick={() => fetchOpenRouterModels(freeOnly)} className="secondary mr-05" disabled={loadingOpenRouter}>
-                {loadingOpenRouter ? 'Loading...' : 'Refresh OpenRouter Models'}
-              </button>
-              <label className="settings-checkbox-label" style={{ marginLeft: '1rem' }}>
-                <input
-                  type="checkbox"
-                  checked={freeOnly}
-                  onChange={(e) => setFreeOnly(e.target.checked)}
-                />
-                Show only free models
-              </label>
+            <div className="settings-group">
+              <h4>OpenRouter Fallback</h4>
+              <p className="settings-info">
+                Fallback behavior for OpenRouter free-model rate limits.
+              </p>
               <div className="checkbox-group-col">
-                <label className="settings-checkbox-label">
+                <label className="settings-checkbox-label settings-checkbox-label--stacked">
                   <input
                     type="checkbox"
                     checked={freeModelLooping}
@@ -845,15 +1113,22 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                       openRouterAPI.setFreeModelSettings(e.target.checked, freeModelAutoSelector).catch(() => {});
                     }}
                   />
-                  Enable Free Model Looping
-                  <HelpTooltip
-                    label="Learn about free model looping"
-                    anchorClassName="help-tooltip-anchor--inline"
-                  >
-                    When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits.
-                  </HelpTooltip>
+                  <span className="settings-option-copy">
+                    <span className="settings-option-title">
+                      Enable Free Model Looping
+                      <HelpTooltip
+                        label="Learn about free model looping"
+                        anchorClassName="help-tooltip-anchor--inline"
+                      >
+                        When a free model is rate-limited, automatically try the next available free model sorted by highest context limit. Prevents workflow stalls from rate limits.
+                      </HelpTooltip>
+                    </span>
+                    <span className="settings-option-description">
+                      Automatically rotate to the next selected free model when one hits a rate limit.
+                    </span>
+                  </span>
                 </label>
-                <label className="settings-checkbox-label">
+                <label className="settings-checkbox-label settings-checkbox-label--stacked">
                   <input
                     type="checkbox"
                     checked={freeModelAutoSelector}
@@ -862,15 +1137,24 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
                       openRouterAPI.setFreeModelSettings(freeModelLooping, e.target.checked).catch(() => {});
                     }}
                   />
-                  Use OpenRouter Free Models Auto-Selector as Backup
-                  <HelpTooltip
-                    label="Learn about the free models auto-selector backup"
-                    anchorClassName="help-tooltip-anchor--inline"
-                  >
-                    When all selected free models are rate-limited, use OpenRouter&apos;s Free Models Router (`openrouter/free`) as a last resort backup. Works independently of Free Model Looping.
-                  </HelpTooltip>
+                  <span className="settings-option-copy">
+                    <span className="settings-option-title">
+                      Use OpenRouter Free Models Auto-Selector as Backup
+                      <HelpTooltip
+                        label="Learn about the free models auto-selector backup"
+                        anchorClassName="help-tooltip-anchor--inline"
+                      >
+                        When all selected free models are rate-limited, use OpenRouter&apos;s Free Models Router (`openrouter/free`) as a last resort backup. Works independently of Free Model Looping.
+                      </HelpTooltip>
+                    </span>
+                    <span className="settings-option-description">
+                      Falls back to OpenRouter&apos;s free router when every selected free model is temporarily exhausted.
+                    </span>
+                  </span>
                 </label>
               </div>
+            </div>
+          )}
             </>
           )}
         </>
@@ -889,7 +1173,8 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
               host: s.provider === 'openrouter' ? (s.openrouterProvider || 'Auto') : 'N/A',
               fallback: s.provider === 'openrouter' ? (s.lmStudioFallbackId?.split('/').pop() || 'None') : 'N/A',
               context: s.contextWindow,
-              maxOutput: s.maxOutputTokens
+              maxOutput: s.maxOutputTokens,
+              supercharge: Boolean(s.superchargeEnabled)
             })),
             validator: {
               provider: validatorProvider,
@@ -897,11 +1182,13 @@ export default function AggregatorSettings({ config, setConfig, capabilities }) 
               host: validatorProvider === 'openrouter' ? (validatorOpenrouterProvider || 'Auto') : 'N/A',
               fallback: validatorProvider === 'openrouter' ? (validatorLmStudioFallback?.split('/').pop() || 'None') : 'N/A',
               context: config.validatorContextSize,
-              maxOutput: validatorMaxOutput
+              maxOutput: validatorMaxOutput,
+              supercharge: validatorSuperchargeEnabled
             },
             uploadedFiles: config.uploadedFiles?.length || 0
           }, null, 2)}
         </pre>
+      </div>
       </div>
     </div>
   );

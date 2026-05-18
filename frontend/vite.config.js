@@ -7,7 +7,7 @@ export default defineConfig(({ mode }) => {
   const backendUrl = env.VITE_MOTO_BACKEND_URL || `http://localhost:${backendPort}`
   const backendWsUrl = env.VITE_MOTO_BACKEND_WS_URL || backendUrl.replace(/^http/i, 'ws')
   const frontendPort = Number(env.VITE_MOTO_FRONTEND_PORT || env.MOTO_FRONTEND_PORT || env.FRONTEND_PORT || 5173)
-  const frontendHost = env.VITE_MOTO_FRONTEND_HOST || '0.0.0.0'
+  const frontendHost = env.VITE_MOTO_FRONTEND_HOST || '127.0.0.1'
 
   const logger = createLogger()
   const originalError = logger.error.bind(logger)

@@ -14,7 +14,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+
+from backend.shared.config import system_config
 
 router = APIRouter(tags=["update"])
 logger = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ _pull_state: Dict[str, Any] = {
 
 
 def _parse_semver(version_str: str) -> Tuple[int, ...]:
-    """Extract numeric version tuple from a semver string (e.g. '1.0.7' -> (1,0,7))."""
+    """Extract numeric version tuple from a semver string (e.g. '1.0.8' -> (1,0,8))."""
     parts = re.findall(r"\d+", version_str or "")
     return tuple(int(p) for p in parts) if parts else (0,)
 
@@ -215,6 +217,12 @@ async def _run_zip_update() -> None:
 @router.post("/api/update/pull")
 async def start_pull() -> Dict[str, Any]:
     """Kick off an update. Routes to git pull or ZIP overlay depending on install type."""
+    if system_config.generic_mode:
+        raise HTTPException(
+            status_code=501,
+            detail="Self-update is unavailable in hosted generic mode.",
+        )
+
     if _pull_state["status"] == "running":
         return {"started": False, "reason": "An update is already in progress."}
 

@@ -3,6 +3,7 @@ import './ProofGraph.css';
 
 function getGraphNodeTierClass(node) {
   const tier = node.novelty_tier;
+  if (tier === 'major_mathematical_discovery') return 'platinum';
   if (tier === 'mathematical_discovery') return 'gold';
   if (tier === 'novel_variant') return 'silver';
   if (tier === 'novel_formulation') return 'bronze';

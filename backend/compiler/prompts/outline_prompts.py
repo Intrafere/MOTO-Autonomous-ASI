@@ -158,6 +158,11 @@ SOURCE USAGE PRINCIPLE:
 - Do NOT force coverage of every brainstorm/database entry
 - Do NOT ignore clearly crucial source material for the scope you choose
 
+DIRECT-ANSWER-FIRST PRINCIPLE:
+- Organize the paper around the strongest rigorous direct answer the paper can justify
+- Prefer sections that directly solve, partially solve, refute, or sharply constrain the user's question over broad background accumulation
+- Include background and preliminaries only to the extent needed to support the direct answer cleanly and rigorously
+
 - Produce a numbered outline with major sections and subsections
 - Incorporate the strongest helpful source ideas where appropriate
 - Flag gaps explicitly if the evidence is insufficient
@@ -185,6 +190,7 @@ WHEN TO MARK outline_complete=true (LOCK OUTLINE):
 - Required sections (Abstract, Introduction, Body, Conclusion) present with exact names
 - Sections follow logical mathematical progression (definitions → theorems → proofs)
 - The outline optimally serves the paper title and user's compiler-directing prompt
+- The outline is focused on the strongest rigorous direct answer available, without unnecessary detours
 - No further refinement would meaningfully improve the outline
 - You are confident this outline will guide excellent paper construction
 
@@ -218,6 +224,7 @@ CRITICAL REQUIREMENTS:
 - The outline should support a coherent, logical flow for the final document
 - Sections should build upon each other logically (definitions → theorems → proofs)
 - The outline should align with the user's compiler-directing prompt goals
+- The outline should prioritize the strongest direct rigorous route to answering the prompt
 - DO NOT include a separate References or Citations section in the outline
 - All content must be rooted in sound mathematical reasoning; aggregator/brainstorm material is optional support, not a mandatory checklist
 - NO unfounded claims or logical fallacies
@@ -308,11 +315,16 @@ SOURCE USAGE PRINCIPLE:
 - Do NOT force additions just because a brainstorm/database entry exists
 - Do NOT ignore clearly crucial source material for the scope you are keeping
 
+DIRECT-ANSWER-FIRST PRINCIPLE:
+- Update the outline when doing so materially strengthens the paper's most direct rigorous answer to the user's prompt
+- Do not add side sections that broaden scope without improving the direct answer, partial answer, impossibility result, or key constraint
+
 Decide if the outline requires updates. Consider:
 - Relevance to current source content when it helps the paper
 - Missing content that should be included in outline to better serve the user prompt
 - Structural issues in current outline
 - Alignment with document construction progress
+- Whether the outline still reflects the strongest direct-answer path revealed by the draft
 
 CRITICAL - NO PLACEHOLDER TEXT:
 You must NEVER include placeholder markers like "[HARD CODED PLACEHOLDER FOR...]" in your outline submissions.
@@ -348,6 +360,7 @@ CRITICAL REQUIREMENTS FOR UPDATES:
 - All added content must be rooted in sound mathematical reasoning; source database material is optional support, not a mandatory checklist
 - NO unfounded claims or logical fallacies
 - Focus on rigorous mathematical arguments
+- Prefer additions that materially strengthen the paper's direct answer rather than merely broadening coverage
 - NEVER change the names of Abstract, Introduction, or Conclusion sections
 - New body sections must be inserted between Introduction and Conclusion
 - DO NOT add unsupported numeric empirical claims in section or subsection headings

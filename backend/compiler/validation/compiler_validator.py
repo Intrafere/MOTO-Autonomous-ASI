@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any, List, Callable, Tuple
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission, CompilerValidationResult
-from backend.shared.json_parser import parse_json
+from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.utils import count_tokens
 from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.validation.json_validator import json_validator
@@ -477,11 +477,16 @@ class CompilerValidator:
                 logger.info("CompilerValidator: Already in retry, using fallback parser")
                 return self._fallback_parse(response)
             
-            # Build retry prompt asking for reformatted JSON
-            # Note: response is already truncated to 2000 chars in the prompt text
+            # Build retry prompt asking for reformatted JSON. Keep failed-output
+            # context, but sanitize it before any replay in prompt or assistant turn.
+            max_failed_output_chars = 2000  # ~500 tokens - enough for error context
+            failed_output_preview = sanitize_model_output_for_retry_context(
+                response,
+                max_chars=max_failed_output_chars,
+            )
             reparse_prompt = (
                 "Your previous response could not be parsed as valid JSON.\n\n"
-                f"YOUR PREVIOUS RESPONSE:\n{response[:2000]}{'...' if len(response) > 2000 else ''}\n\n"
+                f"YOUR PREVIOUS RESPONSE:\n{failed_output_preview}\n\n"
                 f"PARSE ERROR: {str(parse_error)}\n\n"
                 "Please provide the exact same validation decision in valid JSON format.\n"
                 "CRITICAL: Properly escape backslashes (use \\\\) and quotes (use \\\").\n"
@@ -491,13 +496,6 @@ class CompilerValidator:
             # Single retry using api_client_manager (supports boost/fallback)
             try:
                 retry_task_id = f"{self.get_current_task_id()}_retry"
-                
-                # CRITICAL FIX: Truncate failed output to prevent context overflow during retry
-                max_failed_output_chars = 2000  # ~500 tokens - enough for error context
-                if len(response) > max_failed_output_chars:
-                    failed_output_preview = response[:max_failed_output_chars] + "\n[...output truncated for retry...]"
-                else:
-                    failed_output_preview = response
                 
                 # Calculate if conversation fits in context window
                 from backend.shared.config import system_config, rag_config
@@ -1295,6 +1293,9 @@ class CompilerValidator:
 
 You see ONLY the brainstorm database and the proposed operation. You do NOT see the paper or any paper edits. Your decision must be based solely on whether this operation improves the brainstorm database.
 
+PROTECTED LEAN 4 PROOFS:
+Lean 4 verified proof entries in the brainstorm database are immutable to paper-writing retroactive operations. If a proposed operation edits, deletes, annotates, or adds context to a Lean 4 verified proof, reject it. Only the normal brainstorm prune system may remove Lean 4 proof entries.
+
 OPERATION TYPE: {action.upper()}
 
 """
@@ -1561,6 +1562,7 @@ SOURCE MATERIAL POLICY:
 - Do NOT reject solely because an outline does not explicitly use or cover database material
 - Do reject if the outline ignores clearly crucial source material in a way that makes its chosen scope weak, incoherent, or misaligned with the user prompt
 - Accept selective or divergent outline structures when they better serve the user's prompt and remain rigorous
+- Prefer outlines that organize the strongest rigorous direct answer to the user's prompt, rather than broad exploratory coverage
 
 YOUR TASK:
 Verify the submission meets ALL criteria above. Accept only if ALL criteria pass. Reject if ANY criterion fails.
@@ -1789,6 +1791,7 @@ SOURCE MATERIAL POLICY:
 - The brainstorm database is optional support, not a mandatory checklist
 - Do NOT reject solely because the submission does not explicitly use brainstorm content or because it departs from brainstorm phrasing
 - Reject only if the submission ignores clearly necessary established content for its claimed scope, conflicts with the outline, or becomes weaker/less rigorous as a result
+- Prefer submissions that strengthen the paper's most direct rigorous answer to the prompt rather than adding indirect breadth
 
 YOUR TASK:
 Verify the submission meets ALL criteria above. If even ONE criterion fails, reject the submission.
@@ -2026,232 +2029,3 @@ Example (reject - inappropriate for section):
         except Exception as e:
             logger.error(f"Failed to parse validation response: {e}")
             return None
-    
-    async def validate_rewrite_decision(
-        self,
-        decision_result: Dict,
-        user_prompt: str,
-        current_body: str,
-        current_outline: str,
-        current_title: str,
-        critique_feedback: str,
-        aggregator_db: str
-    ) -> bool:
-        """
-        Validate a rewrite vs continue decision made after critique phase.
-        
-        Args:
-            decision_result: The decision dict from critique submitter
-            user_prompt: User's compiler-directing prompt
-            current_body: Body section being evaluated
-            current_outline: Paper outline
-            current_title: Current paper title
-            critique_feedback: All accepted critiques (typically 1-3 out of 5 total attempts)
-            aggregator_db: Aggregator database content
-            
-        Returns:
-            True if decision is valid, False if should be retried
-        """
-        try:
-            logger.info("Validating rewrite decision...")
-            
-            # Import prompt builder
-            from backend.compiler.prompts.critique_prompts import build_rewrite_decision_validation_prompt
-            
-            # Build validation prompt
-            prompt = build_rewrite_decision_validation_prompt(
-                user_prompt=user_prompt,
-                current_body=current_body,
-                current_outline=current_outline,
-                current_title=current_title,
-                critique_feedback=critique_feedback,
-                decision_result=decision_result,
-                aggregator_db=aggregator_db
-            )
-            
-            # Generate task ID
-            task_id = self.get_current_task_id()
-            self.task_sequence += 1
-            
-            # Notify task started
-            if self.task_tracking_callback:
-                self.task_tracking_callback("started", task_id)
-            
-            # Call LLM
-            from backend.shared.config import system_config
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=system_config.compiler_validator_max_output_tokens
-            )
-            
-            # Notify task completed
-            if self.task_tracking_callback:
-                self.task_tracking_callback("completed", task_id)
-            
-            # Extract content from response (handles both 'content' and 'reasoning' fields)
-            message = response.get("choices", [{}])[0].get("message", {})
-            llm_output = message.get("content") or message.get("reasoning") or ""
-            
-            # Parse the extracted string
-            data = parse_json(llm_output)
-            
-            if data is None:
-                logger.error("Failed to parse rewrite decision validation response")
-                return False
-            
-            # Handle array responses
-            if isinstance(data, list):
-                logger.warning("Validator returned array instead of object - using first element")
-                if not data:
-                    return False
-                data = data[0]
-            
-            # Check decision
-            decision = data.get("decision", "").lower()
-            reasoning = data.get("reasoning", "")
-            
-            if decision == "accept":
-                logger.info(f"Rewrite decision VALIDATED: {reasoning[:200]}...")
-                return True
-            else:
-                logger.info(f"Rewrite decision REJECTED: {reasoning[:200]}...")
-                return False
-                
-        except FreeModelExhaustedError:
-            raise
-        except Exception as e:
-            logger.error(f"Error validating rewrite decision: {e}", exc_info=True)
-            return False
-    
-    async def validate_partial_revision_edit(
-        self,
-        edit_proposal: Dict,
-        current_paper: str,
-        current_outline: str,
-        critique_feedback: str
-    ) -> Tuple[bool, str]:
-        """
-        Validate a single edit proposed during iterative partial revision.
-        
-        This validates that an edit:
-        1. Uses exact string matching correctly
-        2. Addresses critique feedback appropriately
-        3. Maintains document coherence
-        4. Preserves mathematical rigor
-        
-        Args:
-            edit_proposal: Dict with operation, old_string, new_string, reasoning
-            current_paper: Current paper state
-            current_outline: Paper outline
-            critique_feedback: The accepted critique feedback being addressed
-            
-        Returns:
-            Tuple of (is_valid: bool, rejection_reason: str)
-        """
-        try:
-            logger.info("Validating partial revision edit...")
-            
-            operation = edit_proposal.get("operation", "")
-            old_string = edit_proposal.get("old_string", "")
-            new_string = edit_proposal.get("new_string", "")
-            reasoning = edit_proposal.get("reasoning", "")
-            
-            # CRITICAL: Ensure markers are intact BEFORE any old_string validation
-            # Partial revision operates on paper (not outline)
-            markers_repaired = await paper_memory.ensure_markers_intact()
-            if markers_repaired:
-                logger.info("Paper markers were missing and have been repaired during partial revision validation")
-                # Re-fetch paper after repair
-                current_paper = await paper_memory.get_paper()
-            
-            # Pre-validation: Check exact string match for non-full_content operations
-            if operation in ("replace", "insert_after", "delete"):
-                if not old_string:
-                    return False, "old_string cannot be empty for this operation"
-                
-                # Normalize and check
-                normalized_paper = normalize_unicode_hyphens(current_paper)
-                normalized_old = normalize_unicode_hyphens(old_string)
-                
-                if normalized_old not in normalized_paper:
-                    # Try to find similar text for better error message
-                    logger.warning(f"Exact string not found in document: '{old_string[:100]}...'")
-                    return False, f"EXACT_STRING_NOT_FOUND: The old_string was not found in the document. Ensure you use text that exists verbatim in CURRENT PAPER."
-                
-                # Check uniqueness
-                count = normalized_paper.count(normalized_old)
-                if count > 1:
-                    return False, f"STRING_NOT_UNIQUE: The old_string appears {count} times in the document. Include more context to make it unique."
-            
-            # Import prompt builder for LLM validation
-            from backend.compiler.prompts.critique_prompts import build_partial_revision_validation_prompt
-            
-            # Build validation prompt
-            prompt = build_partial_revision_validation_prompt(
-                current_paper=current_paper,
-                current_outline=current_outline,
-                critique_feedback=critique_feedback,
-                edit_proposal=edit_proposal
-            )
-            
-            # Generate task ID
-            task_id = self.get_current_task_id()
-            self.task_sequence += 1
-            
-            # Notify task started
-            if self.task_tracking_callback:
-                self.task_tracking_callback("started", task_id)
-            
-            # Call LLM
-            from backend.shared.config import system_config
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=system_config.compiler_validator_max_output_tokens
-            )
-            
-            # Notify task completed
-            if self.task_tracking_callback:
-                self.task_tracking_callback("completed", task_id)
-            
-            # Extract content from response
-            message = response.get("choices", [{}])[0].get("message", {})
-            llm_output = message.get("content") or message.get("reasoning") or ""
-            
-            # Parse the response
-            data = parse_json(llm_output)
-            
-            if data is None:
-                logger.error("Failed to parse partial revision validation response")
-                return False, "Failed to parse validation response"
-            
-            # Handle array responses
-            if isinstance(data, list):
-                logger.warning("Validator returned array - using first element")
-                if not data:
-                    return False, "Empty validation response"
-                data = data[0]
-            
-            # Check decision
-            decision = data.get("decision", "").lower()
-            val_reasoning = data.get("reasoning", "No reason provided")
-            
-            if decision == "accept":
-                logger.info(f"Partial revision edit VALIDATED: {val_reasoning[:150]}...")
-                return True, ""
-            else:
-                logger.info(f"Partial revision edit REJECTED: {val_reasoning[:150]}...")
-                return False, val_reasoning
-                
-        except FreeModelExhaustedError:
-            raise
-        except Exception as e:
-            logger.error(f"Error validating partial revision edit: {e}", exc_info=True)
-            return False, f"Validation error: {str(e)}"

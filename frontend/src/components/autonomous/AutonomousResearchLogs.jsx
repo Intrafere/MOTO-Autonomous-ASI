@@ -3,35 +3,15 @@
  * Shows submission accept/reject statistics broken down by each submitter role.
  * Includes API call logging with full request/response details.
  */
-import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { autonomousAPI } from '../../services/api';
+import ApiCallLogs from '../ApiCallLogs';
 import './AutonomousResearch.css';
-
-const EMPTY_API_STATS = Object.freeze({
-  total_calls: 0,
-  successful_calls: 0,
-  failed_calls: 0,
-  success_rate: 0,
-  boosted_calls: 0,
-  by_phase: {},
-  by_model: {},
-  by_provider: {},
-  by_source: {},
-  by_boost_mode: {},
-});
 
 const AutonomousResearchLogs = ({ stats, events }) => {
   const eventsContainerRef = useRef(null);
   const prevEventsLengthRef = useRef(0);
   const [expandedSubmitters, setExpandedSubmitters] = useState({});
-  
-  // API Logs state
-  const [apiLogs, setApiLogs] = useState([]);
-  const [apiStats, setApiStats] = useState(null);
-  const [apiLogsLoading, setApiLogsLoading] = useState(true);
-  const [expandedApiLogIdx, setExpandedApiLogIdx] = useState(null);
-  const [apiAutoRefresh, setApiAutoRefresh] = useState(true);
-  const abortControllerRef = useRef(null);
 
   // Auto-scroll event log only when new events are added (not on mount/tab switch)
   useEffect(() => {
@@ -41,153 +21,6 @@ const AutonomousResearchLogs = ({ stats, events }) => {
     }
     prevEventsLengthRef.current = currentLength;
   }, [events]);
-
-  // Fetch API logs
-  const fetchApiLogs = useCallback(async () => {
-    // Abort previous request if still pending
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    
-    // Create new abort controller for this request
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    
-    try {
-      const response = await autonomousAPI.getApiLogs(100, { signal: controller.signal });
-      if (abortControllerRef.current !== controller) {
-        return;
-      }
-
-      if (response.success) {
-        setApiLogs(response.logs || []);
-        setApiStats(response.stats || EMPTY_API_STATS);
-      }
-    } catch (error) {
-      if (abortControllerRef.current !== controller) {
-        return;
-      }
-
-      // Don't log abort errors as they're expected on cleanup
-      if (error.name !== 'AbortError') {
-        console.error('Failed to fetch autonomous API logs:', error);
-      }
-    } finally {
-      if (abortControllerRef.current === controller) {
-        setApiLogsLoading(false);
-      }
-    }
-  }, []);
-
-  // Initial fetch and auto-refresh for API logs
-  useEffect(() => {
-    fetchApiLogs();
-
-    let interval;
-    if (apiAutoRefresh) {
-      // Set interval to refresh every 5 seconds (skip first call since we already called above)
-      interval = setInterval(fetchApiLogs, 5000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-      // Cancel any pending requests on unmount
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-    };
-  }, [fetchApiLogs, apiAutoRefresh]);
-
-  // Handle clear API logs
-  const handleClearApiLogs = async () => {
-    if (!window.confirm('Are you sure you want to clear all API logs?')) {
-      return;
-    }
-
-    try {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-
-      await autonomousAPI.clearApiLogs();
-      setApiLogs([]);
-      setApiStats(EMPTY_API_STATS);
-      setExpandedApiLogIdx(null);
-      setApiLogsLoading(false);
-    } catch (error) {
-      console.error('Failed to clear API logs:', error);
-    }
-  };
-
-  // Toggle API log expansion
-  const toggleApiLogExpand = (index) => {
-    setExpandedApiLogIdx(expandedApiLogIdx === index ? null : index);
-  };
-
-  // Copy to clipboard
-  const copyToClipboard = async (text) => {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch (error) {
-      console.error('Failed to copy to clipboard:', error);
-    }
-  };
-
-  // Format duration
-  const formatDuration = (ms) => {
-    if (ms === null || ms === undefined) return '-';
-    if (ms < 1000) return `${Math.round(ms)}ms`;
-    return `${(ms / 1000).toFixed(1)}s`;
-  };
-
-  // Format timestamp
-  const formatTimestamp = (timestamp) => {
-    try {
-      const date = new Date(timestamp);
-      return date.toLocaleString();
-    } catch {
-      return timestamp;
-    }
-  };
-
-  // Get phase label
-  const getPhaseLabel = (phase) => {
-    switch (phase) {
-      case 'topic_selection': return 'Topic';
-      case 'brainstorm': return 'Brainstorm';
-      case 'paper_compilation': return 'Paper';
-      case 'tier3': return 'Tier 3';
-      case 'boost': return 'Boost';
-      default: return phase || 'Unknown';
-    }
-  };
-
-  const getSourceLabel = (source) => {
-    switch (source) {
-      case 'api+boost': return 'Boosted';
-      case 'boost': return 'Boost Only';
-      default: return 'Standard';
-    }
-  };
-
-  const getBoostModeLabel = (mode) => {
-    switch (mode) {
-      case 'next_count': return 'Next X';
-      case 'category': return 'Category';
-      case 'task_id': return 'Task ID';
-      default: return mode || 'Unknown';
-    }
-  };
-
-  const getProviderLabel = (provider) => {
-    switch (provider) {
-      case 'openrouter': return 'OR';
-      case 'lm_studio': return 'LMS';
-      default: return provider || 'UNK';
-    }
-  };
 
   // Calculate per-submitter statistics from individual events
   // These come from the aggregator's direct 'submission_accepted'/'submission_rejected' events
@@ -247,6 +80,14 @@ const AutonomousResearchLogs = ({ stats, events }) => {
 
   const formatEventMessage = (event) => {
     const data = event.data || {};
+    const proofName = data.proof_label ? `Proof ${data.proof_label}` : 'Proof';
+    const proofTarget = data.theorem_statement || data.theorem_id || '';
+    const proofLeanResponse = () => {
+      if (data.lean_response) return data.lean_response;
+      if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
+      const error = data.error_summary || data.error_output || data.reason || '';
+      return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
+    };
     
     switch (event.event) {
       case 'auto_research_started':
@@ -319,17 +160,21 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'proof_check_candidates_found':
         return `Proof candidates found: ${data.count || 0}`;
       case 'proof_attempt_started':
-        return `Proof attempt ${data.attempt || 1}: ${data.theorem_statement || data.theorem_id}`;
+        return `${proofName}, Attempt ${data.attempt || 1} started: ${proofTarget}`;
       case 'proof_attempt_failed':
-        return `Proof attempt ${data.attempt || '?'} failed: ${data.error_summary || data.theorem_statement || data.theorem_id}`;
+        return `${proofName}, Attempt ${data.attempt || '?'} final: ${proofLeanResponse()}`;
+      case 'proof_lean_accepted':
+        return `${proofName}, Attempt ${data.attempt || '?'} final: ${proofLeanResponse()}`;
+      case 'proof_integrity_rejected':
+        return `${proofName} error: integrity rejected - ${data.reason || proofTarget}`;
       case 'proof_verified':
-        return `Lean 4 verified: ${data.theorem_statement || data.theorem_id}`;
+        return `${proofName} verified and accepted: ${proofTarget}`;
       case 'proof_attempts_exhausted':
-        return `Proof attempts exhausted: ${data.theorem_statement || data.theorem_id}`;
+        return `${proofName} terminated: proof attempts exhausted for ${proofTarget}`;
       case 'novel_proof_discovered':
-        return `Novel proof discovered: ${data.theorem_statement}`;
+        return `${proofName} novel proof discovered: ${data.theorem_statement}`;
       case 'known_proof_verified':
-        return `Known proof verified for ${data.source_type} ${data.source_id}`;
+        return `${proofName} known proof verified for ${data.source_type} ${data.source_id}`;
       case 'proof_check_complete':
         return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
       default:
@@ -339,10 +184,16 @@ const AutonomousResearchLogs = ({ stats, events }) => {
 
   const getEventClass = (event) => {
     const eventName = event.event || '';
-    if (eventName === 'proof_attempt_failed' || eventName === 'proof_attempts_exhausted') {
+    if (
+      eventName === 'proof_attempt_failed' ||
+      eventName === 'proof_attempts_exhausted' ||
+      eventName === 'proof_integrity_rejected' ||
+      eventName === 'smt_check_error'
+    ) {
       return 'log-reject';
     }
     if (
+      eventName === 'proof_lean_accepted' ||
       eventName === 'proof_verified' ||
       eventName === 'novel_proof_discovered' ||
       eventName === 'known_proof_verified' ||
@@ -400,8 +251,8 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         </div>
         
         <div className="metric-card">
-          <span className="metric-value">{stats?.total_papers_archived || 0}</span>
-          <span className="metric-label">Archived</span>
+          <span className="metric-value">{stats?.total_papers_pruned || stats?.total_papers_archived || 0}</span>
+          <span className="metric-label">Pruned</span>
         </div>
         
         <div className="metric-card">
@@ -525,201 +376,11 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         )}
       </div>
 
-      {/* API Call Logs Section */}
-      <div className="api-logs-section" style={{ marginTop: '30px' }}>
-        <div className="api-logs-header">
-          <h3>API Call Logs</h3>
-          <div className="api-logs-actions">
-            <label className="auto-refresh-toggle">
-              <input
-                type="checkbox"
-                checked={apiAutoRefresh}
-                onChange={(e) => setApiAutoRefresh(e.target.checked)}
-              />
-              Auto-refresh
-            </label>
-            <button onClick={fetchApiLogs} className="refresh-btn" title="Refresh now">
-              Refresh
-            </button>
-            <button 
-              onClick={handleClearApiLogs} 
-              className="clear-btn"
-              disabled={apiLogs.length === 0}
-            >
-              Clear Logs
-            </button>
-          </div>
-        </div>
-
-        {/* API Stats Summary */}
-        {apiStats && (
-          <div className="api-stats">
-            <div className="stat-card">
-              <span className="stat-value">{apiStats.total_calls}</span>
-              <span className="stat-label">Total API Calls</span>
-            </div>
-            <div className="stat-card success">
-              <span className="stat-value">{apiStats.successful_calls}</span>
-              <span className="stat-label">Successful</span>
-            </div>
-            <div className="stat-card error">
-              <span className="stat-value">{apiStats.failed_calls}</span>
-              <span className="stat-label">Failed</span>
-            </div>
-            <div className="stat-card">
-              <span className="stat-value">
-                {(apiStats.success_rate * 100).toFixed(1)}%
-              </span>
-              <span className="stat-label">Success Rate</span>
-            </div>
-            <div className="stat-card">
-              <span className="stat-value">{apiStats.boosted_calls || 0}</span>
-              <span className="stat-label">Boosted Calls</span>
-            </div>
-          </div>
-        )}
-
-        {/* Stats by Phase */}
-        {apiStats && apiStats.by_phase && Object.keys(apiStats.by_phase).length > 0 && (
-          <div className="phase-stats">
-            <span className="phase-stats-label">By Phase:</span>
-            {Object.entries(apiStats.by_phase).map(([phase, count]) => (
-              <span key={phase} className="phase-stat-badge">
-                {getPhaseLabel(phase)}: {count}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {apiStats && apiStats.by_source && Object.keys(apiStats.by_source).length > 0 && (
-          <div className="phase-stats">
-            <span className="phase-stats-label">By Source:</span>
-            {Object.entries(apiStats.by_source).map(([source, count]) => (
-              <span key={source} className="phase-stat-badge">
-                {getSourceLabel(source)}: {count}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {apiStats && apiStats.by_boost_mode && Object.keys(apiStats.by_boost_mode).length > 0 && (
-          <div className="phase-stats">
-            <span className="phase-stats-label">Boost Modes:</span>
-            {Object.entries(apiStats.by_boost_mode).map(([mode, count]) => (
-              <span key={mode} className="phase-stat-badge">
-                {getBoostModeLabel(mode)}: {count}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* API Logs List */}
-        <div className="api-logs-list">
-          {apiLogsLoading ? (
-            <div className="logs-loading">Loading API logs...</div>
-          ) : apiLogs.length === 0 ? (
-            <div className="logs-empty">
-              <p>No API calls logged yet.</p>
-              <p className="logs-empty-hint">
-                Run a workflow and make API calls to see the combined logs here.
-              </p>
-            </div>
-          ) : (
-            apiLogs.map((log, index) => (
-              <div 
-                key={index} 
-                className={`api-log-entry ${log.success ? 'success' : 'error'} ${expandedApiLogIdx === index ? 'expanded' : ''}`}
-              >
-                <div 
-                  className="log-summary"
-                  onClick={() => toggleApiLogExpand(index)}
-                >
-                  <div className="log-status">
-                    {log.success ? '✓' : '✗'}
-                  </div>
-                  <div className="log-info">
-                    <div className="log-task">
-                      <span className="log-task-id">{log.task_id}</span>
-                      <span className="log-phase-badge">{getPhaseLabel(log.phase)}</span>
-                      <span className={`log-source-badge ${log.boosted ? 'boosted' : 'standard'}`}>
-                        {getSourceLabel(log.source)}
-                      </span>
-                      {log.boost_mode && (
-                        <span className="log-boost-mode-badge">{getBoostModeLabel(log.boost_mode)}</span>
-                      )}
-                    </div>
-                    <div className="log-meta">
-                      <span className="log-model">{log.model}</span>
-                      <span className="log-provider-badge">{getProviderLabel(log.provider)}</span>
-                      <span className="log-duration">{formatDuration(log.duration_ms)}</span>
-                      {log.tokens_used && (
-                        <span className="log-tokens">{log.tokens_used} tokens</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="log-timestamp">{formatTimestamp(log.timestamp)}</div>
-                  <div className="log-expand-icon">{expandedApiLogIdx === index ? '▼' : '▶'}</div>
-                </div>
-
-                {expandedApiLogIdx === index && (
-                  <div className="log-details">
-                    <div className="log-detail-section">
-                      <h4>Role</h4>
-                      <pre>{log.role_id}</pre>
-                    </div>
-
-                    <div className="log-detail-section">
-                      <h4>Source</h4>
-                      <pre>{getSourceLabel(log.source)}{log.boost_mode ? ` (${getBoostModeLabel(log.boost_mode)})` : ''}</pre>
-                    </div>
-
-                    {log.error && (
-                      <div className="log-detail-section error">
-                        <h4>Error</h4>
-                        <pre>{log.error}</pre>
-                      </div>
-                    )}
-
-                    <div className="log-detail-section">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <h4>Sent Prompt</h4>
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            copyToClipboard(log.prompt_full || log.prompt_preview || '');
-                          }}
-                          className="copy-btn"
-                          title="Copy full prompt to clipboard"
-                        >
-                          Copy Full
-                        </button>
-                      </div>
-                      <pre className="log-preview">{log.prompt_preview || '(empty)'}</pre>
-                    </div>
-
-                    <div className="log-detail-section">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <h4>Received Response</h4>
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            copyToClipboard(log.response_full || log.response_preview || '');
-                          }}
-                          className="copy-btn"
-                          title="Copy full response to clipboard"
-                        >
-                          Copy Full
-                        </button>
-                      </div>
-                      <pre className="log-response">{log.response_full || log.response_preview || '(empty)'}</pre>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-      </div>
+      <ApiCallLogs
+        api={autonomousAPI}
+        workflow="autonomous"
+        style={{ marginTop: '30px' }}
+      />
 
       {/* Event Log */}
       <h4 style={{ marginTop: '20px' }}>Event Log</h4>

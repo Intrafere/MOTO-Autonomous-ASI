@@ -9,11 +9,31 @@ The RAG system in this program is very advanced, be certain that any changes you
 
 DIRECT INJECTION FIRST, RAG SECOND IF DIRECT INJECTION DOESN'T FIT.
 
+Some inputs are **mandatory direct-inject** and must never be RAG'd, summarized, compressed, truncated, excerpted, or replaced by partial views. If mandatory direct-inject context does not fit the configured model context, halt with an explicit context-overflow error and tell the user which mandatory context overflowed.
+
 If an item is direct injected, its RAG counterpart must NOT also be included.
 
-**RAG Offload Priority — Submitter:** Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files
+### Paper-Writing RAG Modes
 
-**RAG Offload Priority — Validator:** Shared Training DB → User Upload Files (submission under review is always direct injected)
+These priorities apply to the Aggregator/Compiler/Autonomous paper-writing workflows. They do **not** describe LeanOJ proof-only memory ordering.
+
+**RAG Offload Priority — Paper-Writing Submitter:** Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files
+
+**RAG Offload Priority — Paper-Writing Validator:** Shared Training DB → User Upload Files (submission under review is always direct injected)
+
+### LeanOJ Proof-Only RAG Mode
+
+These priorities apply only to the LeanOJ proof solver. LeanOJ stores proof artifacts under session-scoped sources such as `leanoj_{session_id}_accepted_ideas` and retrieves with `include_source_prefixes=[f"leanoj_{session_id}_"]`. Do not apply these orders to paper-writing prompts.
+
+**RAG Offload Priority — LeanOJ Final Solver:** Verified Subproofs → Partial Proof Scaffolds → Accepted Proof Memory Notes. Final-solver proof memory must not include recursive topics, historical final-cycle packets, failed-attempt counts, or phase-transition/path vocabulary. It is an edit-only mode. The prompt may separately include the most recent 5 final attempts as compact execution feedback for edit selection only; this is not proof evidence and must not seed `master_proof.lean`.
+
+**RAG Offload Priority — LeanOJ Proofstorm/Subproof Solver:** Current Final-Cycle Failure Packet (always direct if active) → Verified Subproofs → Relevant Partial Proof Scaffolds → Accepted Brainstorm Ideas → Historical Failed Attempts For Related Obstacles
+
+**RAG Offload Priority — LeanOJ Brainstorm After Final-Loop Failure:** Current final-attempt-cycle failure packet (always direct) → Accepted Brainstorm Ideas → Partial Proof Scaffolds → Verified Subproofs → Older Historical Final Failures (RAG only)
+
+**LeanOJ capped feedback rule:** Same-subproof prior attempt errors and rejection/failure summaries may stay capped as direct feedback. The final solver may receive compact execution feedback from the most recent 5 final attempts after filtering or rewriting path-transition vocabulary and final-cycle attempt-count summaries. Validator feedback rejecting non-progressive `master_proof.lean` shortening edits is allowed as direct final-solver feedback. The cap applies only to direct rejection/execution feedback, not to total persisted LeanOJ memory.
+
+**LeanOJ mandatory direct-inject inputs:** User problem, Lean template, JSON/schema/task instructions, and the canonical `master_proof.lean` during the final proof-editing loop are mandatory direct-inject context. The master proof is the active proof attempt and must be injected in full. It must never be RAG offloaded, summarized, compressed, truncated, chunk-windowed, or replaced by an excerpt. If the full master proof cannot fit with the other mandatory prompt context, LeanOJ must stop with a hard mandatory direct-context overflow error.
 
 ## Further RAG Specifications
 
@@ -62,6 +82,9 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 - **Generic mode lock skip**: FastEmbed is in-process and thread-safe — embedding calls skip the global RAG lock. ChromaDB write locking remains in both modes.
 - **Read retry**: Vector search auto-retries with exponential backoff (0.5s → 1s → 2s, max 3 attempts) on HNSW index errors during concurrent writes
 - **Embedding rate limiting**: Semaphore limits concurrent embedding requests to 2 (default mode only; generic mode uses in-process FastEmbed)
+- **FastAPI event-loop safety**: `rag_manager` must not run synchronous ChromaDB calls or CPU-heavy scoring directly on the event loop. Use `asyncio.to_thread()` for ChromaDB `add/query/get/delete` and for large in-memory vector/BM25 scoring.
+- **Retrieval snapshots**: Take a stable chunk snapshot before threaded scoring so concurrent add/remove operations cannot mutate the iterable being scored. Worker-thread BM25/vector scoring should use local snapshot state and must not mutate shared caches such as `self.bm25_index`.
+- **GUI responsiveness invariant**: RAG work runs inside long-lived research/proof tasks; it must never starve `/api/health`, `/api/features`, status polling, OpenRouter key-status, or WebSocket handling.
 
 ---
 
@@ -69,11 +92,13 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Stage A — Query Rewriting**: Expands to 3-6 semantic variants; filters queries < 3 words; embeddings cached (500-entry LRU); variants batched into single embedding API call.
 
-**Stage B — Hybrid Recall**: BM25 (exact terms) + ANN Cosine (semantic); top 120 from each, deduped by chunk_id.
+**Stage B — Hybrid Recall**: BM25 (exact terms) + ANN Cosine (semantic); top 120 from each, deduped by chunk_id. Optional `include_sources` / `include_source_prefixes` scopes recall to named source files or source-name prefixes before reranking. Recall operates on a chunk snapshot; scoped in-memory vector fallback and BM25 scoring must run off-loop.
 
 **Stage C — Reranking + MMR**: Blend vector (60%) + BM25 (40%); MMR λ=0.8 (80% relevance, 20% diversity); removes near-duplicates (similarity > 0.85); hard cap at context budget.
 
 **Stage D — Packing**: Assembles evidence with headers; priority: document → section → relevance. Packs chunks incrementally until budget is reached (no compression — disabled as unreliable). Skips chunks from `exclude_sources` (content already direct-injected in prompt). Returns `ContextPack` with evidence tracking.
+
+**Scoped retrieval**: `rag_manager.retrieve()` may receive `include_sources` and/or `include_source_prefixes` to restrict recall to a namespaced source set before reranking/packing. Use this for mode-specific memory namespaces such as LeanOJ so proof-solver artifacts cannot leak into unrelated paper-writing or compiler retrieval. `exclude_sources` still applies afterward for anti-duplication when a scoped source was direct-injected.
 
 ---
 
@@ -103,6 +128,8 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Always direct injected**: User prompt/goal, JSON output format specs, system prompts.
 
+**Mandatory direct-inject overflow**: Mandatory direct-inject inputs are not eligible for RAG fallback or compression. If they exceed available prompt context, halt with an explicit overflow error. Examples include the LeanOJ final-loop `master_proof.lean`, validator submissions under review, active Lean source/proof attempts, and proof-verification candidate theorem/formalization inputs.
+
 **Token budget formula**: `available_input = context_window - output_reserve - buffer(500)`
 
 **Context allocation algorithm**:
@@ -113,9 +140,11 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Key Invariant**: Context allocator returns content parts only. Prompt builder adds template parts (system prompt, JSON, user prompt). Both must be counted to avoid overflow.
 
-**Overflow handling**: User prompt always direct injected; if exceeds `context_window - minimum_RAG_allocation`: HALT with error. Content too large: offload to RAG. Still doesn't fit: compress (NEVER truncate).
+**Overflow handling**: User prompt always direct injected; if exceeds `context_window - minimum_RAG_allocation`: HALT with error. Mandatory direct-inject content that does not fit: HALT with explicit context-overflow error. Non-mandatory content too large: offload to RAG. Still doesn't fit: compress only when the mode explicitly allows compression (NEVER truncate).
 
 **Source Exclusion (anti-duplication)**: `rag_manager.retrieve(exclude_sources=[...])` filters chunks from named sources during Stage D packing. Callers pass source names of content already direct-injected so RAG budget goes entirely to non-duplicated content.
+
+**Source Scoping (anti-leakage)**: `rag_manager.retrieve(include_sources=[...], include_source_prefixes=[...])` restricts recall to explicit sources before reranking/packing. Use this whenever a mode stores specialized memory in the shared Chroma collections and must prevent cross-mode retrieval. LeanOJ uses session-prefixed sources such as `leanoj_{session_id}_accepted_ideas` and retrieves with `include_source_prefixes=[f"leanoj_{session_id}_"]`.
 
 | Mode | Excluded Sources | Reason |
 |---|---|---|
@@ -124,6 +153,7 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 | Compiler rigor | `compiler_outline.txt` | Outline always direct-injected; paper intentionally RAG'd (smaller context) |
 | Aggregator submitter/validator | Direct-injected user file names + direct-injected shared-training sources (current training file + `rag_shared_training_update_*`) | Prevents RAG returning chunks already in direct context when only some content is offloaded |
 | Aggregator cleanup review | Same as above, when full submissions DB is direct-injected | Prevents cleanup RAG evidence from repeating already-injected submissions |
+| LeanOJ proof solver | Direct-injected LeanOJ source names, scoped to `leanoj_{session_id}_*` sources | Keeps useful proof memory session-scoped and prevents cross-mode retrieval pollution |
 
 ---
 
@@ -162,6 +192,8 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 **Proof Verification Stage (optional, gated on `lean4_enabled`)**: Proof identification, formalization, and lemma search agents operate outside the RAG pipeline. Verified `ProofRecord` summaries and `FailedProofCandidate` hints (from `proof_prompts.format_failure_hints_for_injection`) are **highest-priority direct injections** into subsequent brainstorm/paper submitter prompts when present — never RAG'd. Lean source files under the session `proofs/` directory are not indexed into Chroma.
 
+**LeanOJ Proof Solver**: LeanOJ useful proof memory uses the existing RAG pipeline through `backend/leanoj/core/leanoj_context.py`, not a separate/simple retriever. Mandatory prompt inputs (user problem, Lean template, role task, JSON schema) stay direct. Useful artifacts (accepted ideas, recursive topics, verified subproofs, partial proof scaffolds, historical final attempts, final-cycle packets, failed subproof context) are persisted in full, direct-injected if they fit, otherwise indexed under session-scoped `leanoj_{session_id}_*` sources and retrieved with source scoping. Direct-injected LeanOJ sources must be excluded from RAG evidence. Current final-cycle failure packets are direct context for the next brainstorm/proofstorm phase; older final-cycle packets remain available through scoped RAG only. Recent rejection/error summaries remain capped direct feedback. During final proof-editing, allocation is narrower: no recursive topics, no historical final-cycle packets, no failed-attempt counts, and no phase-transition/path vocabulary; the prompt may still include the most recent 5 final attempts as capped execution feedback so the solver does not repeat stale edits or ignored Lean errors. Validator feedback from rejected non-progressive master-proof shortening edits may be direct feedback because it tells the next final solver what proof progress to restore. The canonical LeanOJ master proof draft (`master_proof.lean`) is file-backed working state, not a RAG artifact: during the final proof-editing loop it is mandatory direct-inject context and must be shown fully or the program must halt with a mandatory direct-context overflow error. Edits always apply to the full persisted proof.
+
 **Embedding provider routing**: See dual-contract table above. Default mode uses LM Studio with OpenRouter fallback. Generic mode uses in-process FastEmbed. Both modes produce compatible vector dimensions for the same ChromaDB collections.
 
 **Training DB files**: `rag_shared_training.txt` and `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt` live under the active instance data root (default desktop paths: `backend/data/rag_shared_training.txt` and `backend/data/Summary_Of_Last_5_Validator_Rejections_For_Submitter_{num}.txt`).
@@ -170,11 +202,11 @@ User-uploaded files: pre-generate ALL 4 configurations. Dynamic files (training 
 
 ## Agents Intentionally Without RAG
 
-These agents use ONLY direct injection (no RAG fallback) by design. Each operates on compact metadata summaries where RAG is unnecessary. Documented in each file's module docstring.
+These agents use ONLY direct injection for their compact metadata decision steps. If a listed agent has a later full-content expansion step, that expansion may use the normal direct-first/RAG fallback documented in its module docstring.
 
 | Agent | Inputs | Why No RAG |
 |---|---|---|
-| Topic selector | Brainstorm metadata, paper titles/abstracts | Strategic "what to work on" decision — summaries suffice; abstracts truncated as overflow fallback |
+| Topic selector | Brainstorm metadata, paper titles/abstracts | Strategic "what to work on" decision — bounded metadata summaries suffice |
 | Topic validator | Same as topic selector | Validates strategic decision, same compact metadata |
 | Paper title selector | Brainstorm summary, existing paper titles/abstracts | Title selection needs topic overview, not full content |
 | Paper redundancy checker | Paper titles/abstracts | Redundancy detected at abstract level, not full-content comparison |
@@ -184,7 +216,7 @@ These agents use ONLY direct injection (no RAG fallback) by design. Each operate
 | Brainstorm continuation | Brainstorm summary, prior paper titles/abstracts | "Write another or move on" uses summary, not full DB |
 | Proof identification / formalization / lemma search | Candidate theorem text, Lean error output, targeted Mathlib lemma metadata | Operates on compact Lean source + structured hints; proof agents consume `ProofRecord` direct-injection summaries and do not route through the RAG pipeline |
 
-**Known oversight**: Certainty assessor Step 2 drops expanded papers when they don't fit instead of RAG'ing them. Should use RAG fallback like reference_selector does.
+**Certainty assessor overflow handling**: Certainty assessor Step 1 remains abstract/outline-only. Step 2 uses RAG fallback for requested expanded papers when full direct injection does not fit.
 
 ---
 
@@ -195,7 +227,7 @@ These agents use ONLY direct injection (no RAG fallback) by design. Each operate
 3. User files pre-generate 4 configs — no re-chunking during session
 4. Dynamic files re-chunked on update — single config
 5. Submitter cycling is independent — each maintains own cycle state
-6. No truncation fallback — fails cleanly, uses RAG or compresses
+6. No truncation fallback — mandatory direct-inject context fails cleanly; non-mandatory oversized content uses RAG or mode-approved compression
 7. Evidence tracking mandatory — all facts map to source spans
 8. User files protected from eviction — permanent cache
 9. Contradiction check pre-acceptance
@@ -205,3 +237,7 @@ These agents use ONLY direct injection (no RAG fallback) by design. Each operate
 13. Per-size chunk cap (`max_chunks_per_size`) enforced after every add — prevents unbounded in-memory embedding growth
 14. Agents that use only metadata summaries (topic selector, title selector, redundancy checker, etc.) intentionally skip RAG — see "Agents Intentionally Without RAG" table above
 15. If content is already direct-injected, it must NOT also appear in RAG retrieval results — no duplication
+16. Shared Chroma retrieval must use source scoping for mode/session-specific memory such as LeanOJ proof artifacts — no cross-mode memory leakage
+17. LeanOJ `master_proof.lean` is mandatory full direct-inject context during the final proof-editing loop. Never RAG, summarize, compress, truncate, or window it. If it does not fit, halt with a mandatory direct-context overflow error.
+18. Synchronous ChromaDB operations and heavy RAG scoring must be offloaded from the FastAPI event loop.
+19. Threaded RAG scoring must use local snapshots and must not mutate shared retrieval indexes/caches.

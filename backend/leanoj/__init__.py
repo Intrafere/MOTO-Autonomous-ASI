@@ -1,0 +1,1 @@
+"""LeanOJ proof-solver mode."""

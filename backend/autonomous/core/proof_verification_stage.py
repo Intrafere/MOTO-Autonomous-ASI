@@ -15,8 +15,15 @@ from backend.autonomous.agents.proof_formalization_agent import ProofFormalizati
 from backend.autonomous.agents.proof_identification_agent import ProofIdentificationAgent
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
 from backend.autonomous.memory.paper_library import paper_library
+from backend.autonomous.core.proof_registration import register_verified_lean_proof
+from backend.aggregator.prompts.validator_prompts import build_validator_prompt
+from backend.shared.api_client_manager import api_client_manager
+from backend.shared.brainstorm_proof_gate import BRAINSTORM_LEAN_PROOF_MARKER
 from backend.shared.config import system_config
-from backend.shared.models import ProofAttemptFeedback, ProofAttemptResult, ProofCandidate, ProofRecord, ProofStageResult, SmtHint
+from backend.shared.json_parser import parse_json
+from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
+from backend.shared.model_error_utils import is_non_retryable_model_error
+from backend.shared.models import ProofAttemptFeedback, ProofAttemptResult, ProofCandidate, ProofStageResult, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.smt_client import get_smt_client
 from .proof_dependency_extractor import ProofDependencyExtractor
@@ -32,6 +39,7 @@ LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
 class _LeanVerificationOutcome:
     """Outcome of a single candidate's Lean 4 formalization pipeline (Phase A)."""
     candidate: ProofCandidate
+    proof_label: str
     success: bool
     theorem_name: str
     lean_code: str
@@ -46,6 +54,7 @@ class ProofVerificationStage:
 
     def __init__(self) -> None:
         self._novelty_task_sequence = 0
+        self._integrity_task_sequence = 0
         self._dependency_extractor = ProofDependencyExtractor()
 
     @classmethod
@@ -135,6 +144,22 @@ class ProofVerificationStage:
 
         cleaned = " ".join(raw.split())
         return cleaned[:limit] + ("..." if len(cleaned) > limit else "")
+
+    @staticmethod
+    def _proof_label_for_index(index: int) -> str:
+        """Return Proof A..Z, then AA..ZZ, then AAA.. for a 1-based index."""
+        safe_index = max(1, int(index or 1))
+        letter = chr(ord("A") + ((safe_index - 1) % 26))
+        repeat_count = ((safe_index - 1) // 26) + 1
+        return letter * repeat_count
+
+    def _lean_response_summary(self, feedback: ProofAttemptFeedback) -> str:
+        if feedback.success:
+            return "Lean 4 response: proof verified."
+        error_summary = self._summarize_error(feedback.error_output, limit=960)
+        if error_summary:
+            return f"Lean 4 response: {error_summary} - proof not verified."
+        return "Lean 4 response: proof not verified."
 
     @staticmethod
     def _extract_suggested_lemma_targets(error_text: str) -> list[str]:
@@ -245,22 +270,13 @@ class ProofVerificationStage:
         source_id: str,
         base_event: dict[str, Any],
         candidate: ProofCandidate,
+        proof_label: str,
         source_content: str,
         identification_agent: ProofIdentificationAgent,
         broadcast_fn: BroadcastFn,
     ) -> Optional[SmtHint]:
         if not system_config.smt_enabled or not self._is_smt_amenable(candidate):
             return None
-
-        await self._broadcast(
-            broadcast_fn,
-            "smt_check_started",
-            {
-                **base_event,
-                "theorem_id": candidate.theorem_id,
-                "theorem_statement": candidate.statement,
-            },
-        )
 
         started_at = time.monotonic()
         result_name = "unknown"
@@ -288,49 +304,23 @@ class ProofVerificationStage:
                 z3_output=z3_raw[:2000],
             )
         except Exception as exc:
+            if is_non_retryable_model_error(exc):
+                raise
             logger.debug("SMT check failed for theorem %s in %s %s: %s", candidate.theorem_id, source_type, source_id, exc)
-            return SmtHint(result="unknown", suggested_tactics=[], smtlib="")
-        finally:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
             await self._broadcast(
                 broadcast_fn,
-                "smt_check_complete",
+                "smt_check_error",
                 {
                     **base_event,
                     "theorem_id": candidate.theorem_id,
                     "theorem_statement": candidate.statement,
-                    "result": result_name,
+                    "proof_label": proof_label,
+                    "error_summary": self._summarize_error(str(exc), limit=960),
                     "elapsed_ms": elapsed_ms,
                 },
             )
-
-    async def _assess_novelty(
-        self,
-        *,
-        user_prompt: str,
-        theorem_statement: str,
-        lean_code: str,
-        validator_model: str,
-        validator_context: int,
-        validator_max_tokens: int,
-        existing_novel_proofs: str,
-    ) -> tuple[str, str]:
-        from .proof_novelty import assess_proof_novelty
-
-        task_id = f"proof_novelty_{self._novelty_task_sequence:03d}"
-        self._novelty_task_sequence += 1
-
-        return await assess_proof_novelty(
-            user_prompt=user_prompt,
-            theorem_statement=theorem_statement,
-            lean_code=lean_code,
-            validator_model=validator_model,
-            validator_context=validator_context,
-            validator_max_tokens=validator_max_tokens,
-            existing_novel_proofs=existing_novel_proofs,
-            task_id=task_id,
-            role_id="autonomous_proof_novelty",
-        )
+            return SmtHint(result="unknown", suggested_tactics=[], smtlib="")
 
     async def _resolve_candidates(
         self,
@@ -377,6 +367,103 @@ class ProofVerificationStage:
             candidate = candidate.model_copy(update={"relevant_lemmas": relevant_lemmas})
         return candidate
 
+    @staticmethod
+    def _format_verified_proof_for_brainstorm_validation(
+        *,
+        theorem_statement: str,
+        formal_sketch: str,
+        lean_code: str,
+        attempt_count: int,
+    ) -> str:
+        sections = [
+            BRAINSTORM_LEAN_PROOF_MARKER,
+            "",
+            "Lean 4 has accepted the following proof. Decide whether it is useful, non-redundant brainstorm progress before it is appended to the brainstorm database.",
+            "",
+            f"Theorem statement: {theorem_statement}",
+        ]
+        if formal_sketch:
+            sections.extend(["", f"Formalization notes: {formal_sketch}"])
+        sections.extend(
+            [
+                "",
+                f"Lean verification: accepted after {attempt_count} attempt{'s' if attempt_count != 1 else ''}.",
+                "",
+                "Lean 4 code:",
+                "```lean",
+                lean_code,
+                "```",
+            ]
+        )
+        return "\n".join(sections).strip()
+
+    async def _validate_brainstorm_verified_proof_addition(
+        self,
+        *,
+        user_prompt: str,
+        source_content: str,
+        proof_submission: str,
+        validator_model: str,
+        validator_context: int,
+        validator_max_tokens: int,
+        task_id: str,
+        role_id: str,
+        broadcast_fn: BroadcastFn,
+        base_event: dict[str, Any],
+    ) -> bool:
+        """Run the normal brainstorm usefulness gate before appending verified proofs."""
+        context = source_content or ""
+        while len(context) > 24000:
+            context = context[: max(len(context) // 2, 24000)]
+        prompt = build_validator_prompt(
+            user_prompt=user_prompt,
+            submission_content=proof_submission,
+            context=f"CURRENT BRAINSTORM DATABASE:\n{context}",
+        )
+        try:
+            response = await api_client_manager.generate_completion(
+                task_id=task_id,
+                role_id=role_id,
+                model=validator_model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=validator_max_tokens,
+                temperature=0.0,
+            )
+            if not response or not response.get("choices"):
+                raise ValueError("Proof brainstorm validator returned no choices.")
+            message = response["choices"][0].get("message", {})
+            content = message.get("content") or message.get("reasoning") or ""
+            raw = parse_json(content)
+            if isinstance(raw, list):
+                raw = raw[0] if raw else {}
+            if not isinstance(raw, dict):
+                raw = {}
+            accepted = str(raw.get("decision") or "").strip().lower() == "accept"
+            await self._broadcast(
+                broadcast_fn,
+                "proof_brainstorm_validation_complete",
+                {
+                    **base_event,
+                    "accepted": accepted,
+                    "reasoning": str(raw.get("reasoning") or raw.get("summary") or ""),
+                },
+            )
+            return accepted
+        except Exception as exc:
+            if is_non_retryable_model_error(exc):
+                raise
+            logger.warning("Verified brainstorm proof usefulness validation failed: %s", exc)
+            await self._broadcast(
+                broadcast_fn,
+                "proof_brainstorm_validation_complete",
+                {
+                    **base_event,
+                    "accepted": False,
+                    "reasoning": f"Validator failed before producing a usable decision: {exc}",
+                },
+            )
+            return False
+
     async def run(
         self,
         content: str,
@@ -397,6 +484,7 @@ class ProofVerificationStage:
         trigger: str = "automatic",
         source_reserved: bool = False,
         should_stop: ShouldStopFn = None,
+        append_to_source: bool = True,
     ) -> ProofStageResult:
         """Run proof identification, formalization, Lean 4 checking, and novelty review."""
         result = ProofStageResult(source_type=source_type, source_id=source_id)
@@ -488,18 +576,22 @@ class ProofVerificationStage:
                 {
                     **base_event,
                     "count": len(resolved_candidates),
-                    "theorems_preview": [candidate.statement[:180] for candidate in resolved_candidates],
+                    "theorems_preview": [
+                        f"Proof {self._proof_label_for_index(index)}: {candidate.statement[:180]}"
+                        for index, candidate in enumerate(resolved_candidates, start=1)
+                    ],
                 },
             )
 
             max_parallel = max(1, int(getattr(system_config, "proof_max_parallel_candidates", 6) or 1))
             semaphore = asyncio.Semaphore(max_parallel)
 
-            async def run_phase_a(theorem_candidate: ProofCandidate) -> _LeanVerificationOutcome:
+            async def run_phase_a(theorem_candidate: ProofCandidate, proof_label: str) -> _LeanVerificationOutcome:
                 async with semaphore:
                     if _stop_requested():
                         return _LeanVerificationOutcome(
                             candidate=theorem_candidate,
+                            proof_label=proof_label,
                             success=False,
                             theorem_name="",
                             lean_code="",
@@ -508,6 +600,7 @@ class ProofVerificationStage:
                     return await self._run_lean_pipeline_for_candidate(
                         theorem_candidate=theorem_candidate,
                         base_event=base_event,
+                        proof_label=proof_label,
                         user_prompt=user_prompt,
                         source_type=source_type,
                         source_id=source_id,
@@ -523,8 +616,8 @@ class ProofVerificationStage:
                     )
 
             verification_tasks = [
-                asyncio.create_task(run_phase_a(candidate))
-                for candidate in resolved_candidates
+                asyncio.create_task(run_phase_a(candidate, self._proof_label_for_index(index)))
+                for index, candidate in enumerate(resolved_candidates, start=1)
             ]
 
             pending_tasks = set(verification_tasks)
@@ -586,6 +679,7 @@ class ProofVerificationStage:
                         break
 
                     candidate = outcome.candidate
+                    proof_label = outcome.proof_label
                     attempts = outcome.attempts
                     lean_code = outcome.lean_code
 
@@ -614,44 +708,118 @@ class ProofVerificationStage:
                         )
                         continue
 
-                    result.verified_count += 1
-                    existing_novel_proofs = novel_proofs_db.get_novel_proofs_for_injection()
-                    novelty_tier, novelty_reasoning = await self._assess_novelty(
+                    integrity_task_id = f"proof_integrity_{self._integrity_task_sequence:03d}"
+                    self._integrity_task_sequence += 1
+                    integrity = await validate_full_lean_proof_integrity(
+                        user_prompt=user_prompt,
+                        theorem_statement=candidate.statement,
+                        formal_sketch=candidate.formal_sketch,
+                        lean_code=lean_code,
+                        source_excerpt=candidate.source_excerpt or content,
+                        allowed_baseline="",
+                        validator_model=validator_model,
+                        validator_context=validator_context,
+                        validator_max_tokens=validator_max_tokens,
+                        task_id=integrity_task_id,
+                        role_id="autonomous_proof_novelty",
+                        require_statement_alignment=True,
+                    )
+                    if not integrity.valid:
+                        integrity_feedback = ProofAttemptFeedback(
+                            attempt=(attempts[-1].attempt + 1 if attempts else 1),
+                            theorem_id=candidate.theorem_id,
+                            reasoning="Post-Lean proof integrity check failed.",
+                            lean_code=lean_code,
+                            error_output=integrity.reason,
+                            strategy="full_script",
+                            success=False,
+                        )
+                        attempts = list(attempts) + [integrity_feedback]
+                        error_summary = self._summarize_error(integrity.reason)
+                        suggested_targets = self._extract_suggested_lemma_targets(integrity.reason)
+                        if source_type == "brainstorm" and trigger != "retry":
+                            await novel_proofs_db.record_failed_candidate(
+                                source_id,
+                                candidate,
+                                error_summary,
+                                suggested_lemma_targets=suggested_targets,
+                            )
+                        await self._broadcast(
+                            broadcast_fn,
+                            "proof_integrity_rejected",
+                            {
+                                **base_event,
+                                "theorem_id": candidate.theorem_id,
+                                "theorem_statement": candidate.statement,
+                                "proof_label": proof_label,
+                                "category": integrity.category,
+                                "reason": integrity.reason,
+                            },
+                        )
+                        result.results.append(
+                            ProofAttemptResult(
+                                theorem_id=candidate.theorem_id,
+                                theorem_statement=candidate.statement,
+                                lean_code=lean_code,
+                                success=False,
+                                novel=False,
+                                attempts_used=len(attempts),
+                                error_summary=error_summary,
+                            )
+                        )
+                        continue
+
+                    novelty_task_id = f"proof_novelty_{self._novelty_task_sequence:03d}"
+                    self._novelty_task_sequence += 1
+
+                    solver_hints = []
+                    if self._first_attempt_used_smt_hint(attempts, candidate.smt_hint):
+                        solver_hints.append("smt-z3")
+
+                    registration = await register_verified_lean_proof(
+                        proof_database=novel_proofs_db,
                         user_prompt=user_prompt,
                         theorem_statement=candidate.statement,
                         lean_code=lean_code,
                         validator_model=validator_model,
                         validator_context=validator_context,
                         validator_max_tokens=validator_max_tokens,
-                        existing_novel_proofs=existing_novel_proofs,
-                    )
-                    is_novel = novelty_tier != "not_novel"
-
-                    solver_hints = []
-                    if self._first_attempt_used_smt_hint(attempts, candidate.smt_hint):
-                        solver_hints.append("smt-z3")
-
-                    proof_record = ProofRecord(
-                        proof_id="",
-                        theorem_id=candidate.theorem_id,
-                        theorem_statement=candidate.statement,
-                        theorem_name=outcome.theorem_name,
-                        formal_sketch=candidate.formal_sketch,
+                        task_id=novelty_task_id,
+                        role_id="autonomous_proof_novelty",
                         source_type=source_type,
                         source_id=source_id,
                         source_title=source_title,
+                        theorem_id=candidate.theorem_id,
+                        theorem_name=outcome.theorem_name,
+                        formal_sketch=candidate.formal_sketch,
                         solver="Lean 4",
-                        lean_code=lean_code,
-                        novel=is_novel,
-                        novelty_tier=novelty_tier,
-                        novelty_reasoning=novelty_reasoning,
                         verification_notes="Lean 4 accepted the submitted proof.",
                         attempt_count=len(attempts),
                         attempts=attempts,
-                        dependencies=[],
                         solver_hints=solver_hints,
+                        broadcast_fn=broadcast_fn,
+                        base_event=base_event,
+                        proof_label=proof_label,
+                        retry_origin_source_id=candidate.origin_source_id,
                     )
-                    stored_record = await novel_proofs_db.add_proof(proof_record)
+                    stored_record = registration.record
+                    is_novel = stored_record.novel
+                    novelty_tier = stored_record.novelty_tier
+                    result.verified_count += 1
+
+                    await self._broadcast(
+                        broadcast_fn,
+                        "proof_verified",
+                        {
+                            **base_event,
+                            "proof_id": stored_record.proof_id,
+                            "theorem_id": candidate.theorem_id,
+                            "theorem_statement": candidate.statement,
+                            "proof_label": proof_label,
+                            "strategy": attempts[-1].strategy if attempts else "full_script",
+                            "retry_origin_source_id": candidate.origin_source_id,
+                        },
+                    )
 
                     # Dependency extraction runs in Phase B so later candidates
                     # in the same paper can see earlier proofs. We instantiate
@@ -687,6 +855,7 @@ class ProofVerificationStage:
                                     **base_event,
                                     "proof_id": stored_record.proof_id,
                                     "theorem_name": stored_record.theorem_name,
+                                    "proof_label": proof_label,
                                     "dependencies": [
                                         dependency.model_dump(mode="json")
                                         for dependency in dependencies
@@ -707,43 +876,44 @@ class ProofVerificationStage:
                             stored_record.proof_id,
                         )
 
-                    if is_novel:
+                    if is_novel and not registration.duplicate:
                         result.novel_count += 1
                         # Novel proofs are appended to their source document so the
                         # paper/brainstorm they came from retains a record of them.
                         # They are also stored in ProofDatabase and direct-injected
                         # into all prompts via inject_into_prompt().
-                        if source_type == "brainstorm":
-                            await brainstorm_memory.append_proofs_section(source_id, stored_record)
-                        elif source_type == "paper":
+                        if append_to_source and source_type == "brainstorm":
+                            validator_accepted = await self._validate_brainstorm_verified_proof_addition(
+                                user_prompt=user_prompt,
+                                source_content=content,
+                                proof_submission=self._format_verified_proof_for_brainstorm_validation(
+                                    theorem_statement=candidate.statement,
+                                    formal_sketch=candidate.formal_sketch,
+                                    lean_code=lean_code,
+                                    attempt_count=len(attempts),
+                                ),
+                                validator_model=validator_model,
+                                validator_context=validator_context,
+                                validator_max_tokens=validator_max_tokens,
+                                task_id=f"proof_brainstorm_val_{self._novelty_task_sequence:03d}",
+                                role_id="autonomous_proof_novelty",
+                                broadcast_fn=broadcast_fn,
+                                base_event={
+                                    **base_event,
+                                    "theorem_id": candidate.theorem_id,
+                                    "theorem_statement": candidate.statement,
+                                    "proof_id": stored_record.proof_id,
+                                    "proof_label": proof_label,
+                                },
+                            )
+                            if validator_accepted:
+                                await brainstorm_memory.append_proofs_section(source_id, stored_record)
+                        elif append_to_source and source_type == "paper":
                             await paper_library.append_proofs_section(source_id, stored_record)
-                        await self._broadcast(
-                            broadcast_fn,
-                            "novel_proof_discovered",
-                            {
-                                **base_event,
-                                "proof_id": stored_record.proof_id,
-                                "theorem_statement": stored_record.theorem_statement,
-                                "solver": "Lean 4",
-                                "novelty_tier": novelty_tier,
-                                "retry_origin_source_id": candidate.origin_source_id,
-                            },
-                        )
-                    else:
-                        # Non-novel (known) proofs are stored in ProofDatabase only.
-                        # They are NOT appended to brainstorm/paper files to avoid
-                        # polluting compiler and RAG context with standard Lean 4 code.
-                        # They remain browsable via proof_database.get_known_proofs_summary_for_browsing().
-                        await self._broadcast(
-                            broadcast_fn,
-                            "known_proof_verified",
-                            {
-                                **base_event,
-                                "proof_id": stored_record.proof_id,
-                                "theorem_statement": stored_record.theorem_statement,
-                                "retry_origin_source_id": candidate.origin_source_id,
-                            },
-                        )
+                    # Non-novel (known) proofs are stored in ProofDatabase only.
+                    # They are NOT appended to brainstorm/paper files to avoid
+                    # polluting compiler and RAG context with standard Lean 4 code.
+                    # They remain browsable via proof_database.get_known_proofs_summary_for_browsing().
 
                     result.results.append(
                         ProofAttemptResult(
@@ -780,6 +950,8 @@ class ProofVerificationStage:
         except FreeModelExhaustedError:
             raise
         except Exception as exc:
+            if is_non_retryable_model_error(exc):
+                raise
             logger.error(
                 "Proof verification stage failed for %s %s: %s",
                 source_type,
@@ -809,6 +981,7 @@ class ProofVerificationStage:
         *,
         theorem_candidate: ProofCandidate,
         base_event: dict[str, Any],
+        proof_label: str,
         user_prompt: str,
         source_type: str,
         source_id: str,
@@ -861,6 +1034,7 @@ class ProofVerificationStage:
             source_id=source_id,
             base_event=base_event,
             candidate=candidate,
+            proof_label=proof_label,
             source_content=source_content,
             identification_agent=identification_agent,
             broadcast_fn=broadcast_fn,
@@ -886,6 +1060,7 @@ class ProofVerificationStage:
                     **base_event,
                     "theorem_id": current_candidate.theorem_id,
                     "theorem_statement": current_candidate.statement,
+                    "proof_label": proof_label,
                     "attempt": attempt_number,
                     "strategy": strategy,
                     "retry_origin_source_id": current_candidate.origin_source_id,
@@ -896,16 +1071,21 @@ class ProofVerificationStage:
             if feedback.success:
                 await self._broadcast(
                     broadcast_fn,
-                    "proof_verified",
+                    "proof_lean_accepted",
                     {
                         **base_event,
                         "theorem_id": current_candidate.theorem_id,
                         "theorem_statement": current_candidate.statement,
+                        "proof_label": proof_label,
+                        "attempt": feedback.attempt,
                         "strategy": feedback.strategy,
+                        "lean_response": self._lean_response_summary(feedback),
+                        "proof_verified": True,
                         "retry_origin_source_id": current_candidate.origin_source_id,
                     },
                 )
             else:
+                lean_response = self._lean_response_summary(feedback)
                 await self._broadcast(
                     broadcast_fn,
                     "proof_attempt_failed",
@@ -913,9 +1093,12 @@ class ProofVerificationStage:
                         **base_event,
                         "theorem_id": current_candidate.theorem_id,
                         "theorem_statement": current_candidate.statement,
+                        "proof_label": proof_label,
                         "attempt": feedback.attempt,
                         "strategy": feedback.strategy,
                         "error_summary": self._summarize_error(feedback.error_output),
+                        "lean_response": lean_response,
+                        "proof_verified": False,
                         "retry_origin_source_id": current_candidate.origin_source_id,
                     },
                 )
@@ -961,12 +1144,14 @@ class ProofVerificationStage:
                     **base_event,
                     "theorem_id": candidate.theorem_id,
                     "theorem_statement": candidate.statement,
+                    "proof_label": proof_label,
                     "retry_origin_source_id": candidate.origin_source_id,
                 },
             )
 
         return _LeanVerificationOutcome(
             candidate=candidate,
+            proof_label=proof_label,
             success=success,
             theorem_name=theorem_name,
             lean_code=lean_code,

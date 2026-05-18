@@ -14,6 +14,11 @@
 }
 
 /* Tier-specific card accents */
+.proof-card--platinum {
+  border-left: 3px solid #e2e8f0;
+  box-shadow: inset 3px 0 12px rgba(226, 232, 240, 0.16);
+}
+
 .proof-card--gold {
   border-left: 3px solid #ffd65c;
 }
@@ -38,6 +43,24 @@
 }
 
 /* Tier-specific badges */
+.proof-badge--platinum {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #e2e8f0 0%, #ffffff 45%, #94a3b8 100%);
+  color: #0f172a;
+  box-shadow: 0 0 14px rgba(226, 232, 240, 0.35);
+}
+
+.proof-badge--platinum::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.65) 48%, transparent 100%);
+  transform: translateX(-130%);
+  animation: proof-library-platinum-shimmer 2.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
 .proof-badge--gold {
   background: linear-gradient(135deg, #ffd65c 0%, #ffe99a 100%);
   color: #1a1a00;
@@ -53,9 +76,58 @@
   color: #1a0a00;
 }
 
+@keyframes proof-library-platinum-shimmer {
+  0% {
+    transform: translateX(-130%);
+  }
+  55%,
+  100% {
+    transform: translateX(130%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .proof-badge--platinum::after {
+    animation: none;
+  }
+}
+
 .proof-title {
   font-family: 'Courier New', monospace;
   letter-spacing: 0.02em;
+}
+
+.proof-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.proof-header-download {
+  padding: 7px 12px;
+  border: 1px solid rgba(30, 255, 28, 0.32);
+  border-radius: 999px;
+  background: rgba(30, 255, 28, 0.1);
+  color: #b7ffb6;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.proof-header-download:hover:not(:disabled) {
+  border-color: rgba(30, 255, 28, 0.56);
+  background: rgba(30, 255, 28, 0.16);
+  transform: translateY(-1px);
+}
+
+.proof-header-download:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .proof-statement {
@@ -163,4 +235,16 @@
 
 .proof-code-block::-webkit-scrollbar-thumb:hover {
   background: #666;
+}
+
+@media (max-width: 700px) {
+  .proof-library .answer-title-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .proof-card-actions,
+  .proof-header-download {
+    width: 100%;
+  }
 }

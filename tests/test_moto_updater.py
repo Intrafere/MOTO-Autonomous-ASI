@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import urllib.error
 from unittest import mock
+import zipfile
 
 import moto_updater
 
@@ -19,6 +20,17 @@ class RepoSlugTests(unittest.TestCase):
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(moto_updater._normalize_repo_slug(raw), expected)
+
+    def test_normalize_repo_slug_rejects_lookalike_or_untrusted_hosts(self) -> None:
+        cases = [
+            "https://github.com.evil/Intrafere/MOTO-Autonomous-ASI",
+            "https://evil.example/github.com/Intrafere/MOTO-Autonomous-ASI",
+            "ssh://git@github.com.evil/Intrafere/MOTO-Autonomous-ASI.git",
+            "https://example.com/Intrafere/MOTO-Autonomous-ASI",
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                self.assertIsNone(moto_updater._normalize_repo_slug(raw))
 
 
 class InstallStateTests(unittest.TestCase):
@@ -119,6 +131,60 @@ class LauncherStateTests(unittest.TestCase):
 
             self.assertEqual(len(instances), 1)
             self.assertEqual(instances[0]["instance_id"], "alive")
+
+    def test_last_instance_record_does_not_persist_keyring_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            record_path = Path(temp_dir) / ".moto_last_instance.json"
+
+            with mock.patch.object(moto_updater, "LAUNCHER_LAST_INSTANCE_PATH", record_path):
+                moto_updater.save_last_instance_record(
+                    instance_id="instance_one",
+                    data_root="data",
+                    log_root="logs",
+                    keyring_namespace="instance_one",
+                    storage_prefix="instance_one",
+                )
+                payload = json.loads(record_path.read_text(encoding="utf-8"))
+
+        self.assertNotIn("keyring_namespace", payload)
+        self.assertNotIn("secret_namespace", payload)
+
+    def test_last_instance_record_reads_legacy_secret_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            record_path = Path(temp_dir) / ".moto_last_instance.json"
+            record_path.write_text(
+                json.dumps(
+                    {
+                        "instance_id": "instance_one",
+                        "data_root": "data",
+                        "log_root": "logs",
+                        "secret_namespace": "legacy_namespace",
+                        "storage_prefix": "instance_one",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(moto_updater, "LAUNCHER_LAST_INSTANCE_PATH", record_path):
+                payload = moto_updater.load_last_instance_record()
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["keyring_namespace"], "legacy_namespace")
+        self.assertNotIn("secret_namespace", payload)
+
+    def test_updater_extract_archive_rejects_zip_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "archive.zip"
+            destination = root / "extract"
+            outside = root / "evil.txt"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../evil.txt", "bad")
+
+            with self.assertRaises(RuntimeError):
+                moto_updater._extract_archive(archive_path, destination)
+
+            self.assertFalse(outside.exists())
 
 
 class SnapshotSyncTests(unittest.TestCase):

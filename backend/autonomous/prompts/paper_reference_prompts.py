@@ -52,6 +52,10 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 YOUR TASK:
 Determine which papers (if any) would be VERY USEFUL to inform and enhance your brainstorm exploration.
 
+DIRECT-SOLUTION PREFERENCE:
+- Prefer papers that most directly help produce a rigorous direct answer, direct partial answer, impossibility result, explicit construction, exact reduction, or sharp constraint
+- Do not select papers merely because they are broadly related if they do not materially strengthen the most direct route to the goal
+
 WHY THIS MATTERS - COMPOUNDING KNOWLEDGE:
 This is the crucial mechanism that allows the system to compound knowledge across research cycles.
 By selecting reference papers BEFORE brainstorming, you can:
@@ -61,9 +65,9 @@ By selecting reference papers BEFORE brainstorming, you can:
 - Accelerate convergence on valuable insights by standing on prior work
 
 THRESHOLD: "VERY USEFUL FOR BRAINSTORMING"
-- Papers that provide mathematical foundations you'll build upon
-- Papers that cover related concepts you can extend or connect to
-- Papers that offer techniques or methods relevant to your topic
+- Papers that provide mathematical foundations you'll directly build upon
+- Papers that cover related concepts you can extend or connect to in service of a more direct answer
+- Papers that offer techniques or methods that materially strengthen the most direct route to your topic
 - Don't request papers that are merely tangentially related
 
 OPTIONS:
@@ -114,15 +118,19 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 YOUR TASK:
 Determine if any ADDITIONAL papers would be valuable for paper compilation, based on what you learned during brainstorming.
 
+DIRECT-SOLUTION PREFERENCE:
+- Add papers only when they materially strengthen the best rigorous direct answer you can now write
+- Do not add broadly relevant papers that do not improve direct resolution of the user's goal
+
 CONTEXT:
 - You already selected reference papers before brainstorming (shown as "ALREADY SELECTED")
 - During brainstorming, you may have discovered new connections or topics
 - This is your chance to add more relevant papers (if any)
 
 THRESHOLD: "VALUABLE BASED ON BRAINSTORM INSIGHTS"
-- Papers that address topics that emerged during brainstorming
-- Papers that provide additional techniques you now realize are relevant
-- Papers that cover connections you discovered during exploration
+- Papers that address topics that emerged during brainstorming and materially strengthen direct resolution
+- Papers that provide additional techniques you now realize are relevant to the strongest direct answer
+- Papers that cover connections you discovered during exploration only when those connections improve direct progress
 - Don't add papers just to fill slots
 
 OPTIONS:
@@ -170,8 +178,12 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 YOUR TASK:
 Determine which papers (if any) would be VERY USEFUL for writing your upcoming paper, and request to see their full content before making final selection.
 
+DIRECT-SOLUTION PREFERENCE:
+- Prefer papers that will help you write the strongest rigorous direct answer to the user's goal
+- Do not expand papers that are merely adjacent background unless they are needed for direct resolution
+
 THRESHOLD: "VERY USEFUL"
-- A paper is "very useful" if it provides substantial mathematical context, techniques, or insights directly relevant to your brainstorm topic
+- A paper is "very useful" if it provides substantial mathematical context, techniques, or insights that materially strengthen the most direct answer to your brainstorm topic
 - Don't request papers that are merely tangentially related
 - Quality over quantity - only request papers you genuinely need to evaluate
 
@@ -251,11 +263,15 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 YOUR TASK:
 Make your final selection of reference papers (maximum {max_papers}) that will be included in your context during paper compilation.
 
+DIRECT-SOLUTION PREFERENCE:
+- Select papers that most directly strengthen the answer you intend to write
+- Prefer papers that support the core proof, construction, impossibility argument, or key reduction over broader background
+
 SELECTION CRITERIA:
-- Papers that provide essential mathematical background
-- Papers that offer techniques or methods relevant to your topic
-- Papers that establish theoretical foundations you'll build upon
-- Papers that present related results you'll reference or extend
+- Papers that provide essential mathematical background for the direct answer
+- Papers that offer techniques or methods central to your topic's strongest resolution path
+- Papers that establish theoretical foundations you'll directly build upon
+- Papers that present related results you'll reference or extend in order to answer the question more directly
 
 CONSTRAINT:
 - Maximum {max_papers} papers can be selected (hard limit for context budget)

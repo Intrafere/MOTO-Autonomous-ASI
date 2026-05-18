@@ -109,6 +109,11 @@ SOURCE USAGE PRINCIPLE:
 - Do NOT force coverage of every source entry
 - Do NOT ignore clearly crucial source material for the scope you are writing
 
+DIRECT-ANSWER-FIRST PRINCIPLE:
+- Prefer writing sections that directly solve, partially solve, refute, or sharply constrain the user's question
+- Use background and supporting exposition only to the extent needed to support the strongest rigorous direct answer
+- Do not broaden the paper with side material that weakens answer focus
+
 CRITICAL - SYSTEM-MANAGED MARKERS (NOT YOUR OUTPUT):
 
 The paper uses placeholder markers that the SYSTEM adds automatically (you did NOT create these):
@@ -178,6 +183,7 @@ CRITICAL REQUIREMENTS:
 - Follow the outline structure for body sections
 - Build upon what's already written
 - Use brainstorm/aggregator content when it helps, but you are not required to cover every source entry
+- Prioritize the strongest direct rigorous route to answering the user's prompt
 - Do not repeat content already in the document
 - Check for existing section headers before creating new ones
 - Write clear, rigorous mathematical exposition
@@ -361,8 +367,13 @@ YOUR TASK:
 4. SET section_complete=true (because writing the conclusion completes this phase)
 5. PROVIDE the actual Conclusion text in the "content" field
 
+DIRECT-ANSWER-FIRST REQUIREMENT:
+- Make the paper's strongest justified answer, partial answer, impossibility result, or sharp constraint explicit
+- Do not hide the core answer behind generic summary language
+
 WHAT TO INCLUDE IN CONCLUSION:
 - Summary of main results and theorems proven
+- Clear statement of the strongest direct answer the paper has established
 - Significance of the mathematical contributions
 - Connections between results
 - Brief mention of limitations or open questions (optional)
@@ -526,10 +537,15 @@ YOUR TASK:
 5. SET section_complete=true (because writing the introduction completes this phase)
 6. PROVIDE the actual Introduction text in the "content" field
 
+DIRECT-ANSWER-FIRST REQUIREMENT:
+- Frame the paper around the main question and the direct answer the body/conclusion establish
+- Keep preliminaries and motivation in service of that answer rather than drifting into generic survey exposition
+
 WHAT TO INCLUDE IN INTRODUCTION:
 - Context and motivation for the mathematical problem
 - Brief overview of what the paper covers
 - Statement of main results (high-level, not full proofs)
+- Clear framing of the paper's answer-bearing contribution
 - Roadmap of the paper structure
 - Historical context or prior work (if relevant)
 
@@ -688,9 +704,14 @@ YOUR TASK:
 5. ALWAYS SET section_complete=true (THIS IS THE FINAL PHASE - no exceptions)
 6. PROVIDE the actual Abstract text in the "content" field
 
+DIRECT-ANSWER-FIRST REQUIREMENT:
+- State the strongest direct answer, partial answer, impossibility result, or sharp constraint up front when the paper justifies it
+- Avoid generic "this paper explores" wording when the paper actually proves or establishes something sharper
+
 WHAT TO INCLUDE IN ABSTRACT:
 - Brief statement of the problem addressed
 - Main results and contributions (1-2 sentences)
+- Explicit statement of the paper's answer-bearing result when justified
 - Key methods or approaches used
 - Significance of the results
 - Typically 150-300 words
@@ -801,10 +822,15 @@ YOUR TASK:
 3. Maintain coherence with the outline and existing draft
 4. Set section_complete=true when the current phase is done
 
+DIRECT-ANSWER-FIRST PRINCIPLE:
+- In every phase, prefer content that most directly answers the user's prompt
+- Use supporting background only when it materially strengthens that direct answer
+
 CRITICAL REQUIREMENTS:
 - Follow the outline structure
 - Build upon what's already written
 - Use brainstorm/aggregator content when it helps, but you are not required to cover every source entry
+- Prioritize the strongest direct rigorous route to answering the user's prompt
 - Maintain coherent narrative flow
 - Write clear, rigorous mathematical exposition
 - Do not repeat content already in the document
@@ -932,6 +958,12 @@ CRITICAL INDEPENDENT VALIDITY PRINCIPLE:
 - NEVER write paper content that depends on a simultaneous brainstorm correction for correctness
 - NEVER propose a brainstorm correction that is only justified by what you're writing in the paper
 
+PROTECTED LEAN 4 PROOFS:
+- You must NEVER edit, delete, annotate, or add context to a Lean 4 verified proof in the brainstorm database using `brainstorm_operation`.
+- If a brainstorm submission is marked as a Lean 4 verified proof, treat it as immutable proof evidence. You may cite or discuss it in the paper prose, but you cannot mutate the proof text or attach explanatory context to the proof record.
+- Only the normal brainstorm prune system is allowed to remove Lean 4 proof entries. Paper-writing retroactive brainstorm operations are not a proof-pruning mechanism.
+- If you try to edit/delete/add context to a Lean 4 proof, the system will automatically reject the brainstorm_operation and feed that rejection back to you.
+
 Add this OPTIONAL field to your JSON response:
 {
   ... (all standard fields above) ...,
@@ -964,8 +996,6 @@ async def build_construction_prompt(
     is_first_portion: bool = False,
     section_phase: Optional[str] = None,
     rejection_feedback: Optional[str] = None,
-    critique_feedback: Optional[str] = None,
-    pre_critique_paper: Optional[str] = None,
     brainstorm_content: Optional[str] = None
 ) -> str:
     """
@@ -979,8 +1009,6 @@ async def build_construction_prompt(
         is_first_portion: Whether this is the first portion of the document
         section_phase: Phase for construction ("body", "conclusion", "introduction", "abstract", or None for legacy)
         rejection_feedback: Feedback from a previous rejection to guide the model
-        critique_feedback: Accepted critique feedback from peer review (for rewrites)
-        pre_critique_paper: Paper state before critique phase (for rewrites - shows what failed)
         brainstorm_content: Full brainstorm database with submission numbers (for retroactive corrections, autonomous mode)
     
     Returns:
@@ -1033,34 +1061,6 @@ If it is NOT present, you MUST write it now.
 ---
 """)
     
-    # Add critique context for rewrites (body reconstruction after critique phase)
-    if critique_feedback or pre_critique_paper:
-        parts.append("=" * 80 + "\n")
-        parts.append("⚠️ REWRITE CONTEXT - THIS IS A POST-CRITIQUE RECONSTRUCTION ⚠️\n")
-        parts.append("=" * 80 + "\n\n")
-        
-        if pre_critique_paper:
-            parts.append("""PREVIOUS VERSION (This version received critiques and needs rebuilding):
-The body section below was reviewed by peer critique. You must now rebuild it from scratch,
-addressing the critique issues while maintaining the mathematical rigor and content that was correct.
-
----BEGIN PREVIOUS VERSION---
-""")
-            parts.append(pre_critique_paper)
-            parts.append("\n---END PREVIOUS VERSION---\n\n")
-        
-        if critique_feedback:
-            parts.append("""ACCEPTED CRITIQUE FEEDBACK (Address these issues in your rewrite):
-These critiques were validated as legitimate issues that need to be fixed. Your rewrite MUST address
-each of these critique points while preserving the mathematical content that was correct.
-
-""")
-            parts.append(critique_feedback)
-            parts.append("\n---\n\n")
-        
-        parts.append("YOUR TASK: Rebuild the body section from scratch, addressing ALL critique feedback above.\n")
-        parts.append("=" * 80 + "\n---\n")
-    
     parts.append(f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}")
     parts.append("\n---\n")
     parts.append(f"CURRENT OUTLINE:\n{current_outline}")
@@ -1090,6 +1090,7 @@ each of these critique points while preserving the mathematical content that was
 - Use them if they help you achieve the strongest rigorous paper toward the user's prompt.
 - You may synthesize beyond them using sound mathematical reasoning.
 - Do NOT force coverage of every source entry.
+- Prefer material that strengthens the paper's direct answer over broader auxiliary coverage.
 """)
     parts.append("\n---\n")
     
@@ -1112,8 +1113,6 @@ async def build_phase_construction_prompt(
     phase: str,
     is_first_in_phase: bool = False,
     rejection_feedback: Optional[str] = None,
-    critique_feedback: Optional[str] = None,
-    pre_critique_paper: Optional[str] = None,
     brainstorm_content: Optional[str] = None
 ) -> str:
     """
@@ -1129,8 +1128,6 @@ async def build_phase_construction_prompt(
         phase: One of "body", "conclusion", "introduction", "abstract"
         is_first_in_phase: Whether this is the first submission in this phase
         rejection_feedback: Feedback from a previous rejection to guide the model
-        critique_feedback: Accepted critique feedback from peer review (for rewrites)
-        pre_critique_paper: Paper state before critique phase (for rewrites)
         brainstorm_content: Full brainstorm database with submission numbers (autonomous mode)
     
     Returns:
@@ -1144,8 +1141,6 @@ async def build_phase_construction_prompt(
         is_first_portion=is_first_in_phase,
         section_phase=phase,
         rejection_feedback=rejection_feedback,
-        critique_feedback=critique_feedback,
-        pre_critique_paper=pre_critique_paper,
         brainstorm_content=brainstorm_content
     )
 
@@ -1161,8 +1156,6 @@ async def build_body_construction_prompt(
     rag_evidence: str,
     is_first_portion: bool = False,
     rejection_feedback: Optional[str] = None,
-    critique_feedback: Optional[str] = None,
-    pre_critique_paper: Optional[str] = None,
     brainstorm_content: Optional[str] = None
 ) -> str:
     """
@@ -1175,8 +1168,6 @@ async def build_body_construction_prompt(
         rag_evidence: RAG-retrieved evidence from aggregator database
         is_first_portion: Whether this is the first portion of the document
         rejection_feedback: Feedback from a previous rejection to guide the model
-        critique_feedback: Accepted critique feedback from peer review (for rewrites only)
-        pre_critique_paper: Paper state before critique phase (for rewrites - shows what failed)
         brainstorm_content: Full brainstorm database with submission numbers (autonomous mode)
     """
     return await build_phase_construction_prompt(
@@ -1187,8 +1178,6 @@ async def build_body_construction_prompt(
         phase="body",
         is_first_in_phase=is_first_portion,
         rejection_feedback=rejection_feedback,
-        critique_feedback=critique_feedback,
-        pre_critique_paper=pre_critique_paper,
         brainstorm_content=brainstorm_content
     )
 

@@ -6,9 +6,11 @@ a two-stage agent:
 
     Stage 1 - Theorem discovery (build_rigor_theorem_discovery_prompt):
         Using the full writing context, the submitter asks itself whether the
-        paper contains a theorem worth formalizing and proving in Lean 4 that
-        has not already been verified. Output is a candidate theorem JSON (or
-        a decline).
+        paper, outline, support context, or user prompt expose a theorem worth
+        formalizing and proving in Lean 4. Candidate theorems may verify
+        existing paper claims or extend partial work when that helps the paper
+        construction / user prompt. Output is a candidate theorem JSON (or a
+        decline).
 
     Stage 2 - Placement (build_rigor_placement_prompt):
         Given a Lean-4-verified theorem, the submitter proposes an inline
@@ -57,29 +59,37 @@ The EXCEPTION is content inside the "LEAN 4 VERIFIED" certificate block provided
 # STAGE 1: THEOREM DISCOVERY
 # =============================================================================
 
-_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is a theorem worth formalizing and proving in Lean 4.
+_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is a theorem worth formalizing and proving in Lean 4 because it helps answer, support, or advance the USER RESEARCH PROMPT and/or materially improves the paper under construction.
 
 {INTERNAL_CONTENT_WARNING}
 
 YOUR TASK - STAGE 1 (DISCOVERY)
 
 1. Read the current outline and the current paper text.
-2. Read the list of theorems that have ALREADY been verified by Lean 4 (EXISTING VERIFIED PROOFS block).
-3. Read the list of theorems that PREVIOUSLY FAILED Lean 4 verification (OPEN LEMMA TARGETS block, if present).
-4. Decide exactly one of:
-   (A) `needs_theorem_work=false` - no theorem worth trying right now. Good reasons: all interesting claims in the paper are already covered by existing verified proofs; the paper is in too early a state; there is no claim a Lean 4 proof could close usefully.
-   (B) `needs_theorem_work=true` - propose a single candidate theorem to formalize.
+2. Read the USER RESEARCH PROMPT and treat it as the relevance boundary for all theorem work.
+3. Read the list of theorems that have ALREADY been verified by Lean 4 (EXISTING VERIFIED PROOFS block).
+4. Read the list of theorems that PREVIOUSLY FAILED Lean 4 verification (OPEN LEMMA TARGETS block, if present).
+5. Decide exactly one of:
+   (A) `needs_theorem_work=false` - no prompt-relevant theorem worth trying right now. Good reasons: all useful claims for the user's prompt are already covered by existing verified proofs; the paper is in too early a state; there is no claim a Lean 4 proof could close usefully; or the only available claims are mathematically interesting but off-topic.
+   (B) `needs_theorem_work=true` - propose a single prompt-relevant candidate theorem to formalize.
 
 RULES FOR PROPOSING A THEOREM:
+- The theorem must directly help answer, support, or advance the USER RESEARCH PROMPT. Do not propose a theorem merely because it is non-trivial or mathematically interesting.
 - The theorem must be provable in Lean 4 with Mathlib.
 - You MUST NOT re-propose a theorem that is already in EXISTING VERIFIED PROOFS. Look for theorems that are DIFFERENT - new results, missed lemmas, or sharper versions that are not yet on the list.
-- You MAY retry a theorem from OPEN LEMMA TARGETS when the paper now gives you a better angle on it. When you do, set `retry_existing_failure_id` to the failed `theorem_id`.
+- You MAY retry a theorem from OPEN LEMMA TARGETS when it is still prompt-relevant and the paper now gives you a better angle on it. When you do, set `retry_existing_failure_id` to the failed `theorem_id`.
+- EXTENSION IS EXPLICITLY ALLOWED AND ENCOURAGED WHERE HELPFUL: you are NOT limited to exact claims already present in the current paper. You may construct a Lean-verifiable theorem by extending partial paper work, the current outline, supporting context, or the USER RESEARCH PROMPT when that theorem would materially help the paper construction and/or the user's requested goal.
+- Set `theorem_origin="existing_paper_claim"` only when the theorem directly formalizes a claim already present in the current paper text.
+- Set `theorem_origin="extension_from_partial_work"` when the theorem is constructed by extending the current paper, outline, or supporting context beyond the exact written claim.
+- Set `theorem_origin="extension_from_user_prompt"` when the theorem is prompted primarily by the USER RESEARCH PROMPT and helps the paper even if the current paper has not yet written the claim.
+- Extension-derived theorems (`extension_from_partial_work` or `extension_from_user_prompt`) MUST set `placement_preference="appendix_only"`. These proofs belong at the end of the paper in the Theorems Appendix, not inline in the main body.
+- Existing-paper-claim theorems may set `placement_preference="inline"` when a local body insertion would strengthen the existing argument, or `placement_preference="appendix_only"` when the proof is useful but would distract from the prose.
 - Prefer theorems whose statements are tight enough that Lean 4 can actually close them (arithmetic facts, concrete inequalities, specific algebraic identities, small group/ring/field lemmas, concrete combinatorial identities) over large open conjectures.
 - The `theorem_statement` is for a human reader. It should be precise, self-contained, and include the hypotheses.
-- The `formal_sketch` tells the formalization agent what tactics or lemmas look promising in Lean 4 / Mathlib. Keep it concrete.
-- The `source_excerpt` is 2-6 sentences of surrounding paper text that motivates why this theorem is a natural target here. It must be a direct paraphrase or quote from the current paper.
+- The `formal_sketch` tells the formalization agent what tactics or lemmas look promising in Lean 4 / Mathlib and why this theorem helps the user's prompt. Keep it concrete.
+- The `source_excerpt` is 2-6 sentences of motivating context. For `existing_paper_claim`, it must be a direct paraphrase or quote from the current paper. For extension-derived theorems, it may explain the partial paper work, outline item, supporting evidence, and/or user-prompt need that the theorem extends.
 
-If Stage 1 guesses wrong, Stage 2 cannot recover - 5 Lean 4 attempts will be spent on the wrong target. Prefer declining over a weak proposal.
+If Stage 1 guesses wrong, Stage 2 cannot recover - 5 Lean 4 attempts will be spent on the wrong target. Prefer declining over a weak or off-prompt proposal.
 
 Output your response ONLY as JSON in this exact format:
 {{{{
@@ -87,8 +97,10 @@ Output your response ONLY as JSON in this exact format:
   "theorem_statement": "precise theorem statement with explicit hypotheses and conclusion (empty if needs_theorem_work=false)",
   "formal_sketch": "concrete sketch: what tactics / Mathlib lemmas you expect to work (empty if needs_theorem_work=false)",
   "source_excerpt": "2-6 sentences of surrounding paper text that motivates this theorem (empty if needs_theorem_work=false)",
+  "theorem_origin": "existing_paper_claim | extension_from_partial_work | extension_from_user_prompt (empty if needs_theorem_work=false)",
+  "placement_preference": "inline | appendix_only (empty if needs_theorem_work=false)",
   "retry_existing_failure_id": "theorem_id from OPEN LEMMA TARGETS if retrying a prior failure, empty string otherwise",
-  "reasoning": "why this theorem is the best target right now OR why no theorem should be attempted"
+  "reasoning": "why this theorem is the best prompt-relevant target right now OR why no theorem should be attempted"
 }}}}"""
 
 
@@ -98,6 +110,8 @@ _DISCOVERY_JSON_SCHEMA = """REQUIRED JSON FORMAT - STAGE 1 (DISCOVERY):
   "theorem_statement": "string",
   "formal_sketch": "string",
   "source_excerpt": "string",
+  "theorem_origin": "existing_paper_claim OR extension_from_partial_work OR extension_from_user_prompt",
+  "placement_preference": "inline OR appendix_only",
   "retry_existing_failure_id": "string (may be empty)",
   "reasoning": "string"
 }
@@ -108,8 +122,22 @@ Example (propose a theorem):
   "theorem_statement": "For every natural number n, the sum of the first n positive integers equals n*(n+1)/2.",
   "formal_sketch": "Induction on n. Base: n=0 both sides are 0. Step: use Finset.sum_range_succ and Nat.succ_mul; close with omega / ring. Mathlib has Finset.sum_range_id which may finish it outright.",
   "source_excerpt": "In Section 2 we reasoned about partial sums of the form 1 + 2 + ... + n...",
+  "theorem_origin": "existing_paper_claim",
+  "placement_preference": "inline",
   "retry_existing_failure_id": "",
-  "reasoning": "Section 2 relies on the closed form but currently presents it without a verified proof. Lean 4 can close this cleanly; it does not duplicate any existing verified proof."
+  "reasoning": "Section 2 uses this closed form to support the user's requested argument but currently presents it without a verified proof. Lean 4 can close this cleanly; it does not duplicate any existing verified proof."
+}
+
+Example (propose an extension theorem for the appendix):
+{
+  "needs_theorem_work": true,
+  "theorem_statement": "For every natural number n, n*(n+1) is even.",
+  "formal_sketch": "Use Nat.even_mul_succ_self or prove by parity cases / omega. This lemma can support a later divisibility argument about triangular numbers.",
+  "source_excerpt": "The outline asks for arithmetic constraints on triangular-number expressions, but the current paper has not yet isolated the parity lemma needed for the clean construction. This theorem extends the partial plan into a Lean-checkable support result.",
+  "theorem_origin": "extension_from_partial_work",
+  "placement_preference": "appendix_only",
+  "retry_existing_failure_id": "",
+  "reasoning": "This is not an exact written claim in the current paper; it extends the partial outline into a useful verified lemma. Because it is extension-derived, it should be stored in the Theorems Appendix rather than inserted inline."
 }
 
 Example (decline):
@@ -118,8 +146,10 @@ Example (decline):
   "theorem_statement": "",
   "formal_sketch": "",
   "source_excerpt": "",
+  "theorem_origin": "",
+  "placement_preference": "",
   "retry_existing_failure_id": "",
-  "reasoning": "The paper currently contains only outline scaffolding and the one verified theorem (proof_002). Attempting another Lean 4 proof right now would either duplicate proof_002 or target claims that are too vague to formalize."
+  "reasoning": "The paper currently contains only outline scaffolding and the one verified theorem (proof_002). Attempting another Lean 4 proof right now would either duplicate proof_002, target claims that are too vague to formalize, or chase claims that do not help the user's prompt."
 }
 """
 
@@ -151,6 +181,7 @@ HARD REQUIREMENTS ON `new_string`:
 
 PLACEMENT GUIDELINES:
 - Put the theorem where it strengthens the local argument. Prefer insertion points inside a relevant body section (near the discussion it closes) over dumping it in a new section.
+- The inline placement should make clear why this verified theorem helps the paper answer or advance the USER RESEARCH PROMPT.
 - The paper has a Theorems Appendix block already; do NOT try to edit the appendix directly.
 - Keep `old_string` short but unique (3-5 lines of surrounding context is usually enough).
 

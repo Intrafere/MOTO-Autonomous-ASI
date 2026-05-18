@@ -55,6 +55,10 @@ class PaperTitleSelectorAgent:
     def get_current_task_id(self) -> str:
         """Get the task ID for the current/next API call."""
         return f"agg_sub1_{self.task_sequence:03d}"
+
+    def get_current_validation_task_id(self) -> str:
+        """Get a validator-routed task ID for title validation."""
+        return f"agg_val_{self.task_sequence:03d}"
     
     async def select_title(
         self,
@@ -232,7 +236,7 @@ class PaperTitleSelectorAgent:
                 return None
 
             # Generate task ID for tracking
-            task_id = self.get_current_task_id()
+            task_id = self.get_current_validation_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -326,7 +330,7 @@ class PaperTitleSelectorAgent:
             
             response = await api_client_manager.generate_completion(
                 task_id=task_id,
-                role_id=self.role_id,  # Use same role_id for validation
+                role_id="autonomous_paper_title_validator",
                 model=self.validator_model_id,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=15000,

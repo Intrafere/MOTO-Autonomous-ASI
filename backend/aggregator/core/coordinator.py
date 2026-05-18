@@ -12,13 +12,15 @@ from datetime import datetime
 import aiofiles
 
 from backend.shared.config import system_config, rag_config
-from backend.shared.models import SystemStatus, Submission, ValidationResult, SubmitterConfig, WorkflowTask, ModelConfig
+from backend.shared.models import SystemStatus, Submission, ValidationResult, SubmitterConfig, WorkflowTask, ModelConfig, ProofAttemptFeedback
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.rag_lock import rag_operation_lock
 from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
+from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
+from backend.shared.log_redaction import redact_log_text
 from backend.aggregator.agents.submitter import SubmitterAgent
 from backend.aggregator.agents.validator import ValidatorAgent
 from backend.aggregator.core.queue_manager import queue_manager
@@ -27,6 +29,36 @@ from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.event_log import event_log
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_uploaded_user_file(file_ref: str, *, allow_trusted_context_files: bool = False) -> Optional[Path]:
+    """Resolve a user upload reference without exposing arbitrary local files."""
+    raw_ref = str(file_ref or "").strip()
+    if not raw_ref:
+        return None
+
+    uploads_root = Path(system_config.user_uploads_dir).resolve()
+    data_root = Path(system_config.data_dir).resolve()
+
+    # Public uploads are logical filenames. Absolute paths are only accepted
+    # after the same root-containment check, so a caller cannot expand access.
+    try:
+        if Path(raw_ref).is_absolute():
+            return resolve_path_within_root(uploads_root, raw_ref)
+
+        safe_filename = validate_single_path_component(raw_ref, "uploaded filename")
+        return resolve_path_within_root(uploads_root, safe_filename)
+    except ValueError as exc:
+        upload_error = exc
+
+    if allow_trusted_context_files:
+        try:
+            return resolve_path_within_root(data_root, raw_ref)
+        except ValueError:
+            pass
+
+    logger.warning("Rejected unsafe uploaded file reference: %s", redact_log_text(upload_error, 240))
+    return None
 
 
 class Coordinator:
@@ -72,6 +104,7 @@ class Coordinator:
         self.single_model_mode = False
         self.submitter_configs: List[SubmitterConfig] = []
         self.validator_model = ""
+        self.validator_provider = "lm_studio"
         
         # Workflow tracking
         self.workflow_tasks: List[WorkflowTask] = []
@@ -84,6 +117,12 @@ class Coordinator:
         
         # Cleanup review toggle (disabled for short-lived mini-brainstorm phases)
         self.enable_cleanup_review = True
+
+        # Optional source-level hard cap used by autonomous brainstorm mode.
+        self.max_total_acceptances: Optional[int] = None
+        self.acceptance_count_offset: int = 0
+        self.acceptance_cap_callback: Optional[Callable[[int], Any]] = None
+        self._acceptance_cap_reached = False
     
     async def _load_stats(self) -> None:
         """Load persisted stats from file."""
@@ -120,6 +159,43 @@ class Coordinator:
             logger.debug("Saved stats to file")
         except Exception as e:
             logger.error(f"Failed to save stats: {e}")
+
+    def _should_use_single_model_mode(
+        self,
+        submitter_configs: List[SubmitterConfig],
+        validator_model: str,
+        validator_provider: str,
+        loaded_models: List[str],
+    ) -> bool:
+        """
+        Decide whether same-model aggregator roles must run sequentially.
+
+        Multiple loaded LM Studio `:#` siblings of the same base model provide
+        safe submitter fan-out capacity; otherwise preserve the existing
+        sequential single-model mode.
+        """
+        all_models = [sc.model_id for sc in submitter_configs] + [validator_model]
+        if len(set(all_models)) != 1:
+            return False
+
+        all_lm_studio = (
+            validator_provider == "lm_studio"
+            and all(sc.provider == "lm_studio" for sc in submitter_configs)
+        )
+        if not all_lm_studio:
+            return True
+
+        sibling_count = lm_studio_client.count_sibling_instances_from_loaded(validator_model, loaded_models)
+        if sibling_count > 1:
+            logger.info(
+                "Single configured LM Studio model '%s' has %s loaded same-base instances; "
+                "using parallel submitter workflow with instance sharing.",
+                validator_model,
+                sibling_count,
+            )
+            return False
+
+        return True
     
     async def initialize(
         self,
@@ -132,8 +208,14 @@ class Coordinator:
         validator_max_tokens: Optional[int] = None,
         validator_provider: str = "lm_studio",
         validator_openrouter_provider: Optional[str] = None,
+        validator_openrouter_reasoning_effort: str = "auto",
         validator_lm_studio_fallback: Optional[str] = None,
-        enable_cleanup_review: bool = True
+        validator_supercharge_enabled: bool = False,
+        enable_cleanup_review: bool = True,
+        max_total_acceptances: Optional[int] = None,
+        acceptance_count_offset: int = 0,
+        acceptance_cap_callback: Optional[Callable[[int], Any]] = None,
+        allow_trusted_context_files: bool = False,
     ) -> None:
         """
         Initialize the coordinator with configuration.
@@ -148,12 +230,22 @@ class Coordinator:
             validator_max_tokens: Optional max output tokens override for validator
             validator_provider: Provider for validator ("lm_studio" or "openrouter")
             validator_openrouter_provider: OpenRouter host provider for validator (e.g., "Anthropic")
+            validator_openrouter_reasoning_effort: OpenRouter reasoning effort for validator
             validator_lm_studio_fallback: LM Studio fallback model for validator when using OpenRouter
+            validator_supercharge_enabled: Whether validator answers should use Supercharge
+            max_total_acceptances: Optional hard cap for accepted submissions, including offset
+            acceptance_count_offset: Existing acceptances before this coordinator run
+            acceptance_cap_callback: Async callback fired when the cap is reached
+            allow_trusted_context_files: Allow internal callers to pass data-root files as context
         """
         logger.info("Initializing coordinator...")
         
         # Store cleanup review toggle
         self.enable_cleanup_review = enable_cleanup_review
+        self.max_total_acceptances = max_total_acceptances
+        self.acceptance_count_offset = max(0, acceptance_count_offset)
+        self.acceptance_cap_callback = acceptance_cap_callback
+        self._acceptance_cap_reached = False
         
         # Validate submitter count
         num_submitters = len(submitter_configs)
@@ -189,13 +281,21 @@ class Coordinator:
         final_validator_max_output = validator_max_tokens if validator_max_tokens is not None else rag_config.validator_max_output_tokens
         context_allocator.set_context_windows(final_submitter_context, final_validator_context, final_submitter_max_output, final_validator_max_output)
         
-        # CRITICAL: Detect single-model mode ONLY based on configured model IDs
+        # Log currently loaded models for diagnostics and same-base instance scheduling.
+        loaded_models = await lm_studio_client.get_loaded_models()
+        logger.info(f"Currently loaded models: {loaded_models}")
+
+        # CRITICAL: Detect single-model mode based on configured model IDs, with
+        # an LM Studio sibling-instance exception for safe submitter fan-out.
         # Boost routing is INDEPENDENT of this decision and does NOT affect concurrency
         # Single-model mode prevents queue overflow when all agents share the same LM Studio server
         # Boost can route calls to OpenRouter even in single-model mode (if enabled)
-        all_models = [sc.model_id for sc in submitter_configs] + [validator_model]
-        unique_models = set(all_models)
-        self.single_model_mode = len(unique_models) == 1
+        self.single_model_mode = self._should_use_single_model_mode(
+            submitter_configs,
+            validator_model,
+            validator_provider,
+            loaded_models,
+        )
         
         if self.single_model_mode:
             logger.info(
@@ -216,10 +316,6 @@ class Coordinator:
                 f"Boost mode ACTIVE: Will route selected tasks to {boost_manager.boost_config.boost_model_id}. "
                 f"This does NOT affect parallel execution mode."
             )
-        
-        # Log currently loaded models for diagnostics
-        loaded_models = await lm_studio_client.get_loaded_models()
-        logger.info(f"Currently loaded models: {loaded_models}")
         
         # CRITICAL: Warn user about potential context mismatches
         # LM Studio may not load models with requested context - this causes silent failures
@@ -260,19 +356,25 @@ class Coordinator:
         
         # Load user files into RAG system
         user_files_content = {}
-        for file_path in user_files:
-            path = Path(file_path)
+        for file_ref in user_files:
+            path = _resolve_uploaded_user_file(
+                file_ref,
+                allow_trusted_context_files=allow_trusted_context_files,
+            )
+            if path is None:
+                continue
             if path.exists():
                 # Add to RAG system with all 4 chunk configs
                 await rag_manager.add_document(
-                    file_path,
+                    str(path),
                     chunk_sizes=rag_config.submitter_chunk_intervals,
                     is_user_file=True
                 )
                 # Also load content for potential direct injection (async to avoid blocking)
-                async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+                # codeql[py/path-injection]: path is resolved by _resolve_uploaded_user_file within uploads/data roots.
+                async with aiofiles.open(path, 'r', encoding='utf-8') as f:
                     user_files_content[path.name] = await f.read()
-                logger.info(f"Loaded user file: {path.name}")
+                logger.info("Loaded user file: %s", redact_log_text(path.name, 120))
         
         # Create submitter agents from configs (1-10 submitters with individual settings)
         self.submitters = []
@@ -301,9 +403,11 @@ class Coordinator:
                     provider=config.provider,
                     model_id=config.model_id,
                     openrouter_provider=config.openrouter_provider,
+                    openrouter_reasoning_effort=config.openrouter_reasoning_effort,
                     lm_studio_fallback_id=config.lm_studio_fallback_id,
                     context_window=config.context_window,
-                    max_output_tokens=config.max_output_tokens
+                    max_output_tokens=config.max_output_tokens,
+                    supercharge_enabled=config.supercharge_enabled
                 )
             )
             logger.info(f"Created Submitter {config.submitter_id}: model={config.model_id}, provider={config.provider}, context={config.context_window}")
@@ -326,9 +430,11 @@ class Coordinator:
                 provider=validator_provider,
                 model_id=validator_model,
                 openrouter_provider=validator_openrouter_provider,
+                openrouter_reasoning_effort=validator_openrouter_reasoning_effort,
                 lm_studio_fallback_id=validator_lm_studio_fallback,
                 context_window=final_validator_context,
-                max_output_tokens=final_validator_max_output
+                max_output_tokens=final_validator_max_output,
+                supercharge_enabled=validator_supercharge_enabled
             )
         )
         logger.info(f"Created Validator: model={validator_model}, provider={validator_provider}")
@@ -627,6 +733,8 @@ class Coordinator:
                 for submission, result in zip(submissions, results):
                     if result.decision == "accept":
                         await self._handle_acceptance(submission, result)
+                        if self._acceptance_cap_reached:
+                            break
                     else:
                         await self._handle_rejection(submission, result)
                 
@@ -721,6 +829,8 @@ class Coordinator:
                     for submission, result in zip(submissions, results):
                         if result.decision == "accept":
                             await self._handle_acceptance(submission, result)
+                            if self._acceptance_cap_reached:
+                                break
                         else:
                             await self._handle_rejection(submission, result)
                 
@@ -755,10 +865,22 @@ class Coordinator:
     
     async def _handle_acceptance(self, submission: Submission, result: ValidationResult) -> None:
         """Handle accepted submission."""
+        next_total_acceptances = self.acceptance_count_offset + self.total_acceptances + 1
+        if (
+            self.max_total_acceptances is not None
+            and next_total_acceptances > self.max_total_acceptances
+        ):
+            await self._handle_acceptance_cap_reached(
+                self.acceptance_count_offset + self.total_acceptances
+            )
+            return
+
         self.total_acceptances += 1
+        total_acceptances_with_offset = self.acceptance_count_offset + self.total_acceptances
         
         # Add to shared training
         await shared_training_memory.add_accepted_submission(submission.content)
+        await self._register_accepted_brainstorm_proof(submission)
         
         # Notify submitter
         submitter = next((s for s in self.submitters if s.submitter_id == submission.submitter_id), None)
@@ -812,6 +934,115 @@ class Coordinator:
         # Trigger cleanup review every 7 acceptances
         if self.enable_cleanup_review and self.total_acceptances % 7 == 0 and self.total_acceptances > 0:
             await self._perform_cleanup_review()
+
+        if (
+            self.max_total_acceptances is not None
+            and total_acceptances_with_offset >= self.max_total_acceptances
+        ):
+            await self._handle_acceptance_cap_reached(total_acceptances_with_offset)
+
+    async def _handle_acceptance_cap_reached(self, total_acceptances: int) -> None:
+        """Stop accepting new work once an optional source-level cap is reached."""
+        if self._acceptance_cap_reached:
+            return
+
+        self._acceptance_cap_reached = True
+        self.is_running = False
+
+        logger.info(
+            "Acceptance cap reached at %s total acceptances; stopping aggregator at source",
+            total_acceptances,
+        )
+
+        await self._broadcast("acceptance_cap_reached", {
+            "total_acceptances": total_acceptances,
+            "max_total_acceptances": self.max_total_acceptances,
+        })
+
+        if self.acceptance_cap_callback:
+            try:
+                await self.acceptance_cap_callback(total_acceptances)
+            except Exception as e:
+                logger.error("Acceptance cap callback failed: %s", e, exc_info=True)
+
+        current_task = asyncio.current_task()
+        for submitter in self.submitters:
+            try:
+                await submitter.stop()
+            except Exception as e:
+                logger.warning("Error stopping submitter after acceptance cap: %s", e)
+
+        if self._main_task and self._main_task is not current_task and not self._main_task.done():
+            self._main_task.cancel()
+
+    def _brainstorm_proof_source_id(self) -> str:
+        """Derive a stable proof source id from the active brainstorm database path."""
+        try:
+            stem = Path(shared_training_memory.file_path).stem
+            if stem.startswith("brainstorm_"):
+                return stem[len("brainstorm_"):] or stem
+            return stem or "manual_aggregator"
+        except Exception:
+            return "manual_aggregator"
+
+    async def _register_accepted_brainstorm_proof(self, submission: Submission) -> None:
+        """Store validator-accepted Lean-verified brainstorm proofs in the proof database."""
+        proof_payload = (submission.metadata or {}).get("brainstorm_lean_proof")
+        if not isinstance(proof_payload, dict):
+            return
+
+        theorem_statement = str(proof_payload.get("theorem_statement") or "").strip()
+        lean_code = str(proof_payload.get("lean_code") or "").strip()
+        if not theorem_statement or not lean_code:
+            return
+
+        try:
+            from backend.autonomous.core.proof_registration import register_verified_lean_proof
+            from backend.autonomous.memory.proof_database import proof_database
+
+            attempts = [
+                item if isinstance(item, ProofAttemptFeedback) else ProofAttemptFeedback.model_validate(item)
+                for item in (proof_payload.get("attempts") or [])
+            ]
+            source_id = self._brainstorm_proof_source_id()
+            source_title = (self.validator.user_prompt if self.validator else "")[:300]
+            registration = await register_verified_lean_proof(
+                proof_database=proof_database,
+                user_prompt=self.validator.user_prompt if self.validator else "",
+                theorem_statement=theorem_statement,
+                lean_code=lean_code,
+                validator_model=self.validator_model,
+                validator_context=rag_config.validator_context_window,
+                validator_max_tokens=rag_config.validator_max_output_tokens,
+                task_id=f"agg_proof_novelty_{self.total_acceptances:03d}",
+                role_id="aggregator_validator",
+                source_type="brainstorm",
+                source_id=source_id,
+                source_title=source_title,
+                theorem_id=f"brainstorm_submission_{self.total_acceptances}",
+                theorem_name=str(proof_payload.get("theorem_name") or ""),
+                formal_sketch=str(proof_payload.get("formal_sketch") or ""),
+                verification_notes="Lean 4 accepted this brainstorm proof before validator acceptance.",
+                attempt_count=int(proof_payload.get("attempt_count") or len(attempts)),
+                attempts=attempts,
+                broadcast_fn=self._broadcast,
+                base_event={
+                    "source_type": "brainstorm",
+                    "source_id": source_id,
+                    "submission_id": submission.submission_id,
+                    "submitter_id": submission.submitter_id,
+                    "trigger": "brainstorm_inline",
+                },
+                proof_label=f"Brainstorm submission {self.total_acceptances}",
+            )
+            submission.metadata["proof_id"] = registration.record.proof_id
+        except Exception as exc:
+            logger.warning(
+                "Accepted Lean brainstorm proof registration failed for submission %s: %s",
+                submission.submission_id,
+                exc,
+                exc_info=True,
+            )
     
     async def _handle_rejection(self, submission: Submission, result: ValidationResult) -> None:
         """Handle rejected submission."""

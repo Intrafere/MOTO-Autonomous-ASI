@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import './MathematicalProofs.css';
 import ProofGraph from './ProofGraph';
+import {
+  buildCurrentProofRuntimeConfig,
+  isProofRuntimeConfigComplete,
+} from '../../hooks/useProofCheckRuntime';
 
 function formatDate(isoString) {
   if (!isoString) {
@@ -49,8 +53,11 @@ function createEmptyGraphState() {
 
 function getTierBadge(proof) {
   const tier = proof.novelty_tier;
+  if (tier === 'major_mathematical_discovery') {
+    return { cardClass: 'platinum', badgeClass: 'platinum', label: 'Major Mathematical Discovery' };
+  }
   if (tier === 'mathematical_discovery') {
-    return { cardClass: 'gold', badgeClass: 'gold', label: 'Mathematical Discovery' };
+    return { cardClass: 'gold', badgeClass: 'gold', label: 'Minor Mathematical Discovery' };
   }
   if (tier === 'novel_variant') {
     return { cardClass: 'silver', badgeClass: 'silver', label: 'Novel Reformulation' };
@@ -299,7 +306,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
   }, [api, proofGraphState.loaded, proofGraphState.loading, proofStatus?.lean4_enabled, viewMode]);
 
   const availableBrainstorms = useMemo(
-    () => brainstorms.filter((brainstorm) => brainstorm.status === 'complete'),
+    () => brainstorms,
     [brainstorms]
   );
 
@@ -328,14 +335,16 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
 
   const counts = useMemo(() => {
     const novel = proofs.filter((proof) => proof.novel).length;
+    const majorDiscovery = proofs.filter((proof) => proof.novelty_tier === 'major_mathematical_discovery').length;
     const discovery = proofs.filter((proof) => proof.novelty_tier === 'mathematical_discovery').length;
     const variant = proofs.filter((proof) => proof.novelty_tier === 'novel_variant').length;
     const formulation = proofs.filter((proof) => proof.novelty_tier === 'novel_formulation').length;
-    const legacyNovel = novel - discovery - variant - formulation;
+    const legacyNovel = novel - majorDiscovery - discovery - variant - formulation;
     return {
       total: proofs.length,
       novel,
       known: proofs.length - novel,
+      majorDiscovery,
       discovery,
       variant,
       formulation,
@@ -346,6 +355,9 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
   const visibleProofs = useMemo(() => {
     if (filter === 'novel') {
       return proofs.filter((proof) => proof.novel);
+    }
+    if (filter === 'major_mathematical_discovery') {
+      return proofs.filter((proof) => proof.novelty_tier === 'major_mathematical_discovery');
     }
     if (filter === 'mathematical_discovery') {
       return proofs.filter((proof) => proof.novelty_tier === 'mathematical_discovery');
@@ -363,15 +375,21 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
     [visibleProofs]
   );
   const showManualPanel = Boolean(proofStatus?.lean4_path);
-  const manualChecksDisabled = !proofStatus?.lean4_enabled || !proofStatus?.manual_check_ready || availableSources.length === 0;
+  const currentProofRuntimeConfig = buildCurrentProofRuntimeConfig();
+  const hasCurrentProofRuntimeConfig = isProofRuntimeConfigComplete(currentProofRuntimeConfig);
+  const manualChecksDisabled = (
+    !proofStatus?.lean4_enabled ||
+    (!proofStatus?.manual_check_ready && !hasCurrentProofRuntimeConfig) ||
+    availableSources.length === 0
+  );
   const manualChecksDisabledReason = !proofStatus
     ? 'Loading proof runtime status...'
     : !proofStatus?.lean4_enabled
       ? 'Lean 4 proof checks are disabled.'
-    : !proofStatus?.manual_check_ready
+    : !proofStatus?.manual_check_ready && !hasCurrentProofRuntimeConfig
       ? (proofStatus?.manual_check_message || 'Manual proof checks are not ready yet.')
       : availableSources.length === 0
-        ? 'No completed sources are available yet.'
+        ? (manualSourceType === 'brainstorm' ? 'No brainstorms are available yet.' : 'No completed papers are available yet.')
         : '';
 
   const handleSelectGraphProof = (proofId) => {
@@ -387,9 +405,11 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
     try {
       setManualCheckPending(true);
       setManualCheckMessage('');
+      const proofRuntimeConfig = buildCurrentProofRuntimeConfig();
       await api.runProofCheck({
         sourceType: manualSourceType,
         sourceId: manualSourceId,
+        proofRuntimeConfig: isProofRuntimeConfigComplete(proofRuntimeConfig) ? proofRuntimeConfig : null,
       });
       setManualCheckMessage(`Queued proof check for ${manualSourceType} ${manualSourceId}.`);
     } catch (err) {
@@ -432,10 +452,16 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
               All Novel ({counts.novel || 0})
             </button>
             <button
+              className={`math-proofs-filter math-proofs-filter--platinum ${filter === 'major_mathematical_discovery' ? 'active' : ''}`}
+              onClick={() => setFilter('major_mathematical_discovery')}
+            >
+              Major Discovery ({counts.majorDiscovery || 0})
+            </button>
+            <button
               className={`math-proofs-filter math-proofs-filter--gold ${filter === 'mathematical_discovery' ? 'active' : ''}`}
               onClick={() => setFilter('mathematical_discovery')}
             >
-              Discovery ({counts.discovery || 0})
+              Minor Mathematical Discovery ({counts.discovery || 0})
             </button>
             <button
               className={`math-proofs-filter math-proofs-filter--silver ${filter === 'novel_variant' ? 'active' : ''}`}
@@ -496,7 +522,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
         <div className="math-proofs-manual-panel">
           <div className="math-proofs-manual-copy">
             <strong>Manual proof check</strong>
-            <span>Queue a Lean 4 proof pass for any completed brainstorm or paper.</span>
+            <span>Queue a Lean 4 proof pass for any brainstorm or completed paper.</span>
           </div>
           <div className="math-proofs-manual-controls">
             <select
@@ -512,7 +538,11 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
               onChange={(event) => setManualSourceId(event.target.value)}
               disabled={manualCheckPending || availableSources.length === 0}
             >
-              {availableSources.length === 0 && <option value="">No completed sources available</option>}
+              {availableSources.length === 0 && (
+                <option value="">
+                  {manualSourceType === 'brainstorm' ? 'No brainstorms available' : 'No completed papers available'}
+                </option>
+              )}
               {manualSourceType === 'brainstorm' &&
                 availableBrainstorms.map((brainstorm) => (
                   <option key={brainstorm.topic_id} value={brainstorm.topic_id}>
@@ -615,12 +645,21 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
                     </p>
                   </div>
 
-                  <button
-                    className="math-proof-expand"
-                    onClick={() => setExpandedProofId(isExpanded ? null : proof.proof_id)}
-                  >
-                    {isExpanded ? 'Hide Details' : 'View Details'}
-                  </button>
+                  <div className="math-proof-card-actions">
+                    <a
+                      className="math-proof-download math-proof-download--compact"
+                      href={api.getProofLeanDownloadUrl(proof.proof_id)}
+                      download={`${proof.proof_id}.lean`}
+                    >
+                      Download .lean
+                    </a>
+                    <button
+                      className="math-proof-expand"
+                      onClick={() => setExpandedProofId(isExpanded ? null : proof.proof_id)}
+                    >
+                      {isExpanded ? 'Hide Details' : 'View Details'}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="math-proof-meta">

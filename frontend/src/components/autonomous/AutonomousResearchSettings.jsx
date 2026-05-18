@@ -8,9 +8,15 @@ import React, { useState, useEffect } from 'react';
 import { openRouterAPI, api, autonomousAPI } from '../../services/api';
 import {
   computeOpenRouterAutoSettings,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
   getProviderNames,
+  getReasoningSupportInfo,
   hasEndpointMetadata,
+  normalizeOpenRouterReasoningEffort,
+  OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import {
   AUTONOMOUS_SETTINGS_STORAGE_KEY,
@@ -19,8 +25,13 @@ import {
   RECOMMENDED_PROFILES,
   applyAutonomousProfileSelection,
   getStoredAutonomousSettings,
+  persistAutonomousSettings,
+  settingsToAutonomousConfig,
 } from '../../utils/autonomousProfiles';
 import HelpTooltip from '../HelpTooltip';
+import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
+import ProofStrengthBadge from '../ProofStrengthBadge';
+import RawSettingsEditor from '../RawSettingsEditor';
 import './AutonomousResearch.css';
 import '../settings-common.css';
 
@@ -29,29 +40,28 @@ const DEFAULT_SUBMITTER_CONFIG = {
   provider: 'lm_studio',
   modelId: '',
   openrouterProvider: null,
+  openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
   lmStudioFallbackId: null,
-  contextWindow: 131072,
-  maxOutputTokens: 25000
+  contextWindow: DEFAULT_CONTEXT_WINDOW,
+  maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  superchargeEnabled: false
 };
 
-const OsTag = () => (
-  <span className="os-tag-tooltip-anchor">
-    <span className="os-tag">OS</span>
-    <span className="os-tag-tooltip">
-      Open source — weights available on Hugging Face for local use with LM Studio.
-    </span>
-  </span>
-);
+const RAW_VIEW_EXIT_WARNING = 'Switching back to the GUI view will restore your last GUI settings/profile and discard raw-only changes. Continue?';
+const formatRawSettings = (value) => JSON.stringify(value, null, 2);
+const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer attempts, then run a 5th same-model call to choose or synthesize the best final answer. It uses 5x the API calls, so it is about 5x slower and 5x more costly, but can produce more intelligent answers.';
 
 // ModelSelector component - extracted outside to prevent recreation on every render
 const ModelSelector = ({
   provider,
   modelId,
   openrouterProv,
+  openrouterReasoningEffort,
   fallback,
   onProviderChange,
   onModelChange,
   onOpenrouterProviderChange,
+  onOpenrouterReasoningEffortChange,
   onFallbackChange,
   lmStudioModels,
   openRouterModels,
@@ -65,6 +75,9 @@ const ModelSelector = ({
   const providers = modelId && effectiveProvider === 'openrouter'
     ? getProviderNames(modelProviders[modelId])
     : [];
+  const reasoningInfo = effectiveProvider === 'openrouter'
+    ? getReasoningSupportInfo(modelProviders[modelId], openrouterProv || null)
+    : { hasEndpointMetadata: false, supportsReasoning: false };
 
   return (
     <>
@@ -139,6 +152,26 @@ const ModelSelector = ({
         </div>
       )}
 
+      {effectiveProvider === 'openrouter' && modelId && (
+        <div className="settings-row">
+          <label>Reasoning Effort</label>
+          <select
+            value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
+            onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
+            disabled={isRunning}
+          >
+            {OPENROUTER_REASONING_EFFORT_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <small className="settings-hint">
+            {reasoningInfo.hasEndpointMetadata && !reasoningInfo.supportsReasoning
+              ? 'This selected host does not advertise reasoning support; OpenRouter may ignore the setting.'
+              : 'Auto sends OpenRouter max reasoning effort by default.'}
+          </small>
+        </div>
+      )}
+
       {/* LM Studio Fallback (if OpenRouter) */}
       {effectiveProvider === 'openrouter' && lmStudioEnabled && (
         <div className="settings-row">
@@ -178,21 +211,28 @@ const RoleConfig = ({
   modelProviders,
   hasOpenRouterKey,
   lmStudioEnabled,
+  developerModeEnabled = false,
+  showProofStrengthBadge = false,
 }) => {
   const storedProvider = localConfig[`${rolePrefix}_provider`] || 'lm_studio';
   const provider = lmStudioEnabled ? storedProvider : 'openrouter';
   const modelId = localConfig[`${rolePrefix}_model`] || '';
   const openrouterProv = localConfig[`${rolePrefix}_openrouter_provider`];
+  const openrouterReasoningEffort = localConfig[`${rolePrefix}_openrouter_reasoning_effort`];
   const fallback = localConfig[`${rolePrefix}_lm_studio_fallback`];
-  const contextWindow = localConfig[`${rolePrefix}_context_window`] || 131072;
-  const maxTokens = localConfig[`${rolePrefix}_max_tokens`] || 25000;
+  const contextWindow = localConfig[`${rolePrefix}_context_window`] || DEFAULT_CONTEXT_WINDOW;
+  const maxTokens = localConfig[`${rolePrefix}_max_tokens`] || DEFAULT_MAX_OUTPUT_TOKENS;
+  const superchargeEnabled = Boolean(localConfig[`${rolePrefix}_supercharge_enabled`]);
 
   return (
     <div className={`submitter-config-section${provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`} style={{
       borderColor: provider === 'openrouter' ? undefined : borderColor
     }}>
       <h5 className={provider === 'openrouter' ? 'card-title--orange' : ''} style={provider !== 'openrouter' ? { color: borderColor } : undefined}>
-        {title}
+        <span className="role-title-with-badges">
+          <span>{title}</span>
+          {showProofStrengthBadge && <ProofStrengthBadge />}
+        </span>
         {provider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
       </h5>
       {hint && <p className="settings-hint">{hint}</p>}
@@ -201,10 +241,12 @@ const RoleConfig = ({
         provider={provider}
         modelId={modelId}
         openrouterProv={openrouterProv}
+        openrouterReasoningEffort={openrouterReasoningEffort}
         fallback={fallback}
         onProviderChange={(p) => handleProviderChange(rolePrefix, p)}
         onModelChange={(m) => handleModelChange(rolePrefix, m)}
         onOpenrouterProviderChange={(p) => handleOpenRouterProviderChange(rolePrefix, p)}
+        onOpenrouterReasoningEffortChange={(effort) => handleChange(`${rolePrefix}_openrouter_reasoning_effort`, normalizeOpenRouterReasoningEffort(effort))}
         onFallbackChange={(f) => handleChange(`${rolePrefix}_lm_studio_fallback`, f)}
         lmStudioModels={lmStudioModels}
         openRouterModels={openRouterModels}
@@ -241,11 +283,40 @@ const RoleConfig = ({
           step={1000}
         />
       </div>
+
+      {developerModeEnabled && (
+        <div className="settings-row settings-row--inline-checkbox">
+          <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+            <input
+              type="checkbox"
+              checked={superchargeEnabled}
+              onChange={(e) => handleChange(`${rolePrefix}_supercharge_enabled`, e.target.checked)}
+              disabled={isRunning}
+            />
+            <HelpTooltip
+              label="Learn about Supercharge"
+              buttonContent="Supercharge"
+              buttonClassName="help-tooltip-btn--text"
+              popupClassName="help-tooltip-popup--fixed"
+              useFixedPosition
+            >
+              {SUPERCHARGE_TOOLTIP}
+            </HelpTooltip>
+          </label>
+        </div>
+      )}
     </div>
   );
 };
 
-const AutonomousResearchSettings = ({ config, onConfigChange, models, capabilities, isRunning }) => {
+const AutonomousResearchSettings = ({
+  config,
+  onConfigChange,
+  models,
+  capabilities,
+  isRunning,
+  developerModeEnabled = false,
+}) => {
   // Models and OpenRouter state
   const [lmStudioModels, setLmStudioModels] = useState(models || []);
   const [openRouterModels, setOpenRouterModels] = useState([]);
@@ -257,14 +328,16 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
   const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(true);
   const [tier3Enabled, setTier3Enabled] = useState(false);
   const [isLoadedFromStorage, setIsLoadedFromStorage] = useState(false);
-  const [showKothTooltip, setShowKothTooltip] = useState(false);
-  const [showTestedModelsTooltip, setShowTestedModelsTooltip] = useState(false);
 
   // Profile management state
   const [userProfiles, setUserProfiles] = useState({});
   const [selectedProfile, setSelectedProfile] = useState('');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
+  const [editRawSettings, setEditRawSettings] = useState(false);
+  const [rawSettingsText, setRawSettingsText] = useState('');
+  const [rawSettingsMessage, setRawSettingsMessage] = useState('');
+  const [guiSettingsBeforeRaw, setGuiSettingsBeforeRaw] = useState(null);
 
   // Wolfram Alpha settings (shared with compiler)
   const [wolframEnabled, setWolframEnabled] = useState(false);
@@ -278,7 +351,6 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
   const [proofSettingsLspEnabled, setProofSettingsLspEnabled] = useState(false);
   const [proofSettingsLspIdleTimeout, setProofSettingsLspIdleTimeout] = useState('600');
   const [proofSettingsSmtEnabled, setProofSettingsSmtEnabled] = useState(false);
-  const [proofSettingsZ3Path, setProofSettingsZ3Path] = useState('');
   const [proofSettingsSmtTimeout, setProofSettingsSmtTimeout] = useState('30');
   const [savingProofSettings, setSavingProofSettings] = useState(false);
   const [proofSettingsMessage, setProofSettingsMessage] = useState('');
@@ -293,6 +365,13 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
   const genericMode = Boolean(capabilities?.genericMode);
   const showLean4Settings = Boolean(lmStudioEnabled && proofStatus?.lean4_path && !genericMode);
 
+  useEffect(() => {
+    if (!developerModeEnabled && editRawSettings) {
+      setEditRawSettings(false);
+      setRawSettingsMessage('');
+    }
+  }, [developerModeEnabled, editRawSettings]);
+
   const handleCollapsibleKeyDown = (event, toggleFn) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -305,7 +384,8 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
     if (cfg?.submitter_configs && Array.isArray(cfg.submitter_configs)) {
       return cfg.submitter_configs.map(c => ({
         ...DEFAULT_SUBMITTER_CONFIG,
-        ...c
+        ...c,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(c.openrouterReasoningEffort || c.openrouter_reasoning_effort),
       }));
     }
     return [
@@ -327,30 +407,38 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
     validator_provider: 'lm_studio',
     validator_model: '',
     validator_openrouter_provider: null,
+    validator_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
     validator_lm_studio_fallback: null,
-    validator_context_window: 131072,
-    validator_max_tokens: 25000,
+    validator_context_window: DEFAULT_CONTEXT_WINDOW,
+    validator_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    validator_supercharge_enabled: false,
     // High-Context
     high_context_provider: 'lm_studio',
     high_context_model: '',
     high_context_openrouter_provider: null,
+    high_context_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
     high_context_lm_studio_fallback: null,
-    high_context_context_window: 131072,
-    high_context_max_tokens: 25000,
+    high_context_context_window: DEFAULT_CONTEXT_WINDOW,
+    high_context_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    high_context_supercharge_enabled: false,
     // High-Param
     high_param_provider: 'lm_studio',
     high_param_model: '',
     high_param_openrouter_provider: null,
+    high_param_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
     high_param_lm_studio_fallback: null,
-    high_param_context_window: 131072,
-    high_param_max_tokens: 25000,
+    high_param_context_window: DEFAULT_CONTEXT_WINDOW,
+    high_param_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    high_param_supercharge_enabled: false,
     // Critique Submitter
     critique_submitter_provider: 'lm_studio',
     critique_submitter_model: '',
     critique_submitter_openrouter_provider: null,
+    critique_submitter_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
     critique_submitter_lm_studio_fallback: null,
-    critique_submitter_context_window: 131072,
-    critique_submitter_max_tokens: 25000,
+    critique_submitter_context_window: DEFAULT_CONTEXT_WINDOW,
+    critique_submitter_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    critique_submitter_supercharge_enabled: false,
     ...config
   });
 
@@ -371,6 +459,7 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
             normalized_submitter.modelId = normalized.submitters[0].modelId;
             normalized_submitter.provider = normalized.submitters[0].provider || 'openrouter';
             normalized_submitter.openrouterProvider = normalized.submitters[0].openrouterProvider || null;
+            normalized_submitter.openrouterReasoningEffort = normalizeOpenRouterReasoningEffort(normalized.submitters[0].openrouterReasoningEffort);
             normalized_submitter.lmStudioFallbackId = normalized.submitters[0].lmStudioFallbackId || null;
             console.log(`[Profile Normalization] Fixed blank submitter 3: using "${normalized_submitter.modelId}"`);
           }
@@ -488,7 +577,6 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
         setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
         setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? 600));
         setProofSettingsSmtEnabled(Boolean(status.smt_enabled));
-        setProofSettingsZ3Path(status.z3_path || '');
         setProofSettingsSmtTimeout(String(status.smt_timeout ?? 30));
       } catch (err) {
         console.error('Failed to load Lean 4 proof status:', err);
@@ -562,6 +650,7 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
         provider: 'openrouter',
         modelId: keepOpenRouterState ? (submitterConfig.modelId || '') : '',
         openrouterProvider: keepOpenRouterState ? (submitterConfig.openrouterProvider || null) : null,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(submitterConfig.openrouterReasoningEffort),
         lmStudioFallbackId: null,
       };
     });
@@ -571,6 +660,7 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
       const providerKey = `${rolePrefix}_provider`;
       const modelKey = `${rolePrefix}_model`;
       const openRouterProviderKey = `${rolePrefix}_openrouter_provider`;
+      const reasoningEffortKey = `${rolePrefix}_openrouter_reasoning_effort`;
       const fallbackKey = `${rolePrefix}_lm_studio_fallback`;
       const keepOpenRouterState = normalizedLocalConfig[providerKey] === 'openrouter';
 
@@ -579,6 +669,7 @@ const AutonomousResearchSettings = ({ config, onConfigChange, models, capabiliti
       normalizedLocalConfig[openRouterProviderKey] = keepOpenRouterState
         ? (normalizedLocalConfig[openRouterProviderKey] || null)
         : null;
+      normalizedLocalConfig[reasoningEffortKey] = normalizeOpenRouterReasoningEffort(normalizedLocalConfig[reasoningEffortKey]);
       normalizedLocalConfig[fallbackKey] = null;
     });
 
@@ -794,7 +885,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     if (numericFields.includes(field)) {
       const parsed = parseInt(value, 10);
       const isContextField = field.includes('context_window');
-      const finalValue = isNaN(parsed) ? (isContextField ? 131072 : 25000) : parsed;
+      const finalValue = isNaN(parsed) ? (isContextField ? DEFAULT_CONTEXT_WINDOW : DEFAULT_MAX_OUTPUT_TOKENS) : parsed;
       
       const newConfig = { ...localConfig, [field]: finalValue };
       markProfileAsCustom();
@@ -806,7 +897,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   // Handle provider change for a role (keeps existing model settings)
   const handleProviderChange = (rolePrefix, provider) => {
     const updates = {
-      [`${rolePrefix}_provider`]: provider
+      [`${rolePrefix}_provider`]: provider,
+      [`${rolePrefix}_openrouter_reasoning_effort`]: DEFAULT_OPENROUTER_REASONING_EFFORT
       // Keep existing model, openrouter_provider, and lm_studio_fallback - don't reset them
     };
     const newConfig = { ...localConfig, ...updates };
@@ -821,6 +913,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       ...localConfig,
       [`${rolePrefix}_model`]: modelId,
       [`${rolePrefix}_openrouter_provider`]: null,
+      [`${rolePrefix}_openrouter_reasoning_effort`]: DEFAULT_OPENROUTER_REASONING_EFFORT,
     };
     markProfileAsCustom();
     setLocalConfig(newConfig);
@@ -931,6 +1024,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         provider: newValue,
         modelId: '',
         openrouterProvider: null,
+        openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
         lmStudioFallbackId: null
       };
     } else {
@@ -955,6 +1049,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       ...newConfigs[index],
       modelId,
       openrouterProvider: null,
+      openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
     };
 
     markProfileAsCustom();
@@ -1019,7 +1114,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     
     if (numericFields.includes(field)) {
       const parsed = parseInt(value, 10);
-      const finalValue = isNaN(parsed) ? (field === 'contextWindow' ? 131072 : 25000) : parsed;
+      const finalValue = isNaN(parsed) ? (field === 'contextWindow' ? DEFAULT_CONTEXT_WINDOW : DEFAULT_MAX_OUTPUT_TOKENS) : parsed;
       
       const newConfigs = [...submitterConfigs];
       newConfigs[index] = {
@@ -1042,9 +1137,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         provider: main.provider,
         modelId: main.modelId,
         openrouterProvider: main.openrouterProvider,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(main.openrouterReasoningEffort),
         lmStudioFallbackId: main.lmStudioFallbackId,
         contextWindow: main.contextWindow,
-        maxOutputTokens: main.maxOutputTokens
+        maxOutputTokens: main.maxOutputTokens,
+        superchargeEnabled: Boolean(main.superchargeEnabled)
       }));
       markProfileAsCustom();
       setSubmitterConfigs(newConfigs);
@@ -1121,7 +1218,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         lean4_lsp_enabled: proofSettingsLspEnabled,
         lean4_lsp_idle_timeout: lspIdleTimeout,
         smt_enabled: proofSettingsSmtEnabled,
-        z3_path: proofSettingsZ3Path,
         smt_timeout: smtTimeout,
       });
       setProofStatus(status);
@@ -1130,7 +1226,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
       setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? lspIdleTimeout));
       setProofSettingsSmtEnabled(Boolean(status.smt_enabled));
-      setProofSettingsZ3Path(status.z3_path || '');
       setProofSettingsSmtTimeout(String(status.smt_timeout ?? smtTimeout));
       setProofSettingsMessage('Lean 4 / SMT proof settings saved.');
     } catch (err) {
@@ -1186,41 +1281,51 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         modelId: cfg.modelId,
         provider: cfg.provider,
         openrouterProvider: cfg.openrouterProvider,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort),
         lmStudioFallbackId: cfg.lmStudioFallbackId,
         contextWindow: cfg.contextWindow,
-        maxOutputTokens: cfg.maxOutputTokens
+        maxOutputTokens: cfg.maxOutputTokens,
+        superchargeEnabled: Boolean(cfg.superchargeEnabled)
       })),
       validator: {
         modelId: localConfig.validator_model,
         provider: localConfig.validator_provider,
         openrouterProvider: localConfig.validator_openrouter_provider,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort),
         lmStudioFallbackId: localConfig.validator_lm_studio_fallback,
         contextWindow: localConfig.validator_context_window,
-        maxOutputTokens: localConfig.validator_max_tokens
+        maxOutputTokens: localConfig.validator_max_tokens,
+        superchargeEnabled: Boolean(localConfig.validator_supercharge_enabled)
       },
       highContext: {
         modelId: localConfig.high_context_model,
         provider: localConfig.high_context_provider,
         openrouterProvider: localConfig.high_context_openrouter_provider,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.high_context_openrouter_reasoning_effort),
         lmStudioFallbackId: localConfig.high_context_lm_studio_fallback,
         contextWindow: localConfig.high_context_context_window,
-        maxOutputTokens: localConfig.high_context_max_tokens
+        maxOutputTokens: localConfig.high_context_max_tokens,
+        superchargeEnabled: Boolean(localConfig.high_context_supercharge_enabled)
       },
       highParam: {
         modelId: localConfig.high_param_model,
         provider: localConfig.high_param_provider,
         openrouterProvider: localConfig.high_param_openrouter_provider,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
         lmStudioFallbackId: localConfig.high_param_lm_studio_fallback,
         contextWindow: localConfig.high_param_context_window,
-        maxOutputTokens: localConfig.high_param_max_tokens
+        maxOutputTokens: localConfig.high_param_max_tokens,
+        superchargeEnabled: Boolean(localConfig.high_param_supercharge_enabled)
       },
       critique: {
         modelId: localConfig.critique_submitter_model,
         provider: localConfig.critique_submitter_provider,
         openrouterProvider: localConfig.critique_submitter_openrouter_provider,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.critique_submitter_openrouter_reasoning_effort),
         lmStudioFallbackId: localConfig.critique_submitter_lm_studio_fallback,
         contextWindow: localConfig.critique_submitter_context_window,
-        maxOutputTokens: localConfig.critique_submitter_max_tokens
+        maxOutputTokens: localConfig.critique_submitter_max_tokens,
+        superchargeEnabled: Boolean(localConfig.critique_submitter_supercharge_enabled)
       }
     };
 
@@ -1260,206 +1365,81 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     }
   };
 
+  const getAutonomousRawSettings = () => ({
+    numSubmitters,
+    submitterConfigs: submitterConfigs.slice(0, numSubmitters),
+    localConfig,
+    freeOnly,
+    freeModelLooping,
+    freeModelAutoSelector,
+    tier3Enabled,
+    modelProviders,
+    selectedProfile,
+  });
+
+  const applyAutonomousRawSettings = (rawSettings, { updateRawText = true } = {}) => {
+    const nextSettings = persistAutonomousSettings({
+      numSubmitters: rawSettings.numSubmitters,
+      submitterConfigs: rawSettings.submitterConfigs,
+      localConfig: rawSettings.localConfig,
+      freeOnly: rawSettings.freeOnly,
+      freeModelLooping: rawSettings.freeModelLooping,
+      freeModelAutoSelector: rawSettings.freeModelAutoSelector,
+      tier3Enabled: rawSettings.tier3Enabled,
+      modelProviders: rawSettings.modelProviders,
+      selectedProfile: rawSettings.selectedProfile,
+    });
+
+    setNumSubmitters(nextSettings.numSubmitters);
+    setSubmitterConfigs(nextSettings.submitterConfigs);
+    setLocalConfig(nextSettings.localConfig);
+    setFreeOnly(nextSettings.freeOnly);
+    setFreeModelLooping(nextSettings.freeModelLooping);
+    setFreeModelAutoSelector(nextSettings.freeModelAutoSelector);
+    setTier3Enabled(nextSettings.tier3Enabled);
+    setModelProviders(nextSettings.modelProviders || {});
+    setSelectedProfile(nextSettings.selectedProfile || '');
+    onConfigChange(settingsToAutonomousConfig(nextSettings));
+
+    if (updateRawText) {
+      setRawSettingsText(formatRawSettings(nextSettings));
+    }
+  };
+
+  const handleRawEditToggle = (checked) => {
+    if (checked) {
+      const currentSettings = getAutonomousRawSettings();
+      setGuiSettingsBeforeRaw(currentSettings);
+      setRawSettingsText(formatRawSettings(currentSettings));
+      setRawSettingsMessage('');
+      setEditRawSettings(true);
+      return;
+    }
+
+    if (!confirm(RAW_VIEW_EXIT_WARNING)) {
+      return;
+    }
+
+    if (guiSettingsBeforeRaw) {
+      applyAutonomousRawSettings(guiSettingsBeforeRaw, { updateRawText: false });
+    }
+    setRawSettingsMessage('');
+    setEditRawSettings(false);
+  };
+
+  const saveRawSettings = () => {
+    try {
+      const parsed = JSON.parse(rawSettingsText);
+      applyAutonomousRawSettings(parsed);
+      setRawSettingsMessage('Saved raw settings.');
+    } catch (error) {
+      setRawSettingsMessage(`Invalid JSON: ${error.message}`);
+    }
+  };
+
   return (
     <div className="autonomous-settings-layout">
-      {/* Left Sidebar - Known Compatible Models */}
-      <div className="settings-left-sidebar">
-        <div className="known-models-sidebar">
-          <h3 className="flex-row-center">
-            <span>Highlighted Models</span>
-            <div className="help-tooltip-anchor">
-              <button
-                type="button"
-                className="help-tooltip-btn"
-                aria-label="Learn about highlighted models"
-                onMouseEnter={() => setShowTestedModelsTooltip(true)}
-                onMouseLeave={() => setShowTestedModelsTooltip(false)}
-                onFocus={() => setShowTestedModelsTooltip(true)}
-                onBlur={() => setShowTestedModelsTooltip(false)}
-              >
-                ?
-              </button>
-              {showTestedModelsTooltip && (
-                /* sidebar-escape: fixed positioning so the tooltip breaks out of the
-                   322px sidebar and renders freely. See index.css for coords. */
-                <div className="help-tooltip-popup help-tooltip-popup--sidebar-escape">
-                  The models and hosts listed here are not affiliated with MOTO or Intrafere LLC. This chart reflects developer-tested configurations intended to help guide model selection. All statements regarding pricing, performance, roles, rankings, or capabilities are speculative and based on individual testing experience. Intrafere LLC and the MOTO development team make no guarantees about the accuracy of this chart. MOTO is compatible with the majority of models, including many not listed here.
-                </div>
-              )}
-            </div>
-          </h3>
-          <p className="hint-text hint-text--dim" style={{ marginLeft: '20px', marginBottom: '0.45rem' }}>
-            Note: Most models over 20 billion parameters are compatible with MOTO.
-          </p>
-          <div className="models-list">
-            {/* Podium - Top 3 */}
-            <div className="models-podium">
-              <div className="models-podium-label">Leaderboard</div>
-              <div className="model-item model-item--ranked model-item--gold model-item--os">
-                <OsTag />
-                <div className="flex-row-center">
-                  <div className="model-item-name">Kimi K2.6</div>
-                  <div
-                    className="help-tooltip-anchor"
-                    style={{ zIndex: 100 }}
-                    aria-label="Learn about the King of the Hill ranking"
-                    onMouseEnter={() => setShowKothTooltip(true)}
-                    onMouseLeave={() => setShowKothTooltip(false)}
-                    onFocus={() => setShowKothTooltip(true)}
-                    onBlur={() => setShowKothTooltip(false)}
-                    tabIndex={0}
-                  >
-                    <div className="ranking-badge ranking-badge--gold">👑 KING OF THE HILL</div>
-                    {showKothTooltip && (
-                      <div
-                        className="help-tooltip-popup"
-                        style={{ top: 'auto', bottom: 'calc(100% + 10px)', left: 'calc(100% + 10px)', right: 'auto' }}
-                      >
-                        This model was chosen by the Intrafere developers as the best overall performer in the MOTO harness, optimized for cost, speed, and knowledge.
-                      </div>
-                    )}
-                  </div>
-                </div>
-                <div className="model-item-badge">Highly knowledgeable and balanced cost</div>
-              </div>
-
-              <div className="model-item model-item--ranked model-item--silver">
-                <div className="flex-row-center">
-                  <div className="model-item-name">Grok 4.1 Fast</div>
-                  <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
-                </div>
-                <div className="model-item-badge">Fast validator</div>
-              </div>
-
-              <div className="model-item model-item--ranked model-item--bronze model-item--os">
-                <OsTag />
-                <div className="flex-row-center">
-                  <div className="model-item-name">GPT OSS 120B</div>
-                  <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
-                </div>
-                <div className="model-item-badge">Balanced knowledge and speed at low cost</div>
-              </div>
-            </div>
-
-            {/* Alphabetical list (rest of models) */}
-
-            <div className="model-item">
-              <div className="model-item-name">Arcee AI's Trinity Large</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">Amazon Nova Pro/Premier</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">Claude Opus/Sonnet</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">DeepSeek</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">Gemini Flash</div>
-              <div className="model-item-badge">Fast validator</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">Gemini Pro</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">Google's Gemma</div>
-              <div className="model-item-badge">Balanced knowledge and speed</div>
-            </div>
-            
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">GLM</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">GLM Turbo</div>
-              <div className="model-item-badge">Fast validator</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">GPT Codex</div>
-              <div className="model-item-badge">Computer science</div>
-            </div>
-            
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">OpenAI's GPT OSS</div>
-              <div className="model-item-badge">Balanced knowledge and speed</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">Grok</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">ChatGPT</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-
-            <div className="model-item">
-              <div className="model-item-name">Inception's Mercury</div>
-              <div className="model-item-badge">Rapid knowledge</div>
-            </div>
-
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">Nemotron Super</div>
-              <div className="model-item-badge">Balanced knowledge and speed</div>
-            </div>
-
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">Nous Hermes</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item">
-              <div className="model-item-name">Perplexity's Sonar</div>
-              <div className="model-item-badge">Native internet search capability</div>
-            </div>
-            
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">Microsoft's Phi</div>
-              <div className="model-item-badge">Balanced knowledge and speed</div>
-            </div>
-
-            <div className="model-item">
-              <div className="model-item-name">MiniMax</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-            
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">Qwen Coder</div>
-              <div className="model-item-badge">Computer science</div>
-            </div>
-            
-            <div className="model-item model-item--os">
-              <OsTag />
-              <div className="model-item-name">Qwen</div>
-              <div className="model-item-badge">Highly knowledgeable</div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <HighlightedModelsSidebar />
 
       {/* Main Content Area */}
       <div className="autonomous-settings">
@@ -1471,23 +1451,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         </p>
         
         <div className="settings-row">
-          <label>
-            Select Profile
-            <HelpTooltip
-              label="Learn how profile selection works"
-              anchorClassName="help-tooltip-anchor--inline"
-              buttonClassName="help-tooltip-btn--green"
-              useFixedPosition
-            >
-              <strong>Profile menu guide</strong>
-              <br /><br />
-              <code>-- Custom Settings --</code> means no saved profile is currently loaded, so you are editing the settings manually.
-              <br /><br />
-              <code>Recommended Profiles</code> are preselected example profiles you can load as starting points.
-              <br /><br />
-              <code>My Profiles</code> contains any custom profiles you save from your current settings.
-            </HelpTooltip>
-          </label>
+          <label>Select Profile</label>
           <select
             value={selectedProfile}
             onChange={(e) => {
@@ -1655,8 +1619,36 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             </label>
           </>
         )}
+        {developerModeEnabled ? (
+          <label
+            className="settings-checkbox-label model-refresh-controls__toggle"
+            style={{ cursor: isRunning ? 'not-allowed' : 'pointer' }}
+          >
+            <input
+              type="checkbox"
+              checked={editRawSettings}
+              onChange={(e) => handleRawEditToggle(e.target.checked)}
+              disabled={isRunning}
+            />
+            Edit Raw
+          </label>
+        ) : (
+          <span className="settings-developer-mode-hint">
+            Developer mode: press Shift + Z + X to toggle raw JSON settings.
+          </span>
+        )}
       </div>
 
+      {editRawSettings ? (
+        <RawSettingsEditor
+          value={rawSettingsText}
+          onChange={setRawSettingsText}
+          onSave={saveRawSettings}
+          message={rawSettingsMessage}
+          disabled={isRunning}
+        />
+      ) : (
+        <>
       {/* Brainstorm Submitters Section */}
       <div className="settings-group">
         <h4>Brainstorm Submitters (Tier 1 Aggregation)</h4>
@@ -1700,7 +1692,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : (idx === 0 ? ' role-config-card--main' : '')}`}
           >
             <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : (idx === 0 ? 'card-title--green' : '')}>
-              {idx === 0 ? 'Submitter 1 (Main Submitter)' : `Submitter ${idx + 1}`}
+              <span className="role-title-with-badges">
+                <span>{idx === 0 ? 'Submitter 1 (Main Submitter)' : `Submitter ${idx + 1}`}</span>
+                {idx === 0 && <ProofStrengthBadge />}
+              </span>
               {effectiveProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
             </h5>
             
@@ -1708,10 +1703,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               provider={cfg.provider}
               modelId={cfg.modelId}
               openrouterProv={cfg.openrouterProvider}
+              openrouterReasoningEffort={cfg.openrouterReasoningEffort}
               fallback={cfg.lmStudioFallbackId}
               onProviderChange={(p) => handleSubmitterConfigChange(idx, 'provider', p)}
               onModelChange={(m) => handleSubmitterModelChange(idx, m)}
               onOpenrouterProviderChange={(p) => handleSubmitterOpenRouterProviderChange(idx, p)}
+              onOpenrouterReasoningEffortChange={(effort) => handleSubmitterConfigChange(idx, 'openrouterReasoningEffort', normalizeOpenRouterReasoningEffort(effort))}
               onFallbackChange={(f) => handleSubmitterConfigChange(idx, 'lmStudioFallbackId', f)}
               lmStudioModels={lmStudioModels}
               openRouterModels={openRouterModels}
@@ -1748,6 +1745,28 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 step={1000}
               />
             </div>
+
+            {developerModeEnabled && (
+              <div className="settings-row settings-row--inline-checkbox">
+                <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(cfg.superchargeEnabled)}
+                    onChange={(e) => handleSubmitterConfigChange(idx, 'superchargeEnabled', e.target.checked)}
+                    disabled={isRunning}
+                  />
+                  <HelpTooltip
+                    label="Learn about Supercharge"
+                    buttonContent="Supercharge"
+                    buttonClassName="help-tooltip-btn--text"
+                    popupClassName="help-tooltip-popup--fixed"
+                    useFixedPosition
+                  >
+                    {SUPERCHARGE_TOOLTIP}
+                  </HelpTooltip>
+                </label>
+              </div>
+            )}
           </div>
             );
           })()
@@ -1777,6 +1796,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
+          developerModeEnabled={developerModeEnabled}
         />
       </div>
 
@@ -1804,6 +1824,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
+          developerModeEnabled={developerModeEnabled}
+          showProofStrengthBadge
         />
 
         <RoleConfig
@@ -1823,11 +1845,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
+          developerModeEnabled={developerModeEnabled}
+          showProofStrengthBadge
         />
 
         <RoleConfig
           title="Critique Submitter"
-          hint="Handles post-body peer review feedback and rewrite decisions."
+          hint="Handles post-body peer review feedback for the AI self-review section."
           rolePrefix="critique_submitter"
           borderColor="#e74c3c"
           localConfig={localConfig}
@@ -1842,6 +1866,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           lmStudioEnabled={lmStudioEnabled}
+          developerModeEnabled={developerModeEnabled}
         />
       </div>
 
@@ -2020,13 +2045,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
                   <div className="settings-row">
                     <label>Z3 Binary Path</label>
-                    <input
-                      type="text"
-                      value={proofSettingsZ3Path}
-                      onChange={(e) => setProofSettingsZ3Path(e.target.value)}
-                      disabled={isRunning || savingProofSettings}
-                      placeholder="Optional explicit z3 path"
-                    />
+                    <div>
+                      <strong>{proofStatus?.z3_path || 'System PATH lookup'}</strong>
+                      <small className="settings-hint" style={{ display: 'block', marginTop: '0.35rem' }}>
+                        Configure this only through trusted startup environment settings.
+                      </small>
+                    </div>
                   </div>
 
                   <div className="settings-row">
@@ -2340,6 +2364,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
     </div>
   );

@@ -46,13 +46,15 @@ REASONS FOR REMOVAL - A paper should be removed if it:
 3. Contains information SUPERSEDED by better, more complete papers
 4. Was MARGINALLY useful initially but provides no unique value given current library
 5. Covers the same mathematical territory as a newer, superior paper
+6. Is more indirect or auxiliary while another paper provides a stronger rigorous direct answer on the same territory
 
 REASONS TO KEEP - A paper should be kept if it:
-1. Provides ANY unique mathematical content not covered elsewhere
-2. Offers a different perspective or approach even if related to other papers
-3. Contains specific proofs, theorems, or techniques not present elsewhere
-4. Contributes to research diversity in any meaningful way
-5. Covers distinct mathematical subtopics within a broader area
+1. Provides a stronger direct answer, sharper impossibility result, or tighter constraint than overlapping papers
+2. Provides ANY unique mathematical content not covered elsewhere
+3. Offers a different perspective or approach even if related to other papers
+4. Contains specific proofs, theorems, or techniques not present elsewhere
+5. Contributes to research diversity in any meaningful way
+6. Covers distinct mathematical subtopics within a broader area
 
 CONSERVATIVE APPROACH:
 - When in doubt, DO NOT recommend removal
@@ -62,6 +64,9 @@ CONSERVATIVE APPROACH:
 
 CRITICAL SELECTION RULE:
 When multiple papers overlap, select the WEAKEST one for removal - the one that provides the LEAST unique value. NEVER remove a more comprehensive paper in favor of keeping a less comprehensive one.
+
+DIRECT-SOLUTION PRIORITY:
+If overlapping papers differ in how directly they answer the user's research goal, preserve the paper with the strongest rigorous direct answer and remove the more auxiliary one first when all else is equal.
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text

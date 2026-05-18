@@ -49,3 +49,46 @@
 .stage2-history-prompt strong {
   color: #1eff1c;
 }
+
+.stage2-history-card--pruned {
+  opacity: 0.68;
+  filter: grayscale(0.65);
+  border-color: rgba(156, 163, 175, 0.32) !important;
+  background: linear-gradient(180deg, rgba(75, 85, 99, 0.22) 0%, rgba(31, 41, 55, 0.62) 100%) !important;
+}
+
+.stage2-history-pruned-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(156, 163, 175, 0.18);
+  border: 1px solid rgba(156, 163, 175, 0.34);
+  color: #d1d5db;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stage2-history-pruned-note {
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(156, 163, 175, 0.12);
+  border: 1px solid rgba(156, 163, 175, 0.22);
+  color: #d1d5db;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.stat-badge--pruned {
+  color: #d1d5db;
+  border-color: rgba(156, 163, 175, 0.28);
+}
+
+.pruned-delete-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}

@@ -1,9 +1,9 @@
 """
 Submission queue manager.
-Handles queue with special logic: if 10+ submissions waiting, skip to latest.
+The coordinator handles overflow by pausing submitters; queued submissions stay FIFO.
 """
 import asyncio
-from typing import Optional, List
+from typing import List, Optional
 from collections import deque
 import logging
 
@@ -15,55 +15,19 @@ logger = logging.getLogger(__name__)
 
 class QueueManager:
     """
-    Thread-safe submission queue.
-    If queue >= 10 on next dequeue, jump to latest and clear rest.
+    Thread-safe FIFO submission queue.
     """
     
     def __init__(self):
         self.queue: deque[Submission] = deque()
         self._lock = asyncio.Lock()
-        self._not_empty = asyncio.Event()
         self.overflow_threshold = system_config.queue_overflow_threshold
     
     async def enqueue(self, submission: Submission) -> None:
         """Add submission to queue."""
         async with self._lock:
             self.queue.append(submission)
-            self._not_empty.set()
             logger.debug(f"Enqueued submission {submission.submission_id}. Queue size: {len(self.queue)}")
-    
-    async def dequeue(self) -> Optional[Submission]:
-        """
-        Dequeue next submission.
-        If queue >= overflow_threshold, skip to latest and clear rest.
-        """
-        # Wait for queue to have items
-        while True:
-            async with self._lock:
-                if self.queue:
-                    break
-                self._not_empty.clear()
-            
-            await self._not_empty.wait()
-        
-        async with self._lock:
-            # Check for overflow
-            if len(self.queue) >= self.overflow_threshold:
-                # Get latest submission
-                latest = self.queue[-1]
-                # Clear all others
-                cleared_count = len(self.queue) - 1
-                self.queue.clear()
-                
-                logger.warning(
-                    f"Queue overflow ({cleared_count + 1} submissions). "
-                    f"Cleared {cleared_count} old submissions, processing latest."
-                )
-                
-                return latest
-            else:
-                # Normal dequeue
-                return self.queue.popleft()
     
     async def size(self) -> int:
         """Get current queue size."""
@@ -79,7 +43,6 @@ class QueueManager:
         """Clear the queue."""
         async with self._lock:
             self.queue.clear()
-            self._not_empty.clear()
             logger.info("Queue cleared")
     
     async def peek(self) -> Optional[Submission]:

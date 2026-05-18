@@ -1,6 +1,7 @@
 /**
  * WebSocket service for real-time updates
  */
+import { getDesktopApiToken } from '../utils/runtimeConfig';
 
 class WebSocketService {
   constructor() {
@@ -8,14 +9,38 @@ class WebSocketService {
     this.listeners = new Map();
     this.reconnectInterval = 3000;
     this.reconnectTimer = null;
+    this.connectAttempt = 0;
   }
 
-  connect() {
+  async connect() {
+    const attemptId = ++this.connectAttempt;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsPath = import.meta.env.VITE_MOTO_WS_PATH || '/ws';
-    const wsUrl = `${protocol}//${window.location.host}${wsPath}`;
+    const wsUrl = new URL(`${protocol}//${window.location.host}${wsPath}`);
+    const desktopApiToken = getDesktopApiToken();
+    if (desktopApiToken) {
+      try {
+        const response = await fetch('/api/ws-ticket', { method: 'POST' });
+        if (!response.ok) {
+          throw new Error(`WebSocket ticket request failed: ${response.status}`);
+        }
+        const payload = await response.json();
+        if (!payload.ticket) {
+          throw new Error('WebSocket ticket response did not include a ticket');
+        }
+        wsUrl.searchParams.set('ticket', payload.ticket);
+      } catch (error) {
+        console.error('Failed to create WebSocket ticket:', error);
+        this.scheduleReconnect();
+        return;
+      }
+    }
+
+    if (attemptId !== this.connectAttempt) {
+      return;
+    }
     
-    this.ws = new WebSocket(wsUrl);
+    this.ws = new WebSocket(wsUrl.toString());
     
     this.ws.onopen = () => {
       console.log('WebSocket connected');
@@ -82,6 +107,7 @@ class WebSocketService {
   }
 
   disconnect() {
+    this.connectAttempt += 1;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

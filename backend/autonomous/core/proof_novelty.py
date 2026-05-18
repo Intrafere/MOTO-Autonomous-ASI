@@ -21,7 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 VALID_NOVELTY_TIERS = frozenset(
-    {"not_novel", "novel_formulation", "novel_variant", "mathematical_discovery"}
+    {
+        "not_novel",
+        "novel_formulation",
+        "novel_variant",
+        "mathematical_discovery",
+        "major_mathematical_discovery",
+    }
 )
 
 
@@ -37,7 +43,7 @@ async def assess_proof_novelty(
     task_id: str,
     role_id: str = "autonomous_proof_novelty",
 ) -> Tuple[str, str]:
-    """Classify a Lean-4-verified theorem into one of four novelty tiers.
+    """Classify a Lean-4-verified theorem into one of five novelty tiers.
 
     Args:
         user_prompt: Top-level research prompt for context.
@@ -55,7 +61,8 @@ async def assess_proof_novelty(
 
     Returns:
         Tuple of (novelty_tier, reasoning) where novelty_tier is one of:
-        "not_novel", "novel_formulation", "novel_variant", "mathematical_discovery".
+        "not_novel", "novel_formulation", "novel_variant",
+        "mathematical_discovery", "major_mathematical_discovery".
         Falls back to ("not_novel", <message>) when the validator returns no
         usable response or an unrecognised tier string.
     """

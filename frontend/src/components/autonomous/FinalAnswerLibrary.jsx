@@ -24,6 +24,7 @@ import './FinalAnswerLibrary.css';
 function FinalAnswerLibrary() {
   const [finalAnswers, setFinalAnswers] = useState([]);
   const [stage2Papers, setStage2Papers] = useState([]);
+  const [prunedPapers, setPrunedPapers] = useState([]);
   const [sessionsResponse, setSessionsResponse] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -33,6 +34,10 @@ function FinalAnswerLibrary() {
   const [filterFormat, setFilterFormat] = useState('all'); // 'all', 'short_form', 'long_form'
   const [showLatex, setShowLatex] = useState(false); // Raw text by default for performance with large docs
   const [downloadingPDF, setDownloadingPDF] = useState(null); // Track which answer is generating PDF
+  const [expandedPrunedRuns, setExpandedPrunedRuns] = useState({});
+  const [expandedPrunedPaperId, setExpandedPrunedPaperId] = useState(null);
+  const [expandedPrunedContent, setExpandedPrunedContent] = useState(null);
+  const [downloadingPrunedPDF, setDownloadingPrunedPDF] = useState(null);
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -47,7 +52,7 @@ function FinalAnswerLibrary() {
       setLoading(true);
       setError(null);
 
-      const [answersResult, sessionsResult, papersResult] = await Promise.allSettled([
+      const [answersResult, sessionsResult, papersResult, prunedPapersResult] = await Promise.allSettled([
         fetch('/api/auto-research/final-answer-library').then(async (response) => {
           if (!response.ok) {
             throw new Error('Failed to load final answer library');
@@ -56,6 +61,7 @@ function FinalAnswerLibrary() {
         }),
         autonomousAPI.getSessions(),
         autonomousAPI.getPaperHistory(),
+        autonomousAPI.getPrunedPaperHistory(),
       ]);
 
       if (answersResult.status !== 'fulfilled') {
@@ -80,6 +86,13 @@ function FinalAnswerLibrary() {
       } else {
         setStage2Papers([]);
         console.warn('Stage 3 history: failed to load Stage 2 paper metadata', papersResult.reason);
+      }
+
+      if (prunedPapersResult.status === 'fulfilled') {
+        setPrunedPapers(prunedPapersResult.value.papers || []);
+      } else {
+        setPrunedPapers([]);
+        console.warn('Stage 3 history: failed to load pruned paper metadata', prunedPapersResult.reason);
       }
     } catch (err) {
       setError(`Error loading library: ${err.message}`);
@@ -196,6 +209,65 @@ function FinalAnswerLibrary() {
     }
   };
 
+  const loadPrunedPaperContent = async (paper) => {
+    if (expandedPrunedPaperId === paper.history_id) {
+      setExpandedPrunedPaperId(null);
+      setExpandedPrunedContent(null);
+      return;
+    }
+
+    const data = await autonomousAPI.getPrunedHistoryPaper(paper.session_id, paper.paper_id);
+    setExpandedPrunedPaperId(paper.history_id);
+    setExpandedPrunedContent(data);
+  };
+
+  const downloadPrunedRaw = async (e, paper) => {
+    e.stopPropagation();
+    try {
+      const data = await autonomousAPI.getPrunedHistoryPaper(paper.session_id, paper.paper_id);
+      const filename = sanitizeFilename(`pruned_${paper.session_id}_${paper.paper_id}_${paper.title}`);
+      downloadRawText(data.content || '', filename, data.outline || '');
+    } catch (err) {
+      console.error('Pruned paper download failed:', err);
+      alert(`Download failed: ${err.message}`);
+    }
+  };
+
+  const downloadPrunedPDF = async (e, paper) => {
+    e.stopPropagation();
+    if (downloadingPrunedPDF) {
+      alert('Already preparing a PDF, please wait...');
+      return;
+    }
+
+    try {
+      const data = await autonomousAPI.getPrunedHistoryPaper(paper.session_id, paper.paper_id);
+      const filename = sanitizeFilename(`pruned_${paper.session_id}_${paper.paper_id}_${paper.title}`);
+      await downloadPDFViaBackend(
+        data.content || '',
+        {
+          title: data.title || paper.title,
+          wordCount: paper.word_count,
+          date: paper.created_at ? new Date(paper.created_at).toLocaleDateString() : new Date().toLocaleDateString(),
+          models: paper.model_usage ? Object.keys(paper.model_usage).join(', ') : null,
+        },
+        filename,
+        data.outline || null,
+        () => setDownloadingPrunedPDF(paper.history_id),
+        () => setDownloadingPrunedPDF(null),
+        (error) => {
+          setDownloadingPrunedPDF(null);
+          console.error('Pruned paper PDF generation failed:', error);
+          alert(`PDF generation failed: ${error.message}`);
+        },
+      );
+    } catch (error) {
+      setDownloadingPrunedPDF(null);
+      console.error('Pruned paper PDF generation failed:', error);
+      alert(`Failed to generate PDF: ${error.message}`);
+    }
+  };
+
   const getCertaintyBadgeColor = (level) => {
     switch (level) {
       case 'total_answer': return '#2d5f2d';
@@ -253,6 +325,16 @@ function FinalAnswerLibrary() {
       }))
       .filter((runGroup) => runGroup.visibleStage3Answers.length > 0);
   }, [runGroups, filterFormat, searchTerm]);
+
+  const prunedPapersBySession = useMemo(() => {
+    const grouped = new Map();
+    for (const paper of prunedPapers) {
+      const sessionPapers = grouped.get(paper.session_id) || [];
+      sessionPapers.push(paper);
+      grouped.set(paper.session_id, sessionPapers);
+    }
+    return grouped;
+  }, [prunedPapers]);
 
   if (loading) {
     return (
@@ -523,6 +605,63 @@ function FinalAnswerLibrary() {
                     </div>
                   ))}
                 </div>
+                {(prunedPapersBySession.get(runGroup.sessionId) || []).length > 0 && (
+                  <div className="pruned-papers-expansion">
+                    <button
+                      className="pruned-papers-toggle"
+                      onClick={() => setExpandedPrunedRuns((prev) => ({
+                        ...prev,
+                        [runGroup.sessionId]: !prev[runGroup.sessionId],
+                      }))}
+                    >
+                      {expandedPrunedRuns[runGroup.sessionId] ? '▼' : '▶'} Pruned Papers ({prunedPapersBySession.get(runGroup.sessionId).length})
+                    </button>
+                    {expandedPrunedRuns[runGroup.sessionId] && (
+                      <div className="pruned-papers-list">
+                        {prunedPapersBySession.get(runGroup.sessionId).map((paper) => (
+                          <div
+                            key={paper.history_id}
+                            className={`pruned-paper-card ${expandedPrunedPaperId === paper.history_id ? 'expanded' : ''}`}
+                            onClick={() => loadPrunedPaperContent(paper)}
+                          >
+                            <div className="pruned-paper-card-header">
+                              <span className="stage2-history-pruned-badge">Pruned Paper</span>
+                              <span>{paper.paper_id}</span>
+                              <span>{paper.word_count?.toLocaleString()} words</span>
+                            </div>
+                            <h4>{paper.title}</h4>
+                            <p>{paper.pruned_note || 'The system decided autonomously that this paper hurt context cumulation.'}</p>
+                            <div className="quick-download-buttons" onClick={(e) => e.stopPropagation()}>
+                              <button className="quick-download-raw" onClick={(e) => downloadPrunedRaw(e, paper)}>
+                                Download Raw
+                              </button>
+                              <button
+                                className="quick-download-pdf"
+                                onClick={(e) => downloadPrunedPDF(e, paper)}
+                                disabled={downloadingPrunedPDF === paper.history_id}
+                              >
+                                {downloadingPrunedPDF === paper.history_id ? 'Preparing PDF...' : 'Download PDF'}
+                              </button>
+                            </div>
+                            {expandedPrunedPaperId === paper.history_id && expandedPrunedContent && (
+                              <div className="full-content pruned-paper-content">
+                                <LatexRenderer
+                                  content={
+                                    expandedPrunedContent.outline
+                                      ? `${expandedPrunedContent.outline}\n\n${'='.repeat(80)}\n\n${expandedPrunedContent.content || ''}`
+                                      : expandedPrunedContent.content || ''
+                                  }
+                                  showToggle={true}
+                                  defaultRaw={true}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </section>
           ))}

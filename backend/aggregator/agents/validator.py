@@ -12,7 +12,7 @@ from backend.shared.models import Submission, ValidationResult
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
-from backend.shared.json_parser import parse_json
+from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.shared_training import shared_training_memory
@@ -326,12 +326,13 @@ class ValidatorAgent:
                 )
                 
                 try:
-                    # CRITICAL FIX: Truncate failed output to prevent context overflow during retry
+                    # Keep conversational retry context, but never replay private
+                    # model thought/channel/control tokens as an assistant turn.
                     max_failed_output_chars = 2000  # ~500 tokens - enough for error context
-                    if len(llm_output) > max_failed_output_chars:
-                        failed_output_preview = llm_output[:max_failed_output_chars] + "\n[...output truncated for retry...]"
-                    else:
-                        failed_output_preview = llm_output
+                    failed_output_preview = sanitize_model_output_for_retry_context(
+                        llm_output,
+                        max_chars=max_failed_output_chars,
+                    )
                     
                     # Calculate if conversation fits in context window
                     prompt_tokens = count_tokens(prompt)
@@ -817,12 +818,13 @@ class ValidatorAgent:
         
         try:
             call_metadata = {}
-            # CRITICAL FIX: Truncate failed output to prevent context overflow during retry
+            # Keep conversational retry context, but never replay private
+            # model thought/channel/control tokens as an assistant turn.
             max_failed_output_chars = 2000  # ~500 tokens - enough for error context
-            if len(failed_output) > max_failed_output_chars:
-                failed_output_preview = failed_output[:max_failed_output_chars] + "\n[...output truncated for retry...]"
-            else:
-                failed_output_preview = failed_output
+            failed_output_preview = sanitize_model_output_for_retry_context(
+                failed_output,
+                max_chars=max_failed_output_chars,
+            )
             
             # Calculate if conversation fits in context window
             from backend.shared.utils import count_tokens

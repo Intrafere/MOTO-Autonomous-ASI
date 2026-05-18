@@ -1,8 +1,20 @@
-const DEFAULT_CONTEXT_WINDOW = 131072;
-const CONTEXT_BUFFER_TOKENS = 500;
-const KNOWN_NO_OUTPUT_CAP_DEFAULTS = {
-  'x-ai/grok-4.3': 128000,
-};
+export const DEFAULT_CONTEXT_WINDOW = 131072;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 25000;
+export const DEFAULT_OPENROUTER_REASONING_EFFORT = 'auto';
+export const OPENROUTER_REASONING_EFFORT_OPTIONS = [
+  { value: 'auto', label: 'Auto (max supported)' },
+  { value: 'xhigh', label: 'xhigh (maximum)' },
+  { value: 'high', label: 'high' },
+  { value: 'medium', label: 'medium' },
+  { value: 'low', label: 'low' },
+  { value: 'minimal', label: 'minimal' },
+  { value: 'none', label: 'none / disabled' },
+];
+const AUTO_ENDPOINT_OUTLIER_RATIO = 0.75;
+const AUTO_MIN_CAPABLE_OUTPUT_TOKENS = 32768;
+const KNOWN_WEAK_AUTO_PROVIDERS = new Set([
+  'venice',
+]);
 
 function toPositiveInteger(value) {
   const parsed = Number(value);
@@ -12,9 +24,138 @@ function toPositiveInteger(value) {
   return Math.floor(parsed);
 }
 
-function getKnownNoOutputCapDefault(model) {
-  const modelId = typeof model?.id === 'string' ? model.id.toLowerCase() : '';
-  return KNOWN_NO_OUTPUT_CAP_DEFAULTS[modelId] || null;
+function getModelContext(model) {
+  return (
+    toPositiveInteger(model?.context_length) ||
+    toPositiveInteger(model?.top_provider?.context_length)
+  );
+}
+
+function normalizeProviderName(providerName) {
+  return typeof providerName === 'string' ? providerName.trim().toLowerCase() : '';
+}
+
+function getEndpointProviderName(endpoint) {
+  return (
+    endpoint?.provider_name ||
+    endpoint?.provider ||
+    endpoint?.name ||
+    endpoint?.id ||
+    ''
+  );
+}
+
+function uniqueSorted(values) {
+  return Array.from(new Set(values.filter(Boolean))).sort((a, b) => a.localeCompare(b));
+}
+
+function median(values) {
+  const sorted = values
+    .filter((value) => Number.isFinite(value))
+    .slice()
+    .sort((a, b) => a - b);
+  if (sorted.length === 0) {
+    return null;
+  }
+  const midpoint = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) {
+    return sorted[midpoint];
+  }
+  return Math.floor((sorted[midpoint - 1] + sorted[midpoint]) / 2);
+}
+
+function buildEndpointMetric(endpoint) {
+  return {
+    endpoint,
+    providerName: getEndpointProviderName(endpoint),
+    normalizedProviderName: normalizeProviderName(getEndpointProviderName(endpoint)),
+    contextLength: toPositiveInteger(endpoint?.context_length),
+    outputCap: toPositiveInteger(endpoint?.max_completion_tokens),
+    promptCap: toPositiveInteger(endpoint?.max_prompt_tokens),
+  };
+}
+
+function selectAutoEndpointSet(endpoints, modelContext = null) {
+  if (!Array.isArray(endpoints) || endpoints.length <= 1) {
+    return {
+      endpoints: endpoints || [],
+      ignoredEndpoints: [],
+      recommendedProvider: null,
+      capableProviderNames: uniqueSorted((endpoints || []).map(getEndpointProviderName)),
+      ignoredProviderNames: [],
+      providerSelectionRecommended: false,
+    };
+  }
+
+  const metrics = endpoints.map(buildEndpointMetric);
+  const outputCaps = metrics.map((metric) => metric.outputCap).filter((value) => value !== null);
+  const contextLengths = metrics.map((metric) => metric.contextLength).filter((value) => value !== null);
+  const medianOutputCap = median(outputCaps);
+  const outputThreshold = medianOutputCap && medianOutputCap >= AUTO_MIN_CAPABLE_OUTPUT_TOKENS
+    ? Math.max(AUTO_MIN_CAPABLE_OUTPUT_TOKENS, Math.floor(medianOutputCap * AUTO_ENDPOINT_OUTLIER_RATIO))
+    : null;
+  const contextThresholdFromModel = modelContext && modelContext >= DEFAULT_CONTEXT_WINDOW * 2
+    ? Math.floor(modelContext * AUTO_ENDPOINT_OUTLIER_RATIO)
+    : null;
+  const hasEndpointNearModelContext = contextThresholdFromModel !== null && metrics.some(
+    (metric) => metric.contextLength !== null && metric.contextLength >= contextThresholdFromModel
+  );
+  const contextThreshold = hasEndpointNearModelContext ? contextThresholdFromModel : null;
+
+  const annotatedMetrics = metrics.map((metric) => {
+    const reasons = [];
+    if (KNOWN_WEAK_AUTO_PROVIDERS.has(metric.normalizedProviderName)) {
+      reasons.push('known weak auto-routing host');
+    }
+    if (outputThreshold !== null && metric.outputCap === null && outputCaps.length > 0) {
+      reasons.push('missing max_completion_tokens while other endpoints expose output caps');
+    }
+    if (outputThreshold !== null && metric.outputCap !== null && metric.outputCap < outputThreshold) {
+      reasons.push(`max_completion_tokens=${metric.outputCap} below capable threshold ${outputThreshold}`);
+    }
+    if (contextThreshold !== null && metric.contextLength !== null && metric.contextLength < contextThreshold) {
+      reasons.push(`context_length=${metric.contextLength} below capable threshold ${contextThreshold}`);
+    }
+    if (contextThreshold !== null && metric.contextLength === null && contextLengths.length > 0) {
+      reasons.push('missing context_length while other endpoints match model context');
+    }
+    return { ...metric, reasons };
+  });
+
+  const capableMetrics = annotatedMetrics.filter((metric) => metric.reasons.length === 0);
+  if (capableMetrics.length === 0) {
+    return {
+      endpoints,
+      ignoredEndpoints: [],
+      recommendedProvider: null,
+      capableProviderNames: uniqueSorted(metrics.map((metric) => metric.providerName)),
+      ignoredProviderNames: [],
+      providerSelectionRecommended: false,
+    };
+  }
+
+  const ignoredMetrics = annotatedMetrics.filter((metric) => metric.reasons.length > 0);
+  if (ignoredMetrics.length === 0) {
+    return {
+      endpoints,
+      ignoredEndpoints: [],
+      recommendedProvider: null,
+      capableProviderNames: uniqueSorted(capableMetrics.map((metric) => metric.providerName)),
+      ignoredProviderNames: [],
+      providerSelectionRecommended: false,
+    };
+  }
+
+  const capableProviderNames = uniqueSorted(capableMetrics.map((metric) => metric.providerName));
+
+  return {
+    endpoints: capableMetrics.map((metric) => metric.endpoint),
+    ignoredEndpoints: ignoredMetrics,
+    recommendedProvider: null,
+    capableProviderNames,
+    ignoredProviderNames: uniqueSorted(ignoredMetrics.map((metric) => metric.providerName)),
+    providerSelectionRecommended: false,
+  };
 }
 
 export function findOpenRouterModel(models, modelId) {
@@ -57,14 +198,46 @@ export function getProviderNames(providerData) {
   return normalizeProviderData(providerData).providers;
 }
 
+export function normalizeOpenRouterReasoningEffort(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (OPENROUTER_REASONING_EFFORT_OPTIONS.some((option) => option.value === normalized)) {
+    return normalized;
+  }
+  return DEFAULT_OPENROUTER_REASONING_EFFORT;
+}
+
+export function getReasoningSupportInfo(providerData, selectedProvider = null) {
+  const { endpoints } = normalizeProviderData(providerData);
+  const normalizedSelectedProvider = normalizeProviderName(selectedProvider);
+  const relevantEndpoints = selectedProvider
+    ? endpoints.filter((endpoint) => normalizeProviderName(getEndpointProviderName(endpoint)) === normalizedSelectedProvider)
+    : endpoints;
+  const supportedParameters = relevantEndpoints.flatMap((endpoint) => (
+    Array.isArray(endpoint?.supported_parameters) ? endpoint.supported_parameters : []
+  ));
+  const normalizedParams = supportedParameters.map((param) => String(param).toLowerCase());
+  const supportsReasoning = normalizedParams.some((param) => (
+    param === 'reasoning' ||
+    param === 'reasoning_effort' ||
+    param === 'reasoning.effort' ||
+    param === 'include_reasoning'
+  ));
+
+  return {
+    supportsReasoning,
+    hasEndpointMetadata: relevantEndpoints.length > 0,
+    supportedParameters,
+  };
+}
+
 /**
  * Compute auto-fill context window + max output tokens for an OpenRouter model.
  *
  * Returns a valid object and marks which values are metadata-backed:
- *   1. Best: full endpoint metadata for the relevant provider(s)
- *   2. Partial: use explicit `max_completion_tokens` when present
- *   3. No-cap: use vetted model-specific defaults for known no-cap models
- *   4. Unknown: fill context only and ask callers not to overwrite output
+ *   1. Context: OpenRouter model.context_length is the source of truth
+ *   2. Output: largest non-outlier endpoint max_completion_tokens
+ *   3. Safety: cap output at 20% of model.context_length
+ *   4. Unknown: ask callers not to overwrite values when metadata is missing
  *
  * The `source` field reports which tier produced the answer, and `warnings`
  * is a list of human-readable diagnostics for logging.
@@ -72,24 +245,43 @@ export function getProviderNames(providerData) {
 export function computeOpenRouterAutoSettings(model, providerData, selectedProvider = null) {
   const { endpoints } = normalizeProviderData(providerData);
   const warnings = [];
+  const modelContext = getModelContext(model);
 
-  const relevantEndpoints = selectedProvider
+  const initialRelevantEndpoints = selectedProvider
     ? endpoints.filter((endpoint) => endpoint?.provider_name === selectedProvider)
     : endpoints;
+  const autoEndpointSelection = selectedProvider
+    ? {
+        endpoints: initialRelevantEndpoints,
+        ignoredEndpoints: [],
+        recommendedProvider: null,
+        capableProviderNames: uniqueSorted(initialRelevantEndpoints.map(getEndpointProviderName)),
+        ignoredProviderNames: [],
+        providerSelectionRecommended: false,
+      }
+    : selectAutoEndpointSet(initialRelevantEndpoints, modelContext);
+  const relevantEndpoints = autoEndpointSelection.endpoints;
 
-  if (selectedProvider && relevantEndpoints.length === 0 && endpoints.length > 0) {
+  if (selectedProvider && initialRelevantEndpoints.length === 0 && endpoints.length > 0) {
     warnings.push(
       `Selected provider "${selectedProvider}" not present in endpoint list; falling back to model-level context.`
     );
   }
 
-  const modelContext = toPositiveInteger(model?.context_length);
-  const knownNoOutputCapDefault = getKnownNoOutputCapDefault(model);
+  if (!selectedProvider && autoEndpointSelection.ignoredEndpoints.length > 0) {
+    const ignoredSummary = autoEndpointSelection.ignoredEndpoints
+      .map((metric) => `${metric.providerName || 'unknown'} (${metric.reasons.join('; ')})`)
+      .join(', ');
+    warnings.push(
+      `Ignored weak OpenRouter auto-routing endpoint(s): ${ignoredSummary}.`
+    );
+  }
 
   if (relevantEndpoints.length === 0) {
     const contextWindow = modelContext || DEFAULT_CONTEXT_WINDOW;
     const contextWindowKnown = modelContext !== null;
-    const maxOutputTokens = knownNoOutputCapDefault;
+    const maxOutputTokens = null;
+    const outputCapSource = 'unknown';
 
     if (!modelContext) {
       warnings.push(
@@ -101,37 +293,33 @@ export function computeOpenRouterAutoSettings(model, providerData, selectedProvi
       );
     }
 
-    if (maxOutputTokens === null) {
-      warnings.push(
-        'No endpoint metadata exposed max_completion_tokens; preserving the current max output setting.'
-      );
-    } else {
-      warnings.push(
-        `No endpoint metadata exposed max_completion_tokens; using known no-cap default ${maxOutputTokens}.`
-      );
-    }
+    warnings.push(
+      'No endpoint metadata exposed max_completion_tokens; preserving the current max output setting.'
+    );
 
     return {
       contextWindow,
       contextWindowKnown,
       maxOutputTokens,
       outputCapKnown: maxOutputTokens !== null,
-      outputCapSource: maxOutputTokens !== null ? 'known-no-cap-default' : 'unknown',
+      outputCapSource,
       smallestEndpointOutputCap: null,
       smallestEndpointContext: null,
       smallestEndpointPromptCap: null,
+      largestEndpointOutputCap: null,
+      largestEndpointContext: null,
+      largestEndpointPromptCap: null,
+      recommendedProvider: autoEndpointSelection.recommendedProvider,
+      providerSelectionRecommended: autoEndpointSelection.providerSelectionRecommended,
+      capableProviderNames: autoEndpointSelection.capableProviderNames,
+      ignoredProviderNames: autoEndpointSelection.ignoredProviderNames,
       fallbackModelContext: modelContext || DEFAULT_CONTEXT_WINDOW,
       source: modelContext ? 'model-context-length' : 'hardcoded-default',
       warnings,
     };
   }
 
-  // Filter endpoints to only those that expose a usable context_length.
-  const endpointsWithContext = relevantEndpoints.filter(
-    (endpoint) => toPositiveInteger(endpoint?.context_length) !== null
-  );
-
-  const endpointContexts = endpointsWithContext
+  const endpointContexts = relevantEndpoints
     .map((endpoint) => toPositiveInteger(endpoint.context_length))
     .filter((value) => value !== null);
 
@@ -143,71 +331,53 @@ export function computeOpenRouterAutoSettings(model, providerData, selectedProvi
     .map((endpoint) => toPositiveInteger(endpoint?.max_prompt_tokens))
     .filter((value) => value !== null);
 
-  // Choose a base context: smallest endpoint context, then model context, then default.
-  let contextWindow;
-  let contextWindowKnown = true;
-  if (endpointContexts.length > 0) {
-    contextWindow = Math.min(...endpointContexts);
-    if (endpointContexts.length < relevantEndpoints.length) {
-      warnings.push(
-        `${relevantEndpoints.length - endpointContexts.length}/${relevantEndpoints.length} endpoints missing context_length; using min of remaining.`
-      );
-    }
-  } else if (modelContext) {
-    contextWindow = modelContext;
-    warnings.push(
-      'No endpoints exposed context_length; falling back to model.context_length.'
-    );
-  } else {
-    contextWindow = DEFAULT_CONTEXT_WINDOW;
-    contextWindowKnown = false;
-    warnings.push(
-      `No endpoint or model context_length; using default ${DEFAULT_CONTEXT_WINDOW}.`
-    );
-  }
-
   const smallestEndpointContext = endpointContexts.length > 0 ? Math.min(...endpointContexts) : null;
   const smallestEndpointOutputCap = endpointOutputCaps.length > 0 ? Math.min(...endpointOutputCaps) : null;
   const smallestEndpointPromptCap = endpointPromptCaps.length > 0 ? Math.min(...endpointPromptCaps) : null;
+  const largestEndpointContext = endpointContexts.length > 0 ? Math.max(...endpointContexts) : null;
+  const largestEndpointOutputCap = endpointOutputCaps.length > 0 ? Math.max(...endpointOutputCaps) : null;
+  const largestEndpointPromptCap = endpointPromptCaps.length > 0 ? Math.max(...endpointPromptCaps) : null;
 
-  // Determine max output tokens.
-  // If at least one endpoint provides max_completion_tokens, honor the smallest.
-  // If none do, use only vetted model-specific defaults; otherwise preserve
-  // the user's current setting instead of guessing from context length.
+  // The model-level OpenRouter context is the total context source of truth.
+  // Endpoint context rows are provider diagnostics only; they must not shrink
+  // the configured model context after weak providers have been filtered out.
+  const contextWindow = modelContext || DEFAULT_CONTEXT_WINDOW;
+  const contextWindowKnown = modelContext !== null;
+  let contextSource;
+  if (modelContext) {
+    contextSource = 'model-context-length';
+  } else {
+    contextSource = 'hardcoded-default';
+    warnings.push(
+      `No OpenRouter model.context_length; preserving the current context setting unless callers need fallback ${DEFAULT_CONTEXT_WINDOW}.`
+    );
+  }
+
+  // Determine max output tokens from non-outlier endpoint caps, capped at 20%
+  // of the OpenRouter model context. In OpenRouter auto mode, use the smallest
+  // capable endpoint cap so OpenRouter can choose any remaining host safely.
   let maxOutputTokens;
   let outputCapSource;
-  if (smallestEndpointOutputCap !== null) {
-    maxOutputTokens = smallestEndpointOutputCap;
+  const endpointOutputCap = selectedProvider ? largestEndpointOutputCap : smallestEndpointOutputCap;
+  const contextBasedOutputCap = modelContext ? Math.floor(modelContext * 0.2) : null;
+  if (endpointOutputCap !== null && contextBasedOutputCap !== null) {
+    maxOutputTokens = Math.min(contextBasedOutputCap, endpointOutputCap);
     outputCapSource = 'endpoint-metadata';
-    if (endpointOutputCaps.length < relevantEndpoints.length) {
-      warnings.push(
-        `${relevantEndpoints.length - endpointOutputCaps.length}/${relevantEndpoints.length} endpoints missing max_completion_tokens; using min of remaining.`
-      );
-    }
-  } else if (knownNoOutputCapDefault !== null) {
-    maxOutputTokens = knownNoOutputCapDefault;
-    outputCapSource = 'known-no-cap-default';
-    warnings.push(
-      `No endpoints exposed max_completion_tokens; using known no-cap default ${maxOutputTokens}.`
-    );
   } else {
     maxOutputTokens = null;
     outputCapSource = 'unknown';
-    warnings.push(
-      'No endpoints exposed max_completion_tokens; preserving the current max output setting.'
-    );
+    if (endpointOutputCap !== null && contextBasedOutputCap === null) {
+      warnings.push(
+        'Endpoint metadata exposed max_completion_tokens but model.context_length is unknown; preserving the current max output setting.'
+      );
+    } else {
+      warnings.push(
+        'No endpoints exposed max_completion_tokens; preserving the current max output setting.'
+      );
+    }
   }
 
-  if (smallestEndpointPromptCap !== null && maxOutputTokens !== null) {
-    contextWindow = Math.min(
-      contextWindow,
-      smallestEndpointPromptCap + maxOutputTokens + CONTEXT_BUFFER_TOKENS
-    );
-  }
-
-  const source = smallestEndpointContext !== null && smallestEndpointOutputCap !== null
-    ? 'endpoint-metadata'
-    : 'partial-endpoint-metadata';
+  const source = `${contextSource}+${outputCapSource}`;
 
   return {
     contextWindow,
@@ -218,6 +388,13 @@ export function computeOpenRouterAutoSettings(model, providerData, selectedProvi
     smallestEndpointOutputCap,
     smallestEndpointContext,
     smallestEndpointPromptCap,
+    largestEndpointOutputCap,
+    largestEndpointContext,
+    largestEndpointPromptCap,
+    recommendedProvider: autoEndpointSelection.recommendedProvider,
+    providerSelectionRecommended: autoEndpointSelection.providerSelectionRecommended,
+    capableProviderNames: autoEndpointSelection.capableProviderNames,
+    ignoredProviderNames: autoEndpointSelection.ignoredProviderNames,
     fallbackModelContext: modelContext || DEFAULT_CONTEXT_WINDOW,
     source,
     warnings,

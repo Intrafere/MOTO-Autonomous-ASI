@@ -10,10 +10,11 @@ Lean-4-verified-theorem flow (see RIGOR_LEAN_BUILD_PLAN.md):
         for up to 5 Lean 4 attempts with error-feedback chaining.
     Stage 3 (novelty): classify the verified proof and persist it via
         proof_database.add_proof.
-    Stage 4 (placement): propose an inline edit that introduces the
+    Stage 4 (placement): either propose an inline edit that introduces the
         theorem with a "verified in Lean 4" marker and an appendix
-        reference. The coordinator owns the 2-attempt validator retry loop
-        and the appendix fallback.
+        reference, or explicitly request appendix-only storage for extension
+        theorems. The coordinator owns the 2-attempt validator retry loop
+        and appendix insertion.
 
 The Wolfram sub-mode that used to live here has been removed in Phase 2.
 Wolfram Alpha is now a tool available to HighContextSubmitter.submit_construction
@@ -39,13 +40,13 @@ from backend.compiler.prompts.rigor_prompts import (
 )
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
-from backend.shared.json_parser import parse_json
+from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
+from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.models import (
     CompilerSubmission,
     ProofAttemptFeedback,
     ProofCandidate,
-    ProofRecord,
 )
 from backend.shared.utils import count_tokens
 
@@ -96,6 +97,7 @@ def format_theorem_appendix_entry(
     """
     header_name = theorem_name.strip() or proof_id
     tier_labels = {
+        "major_mathematical_discovery": "Major Mathematical Discovery",
         "mathematical_discovery": "Mathematical Discovery",
         "novel_variant": "Novel Reformulation",
         "novel_formulation": "Novel Formalization",
@@ -103,6 +105,7 @@ def format_theorem_appendix_entry(
     novelty_label = tier_labels.get(novelty_tier, "Novel" if is_novel else "Known")
     status_suffix = {
         "appendix_fallback": "inline placement rejected; preserved here because Lean 4 verified the math",
+        "appendix_requested": "stored here by rigor discovery request",
         "inline": "also placed inline in the body",
     }.get(placement_outcome, placement_outcome)
 
@@ -138,6 +141,8 @@ class RigorTheoremResult:
     # Retained for retry-prompt assembly
     formal_sketch: str = ""
     source_excerpt: str = ""
+    theorem_origin: str = "existing_paper_claim"
+    placement_preference: str = "inline"
     # Metadata pass-through
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -156,6 +161,10 @@ class HighParamSubmitter:
         model_name: str,
         user_prompt: str,
         websocket_broadcaster: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+        *,
+        validator_model: str = "",
+        validator_context_window: Optional[int] = None,
+        validator_max_tokens: Optional[int] = None,
     ):
         self.model_name = model_name
         # NOTE: proof_database.inject_into_prompt prepends all novel proofs
@@ -163,6 +172,9 @@ class HighParamSubmitter:
         self.user_prompt = proof_database.inject_into_prompt(user_prompt)
         self.raw_user_prompt = user_prompt
         self.websocket_broadcaster = websocket_broadcaster
+        self.validator_model = validator_model or model_name
+        self.validator_context_window = validator_context_window or system_config.compiler_validator_context_window
+        self.validator_max_tokens = validator_max_tokens or system_config.compiler_validator_max_output_tokens
         self._initialized = False
         self._standalone_session_id = f"standalone_{uuid.uuid4().hex[:12]}"
 
@@ -192,6 +204,8 @@ class HighParamSubmitter:
 
         self.context_window = system_config.compiler_high_param_context_window
         self.max_output_tokens = system_config.compiler_high_param_max_output_tokens
+        self.validator_context_window = self.validator_context_window or system_config.compiler_validator_context_window
+        self.validator_max_tokens = self.validator_max_tokens or system_config.compiler_validator_max_output_tokens
         self.available_input_tokens = rag_config.get_available_input_tokens(
             self.context_window, self.max_output_tokens
         )
@@ -298,10 +312,30 @@ class HighParamSubmitter:
         formal_sketch = str(discovery.get("formal_sketch") or "").strip()
         source_excerpt = str(discovery.get("source_excerpt") or "").strip()
         retry_failure_id = str(discovery.get("retry_existing_failure_id") or "").strip()
+        theorem_origin = str(discovery.get("theorem_origin") or "").strip()
+        placement_preference = str(discovery.get("placement_preference") or "").strip()
 
         if not theorem_statement:
             logger.info("Rigor cycle: discovery returned empty theorem_statement; declining")
             return None
+
+        if theorem_origin not in {
+            "existing_paper_claim",
+            "extension_from_partial_work",
+            "extension_from_user_prompt",
+        }:
+            theorem_origin = "existing_paper_claim"
+
+        if placement_preference not in {"inline", "appendix_only"}:
+            placement_preference = "inline"
+
+        if theorem_origin in {
+            "extension_from_partial_work",
+            "extension_from_user_prompt",
+        }:
+            # Extension proofs are useful evidence for the paper, but they
+            # should not silently mutate the main body narrative.
+            placement_preference = "appendix_only"
 
         logger.info(
             "Rigor cycle: Stage 2 - Lean 4 formalization (up to 5 attempts), "
@@ -323,13 +357,16 @@ class HighParamSubmitter:
         theorem_name, lean_code, attempts = formalizer_result
 
         logger.info("Rigor cycle: Stage 3 - novelty classification + persistence")
-        is_novel, novelty_reasoning, stored_record = await self._step_assess_novelty_and_store(
+        novelty_result = await self._step_assess_novelty_and_store(
             theorem_statement=theorem_statement,
             theorem_name=theorem_name,
             lean_code=lean_code,
             formal_sketch=formal_sketch,
             attempts=attempts,
         )
+        if novelty_result is None:
+            return None
+        is_novel, novelty_reasoning, stored_record = novelty_result
 
         await self._broadcast(
             "proof_verified",
@@ -355,14 +392,22 @@ class HighParamSubmitter:
             except Exception as exc:
                 logger.debug("mark_resolved_retry failed (non-fatal): %s", exc)
 
-        logger.info("Rigor cycle: Stage 4 - initial placement proposal")
-        initial_submission = await self._step_initial_placement(
-            proof_id=stored_record.proof_id,
-            theorem_statement=theorem_statement,
-            theorem_name=theorem_name,
-            lean_code=lean_code,
-            is_novel=is_novel,
-        )
+        initial_submission = None
+        if placement_preference == "appendix_only":
+            logger.info(
+                "Rigor cycle: discovery requested appendix-only placement "
+                "(origin=%s)",
+                theorem_origin,
+            )
+        else:
+            logger.info("Rigor cycle: Stage 4 - initial placement proposal")
+            initial_submission = await self._step_initial_placement(
+                proof_id=stored_record.proof_id,
+                theorem_statement=theorem_statement,
+                theorem_name=theorem_name,
+                lean_code=lean_code,
+                is_novel=is_novel,
+            )
 
         return RigorTheoremResult(
             proof_id=stored_record.proof_id,
@@ -370,16 +415,20 @@ class HighParamSubmitter:
             theorem_name=theorem_name,
             lean_code=lean_code,
             is_novel=is_novel,
-            novelty_tier=novelty_tier,
+            novelty_tier=stored_record.novelty_tier,
             novelty_reasoning=novelty_reasoning,
             attempts=attempts,
             source_id=self._compiler_source_id(),
             initial_placement_submission=initial_submission,
             formal_sketch=formal_sketch,
             source_excerpt=source_excerpt,
+            theorem_origin=theorem_origin,
+            placement_preference=placement_preference,
             metadata={
                 "retry_failure_id": retry_failure_id,
                 "attempt_count": len(attempts),
+                "theorem_origin": theorem_origin,
+                "placement_preference": placement_preference,
             },
         )
 
@@ -489,6 +538,17 @@ class HighParamSubmitter:
             max_output_tokens=self.max_output_tokens,
             role_id="compiler_rigor_formalization",
         )
+        proof_label = "A"
+
+        def _lean_response_summary(feedback: ProofAttemptFeedback) -> str:
+            if feedback.success:
+                return "Lean 4 response: proof verified."
+            error = " ".join((feedback.error_output or "").split())
+            if len(error) > 960:
+                error = f"{error[:960]}..."
+            if error:
+                return f"Lean 4 response: {error} - proof not verified."
+            return "Lean 4 response: proof not verified."
 
         async def _on_attempt_started(attempt_number: int, strategy: str) -> None:
             await self._broadcast(
@@ -498,13 +558,14 @@ class HighParamSubmitter:
                     "source_id": self._compiler_source_id(),
                     "theorem_id": candidate.theorem_id,
                     "theorem_statement": theorem_statement,
+                    "proof_label": proof_label,
                     "attempt": attempt_number,
                     "strategy": strategy,
                 },
             )
 
         async def _on_attempt_feedback(feedback: ProofAttemptFeedback) -> None:
-            event = "proof_verified" if feedback.success else "proof_attempt_failed"
+            event = "proof_lean_accepted" if feedback.success else "proof_attempt_failed"
             await self._broadcast(
                 event,
                 {
@@ -512,9 +573,12 @@ class HighParamSubmitter:
                     "source_id": self._compiler_source_id(),
                     "theorem_id": candidate.theorem_id,
                     "theorem_statement": theorem_statement,
+                    "proof_label": proof_label,
                     "attempt": feedback.attempt,
                     "strategy": feedback.strategy,
                     "error_output": feedback.error_output[:500] if feedback.error_output else "",
+                    "lean_response": _lean_response_summary(feedback),
+                    "proof_verified": feedback.success,
                 },
             )
 
@@ -574,6 +638,61 @@ class HighParamSubmitter:
             )
             return None
 
+        integrity = await validate_full_lean_proof_integrity(
+            user_prompt=self.raw_user_prompt,
+            theorem_statement=theorem_statement,
+            formal_sketch=candidate.formal_sketch,
+            lean_code=lean_code,
+            source_excerpt=candidate.source_excerpt or current_paper,
+            allowed_baseline="",
+            validator_model=self.validator_model,
+            validator_context=self.validator_context_window,
+            validator_max_tokens=self.validator_max_tokens,
+            task_id=f"{self.get_current_task_id()}_integrity",
+            role_id="compiler_rigor_novelty",
+            require_statement_alignment=True,
+        )
+        if not integrity.valid:
+            integrity_feedback = ProofAttemptFeedback(
+                attempt=(attempts[-1].attempt + 1 if attempts else 1),
+                theorem_id=candidate.theorem_id,
+                reasoning="Post-Lean proof integrity check failed.",
+                lean_code=lean_code,
+                error_output=integrity.reason,
+                strategy="full_script",
+                success=False,
+            )
+            attempts = list(attempts) + [integrity_feedback]
+            try:
+                await proof_database.record_failed_candidate(
+                    source_brainstorm_id=self._compiler_source_id(),
+                    theorem_candidate=candidate,
+                    error_summary=integrity.reason[:2000],
+                )
+            except Exception as exc:
+                logger.debug("record_failed_candidate failed after integrity rejection: %s", exc)
+            await self._broadcast(
+                "proof_integrity_rejected",
+                {
+                    "source_type": "compiler_rigor",
+                    "source_id": self._compiler_source_id(),
+                    "theorem_id": candidate.theorem_id,
+                    "theorem_statement": theorem_statement,
+                    "category": integrity.category,
+                    "reason": integrity.reason,
+                },
+            )
+            await self._broadcast(
+                "proof_check_complete",
+                {
+                    "source_type": "compiler_rigor",
+                    "source_id": self._compiler_source_id(),
+                    "verified_count": 0,
+                    "message": "Lean proof failed post-verification integrity checks",
+                },
+            )
+            return None
+
         return theorem_name, lean_code, attempts
 
     # --------------------------------------------------------- stage 3
@@ -586,60 +705,58 @@ class HighParamSubmitter:
         lean_code: str,
         formal_sketch: str,
         attempts: List[ProofAttemptFeedback],
-    ) -> tuple:
+    ) -> Optional[tuple]:
         """Classify the verified proof and persist it via proof_database.
 
         Returns (is_novel, novelty_reasoning, stored_record).
         """
-        # Lazy import to break an early-load circular chain through the
-        # autonomous.core package __init__.
-        from backend.autonomous.core.proof_novelty import assess_proof_novelty
-
-        existing_block = proof_database.get_novel_proofs_for_injection()
-
         task_id = f"{self.get_current_task_id()}_novelty"
         self.task_sequence += 1
 
         try:
-            novelty_tier, novelty_reasoning = await assess_proof_novelty(
+            # Lazy import avoids an early-load cycle through autonomous.core.
+            from backend.autonomous.core.proof_registration import register_verified_lean_proof
+
+            registration = await register_verified_lean_proof(
+                proof_database=proof_database,
                 user_prompt=self.raw_user_prompt,
                 theorem_statement=theorem_statement,
                 lean_code=lean_code,
-                validator_model=self.model_name,
-                validator_context=self.context_window,
-                validator_max_tokens=self.max_output_tokens,
-                existing_novel_proofs=existing_block,
+                validator_model=self.validator_model,
+                validator_context=self.validator_context_window,
+                validator_max_tokens=self.validator_max_tokens,
                 task_id=task_id,
                 role_id="compiler_rigor_novelty",
+                source_type="paper",
+                source_id=self._compiler_source_id(),
+                source_title="Compiler Rigor Theorem",
+                theorem_name=theorem_name,
+                formal_sketch=formal_sketch,
+                solver="Lean 4",
+                verification_notes="Produced by compiler rigor loop (HighParamSubmitter).",
+                attempt_count=len(attempts),
+                attempts=list(attempts),
+                broadcast_fn=self.websocket_broadcaster,
+                base_event={
+                    "source_type": "compiler_rigor",
+                    "source_id": self._compiler_source_id(),
+                    "trigger": "rigor_loop",
+                },
             )
-            is_novel = novelty_tier != "not_novel"
+            stored = registration.record
+            return stored.novel, stored.novelty_reasoning, stored
         except Exception as exc:
-            logger.warning("Novelty assessment failed (%s); defaulting to non-novel", exc)
-            novelty_tier, novelty_reasoning, is_novel = "not_novel", f"Novelty assessment error: {exc}", False
-
-        record = ProofRecord(
-            proof_id="",  # proof_database assigns proof_XXX on add_proof
-            theorem_id="",
-            theorem_statement=theorem_statement,
-            theorem_name=theorem_name,
-            formal_sketch=formal_sketch,
-            source_type="paper",  # compiler rigor proofs live under the "paper" channel
-            source_id=self._compiler_source_id(),
-            source_title="Compiler Rigor Theorem",
-            solver="Lean 4",
-            lean_code=lean_code,
-            novel=is_novel,
-            novelty_tier=novelty_tier,
-            novelty_reasoning=novelty_reasoning,
-            verification_notes="Produced by compiler rigor loop (HighParamSubmitter).",
-            attempt_count=len(attempts),
-            attempts=list(attempts),
-            dependencies=[],
-            solver_hints=[],
-        )
-
-        stored = await proof_database.add_proof(record)
-        return is_novel, novelty_reasoning, stored
+            logger.warning("Novelty assessment failed; rigor proof will not be stored: %s", exc)
+            await self._broadcast(
+                "proof_check_complete",
+                {
+                    "source_type": "compiler_rigor",
+                    "source_id": self._compiler_source_id(),
+                    "verified_count": 0,
+                    "message": f"novelty validation failed: {exc}",
+                },
+            )
+            return None
 
     # --------------------------------------------------------- stage 4
 
@@ -870,9 +987,7 @@ class HighParamSubmitter:
         )
 
         try:
-            truncated_preview = llm_output[:2000] + (
-                "\n[...truncated...]" if len(llm_output) > 2000 else ""
-            )
+            truncated_preview = sanitize_model_output_for_retry_context(llm_output, max_chars=2000)
             retry_response = await api_client_manager.generate_completion(
                 task_id=f"{task_id}_retry",
                 role_id=self.role_id,

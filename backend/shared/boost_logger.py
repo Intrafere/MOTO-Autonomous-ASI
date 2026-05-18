@@ -4,16 +4,30 @@ Stores logs in a persistent file so boost-routed calls can be merged into the
 main API call log view.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import os
+from collections import deque
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 from backend.shared.config import system_config
+from backend.shared.log_redaction import redact_log_text
 
 logger = logging.getLogger(__name__)
+
+
+def _payload_metadata(value: str, preview_chars: int) -> Dict[str, Any]:
+    """Return safe log metadata for a boost response payload."""
+    text = value or ""
+    preview = redact_log_text(text, preview_chars)
+    return {
+        "preview": preview,
+        "size": len(text),
+        "sha256": hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest() if text else "",
+    }
 
 
 class BoostLogger:
@@ -39,6 +53,7 @@ class BoostLogger:
         
         self._initialized = True
         self._ensure_log_file()
+        self._scrub_persisted_full_payloads()
         logger.info("BoostLogger initialized")
     
     def _ensure_log_file(self) -> None:
@@ -52,6 +67,61 @@ class BoostLogger:
     def _get_log_path(self) -> Path:
         """Return the instance-scoped boost log path."""
         return Path(system_config.data_dir) / "boost_api_log.txt"
+
+    def _scrub_persisted_full_payloads(self) -> None:
+        """Remove legacy raw prompt/response bodies from the on-disk JSONL log."""
+        log_path = self._get_log_path()
+        if not log_path.exists():
+            return
+
+        changed = False
+        scrubbed_lines: List[str] = []
+
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    scrubbed_lines.append(line)
+                    continue
+
+                original_entry = dict(entry)
+                prompt_full = str(entry.pop("prompt_full", "") or "")
+                response_full = str(entry.pop("response_full", "") or "")
+                prompt_source = prompt_full or str(entry.get("prompt_preview") or "")
+                response_source = response_full or str(entry.get("response_preview") or "")
+
+                if prompt_source:
+                    entry["prompt_preview"] = redact_log_text(prompt_source, 500)
+                    entry["prompt_size"] = int(entry.get("prompt_size") or len(prompt_source))
+                if response_source:
+                    response_meta = _payload_metadata(response_source, 2000)
+                    entry["response_preview"] = response_meta["preview"]
+                    entry["response_size"] = int(entry.get("response_size") or response_meta["size"])
+                    entry.setdefault("response_sha256", response_meta["sha256"])
+
+                entry["has_full_prompt"] = False
+                entry["has_full_response"] = False
+                entry["response_redacted"] = True
+                if entry.get("error"):
+                    entry["error"] = redact_log_text(entry["error"], 1000)
+
+                if prompt_full or response_full or entry != original_entry:
+                    changed = True
+                scrubbed_lines.append(json.dumps(entry) + "\n")
+
+            if changed:
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.writelines(scrubbed_lines)
+                logger.info("Scrubbed legacy full payloads from boost API log")
+        except Exception as e:
+            logger.warning(f"Failed to scrub legacy boost API log payloads: {e}")
     
     async def log_boost_call(
         self,
@@ -83,20 +153,27 @@ class BoostLogger:
         """
         async with self._lock:
             try:
+                response_meta = _payload_metadata(response_content, 2000)
+                store_full_payloads = bool(system_config.api_log_store_full_payloads)
                 log_entry = {
                     "timestamp": datetime.now().isoformat(),
                     "task_id": task_id,
                     "role_id": role_id,
                     "model": model,
                     "boost_mode": boost_mode,
-                    "prompt_preview": prompt_preview[:500] if prompt_preview else "",
-                    "response_preview": response_content[:2000] if response_content else "",
-                    "response_full": response_content,
+                    "prompt_preview": redact_log_text(prompt_preview, 500) if prompt_preview else "",
+                    "response_preview": response_meta["preview"],
+                    "response_size": response_meta["size"],
+                    "response_sha256": response_meta["sha256"],
+                    "response_redacted": not store_full_payloads,
+                    "has_full_response": store_full_payloads and bool(response_content),
                     "tokens_used": tokens_used,
                     "duration_ms": duration_ms,
                     "success": success,
-                    "error": error
+                    "error": redact_log_text(error, 1000)
                 }
+                if store_full_payloads:
+                    log_entry["response_full"] = response_content
                 
                 # Append to log file
                 with open(self._get_log_path(), "a", encoding="utf-8") as f:
@@ -126,7 +203,7 @@ class BoostLogger:
         except Exception as e:
             logger.error(f"Failed to trim boost log: {e}")
     
-    async def get_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def get_logs(self, limit: int = 100, include_full: bool = True) -> List[Dict[str, Any]]:
         """
         Get recent boost API call logs.
         
@@ -143,7 +220,7 @@ class BoostLogger:
                     return []
                 
                 with open(log_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
+                    lines = deque(f, maxlen=max(1, limit))
                 
                 logs = []
                 for line in lines:
@@ -151,6 +228,15 @@ class BoostLogger:
                     if line:
                         try:
                             log_entry = json.loads(line)
+                            if not include_full or not system_config.api_log_store_full_payloads:
+                                prompt_full = str(log_entry.pop("prompt_full", "") or "")
+                                response_full = str(log_entry.pop("response_full", "") or "")
+                                log_entry["prompt_size"] = len(prompt_full)
+                                log_entry["response_size"] = int(log_entry.get("response_size") or len(response_full))
+                                log_entry["has_full_prompt"] = False
+                                log_entry["has_full_response"] = False
+                                if response_full and not log_entry.get("response_sha256"):
+                                    log_entry["response_sha256"] = hashlib.sha256(response_full.encode("utf-8", errors="replace")).hexdigest()
                             logs.append(log_entry)
                         except json.JSONDecodeError:
                             continue
@@ -163,7 +249,7 @@ class BoostLogger:
                 logger.error(f"Failed to get boost logs: {e}")
                 return []
     
-    async def get_log_entry(self, index: int) -> Optional[Dict[str, Any]]:
+    async def get_log_entry(self, index: int, include_full: bool = True) -> Optional[Dict[str, Any]]:
         """
         Get a specific log entry by index (0 = most recent).
         
@@ -173,15 +259,53 @@ class BoostLogger:
         Returns:
             Log entry dict or None if not found
         """
-        logs = await self.get_logs(limit=index + 1)
+        logs = await self.get_logs(limit=index + 1, include_full=include_full)
         if index < len(logs):
             return logs[index]
         return None
     
-    async def clear_logs(self) -> None:
-        """Clear all boost API logs."""
+    @staticmethod
+    def _entry_workflow(entry: Dict[str, Any]) -> str:
+        workflow = str(entry.get("workflow") or "").strip().lower()
+        if workflow:
+            return workflow
+
+        role_id = str(entry.get("role_id") or "")
+        task_id = str(entry.get("task_id") or "")
+        if role_id.startswith("leanoj_") or task_id.startswith("leanoj_"):
+            return "leanoj"
+        return "autonomous"
+
+    async def clear_logs(self, workflow: Optional[str] = None) -> None:
+        """Clear boost API logs, optionally scoped to one workflow."""
         async with self._lock:
             try:
+                if workflow:
+                    log_path = self._get_log_path()
+                    if not os.path.exists(log_path):
+                        return
+
+                    with open(log_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+
+                    retained_lines: List[str] = []
+                    for line in lines:
+                        stripped = line.strip()
+                        if not stripped:
+                            continue
+                        try:
+                            entry = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            retained_lines.append(line)
+                            continue
+                        if self._entry_workflow(entry) != workflow:
+                            retained_lines.append(line)
+
+                    with open(log_path, "w", encoding="utf-8") as f:
+                        f.writelines(retained_lines)
+                    logger.info("Boost logs cleared for workflow %s", workflow)
+                    return
+
                 with open(self._get_log_path(), "w", encoding="utf-8") as f:
                     f.write("")
                 logger.info("Boost logs cleared")

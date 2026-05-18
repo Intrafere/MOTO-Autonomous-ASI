@@ -9,6 +9,7 @@ Supports four boost modes:
 4. Per-task Toggle - Task ID based (legacy)
 """
 import asyncio
+import json
 import logging
 import time
 from typing import Dict, Any, List, Optional, Callable
@@ -26,10 +27,25 @@ from backend.shared.boost_logger import boost_logger
 from backend.shared.config import rag_config, system_config
 from backend.shared.fastembed_provider import FASTEMBED_MODEL_NAME, FastEmbedProvider
 from backend.shared.free_model_manager import free_model_manager
+from backend.shared.json_parser import sanitize_model_output_for_retry_context
 from backend.shared.models import ModelConfig
 from backend.shared.token_tracker import token_tracker
 
 logger = logging.getLogger(__name__)
+
+
+def _response_shape_for_logging(response: Any) -> str:
+    """Summarize an upstream response shape without logging provider/model text."""
+    if isinstance(response, dict):
+        keys = sorted(str(key) for key in response.keys())
+        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        return (
+            f"type=dict, keys={keys}, choices_present={bool(response.get('choices'))}, "
+            f"error_present={'error' in response}, usage_keys={sorted(str(key) for key in usage.keys())}"
+        )
+    if isinstance(response, list):
+        return f"type=list, length={len(response)}"
+    return f"type={type(response).__name__}"
 
 
 class APIClientManager:
@@ -38,6 +54,16 @@ class APIClientManager:
     Handles fallback on credit exhaustion and boost integration.
     """
     CALL_METADATA_KEY = "_moto_call_metadata"
+    # Supercharge intentionally breaks the default 0.0 temperature policy for
+    # candidate attempts so parallel completions produce meaningfully different answers.
+    SUPERCHARGE_ATTEMPT_TEMPERATURES = (0.0, 0.2, 0.4, 0.8)
+    SUPERCHARGE_CANDIDATE_MAX_CHARS = 20000
+    # Parallel brainstorm submitters use a lane-based ladder: submitter 1 stays
+    # deterministic, later lanes get increasing exploration pressure.
+    PARALLEL_BRAINSTORM_SUBMITTER_TEMPERATURES = (
+        0.0, 0.1, 0.2, 0.3, 0.4,
+        0.5, 0.6, 0.7, 0.8, 0.9,
+    )
     
     def __init__(self):
         self._openrouter_client: Optional[OpenRouterClient] = None
@@ -60,10 +86,11 @@ class APIClientManager:
         # Signature: async callback(model_id: str)
         self._model_tracking_callback: Optional[Callable] = None
         
-        # Autonomous API logger callback
-        # Called after each API call (success or failure) with full details
-        # Signature: async callback(task_id, role_id, model, provider, prompt, response, duration_ms, success, error, phase)
-        self._autonomous_logger_callback: Optional[Callable] = None
+        # API logger callback. Workflows can override this to add namespace-specific
+        # metadata; otherwise the manager still logs every model call by default.
+        # Signature: async callback(task_id, role_id, model, provider, prompt, response,
+        #                           tokens_used, duration_ms, success, error, phase)
+        self._autonomous_logger_callback: Optional[Callable] = self._default_api_logger_callback
         
         # Current autonomous phase (set by autonomous coordinator)
         self._current_autonomous_phase: str = "unknown"
@@ -73,6 +100,17 @@ class APIClientManager:
         
         # Lock for thread-safe state updates
         self._state_lock = asyncio.Lock()
+
+    @classmethod
+    def parallel_brainstorm_submitter_temperature(cls, submitter_index: int) -> float:
+        """Return the deterministic temperature lane for a parallel brainstorm submitter."""
+        try:
+            index = int(submitter_index)
+        except (TypeError, ValueError):
+            index = 1
+        index = max(1, index)
+        ladder_index = min(index - 1, len(cls.PARALLEL_BRAINSTORM_SUBMITTER_TEMPERATURES) - 1)
+        return cls.PARALLEL_BRAINSTORM_SUBMITTER_TEMPERATURES[ladder_index]
     
     def set_broadcast_callback(self, callback: Callable) -> None:
         """Set callback for broadcasting WebSocket events."""
@@ -136,6 +174,78 @@ class APIClientManager:
         else:
             logger.info("Model tracking callback cleared")
     
+    @staticmethod
+    def _infer_api_log_workflow(task_id: str, role_id: str) -> str:
+        """Infer the API-log namespace used by the shared log tab."""
+        task = (task_id or "").strip().lower()
+        role = (role_id or "").strip().lower()
+        if role.startswith("leanoj_") or task.startswith("leanoj_"):
+            return "leanoj"
+        return "autonomous"
+
+    @staticmethod
+    def _prompt_for_logging(messages: Optional[List[Dict[str, Any]]]) -> str:
+        """Return a safe prompt preview source without raw tool-result content."""
+        if not messages:
+            return ""
+
+        message = messages[-1]
+        role = str(message.get("role") or "")
+        content = message.get("content", "")
+
+        if role == "tool":
+            tool_name = str(message.get("name") or "")
+            tool_call_id = str(message.get("tool_call_id") or "")
+            content_len = len(content) if isinstance(content, str) else len(str(content or ""))
+            return (
+                "[tool message redacted for API logging; "
+                f"name={tool_name or 'unknown'}, "
+                f"tool_call_id_present={bool(tool_call_id)}, "
+                f"content_length={content_len}]"
+            )
+
+        if isinstance(content, str):
+            return content
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except Exception:
+            return str(content or "")
+
+    async def _default_api_logger_callback(
+        self,
+        task_id,
+        role_id,
+        model,
+        provider,
+        prompt,
+        response,
+        tokens_used,
+        duration_ms,
+        success,
+        error,
+        phase,
+    ) -> None:
+        """Persist API calls even when no workflow-specific logger is active."""
+        try:
+            from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
+
+            await autonomous_api_logger.log_api_call(
+                task_id=task_id,
+                role_id=role_id,
+                model=model,
+                provider=provider,
+                prompt=prompt,
+                response_content=response,
+                tokens_used=tokens_used,
+                duration_ms=duration_ms,
+                success=success,
+                error=error,
+                phase=phase or self._current_autonomous_phase,
+                workflow=self._infer_api_log_workflow(task_id, role_id),
+            )
+        except Exception as e:
+            logger.error(f"Failed to log API call in default logger: {e}")
+
     def set_autonomous_logger_callback(self, callback: Optional[Callable]) -> None:
         """
         Set callback for autonomous API logging.
@@ -143,16 +253,16 @@ class APIClientManager:
         The callback is called after each API call with full details for logging.
         
         Args:
-            callback: Async function with signature: 
+            callback: Async function with signature:
                       callback(task_id, role_id, model, provider, prompt, response, 
-                               duration_ms, success, error, phase)
-                      or None to disable
+                               tokens_used, duration_ms, success, error, phase)
+                      or None to restore default all-call logging
         """
-        self._autonomous_logger_callback = callback
+        self._autonomous_logger_callback = callback or self._default_api_logger_callback
         if callback:
             logger.info("Autonomous API logger callback set")
         else:
-            logger.info("Autonomous API logger callback cleared")
+            logger.info("Autonomous API logger callback restored to default")
     
     def set_autonomous_phase(self, phase: str) -> None:
         """
@@ -189,6 +299,7 @@ class APIClientManager:
         boosted: bool,
         boost_mode: Optional[str] = None,
         openrouter_provider: Optional[str] = None,
+        openrouter_reasoning_effort: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Attach effective routing details to a successful API response."""
         if not isinstance(response, dict):
@@ -205,6 +316,7 @@ class APIClientManager:
             "boosted": boosted,
             "boost_mode": boost_mode,
             "openrouter_provider": openrouter_provider,
+            "openrouter_reasoning_effort": openrouter_reasoning_effort,
         }
         return response
 
@@ -249,6 +361,27 @@ class APIClientManager:
             config: Model configuration (includes provider, model_id, openrouter_model_id, 
                     lm_studio_fallback_id, and optionally openrouter_provider)
         """
+        if system_config.generic_mode:
+            if config.provider != "openrouter":
+                logger.warning(
+                    "Generic mode is OpenRouter-only. Normalizing role '%s' from provider=%s to OpenRouter.",
+                    role_id,
+                    config.provider,
+                )
+                config = config.model_copy(
+                    update={
+                        "provider": "openrouter",
+                        "openrouter_model_id": config.openrouter_model_id or config.model_id,
+                        "lm_studio_fallback_id": None,
+                    }
+                )
+            elif config.lm_studio_fallback_id:
+                logger.warning(
+                    "Generic mode is OpenRouter-only. Dropping LM Studio fallback for role '%s'.",
+                    role_id,
+                )
+                config = config.model_copy(update={"lm_studio_fallback_id": None})
+
         self._role_model_configs[role_id] = config
         
         # Set initial fallback state based on provider
@@ -294,8 +427,186 @@ class APIClientManager:
             return "task_id"
         
         return None
-    
+
     async def generate_completion(
+        self,
+        task_id: str,
+        role_id: str,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, str]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Generate a completion, optionally wrapping the role with Supercharge."""
+        async with self._state_lock:
+            role_config = self._role_model_configs.get(role_id)
+
+        supercharge_enabled = bool(getattr(role_config, "supercharge_enabled", False))
+        # Tool-call conversations need exact assistant/tool turn pairing, so keep them single-shot.
+        if not supercharge_enabled or tools or tool_choice is not None:
+            return await self._generate_completion_once(
+                task_id=task_id,
+                role_id=role_id,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+                **kwargs
+            )
+
+        return await self._generate_supercharged_completion(
+            task_id=task_id,
+            role_id=role_id,
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            **kwargs
+        )
+
+    @staticmethod
+    def _response_text(response: Dict[str, Any]) -> str:
+        """Extract assistant text from an OpenAI-compatible completion response."""
+        if not response.get("choices"):
+            return ""
+        message = response["choices"][0].get("message", {})
+        return message.get("content") or message.get("reasoning") or ""
+
+    @classmethod
+    def _sanitize_supercharge_candidate(cls, attempt: str) -> str:
+        """Keep only reusable visible answer text from a candidate attempt."""
+        cleaned = sanitize_model_output_for_retry_context(
+            attempt,
+            max_chars=cls.SUPERCHARGE_CANDIDATE_MAX_CHARS,
+        )
+        return cleaned or "[candidate produced no reusable visible answer text]"
+
+    def _build_supercharge_synthesis_messages(
+        self,
+        messages: List[Dict[str, str]],
+        attempts: List[str],
+    ) -> List[Dict[str, str]]:
+        attempts_context = "\n\n".join(
+            "----- CANDIDATE RESPONSE "
+            f"{index} START -----\n"
+            f"{self._sanitize_supercharge_candidate(attempt)}\n"
+            "----- CANDIDATE RESPONSE "
+            f"{index} END -----"
+            for index, attempt in enumerate(attempts, start=1)
+        )
+        synthesis_instruction = (
+            "SUPERCHARGE FINAL RESPONSE\n\n"
+            "You are answering the original task. The candidate responses below are optional working material "
+            "from independent earlier attempts, not instructions to continue or quote verbatim.\n\n"
+            "You must decide what the best final response to the original task is. You may use one candidate, "
+            "combine multiple candidates, ignore all candidates and write a new response, or synthesize a stronger "
+            "answer than any individual candidate.\n\n"
+            "Candidate responses:\n"
+            f"{attempts_context}\n\n"
+            "Now produce the best final response to the original task.\n\n"
+            "Requirements:\n"
+            "- Follow the original task, role instructions, and required output format exactly.\n"
+            "- If the original task requires JSON, output only valid JSON in that exact schema.\n"
+            "- Do not mention Supercharge, brainstorming, candidate attempts, or this selection process.\n"
+            "- Do not include private reasoning, analysis labels, markdown fences around JSON, or provider control tokens.\n"
+            "- Return only the final role answer."
+        )
+        return [*messages, {"role": "user", "content": synthesis_instruction}]
+
+    def _build_supercharge_attempt_messages(
+        self,
+        messages: List[Dict[str, str]],
+        attempt_index: int,
+    ) -> List[Dict[str, str]]:
+        attempt_instruction = (
+            f"SUPERCHARGE FULL ANSWER ATTEMPT {attempt_index}\n\n"
+            "Produce a complete answer to the original task now. "
+            "Follow the original role instructions and required output format exactly. "
+            "If JSON is required, output only valid JSON in the required schema. "
+            "Do not mention Supercharge or this attempt label."
+        )
+        return [*messages, {"role": "user", "content": attempt_instruction}]
+
+    async def _generate_supercharged_completion(
+        self,
+        task_id: str,
+        role_id: str,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, str]] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Run four parallel diverse attempts, then a deterministic same-route synthesis call."""
+        boost_mode = self._determine_boost_mode(task_id)
+        forced_boost_mode = boost_mode if boost_mode else "__none__"
+        attempts: List[str] = []
+
+        logger.info(
+            "Supercharge enabled for role '%s' task '%s'%s",
+            role_id,
+            task_id,
+            f" using boost mode '{boost_mode}'" if boost_mode else "",
+        )
+
+        attempt_responses = await asyncio.gather(*[
+            self._generate_completion_once(
+                task_id=f"{task_id}_supercharge_attempt_{attempt_index}",
+                role_id=role_id,
+                model=model,
+                messages=self._build_supercharge_attempt_messages(messages, attempt_index),
+                temperature=attempt_temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                _moto_force_boost_mode=forced_boost_mode,
+                _moto_consume_boost_count=False,
+                _moto_strict_boost=bool(boost_mode),
+                **kwargs
+            )
+            for attempt_index, attempt_temperature in enumerate(
+                self.SUPERCHARGE_ATTEMPT_TEMPERATURES,
+                start=1,
+            )
+        ])
+        attempts = [self._response_text(response) for response in attempt_responses]
+
+        synthesis_response = await self._generate_completion_once(
+            task_id=f"{task_id}_supercharge_final",
+            role_id=role_id,
+            model=model,
+            messages=self._build_supercharge_synthesis_messages(messages, attempts),
+            temperature=0.0,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            _moto_force_boost_mode=forced_boost_mode,
+            _moto_consume_boost_count=False,
+            _moto_strict_boost=bool(boost_mode),
+            **kwargs
+        )
+
+        metadata = self.extract_call_metadata(synthesis_response)
+        if boost_mode == "next_count" and metadata.get("boosted"):
+            await boost_manager.consume_boost_count()
+
+        if isinstance(synthesis_response, dict):
+            synthesis_response[self.CALL_METADATA_KEY] = {
+                **metadata,
+                "supercharged": True,
+                "supercharge_attempts": 4,
+                "supercharge_attempt_temperatures": list(self.SUPERCHARGE_ATTEMPT_TEMPERATURES),
+            }
+        return synthesis_response
+
+    async def _generate_completion_once(
         self,
         task_id: str,
         role_id: str,
@@ -331,13 +642,21 @@ class APIClientManager:
         Returns:
             API response dict
         """
+        forced_boost_mode = kwargs.pop("_moto_force_boost_mode", None)
+        consume_boost_count = kwargs.pop("_moto_consume_boost_count", True)
+        strict_boost = kwargs.pop("_moto_strict_boost", False)
         requested_model = model
         async with self._state_lock:
             initial_role_config = self._role_model_configs.get(role_id)
         configured_provider = initial_role_config.provider if initial_role_config else None
 
         # Check if task should use boost (unified check for all boost modes)
-        boost_mode = self._determine_boost_mode(task_id)
+        if forced_boost_mode == "__none__":
+            boost_mode = None
+        elif forced_boost_mode is not None:
+            boost_mode = forced_boost_mode
+        else:
+            boost_mode = self._determine_boost_mode(task_id)
         
         if boost_mode and boost_manager.boost_config:
             boost_model = boost_manager.boost_config.boost_model_id
@@ -348,8 +667,8 @@ class APIClientManager:
             # Get prompt preview for logging
             prompt_preview = ""
             if messages:
-                last_message = messages[-1].get("content", "")
-                prompt_preview = last_message[:500] if last_message else ""
+                last_message = self._prompt_for_logging(messages)
+                prompt_preview = last_message or ""
             
             start_time = time.time()
             
@@ -373,6 +692,7 @@ class APIClientManager:
                             max_tokens=max_tokens or boost_manager.boost_config.boost_max_output_tokens,
                             response_format=response_format,
                             provider=boost_provider,
+                            reasoning_effort=boost_manager.boost_config.boost_reasoning_effort,
                             tools=tools,
                             tool_choice=tool_choice,
                         ),
@@ -386,9 +706,11 @@ class APIClientManager:
                     
                     # Check for missing choices (upstream provider timeout/error)
                     if not result.get("choices"):
-                        import json as _json
-                        raw_response = _json.dumps(result)[:2000]
-                        logger.error(f"OpenRouter boost response missing 'choices' after {duration_ms:.0f}ms - raw: {raw_response}")
+                        logger.error(
+                            "OpenRouter boost response missing 'choices' after %.0fms - %s",
+                            duration_ms,
+                            _response_shape_for_logging(result),
+                        )
                         
                         # Log as failure
                         await boost_logger.log_boost_call(
@@ -433,6 +755,7 @@ class APIClientManager:
                         boosted=True,
                         boost_mode=boost_mode,
                         openrouter_provider=boost_provider,
+                        openrouter_reasoning_effort=boost_manager.boost_config.boost_reasoning_effort,
                     )
                     
                     # Log the boost call
@@ -450,7 +773,7 @@ class APIClientManager:
                     
                     # Log to autonomous API logger if callback set
                     if self._autonomous_logger_callback:
-                        full_prompt = messages[-1].get("content", "") if messages else ""
+                        full_prompt = self._prompt_for_logging(messages)
                         await self._autonomous_logger_callback(
                             task_id=task_id,
                             role_id=role_id,
@@ -469,7 +792,7 @@ class APIClientManager:
                     await self._track_model_usage(boost_model)
                     
                     # Consume boost count if using next_count mode
-                    if boost_mode == "next_count":
+                    if boost_mode == "next_count" and consume_boost_count:
                         await boost_manager.consume_boost_count()
                     
                     return result
@@ -493,7 +816,7 @@ class APIClientManager:
                 
                 # Log to autonomous API logger if callback set
                 if self._autonomous_logger_callback:
-                    full_prompt = messages[-1].get("content", "") if messages else ""
+                    full_prompt = self._prompt_for_logging(messages)
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
@@ -519,6 +842,8 @@ class APIClientManager:
                 
                 # Fall through to primary model (boost has no fallback concept)
                 logger.info(f"Boost rate limited, using primary model for task {task_id}")
+                if strict_boost:
+                    raise RuntimeError(f"Strict boost call failed for task {task_id}: {e}") from e
             
             except OpenRouterPrivacyPolicyError as e:
                 # Privacy policy error - log and crash (boost has no fallback concept)
@@ -537,7 +862,7 @@ class APIClientManager:
                 
                 # Log to autonomous API logger if callback set
                 if self._autonomous_logger_callback:
-                    full_prompt = messages[-1].get("content", "") if messages else ""
+                    full_prompt = self._prompt_for_logging(messages)
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
@@ -597,7 +922,7 @@ class APIClientManager:
                 
                 # Log to autonomous API logger if callback set
                 if self._autonomous_logger_callback:
-                    full_prompt = messages[-1].get("content", "") if messages else ""
+                    full_prompt = self._prompt_for_logging(messages)
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
@@ -618,6 +943,8 @@ class APIClientManager:
                     "task_id": task_id,
                     "message": "Boost credits exhausted, falling back to primary model"
                 })
+                if strict_boost:
+                    raise RuntimeError(f"Strict boost call credits exhausted for task {task_id}: {e}") from e
                 # Continue to primary model routing below
                 
             except Exception as e:
@@ -637,7 +964,7 @@ class APIClientManager:
                 
                 # Log to autonomous API logger if callback set
                 if self._autonomous_logger_callback:
-                    full_prompt = messages[-1].get("content", "") if messages else ""
+                    full_prompt = self._prompt_for_logging(messages)
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
@@ -653,12 +980,23 @@ class APIClientManager:
                     )
                 
                 logger.error(f"Boost API error for task {task_id}: {e}, using primary model")
+                if strict_boost:
+                    raise RuntimeError(f"Strict boost call failed for task {task_id}: {e}") from e
                 # Fall through to primary model
         
         # Check role fallback state
         async with self._state_lock:
             fallback_state = self._role_fallback_state.get(role_id, "lm_studio")
             role_config = self._role_model_configs.get(role_id)
+
+            if system_config.generic_mode and role_config and fallback_state != "openrouter":
+                logger.warning(
+                    "Generic mode reset role '%s' fallback state from %s to OpenRouter.",
+                    role_id,
+                    fallback_state,
+                )
+                fallback_state = "openrouter"
+                self._role_fallback_state[role_id] = "openrouter"
         
         # If OpenRouter configured and not fallen back, try OpenRouter
         if fallback_state == "openrouter" and role_config:
@@ -719,6 +1057,7 @@ class APIClientManager:
                             max_tokens=max_tokens or role_config.max_output_tokens,
                             response_format=response_format,
                             provider=openrouter_provider,
+                            reasoning_effort=role_config.openrouter_reasoning_effort,
                             tools=tools,
                             tool_choice=tool_choice,
                         ),
@@ -732,9 +1071,11 @@ class APIClientManager:
                     
                     # Check for missing choices (upstream provider timeout/error)
                     if not result.get("choices"):
-                        import json as _json
-                        raw_response = _json.dumps(result)[:2000]
-                        logger.error(f"OpenRouter response missing 'choices' after {duration_ms:.0f}ms - raw: {raw_response}")
+                        logger.error(
+                            "OpenRouter response missing 'choices' after %.0fms - %s",
+                            duration_ms,
+                            _response_shape_for_logging(result),
+                        )
                         raise ValueError(f"OpenRouter response missing 'choices' after {duration_ms:.0f}ms (upstream provider timeout)")
                     
                     response_content = ""
@@ -761,11 +1102,12 @@ class APIClientManager:
                         boosted=False,
                         boost_mode=None,
                         openrouter_provider=openrouter_provider,
+                        openrouter_reasoning_effort=role_config.openrouter_reasoning_effort,
                     )
                     
                     # Log to autonomous API logger if callback set
                     if self._autonomous_logger_callback:
-                        full_prompt = messages[-1].get("content", "") if messages else ""
+                        full_prompt = self._prompt_for_logging(messages)
                         await self._autonomous_logger_callback(
                             task_id=task_id,
                             role_id=role_id,
@@ -790,7 +1132,7 @@ class APIClientManager:
                     duration_ms = (time.time() - start_time) * 1000
                     
                     if self._autonomous_logger_callback:
-                        full_prompt = messages[-1].get("content", "") if messages else ""
+                        full_prompt = self._prompt_for_logging(messages)
                         await self._autonomous_logger_callback(
                             task_id=task_id,
                             role_id=role_id,
@@ -827,6 +1169,9 @@ class APIClientManager:
                         temperature=temperature,
                         max_tokens=max_tokens or role_config.max_output_tokens,
                         response_format=response_format,
+                        reasoning_effort=role_config.openrouter_reasoning_effort,
+                        tools=tools,
+                        tool_choice=tool_choice,
                     )
                     if rotated_result is not None:
                         free_model_manager.clear_failed_models()  # Success - clear failures
@@ -852,7 +1197,7 @@ class APIClientManager:
                     
                     # Log to autonomous API logger if callback set
                     if self._autonomous_logger_callback:
-                        full_prompt = messages[-1].get("content", "") if messages else ""
+                        full_prompt = self._prompt_for_logging(messages)
                         await self._autonomous_logger_callback(
                             task_id=task_id,
                             role_id=role_id,
@@ -918,7 +1263,7 @@ class APIClientManager:
                     
                     # Log to autonomous API logger if callback set
                     if self._autonomous_logger_callback:
-                        full_prompt = messages[-1].get("content", "") if messages else ""
+                        full_prompt = self._prompt_for_logging(messages)
                         await self._autonomous_logger_callback(
                             task_id=task_id,
                             role_id=role_id,
@@ -979,7 +1324,7 @@ class APIClientManager:
                     
                     # Log to autonomous API logger if callback set
                     if self._autonomous_logger_callback:
-                        full_prompt = messages[-1].get("content", "") if messages else ""
+                        full_prompt = self._prompt_for_logging(messages)
                         await self._autonomous_logger_callback(
                             task_id=task_id,
                             role_id=role_id,
@@ -1010,6 +1355,12 @@ class APIClientManager:
                         )
                         raise
         
+        if system_config.generic_mode:
+            raise RuntimeError(
+                f"Generic mode is OpenRouter-only; role '{role_id}' cannot use LM Studio. "
+                "Configure the role with provider='openrouter' and a valid OpenRouter model/key."
+            )
+
         # Use LM Studio (either configured as primary or fallen back)
         logger.debug(f"Role {role_id} using LM Studio: {model}")
         start_time = time.time()
@@ -1036,13 +1387,17 @@ class APIClientManager:
             
             # Check for missing choices
             if not result.get("choices"):
-                import json as _json
-                raw_response = _json.dumps(result)[:2000]
-                logger.error(f"LM Studio response missing 'choices' after {duration_ms:.0f}ms - raw: {raw_response}")
+                logger.error(
+                    "LM Studio response missing 'choices' after %.0fms - %s",
+                    duration_ms,
+                    _response_shape_for_logging(result),
+                )
                 raise ValueError(f"LM Studio response missing 'choices' after {duration_ms:.0f}ms")
             
             response_content = ""
             tokens_used = None
+            lm_routing_metadata = lm_studio_client.extract_routing_metadata(result)
+            actual_lm_studio_model = lm_routing_metadata.get("actual_model") or model
             if result.get("choices"):
                 message = result["choices"][0].get("message", {})
                 response_content = message.get("content") or message.get("reasoning") or ""
@@ -1051,7 +1406,7 @@ class APIClientManager:
                 _pt = result["usage"].get("prompt_tokens")
                 _ct = result["usage"].get("completion_tokens")
                 if _pt is not None and _ct is not None:
-                    token_tracker.track(model, _pt, _ct)
+                    token_tracker.track(actual_lm_studio_model, _pt, _ct)
                     await self._broadcast("token_usage_updated", token_tracker.get_stats())
 
             result = self._annotate_response_with_call_metadata(
@@ -1059,7 +1414,7 @@ class APIClientManager:
                 task_id=task_id,
                 role_id=role_id,
                 configured_model=requested_model,
-                actual_model=model,
+                actual_model=actual_lm_studio_model,
                 configured_provider=role_config.provider if role_config else configured_provider or "lm_studio",
                 actual_provider="lm_studio",
                 boosted=False,
@@ -1068,11 +1423,11 @@ class APIClientManager:
             
             # Log to autonomous API logger if callback set
             if self._autonomous_logger_callback:
-                full_prompt = messages[-1].get("content", "") if messages else ""
+                full_prompt = self._prompt_for_logging(messages)
                 await self._autonomous_logger_callback(
                     task_id=task_id,
                     role_id=role_id,
-                    model=model,
+                    model=actual_lm_studio_model,
                     provider="lm_studio",
                     prompt=full_prompt,
                     response=response_content,
@@ -1084,7 +1439,7 @@ class APIClientManager:
                 )
             
             # Track model usage for Tier 3
-            await self._track_model_usage(model)
+            await self._track_model_usage(actual_lm_studio_model)
             
             return result
             
@@ -1092,7 +1447,7 @@ class APIClientManager:
             # Log LM Studio error to autonomous logger if callback set
             duration_ms = (time.time() - start_time) * 1000
             if self._autonomous_logger_callback:
-                full_prompt = messages[-1].get("content", "") if messages else ""
+                full_prompt = self._prompt_for_logging(messages)
                 await self._autonomous_logger_callback(
                     task_id=task_id,
                     role_id=role_id,
@@ -1120,6 +1475,9 @@ class APIClientManager:
         temperature: float,
         max_tokens: int,
         response_format: Optional[Dict[str, str]],
+        reasoning_effort: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Attempt free model rotation chain: looping -> auto-selector.
@@ -1153,6 +1511,7 @@ class APIClientManager:
                             temperature=temperature,
                             max_tokens=max_tokens,
                             response_format=response_format,
+                            reasoning_effort=reasoning_effort,
                             tools=tools,
                             tool_choice=tool_choice,
                         ),
@@ -1177,6 +1536,7 @@ class APIClientManager:
                         actual_provider="openrouter",
                         boosted=False,
                         boost_mode=None,
+                        openrouter_reasoning_effort=reasoning_effort,
                     )
                     if free_model_manager.is_account_exhausted():
                         free_model_manager.clear_account_exhaustion()
@@ -1204,6 +1564,7 @@ class APIClientManager:
                         temperature=temperature,
                         max_tokens=max_tokens,
                         response_format=response_format,
+                        reasoning_effort=reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
                     ),
@@ -1228,6 +1589,7 @@ class APIClientManager:
                     actual_provider="openrouter",
                     boosted=False,
                     boost_mode=None,
+                    openrouter_reasoning_effort=reasoning_effort,
                 )
                 if free_model_manager.is_account_exhausted():
                     free_model_manager.clear_account_exhaustion()

@@ -1,23 +1,104 @@
 """
 Compiler API routes.
 """
+import asyncio
+import hashlib
 from fastapi import APIRouter, HTTPException
 import logging
 from pathlib import Path
 import aiofiles
 
-from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueRequest
+from backend.api.routes import websocket
+from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueRequest, ModelConfig
 from backend.shared.config import system_config
 from backend.shared.token_tracker import token_tracker
-from backend.compiler.core.compiler_coordinator import compiler_coordinator
+from backend.shared.api_client_manager import api_client_manager
+from backend.shared.workflow_start_guard import workflow_start_guard
+from backend.compiler.core.compiler_coordinator import CRITIQUE_ATTEMPT_TARGET, compiler_coordinator
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import paper_memory
 from backend.aggregator.core.coordinator import coordinator
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
+from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
+from backend.autonomous.memory.proof_database import proof_database
+from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/compiler", tags=["compiler"])
+
+
+async def _run_saved_compiler_paper_proof_check(
+    full_content: str,
+    source_title: str,
+    proof_config: dict,
+) -> None:
+    """Run autonomous proof extraction/tiering for a saved manual compiler paper."""
+    if not proof_config.get("lean4_enabled"):
+        logger.info("Skipping saved compiler paper proof check: Lean 4 disabled")
+        return
+    if not full_content.strip():
+        return
+    submitter_model = str(proof_config.get("submitter_model") or "")
+    validator_model = str(proof_config.get("validator_model") or "")
+    if not submitter_model:
+        logger.warning("Skipping saved compiler paper proof check: high-context model is unavailable")
+        return
+    if not validator_model:
+        logger.warning("Skipping saved compiler paper proof check: validator model is unavailable")
+        return
+
+    source_hash = hashlib.sha256(full_content.encode("utf-8")).hexdigest()[:16]
+    source_id = f"compiler_manual_{source_hash}"
+    role_suffix = "compiler_manual_paper"
+
+    submitter_config = ModelConfig(
+        provider=str(proof_config.get("submitter_provider") or "lm_studio"),
+        model_id=submitter_model,
+        openrouter_provider=proof_config.get("submitter_openrouter_provider"),
+        openrouter_reasoning_effort=proof_config.get("submitter_openrouter_reasoning_effort", "auto"),
+        lm_studio_fallback_id=proof_config.get("submitter_lm_studio_fallback"),
+        context_window=int(proof_config.get("submitter_context") or system_config.compiler_high_context_context_window),
+        max_output_tokens=int(proof_config.get("submitter_max_tokens") or system_config.compiler_high_context_max_output_tokens),
+        supercharge_enabled=bool(proof_config.get("submitter_supercharge_enabled", False)),
+    )
+    validator_config = ModelConfig(
+        provider=str(proof_config.get("validator_provider") or "lm_studio"),
+        model_id=validator_model,
+        openrouter_provider=proof_config.get("validator_openrouter_provider"),
+        openrouter_reasoning_effort=proof_config.get("validator_openrouter_reasoning_effort", "auto"),
+        lm_studio_fallback_id=proof_config.get("validator_lm_studio_fallback"),
+        context_window=int(proof_config.get("validator_context") or system_config.compiler_validator_context_window),
+        max_output_tokens=int(proof_config.get("validator_max_tokens") or system_config.compiler_validator_max_output_tokens),
+        supercharge_enabled=bool(proof_config.get("validator_supercharge_enabled", False)),
+    )
+    for role_id in (
+        f"autonomous_proof_identification_{role_suffix}",
+        f"autonomous_proof_lemma_search_{role_suffix}",
+        f"autonomous_proof_formalization_{role_suffix}",
+    ):
+        api_client_manager.configure_role(role_id, submitter_config)
+    api_client_manager.configure_role("autonomous_proof_novelty", validator_config)
+
+    stage = ProofVerificationStage()
+    await stage.run(
+        content=full_content,
+        source_type="paper",
+        source_id=source_id,
+        user_prompt=str(proof_config.get("user_prompt") or ""),
+        submitter_model=submitter_model,
+        submitter_context=submitter_config.context_window,
+        submitter_max_tokens=submitter_config.max_output_tokens,
+        validator_model=validator_model,
+        validator_context=validator_config.context_window,
+        validator_max_tokens=validator_config.max_output_tokens,
+        broadcast_fn=websocket.broadcast_event,
+        novel_proofs_db=proof_database,
+        source_title=source_title,
+        role_suffix_override=role_suffix,
+        trigger="manual_compiler_save",
+        append_to_source=False,
+    )
 
 
 def _get_start_conflict() -> str | None:
@@ -29,71 +110,94 @@ def _get_start_conflict() -> str | None:
         return "Cannot start Compiler while Aggregator is running. Stop Aggregator first."
 
     autonomous_state = autonomous_coordinator.get_state()
-    if autonomous_state.is_running:
+    if autonomous_state.is_running or autonomous_coordinator.is_active:
         return "Cannot start Compiler while Autonomous Research is running. Stop Autonomous Research first."
 
+    if leanoj_coordinator.is_active:
+        return "Cannot start Compiler while Proof Solver is running. Stop Proof Solver first."
+
     return None
+
+
+def _log_background_task_failure(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.info("Saved compiler paper proof check was cancelled")
+    except Exception:
+        logger.exception("Saved compiler paper proof check failed")
 
 
 @router.post("/start")
 async def start_compiler(request: CompilerStartRequest):
     """Start the compiler system."""
     try:
-        conflict = _get_start_conflict()
-        if conflict:
-            raise HTTPException(status_code=400, detail=conflict)
+        async with workflow_start_guard.reserve():
+            conflict = _get_start_conflict()
+            if conflict:
+                raise HTTPException(status_code=400, detail=conflict)
 
-        # Update system config with user-provided context sizes
-        system_config.compiler_validator_context_window = request.validator_context_size
-        system_config.compiler_high_context_context_window = request.high_context_context_size
-        system_config.compiler_high_param_context_window = request.high_param_context_size
-        system_config.compiler_critique_submitter_context_window = request.critique_submitter_context_window
-        
-        # Update max output token configurations
-        system_config.compiler_validator_max_output_tokens = request.validator_max_output_tokens
-        system_config.compiler_high_context_max_output_tokens = request.high_context_max_output_tokens
-        system_config.compiler_high_param_max_output_tokens = request.high_param_max_output_tokens
-        system_config.compiler_critique_submitter_max_tokens = request.critique_submitter_max_tokens
-        
-        # Store critique submitter model
-        system_config.compiler_critique_submitter_model = request.critique_submitter_model
-        
-        logger.info(
-            f"Compiler max output tokens - "
-            f"Validator: {request.validator_max_output_tokens}, "
-            f"High-context: {request.high_context_max_output_tokens}, "
-            f"High-param: {request.high_param_max_output_tokens}"
-        )
-        
-        # Initialize coordinator with OpenRouter provider configurations
-        await compiler_coordinator.initialize(
-            compiler_prompt=request.compiler_prompt,
-            validator_model=request.validator_model,
-            high_context_model=request.high_context_model,
-            high_param_model=request.high_param_model,
-            critique_submitter_model=request.critique_submitter_model,
-            # OpenRouter provider configs for each role
-            validator_provider=request.validator_provider,
-            validator_openrouter_provider=request.validator_openrouter_provider,
-            validator_lm_studio_fallback=request.validator_lm_studio_fallback,
-            high_context_provider=request.high_context_provider,
-            high_context_openrouter_provider=request.high_context_openrouter_provider,
-            high_context_lm_studio_fallback=request.high_context_lm_studio_fallback,
-            high_param_provider=request.high_param_provider,
-            high_param_openrouter_provider=request.high_param_openrouter_provider,
-            high_param_lm_studio_fallback=request.high_param_lm_studio_fallback,
-            critique_submitter_provider=request.critique_submitter_provider,
-            critique_submitter_openrouter_provider=request.critique_submitter_openrouter_provider,
-            critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback
-        )
-        
-        # Start coordinator
-        token_tracker.reset()
-        token_tracker.start_timer()
-        await compiler_coordinator.start()
-        
-        return {"status": "started", "message": "Compiler started successfully"}
+            # Update system config with user-provided context sizes
+            system_config.compiler_validator_context_window = request.validator_context_size
+            system_config.compiler_high_context_context_window = request.high_context_context_size
+            system_config.compiler_high_param_context_window = request.high_param_context_size
+            system_config.compiler_critique_submitter_context_window = request.critique_submitter_context_window
+
+            # Update max output token configurations
+            system_config.compiler_validator_max_output_tokens = request.validator_max_output_tokens
+            system_config.compiler_high_context_max_output_tokens = request.high_context_max_output_tokens
+            system_config.compiler_high_param_max_output_tokens = request.high_param_max_output_tokens
+            system_config.compiler_critique_submitter_max_tokens = request.critique_submitter_max_tokens
+
+            # Store critique submitter model
+            system_config.compiler_critique_submitter_model = request.critique_submitter_model
+
+            logger.info(
+                f"Compiler max output tokens - "
+                f"Validator: {request.validator_max_output_tokens}, "
+                f"High-context: {request.high_context_max_output_tokens}, "
+                f"High-param: {request.high_param_max_output_tokens}"
+            )
+
+            # Initialize coordinator with OpenRouter provider configurations
+            await compiler_coordinator.initialize(
+                compiler_prompt=request.compiler_prompt,
+                validator_model=request.validator_model,
+                high_context_model=request.high_context_model,
+                high_param_model=request.high_param_model,
+                critique_submitter_model=request.critique_submitter_model,
+                # OpenRouter provider configs for each role
+                validator_provider=request.validator_provider,
+                validator_openrouter_provider=request.validator_openrouter_provider,
+                validator_openrouter_reasoning_effort=request.validator_openrouter_reasoning_effort,
+                validator_lm_studio_fallback=request.validator_lm_studio_fallback,
+                high_context_provider=request.high_context_provider,
+                high_context_openrouter_provider=request.high_context_openrouter_provider,
+                high_context_openrouter_reasoning_effort=request.high_context_openrouter_reasoning_effort,
+                high_context_lm_studio_fallback=request.high_context_lm_studio_fallback,
+                high_param_provider=request.high_param_provider,
+                high_param_openrouter_provider=request.high_param_openrouter_provider,
+                high_param_openrouter_reasoning_effort=request.high_param_openrouter_reasoning_effort,
+                high_param_lm_studio_fallback=request.high_param_lm_studio_fallback,
+                critique_submitter_provider=request.critique_submitter_provider,
+                critique_submitter_openrouter_provider=request.critique_submitter_openrouter_provider,
+                critique_submitter_openrouter_reasoning_effort=request.critique_submitter_openrouter_reasoning_effort,
+                critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback,
+                validator_supercharge_enabled=request.validator_supercharge_enabled,
+                high_context_supercharge_enabled=request.high_context_supercharge_enabled,
+                high_param_supercharge_enabled=request.high_param_supercharge_enabled,
+                critique_submitter_supercharge_enabled=request.critique_submitter_supercharge_enabled
+            )
+
+            # Start coordinator
+            token_tracker.reset()
+            token_tracker.start_timer()
+            await compiler_coordinator.start()
+
+            return {"status": "started", "message": "Compiler started successfully"}
     
+    except HTTPException:
+        raise
     except ValueError as e:
         # Model compatibility errors - provide structured error response
         error_msg = str(e)
@@ -336,13 +440,47 @@ async def save_paper():
         
         async with aiofiles.open(output_path, 'w', encoding='utf-8') as f:
             await f.write(full_content)
+
+        high_context = compiler_coordinator.high_context_submitter
+        proof_check_scheduled = bool(
+            system_config.lean4_enabled
+            and full_content.strip()
+            and high_context is not None
+            and getattr(high_context, "model_name", "")
+            and compiler_coordinator.validator_model
+        )
+        if proof_check_scheduled:
+            source_title = compiler_coordinator.paper_title or compiler_coordinator.user_prompt or "Compiler Paper"
+            proof_config = {
+                "lean4_enabled": system_config.lean4_enabled,
+                "user_prompt": compiler_coordinator.user_prompt,
+                "submitter_model": high_context.model_name,
+                "submitter_provider": compiler_coordinator.high_context_provider,
+                "submitter_openrouter_provider": compiler_coordinator.high_context_openrouter_provider,
+                "submitter_openrouter_reasoning_effort": compiler_coordinator.high_context_openrouter_reasoning_effort,
+                "submitter_lm_studio_fallback": compiler_coordinator.high_context_lm_studio_fallback,
+                "submitter_context": system_config.compiler_high_context_context_window,
+                "submitter_max_tokens": system_config.compiler_high_context_max_output_tokens,
+                "submitter_supercharge_enabled": getattr(compiler_coordinator, "high_context_supercharge_enabled", False),
+                "validator_model": compiler_coordinator.validator_model,
+                "validator_provider": compiler_coordinator.validator_provider,
+                "validator_openrouter_provider": compiler_coordinator.validator_openrouter_provider,
+                "validator_openrouter_reasoning_effort": compiler_coordinator.validator_openrouter_reasoning_effort,
+                "validator_lm_studio_fallback": compiler_coordinator.validator_lm_studio_fallback,
+                "validator_context": compiler_coordinator.validator_context_window,
+                "validator_max_tokens": compiler_coordinator.validator_max_tokens,
+                "validator_supercharge_enabled": getattr(compiler_coordinator, "validator_supercharge_enabled", False),
+            }
+            task = asyncio.create_task(_run_saved_compiler_paper_proof_check(full_content, source_title, proof_config))
+            task.add_done_callback(_log_background_task_failure)
         
         return {
             "status": "saved",
-            "path": str(output_path),
+            "path": output_path.name,
             "word_count": word_count,
-            "message": f"Paper saved to {output_path} ({word_count} words)",
-            "has_attribution": bool(attribution_section)
+            "message": f"Paper saved to {output_path.name} ({word_count} words)",
+            "has_attribution": bool(attribution_section),
+            "proof_check_scheduled": proof_check_scheduled
         }
     except Exception as e:
         logger.error(f"Failed to save paper: {e}")
@@ -441,7 +579,7 @@ async def get_critique_status():
             "in_critique_phase": compiler_coordinator.in_critique_phase,
             "critique_acceptances": compiler_coordinator.critique_acceptances,
             "paper_version": compiler_coordinator.paper_version,
-            "target_critiques": 5
+            "target_critiques": CRITIQUE_ATTEMPT_TARGET
         }
     except Exception as e:
         logger.error(f"Failed to get critique status: {e}")
@@ -512,6 +650,8 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         validator_max_tokens = critique_request.validator_max_tokens
         validator_provider = critique_request.validator_provider
         validator_openrouter_provider = critique_request.validator_openrouter_provider
+        validator_openrouter_reasoning_effort = critique_request.validator_openrouter_reasoning_effort
+        validator_supercharge_enabled = bool(critique_request.validator_supercharge_enabled)
         
         # If validator config not provided in request, fall back to coordinator config
         if not validator_model:
@@ -520,6 +660,8 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
             validator_max_tokens = system_config.compiler_validator_max_output_tokens
             validator_provider = getattr(compiler_coordinator, 'validator_provider', 'lm_studio')
             validator_openrouter_provider = getattr(compiler_coordinator, 'validator_openrouter_provider', None)
+            validator_openrouter_reasoning_effort = getattr(compiler_coordinator, 'validator_openrouter_reasoning_effort', 'auto')
+            validator_supercharge_enabled = bool(getattr(compiler_coordinator, 'validator_supercharge_enabled', False))
         
         if not validator_model:
             raise HTTPException(
@@ -576,9 +718,11 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
                 model_id=validator_model,
                 openrouter_model_id=validator_model if validator_provider == "openrouter" else None,
                 openrouter_provider=validator_openrouter_provider,
+                openrouter_reasoning_effort=validator_openrouter_reasoning_effort,
                 lm_studio_fallback_id=None,  # No fallback for direct critique calls
                 context_window=validator_context_window,
-                max_output_tokens=validator_max_tokens
+                max_output_tokens=validator_max_tokens,
+                supercharge_enabled=validator_supercharge_enabled
             )
         )
         

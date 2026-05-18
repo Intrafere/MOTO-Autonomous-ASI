@@ -3,6 +3,7 @@ High-context submitter agent for compiler.
 Handles 3 modes: construction, outline update, and review.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -14,7 +15,7 @@ from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission
 from backend.shared.config import system_config, rag_config
 from backend.shared.utils import count_tokens
-from backend.shared.json_parser import parse_json
+from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.validation.json_validator import json_validator
 from backend.compiler.prompts.outline_prompts import (
@@ -46,10 +47,33 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # The main writer may invoke Wolfram Alpha as a real OpenAI-style tool during
 # construction mode. Each submission gets a budget of 20 calls; the loop
-# forces finalization once the budget is exhausted. Callers attach the full
-# audit trail to `CompilerSubmission.metadata["wolfram_calls"]`.
+# forces finalization once the budget is exhausted. Tool results are returned
+# to the model, while logs/WebSocket events only expose redacted metadata.
 
 WOLFRAM_MAX_CALLS_PER_SUBMISSION = 20
+
+
+def _hash_text_for_audit(value: str) -> str:
+    text = value or ""
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest() if text else ""
+
+
+def _redacted_wolfram_audit_entry(query: str, purpose: str, result: str) -> Dict[str, Any]:
+    """Store non-sensitive Wolfram audit metadata while preserving call counts."""
+    return {
+        "query": "[redacted]",
+        "purpose": "[redacted]" if purpose else "",
+        "result": "[redacted]",
+        "query_redacted": True,
+        "purpose_redacted": True,
+        "result_redacted": True,
+        "query_length": len(query or ""),
+        "purpose_length": len(purpose or ""),
+        "result_length": len(result or ""),
+        "query_sha256": _hash_text_for_audit(query),
+        "purpose_sha256": _hash_text_for_audit(purpose),
+        "result_sha256": _hash_text_for_audit(result),
+    }
 
 WOLFRAM_TOOL_SCHEMA: Dict[str, Any] = {
     "type": "function",
@@ -489,8 +513,6 @@ class HighContextSubmitter:
         is_first_portion: bool = False, 
         section_phase: Optional[str] = None,
         rejection_feedback: Optional[str] = None,
-        critique_feedback: Optional[str] = None,
-        pre_critique_paper: Optional[str] = None,
         brainstorm_content: Optional[str] = None,
         brainstorm_source_name: Optional[str] = None
     ) -> Optional[CompilerSubmission]:
@@ -502,8 +524,6 @@ class HighContextSubmitter:
             section_phase: Phase constraint for construction ("body", "conclusion", "introduction", "abstract")
                           When provided, uses phase-specific prompts with explicit section_complete feedback.
             rejection_feedback: Feedback from a previous rejection to guide the model (e.g., "Introduction not found in document")
-            critique_feedback: Accepted critique feedback from peer review (for body rewrites only)
-            pre_critique_paper: Paper state before critique phase (for body rewrites - shows what failed)
             brainstorm_content: Full brainstorm database with submission numbers (for retroactive corrections)
             brainstorm_source_name: RAG source name for brainstorm (e.g., "brainstorm_abc123.txt") to exclude from retrieval
         
@@ -512,8 +532,7 @@ class HighContextSubmitter:
         """
         phase_info = f", phase={section_phase}" if section_phase else ""
         feedback_info = f", retry with feedback" if rejection_feedback else ""
-        critique_info = f", rewrite with critique" if critique_feedback else ""
-        logger.info(f"Starting construction submission generation (first={is_first_portion}{phase_info}{feedback_info}{critique_info})")
+        logger.info(f"Starting construction submission generation (first={is_first_portion}{phase_info}{feedback_info})")
         
         try:
             # Get current outline and paper
@@ -577,8 +596,6 @@ class HighContextSubmitter:
                     rag_evidence=context_pack.text,
                     is_first_portion=is_first_portion,
                     rejection_feedback=rejection_feedback,
-                    critique_feedback=critique_feedback,
-                    pre_critique_paper=pre_critique_paper,
                     brainstorm_content=brainstorm_content
                 )
             elif section_phase == "conclusion":
@@ -617,9 +634,7 @@ class HighContextSubmitter:
                     rag_evidence=context_pack.text,
                     is_first_portion=is_first_portion,
                     section_phase=section_phase,
-                    rejection_feedback=rejection_feedback,
-                    critique_feedback=critique_feedback,
-                    pre_critique_paper=pre_critique_paper
+                    rejection_feedback=rejection_feedback
                 )
             logger.info(f"Prompt built: {len(prompt)} chars")
             
@@ -993,7 +1008,7 @@ class HighContextSubmitter:
           to the single-shot path.
 
         Websocket events:
-        - `compiler_wolfram_call` broadcast per call with query + preview.
+        - `compiler_wolfram_call` broadcast per call with redacted metadata.
         """
         wolfram_enabled = _wolfram_tool_available()
 
@@ -1115,16 +1130,14 @@ class HighContextSubmitter:
                     logger.warning(f"Wolfram query raised: {exc}")
                     result_text = None
                 result_text = result_text or "Wolfram Alpha returned no result."
-                wolfram_calls.append({
-                    "query": query,
-                    "purpose": purpose,
-                    "result": result_text,
-                })
+                wolfram_calls.append(_redacted_wolfram_audit_entry(query, purpose, result_text))
                 logger.info(
-                    "Wolfram Alpha call %d/%d: %s",
+                    "Wolfram Alpha call %d/%d completed (query_len=%d, purpose_len=%d, result_len=%d)",
                     len(wolfram_calls),
                     WOLFRAM_MAX_CALLS_PER_SUBMISSION,
-                    query[:120],
+                    len(query),
+                    len(purpose),
+                    len(result_text),
                 )
                 try:
                     await self._broadcast_wolfram_event(
@@ -1181,9 +1194,14 @@ class HighContextSubmitter:
                 "compiler_wolfram_call",
                 {
                     "task_id": task_id,
-                    "query": query,
-                    "purpose": purpose,
-                    "result_preview": (result or "")[:200],
+                    "query": "[redacted]",
+                    "purpose": "[redacted]" if purpose else "",
+                    "result_preview": "",
+                    "query_redacted": True,
+                    "result_redacted": True,
+                    "query_length": len(query or ""),
+                    "purpose_length": len(purpose or ""),
+                    "result_length": len(result or ""),
                     "calls_used": calls_used,
                     "calls_remaining": max(0, WOLFRAM_MAX_CALLS_PER_SUBMISSION - calls_used),
                     "max_calls": WOLFRAM_MAX_CALLS_PER_SUBMISSION,
@@ -1229,6 +1247,7 @@ class HighContextSubmitter:
         try:
             # Generate a retry task ID (append _retry to distinguish from original)
             retry_task_id = f"{self.get_current_task_id()}_retry"
+            retry_context = sanitize_model_output_for_retry_context(response)
             
             retry_response = await api_client_manager.generate_completion(
                 task_id=retry_task_id,
@@ -1236,7 +1255,7 @@ class HighContextSubmitter:
                 model=self.model_name,
                 messages=[
                     {"role": "user", "content": original_prompt},
-                    {"role": "assistant", "content": response},
+                    {"role": "assistant", "content": retry_context},
                     {"role": "user", "content": retry_prompt}
                 ],
                 temperature=0.0,  # Deterministic JSON formatting

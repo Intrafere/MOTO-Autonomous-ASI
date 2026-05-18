@@ -74,6 +74,7 @@ Review the document for these specific issues:
 - Structural issues
 - Redundancy
 - Forward-looking structural previews
+- Places where the draft drifts away from the strongest direct answer to the user's prompt
 - Other improvements
 
 CRITICAL - SYSTEM-MANAGED MARKERS (NOT YOUR OUTPUT):
@@ -116,6 +117,7 @@ WHEN TO MAKE AN EDIT:
 - Unsupported empirical claims, unsupported artifact/code claims, or uncited literature claims
 - Numeric benchmark-style claims in narrative text that are not explicitly sourced
 - Statements implying experiments, measurements, or implementations that are not actually evidenced
+- Generic exploratory wording that obscures a stronger justified direct answer already present in the draft
 
 WHEN NOT TO MAKE AN EDIT:
 - Document is acceptable for a draft in progress

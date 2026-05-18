@@ -196,6 +196,24 @@ code {
   backface-visibility: hidden;
 }
 
+.banner-mode-subtitle {
+  color: #1eff1c;
+  font-size: 0.9rem;
+  line-height: 1.25;
+  min-height: 1.125rem;
+  margin: 0.35rem 0 0 0;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-shadow:
+    0 0 10px rgba(30, 255, 28, 0.35),
+    0 0 18px rgba(30, 255, 28, 0.18);
+}
+
+.banner-mode-subtitle--hidden {
+  visibility: hidden;
+}
+
 .banner-company {
   color: #ffffff;
   font-size: 0.85rem;
@@ -222,6 +240,10 @@ code {
   .banner-variant {
     font-size: 0.85rem;
     margin-top: 0.65rem;
+  }
+
+  .banner-mode-subtitle {
+    font-size: 0.78rem;
   }
   
   .banner-company {
@@ -374,6 +396,21 @@ code {
   color: #4caf50;
 }
 
+.help-tooltip-btn--text {
+  width: auto;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary, #888);
+  box-shadow: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  line-height: 1.35;
+  text-decoration: none;
+}
+
 .app-header-help-btn:hover,
 .app-header-help-btn:focus-visible,
 .help-tooltip-btn:hover,
@@ -382,6 +419,15 @@ code {
   filter: brightness(1.08);
   transform: translateY(-1px);
   box-shadow: 0 10px 20px rgba(0, 0, 0, 0.26);
+}
+
+.help-tooltip-btn--text:hover,
+.help-tooltip-btn--text:focus-visible {
+  border-color: transparent;
+  filter: brightness(1.15);
+  transform: none;
+  box-shadow: none;
+  color: var(--text-primary, #e0e0e0);
 }
 
 .app-header-help-btn:focus-visible,
@@ -542,6 +588,11 @@ button.header-status-chip:focus-visible {
   row-gap: 0.5rem;
 }
 
+.tabs.tabs-leanoj {
+  flex-wrap: wrap;
+  row-gap: 0.5rem;
+}
+
 .tab {
   padding: 0.8rem 1.25rem;
   min-height: 58px;
@@ -611,6 +662,25 @@ button.header-status-chip:focus-visible {
   max-width: 1920px;
   margin: 0 auto;
   padding: 0 1rem;
+}
+
+.workflow-main-interface > * {
+  transition:
+    filter var(--transition-normal),
+    opacity var(--transition-normal);
+}
+
+.workflow-main-interface--running > :not(.autonomous-header):not(.button-group):not(.activity-section):not(.tier3-dialog-overlay) {
+  filter: brightness(0.72);
+  opacity: 0.78;
+}
+
+.workflow-main-interface--running > .autonomous-header,
+.workflow-main-interface--running > .button-group,
+.workflow-main-interface--running > .activity-section,
+.workflow-main-interface--running > .tier3-dialog-overlay {
+  filter: none;
+  opacity: 1;
 }
 
 h1 {

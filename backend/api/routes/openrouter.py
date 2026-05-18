@@ -10,7 +10,7 @@ This module handles:
 Note: Boost routes can reuse the active global key by default, while still allowing
 an explicit boost-only override key when the user provides one.
 """
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Request
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 import logging
@@ -242,21 +242,27 @@ async def get_api_key_status() -> Dict[str, Any]:
 
 
 @router.get("/api/openrouter/models")
-async def get_models(api_key: Optional[str] = None, free_only: bool = False) -> Dict[str, Any]:
+async def get_models(request: Request, free_only: bool = False, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     """
     Fetch available OpenRouter models.
     
-    If api_key is provided, uses that key. Otherwise uses the stored global key.
+    If Authorization is provided, uses that key. Otherwise uses the stored global key.
     
     Args:
-        api_key: Optional API key to use instead of stored key (query parameter)
         free_only: If True, only return models with $0 pricing (query parameter)
+        authorization: Optional API key via Authorization header (Bearer token)
         
     Returns:
         List of available models with their details
     """
     try:
-        # Use provided key or fall back to stored key
+        if "api_key" in request.query_params:
+            raise HTTPException(
+                status_code=400,
+                detail="OpenRouter API keys must be supplied via Authorization header, not URL query parameters.",
+            )
+
+        api_key = authorization.replace("Bearer ", "") if authorization and authorization.startswith("Bearer ") else authorization
         key_to_use = api_key or rag_config.openrouter_api_key
         
         if not key_to_use:
