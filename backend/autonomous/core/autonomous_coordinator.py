@@ -6646,9 +6646,11 @@ class AutonomousCoordinator:
         if self._running or self._state.is_running:
             raise RuntimeError("Cannot clear data while running")
         
+        import json
         import shutil
         import time
         from pathlib import Path
+        from backend.aggregator.core.queue_manager import queue_manager
         
         # Wait briefly for any pending async file operations to complete
         await asyncio.sleep(0.3)
@@ -6677,12 +6679,57 @@ class AutonomousCoordinator:
                     raise
             return False
         
-        # Step 0: Clear all session workflow states (prevents resume from old sessions)
+        # Step 0: Make existing sessions history-only so completed work stays
+        # browsable but durable recovery will not restart it as live work.
         try:
             sessions_dir = Path(system_config.auto_sessions_base_dir)
+            cleared_session_count = 0
+            session_mark_failures = []
             if sessions_dir.exists():
                 for session_dir in sessions_dir.iterdir():
                     if session_dir.is_dir():
+                        now = datetime.now().isoformat()
+                        metadata_path = session_dir / "session_metadata.json"
+                        metadata = {}
+                        if metadata_path.exists():
+                            try:
+                                async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
+                                    raw_metadata = await f.read()
+                                metadata = json.loads(raw_metadata) if raw_metadata.strip() else {}
+                            except Exception as e:
+                                logger.warning(f"Could not read session metadata for {session_dir.name}: {e}")
+
+                        metadata.setdefault("session_id", session_dir.name)
+                        if not metadata.get("user_prompt") and metadata.get("user_research_prompt"):
+                            metadata["user_prompt"] = metadata.get("user_research_prompt")
+                        metadata["status"] = "cleared"
+                        metadata["resume_disabled"] = True
+                        metadata["cleared_at"] = now
+                        metadata["last_updated"] = now
+
+                        try:
+                            async with aiofiles.open(metadata_path, 'w', encoding='utf-8') as f:
+                                await f.write(json.dumps(metadata, indent=2))
+                            cleared_session_count += 1
+                        except Exception as e:
+                            message = f"Could not mark session as cleared for {session_dir.name}: {e}"
+                            session_mark_failures.append(message)
+                            logger.error(message)
+
+                        stats_path = session_dir / "session_stats.json"
+                        if stats_path.exists():
+                            try:
+                                async with aiofiles.open(stats_path, 'r', encoding='utf-8') as f:
+                                    raw_stats = await f.read()
+                                stats = json.loads(raw_stats) if raw_stats.strip() else {}
+                                stats["current_brainstorm_id"] = None
+                                stats["current_paper_id"] = None
+                                stats["last_updated"] = now
+                                async with aiofiles.open(stats_path, 'w', encoding='utf-8') as f:
+                                    await f.write(json.dumps(stats, indent=2))
+                            except Exception as e:
+                                logger.warning(f"Could not clear active stats for {session_dir.name}: {e}")
+
                         workflow_state_file = session_dir / "workflow_state.json"
                         if workflow_state_file.exists():
                             try:
@@ -6691,10 +6738,33 @@ class AutonomousCoordinator:
                             except Exception as e:
                                 # Non-critical: workflow state files are small
                                 logger.warning(f"Could not clear workflow state for {session_dir.name}: {e}")
-            logger.info("Cleared all session workflow states")
+            if session_mark_failures:
+                critical_errors.append(
+                    "Failed to mark one or more sessions non-resumable: "
+                    + "; ".join(session_mark_failures)
+                )
+            else:
+                successes.append(f"Marked {cleared_session_count} session(s) as history-only")
+                logger.info("Marked session histories as non-resumable and cleared workflow states")
         except Exception as e:
-            errors.append(f"Failed to clear session workflow states: {e}")
-            logger.error(errors[-1])
+            critical_errors.append(f"Failed to mark sessions history-only: {e}")
+            logger.error(critical_errors[-1])
+
+        # Step 0b: Reset live path bindings before clearing legacy state.
+        # Session files remain as history; current Stage 1/2 views should read
+        # from the empty legacy roots until the next Start creates a new session.
+        try:
+            await session_manager.clear()
+            brainstorm_memory.set_session_manager(None)
+            paper_library.set_session_manager(None)
+            research_metadata.set_session_manager(None)
+            final_answer_memory.set_session_manager(None)
+            proof_database.set_session_manager(None)
+            successes.append("Reset live session path bindings")
+            logger.info("Reset live session path bindings after clear")
+        except Exception as e:
+            errors.append(f"Failed to reset live session path bindings: {e}")
+            logger.warning(errors[-1])
         
         # Step 1: Clear brainstorms directory
         try:
@@ -6774,6 +6844,15 @@ class AutonomousCoordinator:
             # Critical: RAG state affects future operations
             critical_errors.append(f"Failed to clear RAG state: {e}")
             logger.error(critical_errors[-1])
+
+        # Step 7b: Clear any queued submissions left by cancelled child aggregators.
+        try:
+            await queue_manager.clear()
+            successes.append("Cleared pending submission queue")
+            logger.info("Cleared pending submission queue")
+        except Exception as e:
+            errors.append(f"Failed to clear pending submission queue: {e}")
+            logger.warning(errors[-1])
         
         # Step 8: Reset internal state
         self._current_topic_id = None
@@ -6800,16 +6879,6 @@ class AutonomousCoordinator:
         
         # Step 9: Reset state object
         self._state = AutonomousResearchState()
-        
-        # Step 10: Clear session manager state
-        try:
-            await session_manager.clear()
-            successes.append("Cleared session manager state")
-            logger.info("Cleared session manager state")
-        except Exception as e:
-            # Non-critical: session manager will reset on next start
-            errors.append(f"Failed to clear session manager: {e}")
-            logger.warning(errors[-1])
         
         # Report results with graceful degradation
         success_count = len(successes)

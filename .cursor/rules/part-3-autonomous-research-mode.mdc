@@ -1318,7 +1318,7 @@ This file persists the current workflow state to enable **automatic resume** aft
 - Before completed-paper proof verification (`paper_phase="paper_proof_verification"`)
 - **During Tier 3 final answer generation phases**
 
-On **clean stop** (user-initiated via stop button), this file is preserved for pause/resume. Only `clear_all_data()` should clear workflow state. `_save_workflow_state()` must preserve the previous `paper_phase` when called without an explicit phase, and only clear the phase when passed `phase=None` intentionally after successful completion.
+On **clean stop** (user-initiated via stop button), this file is preserved for pause/resume. Only `clear_all_data()` should clear workflow state. `clear_all_data()` preserves completed session files for history, marks existing sessions non-resumable/history-only, clears pending child-aggregator queue state, and resets live memory path bindings so the next Start creates a fresh session. `_save_workflow_state()` must preserve the previous `paper_phase` when called without an explicit phase, and only clear the phase when passed `phase=None` intentionally after successful completion.
 
 On **restart/crash recovery**, if this file exists with a resumable tier/topic/paper (regardless of `is_running`), the system detects an interrupted workflow and:
 1. Restores internal state (topic ID, acceptance counts, model config, etc.)
@@ -1327,14 +1327,14 @@ On **restart/crash recovery**, if this file exists with a resumable tier/topic/p
 4. Detects completed papers paused before proof verification and resumes `paper_proof_verification` before moving on
 5. Broadcasts `auto_research_resumed` WebSocket event
 
-If `workflow_state.json` is stale, idle, or missing, session recovery must conservatively synthesize a resume point from durable `session_stats.json`, brainstorm metadata/database files, and in-progress paper metadata/content. This includes scanning `papers/*_metadata.json` for `status="in_progress"` when stats lost `current_paper_id`; the resume phase is detected from saved paper content rather than defaulting to body.
+If `workflow_state.json` is stale, idle, or missing, session recovery must conservatively synthesize a resume point from durable `session_stats.json`, brainstorm metadata/database files, and in-progress paper metadata/content unless the session metadata is marked non-resumable/history-only. This includes scanning `papers/*_metadata.json` for `status="in_progress"` when stats lost `current_paper_id`; the resume phase is detected from saved paper content rather than defaulting to body.
 
 
 **Important Notes:**
 - The user research prompt is saved in `auto_research_metadata.json`, not the workflow state
 - Model configuration is saved to allow resuming with the same model settings
-- If the workflow state file is corrupted or missing, first try durable session-file recovery; start fresh only if no current topic, in-progress paper, completed unpapered brainstorm, completed papers, or active Tier 3 state can be recovered
-- The `clear_all_data` API endpoint clears the workflow state along with all other data
+- If the workflow state file is corrupted or missing, first try durable session-file recovery; start fresh only if no current topic, in-progress paper, completed unpapered brainstorm, completed papers, or active Tier 3 state can be recovered, and only when the session is not marked non-resumable/history-only
+- The `clear_all_data` API endpoint preserves session files for history, marks sessions `resume_disabled=true` / `status="cleared"`, and must fail if any session cannot be marked non-resumable
 
 ---
 
