@@ -39,6 +39,9 @@ class BrainstormMemory:
         if session_manager and session_manager.is_session_active:
             self._base_dir = session_manager.get_brainstorms_dir()
             logger.info(f"Brainstorm memory using session path: {self._base_dir}")
+        else:
+            self._base_dir = Path(system_config.auto_brainstorms_dir)
+            logger.info(f"Brainstorm memory using legacy path: {self._base_dir}")
         
     async def initialize(self) -> None:
         """Initialize the brainstorm memory directory."""

@@ -21,6 +21,9 @@ from backend.shared.config import system_config
 logger = logging.getLogger(__name__)
 
 
+NON_RESUMABLE_SESSION_STATUSES = {"cleared", "history_only", "archived", "complete"}
+
+
 def _session_paper_has_section(content: str, section_name: str) -> bool:
     base_patterns = [
         rf"##\s*{section_name}",
@@ -230,6 +233,17 @@ class SessionManager:
             if metadata_path.exists():
                 async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
                     metadata = json.loads(await f.read())
+                    session_status = str(metadata.get("status", "")).lower()
+                    if metadata.get("resume_disabled") or session_status in NON_RESUMABLE_SESSION_STATUSES:
+                        logger.error(
+                            "Refusing to resume non-resumable session: %s (status=%s)",
+                            session_id,
+                            session_status or "unknown",
+                        )
+                        self._session_path = None
+                        self._user_prompt = None
+                        self._session_id = None
+                        return None
                     self._user_prompt = metadata.get("user_prompt", "")
                     self._session_id = metadata.get("session_id", session_id)
             else:
@@ -345,7 +359,24 @@ class SessionManager:
                 
             workflow_state_path = session_dir / "workflow_state.json"
             workflow_state = None
+            session_metadata = {}
+            user_prompt = ""
             try:
+                session_metadata_path = session_dir / "session_metadata.json"
+                if session_metadata_path.exists():
+                    async with aiofiles.open(session_metadata_path, 'r', encoding='utf-8') as f:
+                        session_metadata = json.loads(await f.read())
+                    user_prompt = session_metadata.get("user_prompt", "") or session_metadata.get("user_research_prompt", "")
+
+                session_status = str(session_metadata.get("status", "")).lower()
+                if session_metadata.get("resume_disabled") or session_status in NON_RESUMABLE_SESSION_STATUSES:
+                    logger.debug(
+                        "Skipping non-resumable session %s (status=%s)",
+                        session_dir.name,
+                        session_status or "unknown",
+                    )
+                    continue
+
                 if workflow_state_path.exists():
                     async with aiofiles.open(workflow_state_path, 'r', encoding='utf-8') as f:
                         raw = await f.read()
@@ -371,14 +402,6 @@ class SessionManager:
                     continue
                 
                 if has_tier and (has_topic or has_papers):
-                    # Load session metadata for user prompt
-                    session_metadata_path = session_dir / "session_metadata.json"
-                    user_prompt = ""
-                    if session_metadata_path.exists():
-                        async with aiofiles.open(session_metadata_path, 'r', encoding='utf-8') as f:
-                            session_metadata = json.loads(await f.read())
-                            user_prompt = session_metadata.get("user_prompt", "")
-                    
                     resumable_sessions.append({
                         "session_id": session_dir.name,
                         "path": str(session_dir),

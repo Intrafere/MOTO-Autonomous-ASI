@@ -178,6 +178,15 @@ class FinalAnswerMemory:
             self._rejections_path = self._base_dir / "tier3_rejections.txt"
             self._final_volume_path = self._base_dir / "final_volume.txt"
             logger.info(f"Final answer memory using session path: {self._base_dir}")
+        else:
+            self._base_dir = Path(system_config.data_dir) / "auto_final_answer"
+            self._state_path = self._base_dir / "final_answer_state.json"
+            self._volume_path = self._base_dir / "volume_organization.json"
+            self._rejections_path = self._base_dir / "tier3_rejections.txt"
+            self._final_volume_path = self._base_dir / "final_volume.txt"
+            logger.info(f"Final answer memory using legacy path: {self._base_dir}")
+
+        self._state = None
     
     async def initialize(self) -> None:
         """Initialize the final answer memory directories and load state."""

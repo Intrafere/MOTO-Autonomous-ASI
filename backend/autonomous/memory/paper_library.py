@@ -48,6 +48,11 @@ class PaperLibrary:
             self._archive_dir = session_manager.get_papers_dir() / "archive"
             self._pruned_dir = session_manager.get_papers_dir() / "pruned"
             logger.info("Paper library using session path: %s", redact_log_text(self._base_dir, 240))
+        else:
+            self._base_dir = Path(system_config.auto_papers_dir)
+            self._archive_dir = Path(system_config.auto_papers_archive_dir)
+            self._pruned_dir = self._base_dir / "pruned"
+            logger.info("Paper library using legacy path: %s", redact_log_text(self._base_dir, 240))
     
     async def initialize(self) -> None:
         """Initialize the paper library directories."""

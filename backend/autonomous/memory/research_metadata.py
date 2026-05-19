@@ -50,6 +50,15 @@ class ResearchMetadata:
             self._stats_path = session_path / "session_stats.json"
             self._workflow_state_path = session_path / "workflow_state.json"
             logger.info(f"Research metadata using session path: {session_path}")
+        else:
+            self._metadata_path = Path(system_config.auto_research_metadata_file)
+            self._stats_path = Path(system_config.auto_research_stats_file)
+            self._workflow_state_path = Path(system_config.auto_workflow_state_file)
+            logger.info("Research metadata using legacy paths")
+
+        self._data = None
+        self._stats = None
+        self._workflow_state = None
     
     def _get_default_stats(self) -> Dict[str, Any]:
         """Default statistics structure."""
