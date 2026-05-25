@@ -12,7 +12,7 @@ Autonomous Research mode agents use the same role prefixes as their parent roles
   Certainty Assessor, Format Selector, Volume Organizer → agg_sub1 (Submitter 1)
 - Topic Validator, Redundancy Checker → agg_val (Agg Validator)
 - Brainstorm aggregation submitters/validator → agg_sub1..10, agg_val (via Coordinator)
-- Paper compilation → comp_hc, comp_hp, comp_val, comp_crit (via CompilerCoordinator)
+- Paper compilation → comp_hc, comp_hp, comp_val, comp_crit (critique_* task IDs alias to comp_crit)
 - LeanOJ path-decision calls use `leanoj_path_*` task IDs for workflow display, but belong to the
   Final Solver boost category (`leanoj_final`) because that role owns final-readiness decisions.
 
@@ -25,6 +25,7 @@ import os
 from typing import Optional, Set, Callable, Any, Dict, List
 
 from backend.shared.config import rag_config, system_config
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BoostConfig
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,10 @@ CATEGORY_PREFIXES = {
 CATEGORY_ALIASES = {
     # Path decisions are absorbed into the dominant Final Solver role.
     "leanoj_path": "leanoj_final",
+    # Critique phase has legacy task IDs but one user-facing category.
+    "critique_val": "comp_crit",
+    "critique_cleanup": "comp_crit",
+    **{f"critique_sub{i}": "comp_crit" for i in range(1, 11)},
 }
 
 
@@ -155,8 +160,8 @@ class BoostManager:
                         boost_model_id=state.get('model_id'),
                         boost_provider=state.get('provider'),
                         boost_reasoning_effort=state.get('reasoning_effort', 'auto'),
-                        boost_context_window=state.get('context_window', 131072),
-                        boost_max_output_tokens=state.get('max_output_tokens', 25000)
+                        boost_context_window=state.get('context_window') or 0,
+                        boost_max_output_tokens=state.get('max_output_tokens') or 0
                     )
                 
                 # Restore boost modes
@@ -168,14 +173,19 @@ class BoostManager:
                 self.boost_always_prefer = state.get('boost_always_prefer', False)
                 self.boosted_task_ids = set(state.get('boosted_task_ids', []))
                 
-                logger.info(f"Loaded boost state: enabled={state.get('enabled')}, model={state.get('model_id')}, "
-                           f"next_count={self.boost_next_count}, categories={len(self.boosted_categories)}, "
-                           f"always_prefer={self.boost_always_prefer}")
+                logger.info(
+                    "Loaded boost state: enabled=%s, model=%s, next_count=%s, categories=%s, always_prefer=%s",
+                    state.get("enabled"),
+                    redact_log_text(state.get("model_id"), 160),
+                    self.boost_next_count,
+                    len(self.boosted_categories),
+                    self.boost_always_prefer,
+                )
                 if legacy_key_present:
                     self._save_state()
                     logger.info("Scrubbed legacy plaintext boost API key from persisted state")
         except Exception as e:
-            logger.warning(f"Failed to load boost state: {e}")
+            logger.warning("Failed to load boost state: %s", redact_log_text(e, 240))
     
     def _save_state(self) -> None:
         """Persist current boost state to disk."""
@@ -189,8 +199,8 @@ class BoostManager:
                 'model_id': self.boost_config.boost_model_id if self.boost_config else None,
                 'provider': self.boost_config.boost_provider if self.boost_config else None,
                 'reasoning_effort': self.boost_config.boost_reasoning_effort if self.boost_config else 'auto',
-                'context_window': self.boost_config.boost_context_window if self.boost_config else 131072,
-                'max_output_tokens': self.boost_config.boost_max_output_tokens if self.boost_config else 25000,
+                'context_window': self.boost_config.boost_context_window if self.boost_config else 0,
+                'max_output_tokens': self.boost_config.boost_max_output_tokens if self.boost_config else 0,
                 'boost_next_count': self.boost_next_count,
                 'boosted_categories': list(self.boosted_categories),
                 'boost_always_prefer': self.boost_always_prefer,
@@ -202,7 +212,7 @@ class BoostManager:
             
             logger.debug("Boost state saved to disk")
         except Exception as e:
-            logger.warning(f"Failed to save boost state: {e}")
+            logger.warning("Failed to save boost state: %s", redact_log_text(e, 240))
     
     def set_broadcast_callback(self, callback: Callable) -> None:
         """Set callback for broadcasting WebSocket events."""
@@ -222,12 +232,18 @@ class BoostManager:
         """
         async with self._lock:
             self.boost_config = config
-            provider_info = f", provider={config.boost_provider}" if config.boost_provider else " (auto-routing)"
+            provider_info = (
+                f", provider={redact_log_text(config.boost_provider, 120)}"
+                if config.boost_provider
+                else " (auto-routing)"
+            )
             logger.info(
-                f"Boost enabled: model={config.boost_model_id}{provider_info}, "
-                f"reasoning={config.boost_reasoning_effort}, "
-                f"context={config.boost_context_window}, "
-                f"max_tokens={config.boost_max_output_tokens}"
+                "Boost enabled: model=%s%s, reasoning=%s, context=%s, max_tokens=%s",
+                redact_log_text(config.boost_model_id, 160),
+                provider_info,
+                redact_log_text(config.boost_reasoning_effort, 40),
+                redact_log_text(config.boost_context_window, 40),
+                redact_log_text(config.boost_max_output_tokens, 40),
             )
             
             # Persist state
@@ -271,11 +287,11 @@ class BoostManager:
             if task_id in self.boosted_task_ids:
                 self.boosted_task_ids.remove(task_id)
                 boosted = False
-                logger.debug(f"Task {task_id} boost disabled")
+                logger.debug("Task %s boost disabled", redact_log_text(task_id, 120))
             else:
                 self.boosted_task_ids.add(task_id)
                 boosted = True
-                logger.debug(f"Task {task_id} boost enabled")
+                logger.debug("Task %s boost enabled", redact_log_text(task_id, 120))
             
             # Persist state
             self._save_state()
@@ -358,11 +374,11 @@ class BoostManager:
             if category in self.boosted_categories:
                 self.boosted_categories.remove(category)
                 boosted = False
-                logger.info(f"Category {category} boost disabled")
+                logger.info("Category %s boost disabled", redact_log_text(category, 120))
             else:
                 self.boosted_categories.add(category)
                 boosted = True
-                logger.info(f"Category {category} boost enabled")
+                logger.info("Category %s boost enabled", redact_log_text(category, 120))
             
             # Persist state
             self._save_state()

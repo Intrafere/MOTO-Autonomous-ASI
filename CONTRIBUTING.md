@@ -223,6 +223,7 @@ Fixes #123
 ## Testing
 - [ ] Tested with LM Studio models
 - [ ] Tested with OpenRouter models
+- [ ] Tested with OpenAI Codex login/provider routing if cloud-access code changed
 - [ ] Tested aggregator workflow
 - [ ] Tested compiler workflow
 - [ ] Tested autonomous research
@@ -276,6 +277,7 @@ Test with various model combinations:
 - Medium models (30B-40B)
 - Large models (70B+)
 - OpenRouter models (GPT-4, Claude, etc.)
+- OpenAI Codex models through `Cloud Access & Keys` when touching cloud credential/provider routing
 
 ### Load Testing
 

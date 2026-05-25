@@ -49,7 +49,7 @@ REASONS FOR REMOVAL - A paper should be removed if it:
 6. Is more indirect or auxiliary while another paper provides a stronger rigorous direct answer on the same territory
 
 REASONS TO KEEP - A paper should be kept if it:
-1. Provides a stronger direct answer, sharper impossibility result, or tighter constraint than overlapping papers
+1. Provides a stronger direct answer to the user's prompt than overlapping papers
 2. Provides ANY unique mathematical content not covered elsewhere
 3. Offers a different perspective or approach even if related to other papers
 4. Contains specific proofs, theorems, or techniques not present elsewhere

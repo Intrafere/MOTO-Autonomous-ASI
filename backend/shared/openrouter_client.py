@@ -13,14 +13,15 @@ import time
 from typing import List, Dict, Any, Optional
 
 from backend.shared.config import system_config
+from backend.shared.log_redaction import redact_log_text
 
 logger = logging.getLogger(__name__)
 
 
 _PROVIDER_SECRET_PATTERNS = (
     re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE),
-    re.compile(r'("(?:api[_-]?key|appid|authorization|token|secret)"\s*:\s*)"[^"]*"', re.IGNORECASE),
-    re.compile(r"((?:api[_-]?key|appid|authorization|token|secret)\s*[=:]\s*)[^\s,&}]+", re.IGNORECASE),
+    re.compile(r'("(?:api[_-]?key|appid|authorization|token|access[_-]?token|refresh[_-]?token|id[_-]?token|secret)"\s*:\s*)"[^"]*"', re.IGNORECASE),
+    re.compile(r"((?:api[_-]?key|appid|authorization|token|access[_-]?token|refresh[_-]?token|id[_-]?token|secret)\s*[=:]\s*)[^\s,&}]+", re.IGNORECASE),
 )
 
 
@@ -35,9 +36,7 @@ def sanitize_provider_error_text(value: Any, max_chars: int = 500) -> str:
     text = re.sub(r'("messages"\s*:\s*)\[[\s\S]*?\]', r'\1[redacted]', text, flags=re.IGNORECASE)
     text = re.sub(r'("prompt"\s*:\s*)"[\s\S]*?"', r'\1"[redacted]"', text, flags=re.IGNORECASE)
 
-    if len(text) > max_chars:
-        return text[:max_chars] + "...[truncated]"
-    return text
+    return redact_log_text(text, max_chars)
 
 
 class OpenRouterClient:
@@ -245,18 +244,21 @@ class OpenRouterClient:
         try:
             # Model ID format is "author/slug" (e.g., "anthropic/claude-3.5-sonnet")
             if "/" not in model_id:
-                logger.warning(f"Invalid model ID format (expected 'author/slug'): {model_id}")
+                logger.warning(
+                    "Invalid model ID format (expected 'author/slug'): %s",
+                    redact_log_text(model_id, 160),
+                )
                 return []
 
             parts = model_id.split("/", 1)
             if len(parts) != 2:
-                logger.warning(f"Could not parse model ID: {model_id}")
+                logger.warning("Could not parse model ID: %s", redact_log_text(model_id, 160))
                 return []
 
             author, slug = parts
 
             url = f"{self.BASE_URL}/models/{author}/{slug}/endpoints"
-            logger.debug(f"Fetching endpoints from: {url}")
+            logger.debug("Fetching endpoints from: %s", redact_log_text(url, 240))
 
             response = await self.client.get(
                 url,
@@ -264,13 +266,16 @@ class OpenRouterClient:
             )
 
             if response.status_code == 404:
-                logger.warning(f"Model {model_id} not found in OpenRouter")
+                logger.warning("Model %s not found in OpenRouter", redact_log_text(model_id, 160))
                 return []
 
             response.raise_for_status()
             data = response.json()
 
-            logger.debug(f"OpenRouter endpoints API response for {model_id} (cached)")
+            logger.debug(
+                "OpenRouter endpoints API response for %s (cached)",
+                redact_log_text(model_id, 160),
+            )
 
             cleaned_endpoints: List[Dict[str, Any]] = []
 
@@ -296,7 +301,9 @@ class OpenRouterClient:
                         if status is None or status < 0:
                             provider_name = endpoint.get("provider_name", "unknown")
                             logger.debug(
-                                f"Filtering out unavailable provider {provider_name} (status={status})"
+                                "Filtering out unavailable provider %s (status=%s)",
+                                redact_log_text(provider_name, 120),
+                                status,
                             )
                             continue
 
@@ -319,14 +326,26 @@ class OpenRouterClient:
                             "quantization": endpoint.get("quantization"),
                         })
 
-            logger.debug(f"Available endpoints for {model_id}: {len(cleaned_endpoints)}")
+            logger.debug(
+                "Available endpoints for %s: %s",
+                redact_log_text(model_id, 160),
+                len(cleaned_endpoints),
+            )
             return cleaned_endpoints
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error fetching endpoints for {model_id}: {e.response.status_code}")
+            logger.error(
+                "HTTP error fetching endpoints for %s: %s",
+                redact_log_text(model_id, 160),
+                e.response.status_code,
+            )
             return []
         except Exception as e:
-            logger.error(f"Failed to get endpoints for model {model_id}: {e}")
+            logger.error(
+                "Failed to get endpoints for model %s: %s",
+                redact_log_text(model_id, 160),
+                redact_log_text(e, 240),
+            )
             return []
 
     async def get_model_providers(self, model_id: str) -> List[str]:
@@ -844,28 +863,6 @@ class OpenRouterClient:
         """
         return dict(self._rate_limited_models)
     
-    def get_soonest_retry(self) -> Optional[float]:
-        """
-        Get the earliest timestamp when any rate-limited model becomes available.
-        
-        Returns:
-            Unix timestamp of soonest cooldown expiry, or None if no models tracked.
-        """
-        if not self._rate_limited_models:
-            return None
-        
-        current_time = time.time()
-        soonest = None
-        
-        for model_id, limit_time in self._rate_limited_models.items():
-            retry_at = limit_time + self.RATE_LIMIT_COOLDOWN
-            if retry_at <= current_time:
-                continue
-            if soonest is None or retry_at < soonest:
-                soonest = retry_at
-        
-        return soonest
-
     async def close(self):
         """Close the HTTP client and cleanup resources."""
         try:
@@ -938,14 +935,7 @@ class RateLimitError(Exception):
 class FreeModelExhaustedError(Exception):
     """
     Raised when all free model options are exhausted (looping + auto-selector + fallback).
-    
-    Contains soonest_retry timestamp so coordinators can implement SERIAL BOTTLENECK
-    pause behavior instead of infinite retry loops.
-    
-    Attributes:
-        soonest_retry: Unix timestamp when the earliest model cooldown expires, or None
     """
-    def __init__(self, message: str, soonest_retry: Optional[float] = None):
+    def __init__(self, message: str):
         super().__init__(message)
-        self.soonest_retry = soonest_retry
 

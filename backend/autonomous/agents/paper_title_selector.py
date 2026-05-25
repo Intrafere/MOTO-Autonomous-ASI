@@ -7,16 +7,15 @@ All inputs are compact summaries that fit in direct injection. The full brainsto
 content is not needed — a summary is sufficient to choose an appropriate title.
 """
 import asyncio
-import json
 import logging
 from typing import Optional, Dict, Any, List, Tuple, Callable
 
-from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.models import PaperTitleSelection
 from backend.shared.utils import count_tokens
+from backend.shared.config import rag_config
 from backend.autonomous.prompts.paper_title_prompts import (
     build_paper_title_prompt,
     build_paper_title_validation_prompt
@@ -35,8 +34,8 @@ class PaperTitleSelectorAgent:
         self,
         model_id: str,
         validator_model_id: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 25000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.model_id = model_id
         self.validator_model_id = validator_model_id
@@ -155,7 +154,7 @@ class PaperTitleSelectorAgent:
     ) -> Optional[PaperTitleSelection]:
         """Generate a paper title selection."""
         try:
-            max_input_tokens = self.context_window - self.max_output_tokens
+            max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
 
             # Build prompt with full rejection feedback first
             prompt = build_paper_title_prompt(
@@ -333,7 +332,6 @@ class PaperTitleSelectorAgent:
                 role_id="autonomous_paper_title_validator",
                 model=self.validator_model_id,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=15000,
                 temperature=0.0  # Deterministic validation - evolving context provides diversity
             )
             

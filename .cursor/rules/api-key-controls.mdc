@@ -1,4 +1,5 @@
 ---
+description: Cloud provider keys, Boost routing, Supercharge, free-model fallback, and workflow metrics
 alwaysApply: true
 ---
 
@@ -6,33 +7,35 @@ alwaysApply: true
 
 ## Overview
 
-Enables OpenRouter integration with automatic LM Studio fallback (default mode) or OpenRouter-only operation (generic mode), plus boost controls and research metrics in the workflow panel.
+Enables cloud provider access with LM Studio fallback in default mode (OpenRouter API keys plus desktop OpenAI Codex OAuth) and OpenRouter-only operation in generic mode, plus boost controls and research metrics in the workflow panel.
 
 **Key Features:**
-- **Per-Role OpenRouter Selection**: Each role independently uses LM Studio or OpenRouter (default mode); all roles use OpenRouter in generic mode
-- **Global OpenRouter API Key**: Single key for all per-role OpenRouter selections within one running backend instance. Boost can reuse it when no explicit boost-only override key is provided.
-- **OpenRouter Auto-Fill**: OpenRouter selectors fetch provider endpoint metadata and compute host-aware context/output settings from a capable endpoint set. Auto mode must ignore known weak hosts (currently Venice) and low/missing-cap outliers before computing context/max-output; manual host selection uses that exact host.
+- **Per-Role Cloud Provider Selection**: Each role independently uses LM Studio, OpenRouter, or desktop-only OpenAI Codex OAuth where available (default mode); generic mode remains OpenRouter-only.
+- **Cloud Access & Keys**: Header overlay manages OpenRouter API keys and desktop OpenAI Codex/ChatGPT subscription OAuth. OpenRouter keeps its single global key and Boost reuse behavior.
+- **OpenRouter Auto-Fill**: OpenRouter selectors fetch provider endpoint metadata and compute host-aware context/output settings from a capable endpoint set. Auto mode ignores known weak hosts (currently Venice) and low/missing-cap outliers before computing context/max-output; manual host selection uses that exact host and its largest exposed endpoint output cap.
+- **OpenAI Codex OAuth Auto-Fill**: Codex model listing must parse Codex catalog fields (`context_length`/`contextTokens`, `context_window`, `max_context_window`, `effective_context_window_percent`, `max_output_tokens`) and use documented Codex-product limits where the catalog omits them. Do not invent a generic fallback context window for unknown Codex models; preserve current settings when metadata is unknown. GPT-5.5 Codex uses the Codex 400K product window, not the 1M regular API window.
 - **OpenRouter Reasoning Effort**: Every OpenRouter role exposes a visible reasoning-effort selector. Default `auto` sends maximum OpenRouter reasoning effort (`xhigh`) through the normalized `reasoning.effort` request object; users may lower it or set `none`.
 - **LM Studio Fallback** (default mode only): Optional fallback per role on credit exhaustion
 - **Free Model Cooldown Handling**: SERIAL BOTTLENECK pause, free model looping, and auto-selector backup (see below)
 - **Boost Mode**: Selective task acceleration via next-count, category, always-prefer, and per-task routing controls, using either an explicit boost override key or the active global OpenRouter key:
   - **Boost Next X Calls**: Counter-based, next X API calls regardless of task ID
-  - **Category Boost**: Role-based, boosts all calls for specific role categories across Aggregator, Compiler, Autonomous/proof, and LeanOJ roles
+  - **Category Boost**: Role-based, boosts all calls for exposed Aggregator, Compiler, autonomous parent-role, and selected LeanOJ category presets. Autonomous proof task IDs and non-exposed LeanOJ helper prefixes are boostable through Boost Next X, Always Prefer, or exact task IDs, but are not separate category presets unless added to `/api/boost/categories`.
   - **Always Prefer Boost**: Attempts boost for every API call, falling back to the primary route on boost failure
   - **Per-Task Toggle**: Legacy task-ID boost controls for individual workflow tasks
 - **Supercharge**: Per-role setting that wraps one role answer as 4 parallel diversified full answer attempts plus a 5th same-model deterministic synthesis answer. If Boost applies, all 5 calls use the Boost route/model/provider/settings.
-- **System works without LM Studio**: Defaults to OpenRouter when LM Studio unavailable; generic mode never attempts LM Studio
+- **Creativity Emphasis Boost**: Developer-gated brainstorm prompt mode for Aggregator, Autonomous Aggregator-backed brainstorm/title/topic exploration, and LeanOJ topic/brainstorm submitters. It is prompt pressure only, not routing or concurrency, and marks accepted/rejected activity with `creativity_emphasized`.
+- **System works without LM Studio**: Defaults to OpenRouter when LM Studio unavailable; generic-mode inference and embeddings never route through LM Studio, though shared legacy diagnostics may still exist and should not be used by hosted UI
 
 ## Mode-Specific Behavior
 
 | Behavior | Default Mode | Generic Mode |
 |----------|-------------|--------------|
-| LLM provider | LM Studio + OpenRouter + fallback | OpenRouter only |
+| LLM provider | LM Studio + OpenRouter + OpenAI Codex OAuth + fallback | OpenRouter only |
 | Embeddings | LM Studio → OpenRouter fallback | FastEmbed (in-process) |
 | LM Studio UI | Shown (provider toggle per role) | Hidden (frontend checks `/api/features`) |
 | Secret persistence | OS keyring via `secret_store.py` | Env-injected/in-memory; keyring bypassed |
 | `Authorization` header | Used for OpenRouter key passthrough | Same; NOT reused for sandbox proxy auth |
-| API key on startup | Restored from keyring | Loaded from `OPENROUTER_API_KEY` env var if present |
+| API key on startup | OpenRouter key and OpenAI Codex OAuth tokens restored from keyring | Loaded from `OPENROUTER_API_KEY` env var if present |
 
 ---
 
@@ -58,6 +61,14 @@ Enables OpenRouter integration with automatic LM Studio fallback (default mode) 
 - Tool-call requests (`tools` or `tool_choice`) bypass Supercharge because assistant/tool turn pairing must remain exact.
 - If Boost applies to the original task, all 5 Supercharge calls force the same Boost mode and Boost config first; Boost failures are strict for Supercharge and must not silently mix in the primary route. `boost_next_count` is consumed once for the successful boosted overall Supercharge answer, not once per internal attempt.
 
+### Creativity Emphasis Boost
+
+**Creativity Emphasis Boost is prompt steering, NOT a routing or concurrency mode.**
+- The developer-gated start flag `creativity_emphasis_boost_enabled` adds the creativity block every fifth valid submission slot per submitter in supported brainstorm loops.
+- The extra prompt block must be included in context budgeting; if it alone would overflow a role's configured input budget, skip the creativity block for that slot and run the normal prompt instead.
+- It never changes validator prompts, provider selection, Boost routing, Supercharge behavior, or submitter parallelism.
+- Frontend payloads must force it off when developer mode is disabled until the control is intentionally promoted to standard mode.
+
 ### Backend Core
 
 #### OpenRouterClient (`backend/shared/openrouter_client.py`)
@@ -66,11 +77,11 @@ Enables OpenRouter integration with automatic LM Studio fallback (default mode) 
 - Credit exhaustion detection: HTTP 402 OR error messages containing "credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"
 - Raises `CreditExhaustionError` on exhaustion (no retries). Retries transient errors (max 3).
 - Temperature=0.0 default except Supercharge candidate attempts and parallel brainstorm submitter lanes. No stop sequences (removed — caused premature truncation with certain models).
-- Exposes both model-level metadata (`/models`) and provider endpoint metadata (`/models/{author}/{slug}/endpoints`) so the UI can compute safe host-aware OpenRouter auto-fill values.
+- Exposes both model-level metadata (`/models`) and provider endpoint metadata (`/models/{author}/{slug}/endpoints`) so the UI can compute model-context and endpoint-output-cap OpenRouter auto-fill values.
 - Auto-routed calls include a provider `ignore` list for known weak hosts so OpenRouter can still fall back across capable providers. Explicit user-selected providers use `provider.order=[provider]` with `allow_fallbacks=false` so requests cannot silently fall back to a host whose limits were not used for settings.
 
 #### APIClientManager (`backend/shared/api_client_manager.py`)
-- Central router for all API calls: optional Supercharge wrapper → boost check → role's OpenRouter (with resettable fallback) → LM Studio (default mode) or OpenRouter-only (generic mode)
+- Central router for all API calls: optional Supercharge wrapper → boost check → role's configured cloud provider (OpenRouter or desktop OpenAI Codex OAuth, with LM Studio fallback) → LM Studio (default mode) or OpenRouter-only (generic mode)
 - Temperature policy exceptions live here: Supercharge attempts use `[0.0, 0.2, 0.4, 0.8]`; parallel brainstorm submitter lanes use `[0.0, 0.1, ..., 0.9]`. Validators, compiler roles, proof/final roles, JSON retries, and single-model sequential submitters stay `0.0`.
 - LM Studio instance sharing lives below this router in `lm_studio_client.generate_completion()`: only default-mode LM Studio calls can share same-base loaded numeric `:#` siblings, response metadata must preserve both the configured model and effective instance, and state-sensitive workflow ordering must not change.
 - Raw provider/model transport output must never be replayed into MOTO retry prompts, feedback memory, accepted memory, RAG, or durable context. Conversational retries are required, but failed-output context must first pass `sanitize_model_output_for_retry_context()` so only reusable visible answer text remains. The sanitizer strips known private thought/channel/control tokens only as transport scaffolding outside visible JSON/string content, not ordinary visible Lean/math/operator syntax such as `<|` or literal visible marker text such as `<|channel>final` / `<channel|>` inside content.
@@ -78,6 +89,7 @@ Enables OpenRouter integration with automatic LM Studio fallback (default mode) 
 - Observability surfaces must default to metadata/previews with secret redaction. Provider keys, URL query keys, Wolfram query/result text, and full prompt/response bodies must not be persisted or broadcast unless an explicit trusted debug path opts in. Legacy full-payload log fields are scrubbed from persisted API logs on logger startup.
 - Tool-call assistant/tool protocol turns are the only exception where exact assistant content/structure may need preservation; ordinary JSON retry assistant turns are not tool protocol turns and must use sanitized retry context.
 - Generic mode must normalize or reject LM Studio role configs and must never fall through to `lm_studio_client.generate_completion()`, even if a direct API caller submits legacy `provider="lm_studio"` or an LM fallback value.
+- OpenAI Codex OAuth is a distinct desktop provider (`openai_codex_oauth`) using ChatGPT/Codex account tokens against `https://chatgpt.com/backend-api/codex`; it is not the regular OpenAI API-key billing path, uses the fixed Codex loopback redirect `http://localhost:1455/auth/callback` plus the current Codex authorize parameters/scopes (`api.connectors.read`, `api.connectors.invoke`, `codex_cli_simplified_flow=true`, `originator=moto`), sends Responses requests with `stream=true`, strips Codex-unsupported output-limit/temperature knobs before the upstream call, aggregates streamed events into MOTO's Chat Completions-compatible shape, parses Codex-backed model context/output metadata from the Codex model catalog, chunks large OAuth token bundles across OS-keyring entries below Windows Credential Manager blob limits, releases the callback listener after pending login completion/expiry, and remains unavailable in generic mode.
 - Generic mode: `get_embeddings()` early-returns to `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain
 - Tracks fallback state per role: `_role_fallback_state: Dict[str, str]`
 - `reset_openrouter_fallbacks()`: Resets all roles originally configured for OpenRouter back from LM Studio fallback. Called automatically on API key set, or manually via reset endpoint.
@@ -87,32 +99,28 @@ Enables OpenRouter integration with automatic LM Studio fallback (default mode) 
 - **EVERY role calling `api_client_manager.generate_completion()` MUST be configured via `api_client_manager.configure_role()`**
 - This includes: aggregator submitters/validator, compiler submitters/validator/critique, autonomous agents, Tier 3 final answer agents, and LeanOJ roles/topic/brainstorm submitters
 - Role configs must preserve `supercharge_enabled` when copied into proof snapshots, manual proof helpers, child Aggregator/Compiler coordinators, and LeanOJ grouped roles.
-- **Proof agents (Part 3, optional)** do NOT have standalone role configs. `ProofVerificationStage` reuses the stored `ProofRuntimeConfigSnapshot` (brainstorm submitter, high-context submitter, validator) captured by `autonomous_coordinator._build_proof_runtime_config_snapshot()` and persisted via `research_metadata.set_proof_runtime_config()`. Manual `POST /api/proofs/check` requires `lean4_enabled=True` AND a seeded snapshot — start autonomous research once to seed it.
+- **Proof agents (Part 3, optional)** do NOT have standalone user-facing model settings. Internal proof role IDs are still configured through `api_client_manager.configure_role()` by copying from the `ProofRuntimeConfigSnapshot` (brainstorm submitter, high-context submitter, validator) captured by `autonomous_coordinator._build_proof_runtime_config_snapshot()` and persisted via `research_metadata.set_proof_runtime_config()`, or supplied directly on manual `POST /api/proofs/check`. Manual checks require `lean4_enabled=True` and either a stored or request-provided runtime snapshot.
 
 **Boost Mode Priority** (`should_use_boost(task_id)`):
-1. Boost Next X: `boost_next_count > 0` → True
-2. Always Prefer Boost: `always_prefer_boost=True` → True
+1. Always Prefer Boost: `boost_always_prefer=True` → True
+2. Boost Next X: `boost_next_count > 0` → True
 3. Category Boost: `_extract_role_prefix(task_id) in boosted_categories` → True
 4. Per-task toggle: exact task ID is enabled → True
 
 **Counter Decrement:** `boost_next_count` decrements ONLY on successful boost API calls. Failed/exhausted calls do NOT decrement.
 
-**Resettable Fallback:** When a role hits credit exhaustion, it falls back to LM Studio for subsequent calls (default mode; generic mode has no LM Studio fallback — raises RuntimeError if no fallback configured). User can reset all fallen-back roles via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key (auto-resets). Each role has independent fallback state.
+**Resettable Fallback / Proof Pause:** When a role hits credit exhaustion, it falls back to LM Studio for subsequent calls when fallback is configured. Proof workflows (LeanOJ and autonomous proof checkpoints) with no fallback preserve their workflow checkpoint/state and enter a provider-credit pause instead of failing proof progress. `POST /api/openrouter/reset-exhaustion` clears fallback/free-model exhaustion and wakes currently waiting in-process proof workflows; stopped/restarted runs rely on their persisted LeanOJ/proof checkpoint resume paths. Each role has independent fallback state.
 
-**Categories from role_id:**
-- `aggregator_submitter_*` → "Aggregator Submitters"
-- `aggregator_validator` → "Aggregator Validator"
-- `compiler_high_context` → "Compiler High-Context"
-- `compiler_high_param` → "Compiler High-Param"
-- `compiler_validator` → "Compiler Validator"
-- `autonomous_*` → "Autonomous"
-- `proof_*` / `autonomous_proof_*` → proof-specific categories
-- `leanoj_*` → LeanOJ topic, brainstorm, subproof, final-solver, and validator categories; LeanOJ path-decision tasks are absorbed into Final Solver boost routing
+**Categories from task ID prefix:**
+- `agg_sub{N}` / `agg_val` → Aggregator and autonomous parent-role tasks
+- `comp_hc` / `comp_hp` / `comp_val` / `comp_crit` → Compiler roles; legacy critique task prefixes (`critique_sub*`, `critique_val`, `critique_cleanup`) alias to `comp_crit`
+- `proof_*` → autonomous proof task IDs (not exposed in the category list unless added explicitly)
+- Exposed LeanOJ category presets cover topic generation/validation, brainstorm submitters/validator, sufficiency, path validation, and final solver. `leanoj_path_*` path-decision calls are absorbed into the Final Solver category; other LeanOJ helper prefixes (for example prune review, master-proof edit validation, final review, and proof-novelty tasks) use Boost Next X, Always Prefer, or exact task IDs unless promoted to category presets.
 
 #### BoostManager (`backend/shared/boost_manager.py`)
 - Singleton. Key methods: `set_boost_config`, `clear_boost`, `set_boost_next_count`, `toggle_category_boost`, `set_always_prefer`, `toggle_task_boost`, `should_use_boost` (main check for coordinators), `consume_boost_count` (only after successful boost call)
 - Boost can use an **explicit override** OpenRouter API key in process memory only, or it falls back to the active global OpenRouter key. Boost state persistence must never write provider key material; legacy persisted boost keys are scrubbed on load. A temporary `OpenRouterClient` is created per boosted task and closed immediately after.
-- **Autonomous agent task ID inheritance**: All autonomous orchestration agents use parent role task ID prefixes — Topic Selector/Completion Reviewer/Reference Selector/Paper Title Selector/Tier 3 agents use `agg_sub1_*`; Topic Validator/Redundancy Checker use `agg_val_*`. Boosting a parent role automatically covers all autonomous agents that run on that model. **Proof agents are the exception**: they use their own prefixes (`proof_id_*`, `proof_lemma_*`, `proof_form_*`, `proof_novelty_*`, `proof_framing_gate_*`) because they run under the `autonomous_proof_*` role IDs with distinct runtime-snapshot configs; Aggregator/Validator category boosts do NOT cover proof agents.
+- **Autonomous agent task ID inheritance**: All autonomous orchestration agents use parent role task ID prefixes — Topic Selector/Completion Reviewer/Reference Selector/Paper Title Selector/Tier 3 agents use `agg_sub1_*`; Topic Validator/Redundancy Checker use `agg_val_*`. Boosting a parent role automatically covers all autonomous agents that run on that model. **Proof agents are the exception**: they use their own prefixes (`proof_id_*`, `proof_lemma_*`, `proof_form_*`, `proof_integrity_*`, `proof_novelty_*`, `proof_framing_gate_*`) because they run under the `autonomous_proof_*` role IDs with distinct runtime-snapshot configs; Aggregator/Validator category boosts do NOT cover proof agents, and proof prefixes are not currently listed by `/api/boost/categories`.
 
 #### BoostLogger (`backend/shared/boost_logger.py`)
 - Singleton. Log file resolves under the active instance data root (default desktop path: `backend/data/boost_api_log.txt`)
@@ -123,8 +131,8 @@ Enables OpenRouter integration with automatic LM Studio fallback (default mode) 
 Coordinators track task IDs internally for boost routing. The frontend does NOT display predicted task lists.
 - Aggregator: `agg_sub{N}_{seq:03d}`, `agg_val_{seq:03d}`
 - Compiler: `comp_hc_{seq:03d}`, `comp_hp_{seq:03d}`, `comp_val_{seq:03d}`
-- Autonomous: `auto_te_{seq:03d}`, `auto_tev_{seq:03d}`, `auto_ts_{seq:03d}`, `auto_tv_{seq:03d}`
-- Autonomous proof (optional, when `lean4_enabled`): `proof_framing_gate_{seq:03d}`, `proof_id_{seq:03d}`, `proof_lemma_{seq:03d}`, `proof_form_{seq:03d}`, `proof_novelty_{seq:03d}`
+- Autonomous orchestration: parent-role prefixes (`agg_sub1_{seq:03d}` for topic/completion/reference/title/Tier 3 agents; `agg_val_{seq:03d}` for topic/redundancy validators)
+- Autonomous proof/framing: `proof_framing_gate_{seq:03d}` for the prompt-framing decision, plus Lean-gated proof work IDs `proof_id_{seq:03d}`, `proof_lemma_{seq:03d}`, `proof_form_{seq:03d}`, `proof_integrity_{seq:03d}`, `proof_novelty_{seq:03d}`
 
 ---
 
@@ -140,17 +148,7 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ## WebSocket Events
 
-**Workflow:** `workflow_updated` (mode), `token_usage_updated` (total_input, total_output, by_model, elapsed_seconds)
-
-**Boost:** `boost_enabled` (model_id, provider, context_window, max_output_tokens), `boost_disabled`, `boost_next_count_updated` (count), `category_boost_toggled` (category, boosted), `boost_credits_exhausted` (task_id, message)
-
-**Fallback:** `openrouter_fallback` (role_id, reason, message, fallback_model), `openrouter_fallback_failed` (role_id, reason, message), `openrouter_fallbacks_reset` (reset_roles, message)
-
-**Hung Connection:** `hung_connection_alert` (role_id, model, provider, elapsed_minutes, message) — fires after 15 minutes of no API response. Amber notification stack (bottom-left, offset from credit exhaustion stack). Auto-cleared on research stop and fallbacks reset.
-
-**Rate Limit:** `openrouter_rate_limit` (model, role_id, retry_after, message)
-
-**Privacy:** `openrouter_privacy_error` (error_type, model, role_id, message, solution_url)
+Workflow, boost, fallback/reset, provider pause/resume, hung-connection, rate-limit, and privacy-policy conditions should emit user-visible notifications when the frontend or hosted wrapper depends on them. Hung-connection alerts should also appear in the active mode's live activity feed and concisely note that the model may still be thinking, the user can keep waiting, and reasoning effort can be lowered in Settings. Keep consumed event payloads stable enough for UI recovery, but do not treat every internal notification name as a rule-level invariant.
 
 ---
 
@@ -158,22 +156,26 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ### Boost (`backend/api/routes/boost.py`)
 - `POST /api/boost/enable` — Enable boost (BoostConfig body)
+- `POST /api/boost/update-model` — Update boost model/config while preserving boost state
 - `POST /api/boost/disable` — Disable boost, clear all modes
-- `GET /api/boost/status` — Current config, counts, categories
+- `GET /api/boost/status` — Current active boost config/state and boosted category IDs; available category definitions come from `/api/boost/categories`
+- `POST /api/boost/set-always-prefer` — Toggle Always Prefer Boost
 - `POST /api/boost/set-next-count` — Set Boost Next X counter `{ "count": int }`
 - `POST /api/boost/toggle-category/{category}` — Toggle category boost
+- `POST /api/boost/toggle-task/{task_id}` — Toggle a legacy exact task boost
 - `GET /api/boost/categories?mode=` — All categories (mode param ignored, always returns all)
 - `GET /api/boost/openrouter-models` — Fetch OpenRouter models (Bearer key header)
 - `GET /api/boost/model-providers?model_id=` — Providers + endpoint metadata for a model
 - `GET /api/boost/logs?limit=` — Recent boost-only logs (debug)
+- `GET /api/boost/logs/{index}` — One boost log entry by index
 - `POST /api/boost/clear-logs` — Clear logs
 
 ### OpenRouter (`backend/api/routes/openrouter.py`)
 - `GET /api/openrouter/lm-studio-availability` — LM Studio availability check
 - `POST /api/openrouter/set-api-key` — Set and validate global OpenRouter key (auto-resets exhaustion flags)
-- `POST /api/openrouter/reset-exhaustion` — Reset all credit exhaustion flags + role fallback states mid-session
+- `POST /api/openrouter/reset-exhaustion` — Reset all credit exhaustion flags + role fallback states mid-session and wake currently waiting provider-paused proof workflows
 - `DELETE /api/openrouter/api-key` — Clear key
-- `GET /api/openrouter/api-key-status` — `{ has_key, enabled }`
+- `GET /api/openrouter/api-key-status` — `{ success, has_key, enabled }`
 - `GET /api/openrouter/models` — Available models (also caches free models for rotation); temporary keys must use `Authorization: Bearer`, never URL query parameters
 - `GET /api/openrouter/providers/{model_id}` — Providers + endpoint metadata for model
 - `GET /api/openrouter/free-model-settings` — `{ looping_enabled, auto_selector_enabled, ... }`
@@ -181,16 +183,23 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 - `POST /api/openrouter/test-connection` — Test key without storing
 - `GET /api/model-cache` — Cached model ID mapping (display_name → api_id)
 
+### Cloud Access (`backend/api/routes/cloud_access.py`)
+- `GET /api/cloud-access/status` — Non-secret Cloud Access & Keys provider status
+- `POST /api/cloud-access/openai-codex/oauth/start` — Start desktop OpenAI Codex OAuth PKCE login and loopback callback listener
+- `POST /api/cloud-access/openai-codex/oauth/exchange` — Exchange pasted callback URL/code for Codex OAuth tokens
+- `GET /api/cloud-access/openai-codex/status` — Non-secret OpenAI Codex OAuth status
+- `GET /api/cloud-access/openai-codex/models` — Codex-backed model list for the signed-in account, including normalized context/output metadata when known
+- `DELETE /api/cloud-access/openai-codex` — Revoke best-effort and clear stored OpenAI Codex OAuth tokens
+
 ### Workflow (`backend/api/routes/workflow.py`)
 - `GET /api/workflow/predictions` — Current workflow mode (also returns tasks for internal use)
-- `GET /api/workflow/history?limit=` — Completed tasks
 - `GET /api/token-stats` — Cumulative token usage (total_input, total_output, by_model, elapsed_seconds)
 
 ---
 
 ## Error Handling
 
-**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota"/"key limit"/"limit exceeded" → `CreditExhaustionError` → default mode: LM Studio fallback for that role; generic mode: RuntimeError (no LM Studio). Fallback is resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key.
+**Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota"/"key limit"/"limit exceeded" → `CreditExhaustionError` → default mode: LM Studio fallback for that role when configured; proof workflows with no fallback checkpoint progress and pause, while currently waiting tasks can be woken by `POST /api/openrouter/reset-exhaustion`; ordinary non-proof generic-mode calls still raise provider/config errors when no fallback exists. Fallback state is resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key.
 
 **Boost Exhaustion:** Falls back to primary for that task; boost stays enabled; counter NOT decremented.
 
@@ -204,35 +213,35 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 **Singleton:** `free_model_manager` in `backend/shared/free_model_manager.py`. Two global settings (both default ON):
 - `looping_enabled` — rotate to next available free model on rate limit (highest context first)
-- `auto_selector_enabled` — fall back to `openrouter/free` (131072 context) when all free models exhausted
+- `auto_selector_enabled` — fall back to `openrouter/free` when all free models are exhausted; context/max-output still come from configured model metadata or user settings, not a hidden 131K default
 
 **Rotation chain** (in `api_client_manager._try_free_model_rotation()` called from RateLimitError handler; keep optional `tools` / `tool_choice` passed through when that helper is used):
 1. If `looping_enabled`: **iterate through ALL** non-rate-limited free models (highest context first) using `tried_models` set to avoid re-trying. On each `RateLimitError`, refresh rate-limited dict and continue to next model. On `CreditExhaustionError`, stop looping.
 2. If all looping candidates exhausted and `auto_selector_enabled`: try `openrouter/free`
 3. If still failed: check LM Studio fallback (default mode only; generic mode skips this)
-4. If no fallback: raise `FreeModelExhaustedError(soonest_retry=...)`
+4. If no fallback: raise `FreeModelExhaustedError`; current coordinators use a fixed short retry sleep for ordinary all-options-exhausted cooldowns. Proof workflows pause only for account-credit exhaustion, not ordinary per-model cooldown exhaustion.
 
 `get_alternative_free_model()` accepts optional `skip_models: set` parameter to skip already-tried models.
 
-**SERIAL BOTTLENECK:** When `FreeModelExhaustedError` propagates to coordinators:
-- Autonomous coordinator: caught INSIDE the `while` loop — sleeps until `soonest_retry`, broadcasts `serial_bottleneck_paused/resumed`, then the loop re-iterates naturally (research resumes)
-- Compiler coordinator: caught at workflow level — sleeps then spawns new `_main_workflow()` task via `asyncio.create_task()`
-- Aggregator submitters: per-submitter pause (others continue); validator loop pauses entire validator
+**SERIAL BOTTLENECK:** When ordinary all-free-models `FreeModelExhaustedError` propagates to coordinators:
+- Autonomous coordinator: caught inside the loop, sleeps briefly, then re-iterates naturally
+- Compiler coordinator: caught at workflow level, sleeps briefly, then spawns new `_main_workflow()` task via `asyncio.create_task()`
+- Aggregator submitters: per-submitter brief retry sleep (others continue); validator loop pauses and retries
 - Prevents infinite retry loops (the 2000+ attempt bug)
 
-**Account Exhaustion:** HTTP 402 on any `:free` model sets `_account_credits_exhausted` flag. All subsequent free model calls short-circuit immediately. Flag clears on next successful free model call, or via `POST /api/openrouter/reset-exhaustion`, or automatically when the API key is re-set.
+**Account Exhaustion:** HTTP 402 on any `:free` model sets `_account_credits_exhausted` flag. All subsequent free model calls short-circuit immediately. Proof workflows with no fallback checkpoint and pause; in-process waiters wake on `POST /api/openrouter/reset-exhaustion`, and restarted workflows resume from their persisted state. The flag clears on next successful free model call, via reset, or automatically when the API key is re-set.
 
 **Error Classes:**
-- `FreeModelExhaustedError` — all options exhausted, contains `soonest_retry` timestamp
+- `FreeModelExhaustedError` — all options exhausted; account-credit exhaustion is separately marked as a provider pause for proof workflows
 - Agents re-raise `FreeModelExhaustedError` through generic `except Exception` blocks
 
 **API Endpoints:**
 - `GET /api/openrouter/free-model-settings` — current looping/auto-selector state
 - `POST /api/openrouter/free-model-settings` — update settings `{looping_enabled, auto_selector_enabled}`
 
-**WebSocket Events:** `free_model_rotated`, `free_model_auto_selector_used`, `serial_bottleneck_paused`, `serial_bottleneck_resumed`, `all_free_models_exhausted`, `account_credits_exhausted`
+**WebSocket Events:** Free-model rotation, auto-selector use, free-model exhaustion/retry, and account-exhaustion states should be visible to the UI; exact internal event names are not rule-level invariants unless consumed by the hosted wrapper or frontend contract.
 
-**Frontend:** Two checkboxes in all settings panels (Aggregator, Compiler, Autonomous) near "Show free models only". Both default checked, persist to localStorage (namespaced automatically when a storage prefix is active), control the same backend singleton for that running backend instance.
+**Frontend:** Aggregator, Compiler, and Autonomous settings expose two OpenRouter free-model fallback controls in their settings panels (currently grouped in the OpenRouter fallback area rather than necessarily adjacent to "Free models only"). Both default checked, hydrate from the backend singleton, and persist as non-secret runtime settings under the active data root plus localStorage UI state. LeanOJ settings currently expose the "Free models only" filter but not the looping/auto-selector controls.
 
 ---
 
@@ -244,6 +253,8 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 **Hosted generic mode (no keyring):** Provider keys are env-injected at sandbox launch and/or set via proxied MOTO API routes. `secret_store` persistence is bypassed; keys live in sandbox memory only. Re-injection required after sandbox recreation. `OPENROUTER_API_KEY` env var auto-loaded during lifespan if present.
 
-**localStorage:** `workflow_panel_collapsed`, `aggregatorConfig`, `compiler_settings`, `autonomousConfig` (includes `freeModelLooping`, `freeModelAutoSelector`, per-role Supercharge settings). When `MOTO_FRONTEND_STORAGE_PREFIX` / `VITE_MOTO_STORAGE_PREFIX` is active, these keys are automatically namespaced per instance.
+**Non-secret runtime settings:** `runtime_settings.json` under the active data root persists process-level user settings such as OpenRouter free-model looping/auto-selector and, in desktop/default mode, Lean/SMT proof runtime flags/timeouts. Generic mode keeps proof settings unavailable but may still persist non-secret free-model settings. It must never contain provider keys or prompt/response payloads.
+
+**localStorage:** Key families include workflow/UI preferences (`workflow_panel_collapsed`, `developerModeSettingsEnabled`, `banner_shimmer_enabled`, `startup_provider_choice`, high-score critique seen keys), settings/profile keys (`aggregatorConfig` / `aggregator_settings`, `compiler_settings`, `autonomous_research_settings`, `autonomous_research_profiles`, `leanoj_solver_settings`, `leanoj_solver_profiles`, boost modal settings), prompt helpers, and related free-model/Supercharge fields. Active app mode and tab state are not persisted; a fresh frontend mount starts on the autonomous main interface. Browser storage namespacing is driven by `VITE_MOTO_STORAGE_PREFIX`; launch/control-plane config may supply `MOTO_FRONTEND_STORAGE_PREFIX` and project it into the frontend env.
 
 **Session (in-memory):** fallback state per role, boosted task IDs, boost next count, boosted categories, completed task IDs, free model manager state, and any explicit Boost override key. Boost override keys must never be persisted to `boost_state.json`; legacy plaintext keys are ignored/scrubbed on load. Boost logs and non-secret boost routing state persist under the active instance data root (`boost_api_log.txt`, `boost_state.json`) and are merged into the main API call log view. API call logs store previews/metadata by default; full prompt/response payload persistence is debug opt-in only, and provider/model error logs must report shape/status metadata instead of raw response bodies.

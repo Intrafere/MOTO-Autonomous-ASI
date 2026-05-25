@@ -33,7 +33,6 @@ from backend.aggregator.prompts.validator_prompts import (
     get_removal_validation_system_prompt,
     get_removal_validation_json_schema
 )
-from backend.aggregator.validation.json_validator import json_validator
 from backend.aggregator.validation.contradiction_checker import contradiction_checker
 
 logger = logging.getLogger(__name__)
@@ -293,15 +292,14 @@ class ValidatorAgent:
                     "context_length": context_allocator.validator_context_window,
                     "model_path": self.model_name
                 })
-            except Exception:
-                # Silently ignore - only applies to LM Studio models
-                pass
+            except Exception as exc:
+                # Only applies to LM Studio models; cache misses should not fail validation.
+                logger.debug("Validator skipped LM Studio cache warmup: %s", exc)
             
             # Parse JSON
             try:
                 parsed = parse_json(llm_output)
                 valid = True
-                error = None
             except Exception as parse_error:
                 # Not corrupted, just invalid JSON - continue with conversational retry
                 valid = False
@@ -377,12 +375,9 @@ class ValidatorAgent:
                         try:
                             parsed = parse_json(retry_output)
                             valid = True
-                            error = None
                             logger.info("Validator: Conversational retry succeeded!")
-                            llm_output = retry_output  # Use retry output
                         except Exception as parse_error:
                             valid = False
-                            parsed = None
                             error = str(parse_error)
                             logger.warning(f"Validator: Retry failed - {error}")
                     else:
@@ -930,7 +925,6 @@ class ValidatorAgent:
                 user_files_content=self.user_files_content or {}
             )
             
-            direct_context = context_result["direct"]
             rag_context = context_result["rag_context"]
             submissions_ragged = context_result["submissions_ragged"]
             user_files_ragged = context_result.get("user_files_ragged", False)
@@ -1135,10 +1129,8 @@ class ValidatorAgent:
                 submission_proposed_for_removal=submission_content
             )
             
-            direct_context = context_result["direct"]
             rag_context = context_result["rag_context"]
             submissions_ragged = context_result["submissions_ragged"]
-            user_files_ragged = context_result.get("user_files_ragged", False)
             
             if submissions_ragged:
                 logger.info(

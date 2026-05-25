@@ -14,9 +14,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from backend.api.routes import websocket
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
-from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
+from backend.autonomous.memory.brainstorm_memory import BrainstormMemory, brainstorm_memory
 from backend.autonomous.memory.paper_library import paper_library
-from backend.autonomous.memory.proof_database import proof_database
+from backend.autonomous.memory.proof_database import ProofDatabase, proof_database
 from backend.autonomous.memory.research_metadata import research_metadata
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import system_config
@@ -33,11 +33,24 @@ from backend.shared.models import (
     ProofRuntimeConfigSnapshot,
     ProofSettingsUpdateRequest,
 )
+from backend.shared.path_safety import resolve_path_within_root
+from backend.shared.runtime_settings import RuntimeSettingsError, save_proof_runtime_settings
 from backend.shared.smt_client import clear_smt_client, get_smt_client
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/proofs", tags=["proofs"])
+
+
+def _schedule_lean4_warm_start(client) -> None:
+    """Warm the Lean workspace without blocking a settings/status request."""
+    async def _warm_start() -> None:
+        try:
+            await client.warm_start()
+        except Exception as exc:  # pragma: no cover - defensive background task
+            logger.warning("Lean 4 client warm start failed: %s", exc)
+
+    asyncio.create_task(_warm_start())
 
 
 def _safe_path_label(path_value: str) -> str:
@@ -82,18 +95,49 @@ def _build_model_config(role: ProofRoleConfigSnapshot) -> ModelConfig:
     )
 
 
+def _runtime_snapshot_validation_error(snapshot: ProofRuntimeConfigSnapshot) -> Optional[str]:
+    roles = {
+        "brainstorm": snapshot.brainstorm,
+        "paper": snapshot.paper,
+        "validator": snapshot.validator,
+    }
+    for label, role in roles.items():
+        if not role.model_id:
+            return f"Proof runtime model configuration is missing a model for {label}."
+        try:
+            context_window = int(role.context_window)
+            max_output_tokens = int(role.max_output_tokens)
+        except (TypeError, ValueError):
+            return (
+                f"Proof runtime {label} context window and max output tokens must be "
+                "configured as positive integers."
+            )
+        if context_window <= 0 or max_output_tokens <= 0:
+            return (
+                f"Proof runtime {label} context window and max output tokens must be "
+                "configured as positive integers."
+            )
+        if max_output_tokens >= context_window:
+            return f"Proof runtime {label} max output tokens must be smaller than its context window."
+    return None
+
+
 def _get_request_runtime_snapshot(request: Optional[ProofCheckRequest]) -> Optional[ProofRuntimeConfigSnapshot]:
     if not request or not request.proof_runtime_config:
         return None
 
     try:
-        return ProofRuntimeConfigSnapshot(**request.proof_runtime_config)
+        snapshot = ProofRuntimeConfigSnapshot(**request.proof_runtime_config)
     except Exception as exc:
         logger.error("Manual proof runtime config from request is invalid: %s", exc)
         raise HTTPException(
             status_code=400,
             detail="Manual proof runtime model configuration is invalid.",
         )
+    validation_error = _runtime_snapshot_validation_error(snapshot)
+    if validation_error:
+        raise HTTPException(status_code=400, detail=validation_error)
+    return snapshot
 
 
 async def _get_runtime_snapshot(request: Optional[ProofCheckRequest] = None) -> Optional[ProofRuntimeConfigSnapshot]:
@@ -122,8 +166,9 @@ async def _get_manual_check_status() -> Tuple[bool, str]:
     if snapshot is None:
         return False, "No proof runtime model configuration is available yet. Start autonomous research once before using manual proof checks."
 
-    if not snapshot.brainstorm.model_id or not snapshot.paper.model_id or not snapshot.validator.model_id:
-        return False, "Proof runtime model configuration is incomplete. Start autonomous research again to refresh proof roles."
+    validation_error = _runtime_snapshot_validation_error(snapshot)
+    if validation_error:
+        return False, validation_error
 
     return True, ""
 
@@ -152,15 +197,112 @@ def _configure_manual_roles(source_type: str, snapshot: ProofRuntimeConfigSnapsh
     return role_config
 
 
-async def _resolve_manual_source(request: ProofCheckRequest) -> Tuple[str, str]:
+async def _prompt_with_verified_proof_context(prompt: str) -> str:
+    """Apply proof-library context to a source-specific manual proof prompt."""
+    source_prompt = (prompt or "").strip()
+    if not source_prompt:
+        source_prompt = (await research_metadata.get_user_prompt()).strip()
+    if not source_prompt:
+        source_prompt = (await research_metadata.get_base_user_prompt()).strip()
+    return proof_database.inject_into_prompt(source_prompt)
+
+
+def _history_proof_database_for_session(session_id: str) -> Optional[ProofDatabase]:
+    """Return a read-only proof database view for a history session."""
+    if not session_id:
+        return None
+    if session_id == "legacy":
+        proofs_dir = Path(system_config.data_dir) / "proofs"
+    else:
+        try:
+            session_path = resolve_path_within_root(
+                Path(system_config.auto_sessions_base_dir),
+                session_id,
+            )
+        except Exception:
+            return None
+        proofs_dir = session_path / "proofs"
+    if not proofs_dir.exists():
+        return None
+    history_db = ProofDatabase()
+    history_db._base_dir = proofs_dir
+    history_db._index_data = None
+    return history_db
+
+
+async def _prompt_with_history_proof_context(prompt: str, session_id: str) -> str:
+    """Apply the selected history session's proof context when available."""
+    source_prompt = (prompt or "").strip()
+    if not source_prompt:
+        source_prompt = (await research_metadata.get_user_prompt()).strip()
+    if not source_prompt:
+        source_prompt = (await research_metadata.get_base_user_prompt()).strip()
+
+    history_db = _history_proof_database_for_session(session_id)
+    if history_db is None:
+        return proof_database.inject_into_prompt(source_prompt)
+    return history_db.inject_into_prompt(source_prompt)
+
+
+async def _augment_paper_content_with_source_brainstorms(
+    paper_content: str,
+    source_brainstorm_ids,
+    source_brainstorm_memory=None,
+) -> str:
+    parts = [f"PAPER CONTENT:\n{(paper_content or '').strip()}"]
+    memory = source_brainstorm_memory or brainstorm_memory
+    for brainstorm_id in source_brainstorm_ids or []:
+        try:
+            brainstorm_content = await memory.get_database_content(
+                str(brainstorm_id),
+                strip_proofs=True,
+            )
+        except Exception as exc:
+            logger.debug("Unable to load source brainstorm %s for manual proof check: %s", brainstorm_id, exc)
+            continue
+        if brainstorm_content:
+            parts.append(
+                f"SOURCE BRAINSTORM {brainstorm_id}:\n"
+                f"{brainstorm_content.strip()}"
+            )
+    return "\n\n---\n\n".join(part for part in parts if part.strip())
+
+
+def _history_brainstorm_memory_for_session(session_id: str) -> Optional[BrainstormMemory]:
+    """Return a session-scoped brainstorm reader for manual history proof checks."""
+    if session_id == "legacy":
+        brainstorms_dir = Path(system_config.auto_brainstorms_dir)
+    else:
+        try:
+            session_path = resolve_path_within_root(
+                Path(system_config.auto_sessions_base_dir),
+                session_id,
+            )
+        except Exception:
+            return None
+        brainstorms_dir = session_path / "brainstorms"
+
+    if not brainstorms_dir.exists():
+        return None
+
+    scoped_memory = BrainstormMemory()
+    scoped_memory._base_dir = brainstorms_dir
+    return scoped_memory
+
+
+async def _resolve_manual_source(request: ProofCheckRequest) -> Tuple[str, str, str]:
     if request.source_type == "brainstorm":
         metadata = await brainstorm_memory.get_metadata(request.source_id)
         if metadata is None:
             raise HTTPException(status_code=404, detail="Brainstorm not found")
-        content = await brainstorm_memory.get_database_content(request.source_id)
+        content = await brainstorm_memory.get_database_content(
+            request.source_id,
+            strip_proofs=True,
+        )
         if not content:
             raise HTTPException(status_code=404, detail="Brainstorm content not found")
-        return content, metadata.topic_prompt
+        user_prompt = await _prompt_with_verified_proof_context(await research_metadata.get_user_prompt())
+        return content, metadata.topic_prompt, user_prompt
 
     metadata = await paper_library.get_metadata(request.source_id)
     if metadata is None:
@@ -170,25 +312,47 @@ async def _resolve_manual_source(request: ProofCheckRequest) -> Tuple[str, str]:
         history_paper = await paper_library.get_history_paper(session_id, paper_id)
         if not history_paper:
             raise HTTPException(status_code=404, detail="Paper not found")
-        content = str(history_paper.get("content", "") or "")
+        content = paper_library.strip_verified_proofs_from_content(
+            str(history_paper.get("content", "") or "")
+        )
         if not content:
             raise HTTPException(status_code=404, detail="Paper content not found")
-        return content, str(history_paper.get("title", "") or paper_id)
-    content = await paper_library.get_paper_content(request.source_id)
+        source_brainstorm_ids = history_paper.get("source_brainstorm_ids") or []
+        history_brainstorm_memory = _history_brainstorm_memory_for_session(session_id)
+        if source_brainstorm_ids and history_brainstorm_memory is not None:
+            content = await _augment_paper_content_with_source_brainstorms(
+                content,
+                source_brainstorm_ids,
+                source_brainstorm_memory=history_brainstorm_memory,
+            )
+        user_prompt = await _prompt_with_history_proof_context(
+            str(history_paper.get("user_prompt", "") or ""),
+            session_id,
+        )
+        return content, str(history_paper.get("title", "") or paper_id), user_prompt
+    content = await paper_library.get_paper_content(
+        request.source_id,
+        strip_proofs=True,
+    )
     if not content:
         raise HTTPException(status_code=404, detail="Paper content not found")
-    return content, metadata.title
+    content = await _augment_paper_content_with_source_brainstorms(
+        content,
+        metadata.source_brainstorm_ids,
+    )
+    user_prompt = await _prompt_with_verified_proof_context(await research_metadata.get_user_prompt())
+    return content, metadata.title, user_prompt
 
 
 async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
+    source_title = ""
     try:
-        source_content, source_title = await _resolve_manual_source(request)
+        source_content, source_title, user_prompt = await _resolve_manual_source(request)
         snapshot = await _get_runtime_snapshot(request)
         if snapshot is None:
             raise RuntimeError("No proof runtime model configuration is available yet.")
 
         role_config = _configure_manual_roles(request.source_type, snapshot)
-        user_prompt = await research_metadata.get_base_user_prompt()
         stage = autonomous_coordinator._proof_verification_stage
         await stage.run_manual(
             content=source_content,
@@ -206,8 +370,24 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
             source_title=source_title,
             source_reserved=True,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Manual proof check failed for %s %s", request.source_type, request.source_id)
+        await websocket.broadcast_event(
+            "proof_check_complete",
+            {
+                "source_type": request.source_type,
+                "source_id": request.source_id,
+                "source_title": source_title,
+                "trigger": "manual",
+                "novel_count": 0,
+                "verified_count": 0,
+                "total_candidates": 0,
+                "message": (
+                    "Proof verification encountered an error: "
+                    f"{ProofVerificationStage._summarize_error(str(exc), limit=960)}"
+                ),
+            },
+        )
         await ProofVerificationStage.release_source(request.source_type, request.source_id)
 
 
@@ -395,6 +575,20 @@ async def get_proofs_status():
             lsp_active = client.is_server_active()
         except (asyncio.TimeoutError, Exception) as exc:
             logger.warning("Lean 4 status check timed out or failed: %s", exc)
+        if manual_check_ready:
+            version_text = (version or "").strip().lower()
+            version_unavailable = (
+                not version_text
+                or "not found" in version_text
+                or "no such file" in version_text
+                or "not recognized" in version_text
+            )
+            if version_unavailable:
+                manual_check_ready = False
+                manual_check_message = "Lean 4 executable is not available."
+            elif not workspace_ready:
+                manual_check_ready = False
+                manual_check_message = "Lean 4 workspace is not ready yet."
 
     if system_config.smt_enabled:
         try:
@@ -416,6 +610,7 @@ async def get_proofs_status():
         "lean4_version": version,
         "lean4_proof_timeout": system_config.lean4_proof_timeout,
         "lean4_lsp_idle_timeout": system_config.lean4_lsp_idle_timeout,
+        "proof_max_parallel_candidates": system_config.proof_max_parallel_candidates,
         "lsp_available": bool(system_config.lean4_enabled and system_config.lean4_lsp_enabled),
         "lsp_active": lsp_active,
         "workspace_ready": workspace_ready,
@@ -456,6 +651,8 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
         system_config.lean4_lsp_enabled = bool(request.lean4_lsp_enabled)
     if request.lean4_lsp_idle_timeout is not None:
         system_config.lean4_lsp_idle_timeout = int(request.lean4_lsp_idle_timeout)
+    if request.max_parallel_candidates is not None:
+        system_config.proof_max_parallel_candidates = int(request.max_parallel_candidates)
     if request.smt_enabled is not None:
         system_config.smt_enabled = bool(request.smt_enabled)
     if request.smt_timeout is not None:
@@ -478,11 +675,16 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
         clear_lean4_client()
         if system_config.lean4_enabled:
             client = initialize_lean4_client()
-            if system_config.lean4_lsp_enabled:
-                await client.warm_start()
+            _schedule_lean4_warm_start(client)
 
     if smt_settings_changed:
         clear_smt_client()
+
+    try:
+        save_proof_runtime_settings()
+    except RuntimeSettingsError as exc:
+        logger.error("Failed to persist proof runtime settings: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to persist proof runtime settings")
 
     return await get_proofs_status()
 

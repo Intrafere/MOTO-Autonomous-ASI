@@ -72,7 +72,9 @@ async def _broadcast_registered_proof(
         "proof_id": record.proof_id,
         "theorem_statement": record.theorem_statement,
         "solver": record.solver,
+        "is_novel": record.novel,
         "novelty_tier": record.novelty_tier,
+        "novelty_reasoning": record.novelty_reasoning,
         "retry_origin_source_id": retry_origin_source_id,
     }
     if proof_label:
@@ -98,7 +100,9 @@ async def _broadcast_duplicate_proof(
         "proof_id": record.proof_id,
         "theorem_statement": record.theorem_statement,
         "solver": record.solver,
+        "is_novel": record.novel,
         "novelty_tier": record.novelty_tier,
+        "novelty_reasoning": record.novelty_reasoning,
         "duplicate": True,
     }
     if proof_label:

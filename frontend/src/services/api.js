@@ -329,18 +329,6 @@ export const compilerAPI = {
     return { data: await response.json() };
   },
 
-  // Skip critique phase
-  async skipCritique() {
-    const response = await fetch(`${API_BASE}/compiler/skip-critique`, {
-      method: 'POST',
-    });
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to skip critique');
-    }
-    return { data: await response.json() };
-  },
-
   // ============================================================
   // Paper Critique API (Validator Critique Feature)
   // ============================================================
@@ -639,18 +627,6 @@ export const autonomousAPI = {
       throw error;
     }
     return response.json();
-  },
-
-  // Skip critique phase (manual override)
-  async skipCritique() {
-    const response = await fetch(`${API_BASE}/auto-research/skip-critique`, {
-      method: 'POST',
-    });
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to skip critique');
-    }
-    return { data: await response.json() };
   },
 
   // Reset current paper (delete and retry from scratch)
@@ -1236,13 +1212,6 @@ export const workflowAPI = {
     return response.json();
   },
 
-  // Get workflow history
-  async getHistory(limit = 50) {
-    const response = await fetch(`${API_BASE}/workflow/history?limit=${limit}`);
-    if (!response.ok) throw new Error('Failed to get workflow history');
-    return response.json();
-  },
-
   // Get cumulative token usage stats and elapsed time
   async getTokenStats() {
     const response = await fetch(`${API_BASE}/token-stats`);
@@ -1345,6 +1314,59 @@ export const openRouterAPI = {
       method: 'POST',
     });
     if (!response.ok) await throwFromResponse(response, 'Failed to reset credit exhaustion');
+    return response.json();
+  },
+};
+
+export const cloudAccessAPI = {
+  async getStatus() {
+    const response = await fetch(`${API_BASE}/cloud-access/status`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get cloud access status');
+    return response.json();
+  },
+
+  async startOpenAICodexLogin(redirectUri = null) {
+    const response = await fetch(`${API_BASE}/cloud-access/openai-codex/oauth/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirect_uri: redirectUri }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to start OpenAI Codex login');
+    return response.json();
+  },
+
+  async exchangeOpenAICodexCode({ code = '', state = '', redirectUrl = '', redirectUri = null } = {}) {
+    const response = await fetch(`${API_BASE}/cloud-access/openai-codex/oauth/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code,
+        state,
+        redirect_url: redirectUrl,
+        redirect_uri: redirectUri,
+      }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to complete OpenAI Codex login');
+    return response.json();
+  },
+
+  async getOpenAICodexStatus() {
+    const response = await fetch(`${API_BASE}/cloud-access/openai-codex/status`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get OpenAI Codex status');
+    return response.json();
+  },
+
+  async getOpenAICodexModels() {
+    const response = await fetch(`${API_BASE}/cloud-access/openai-codex/models`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to fetch OpenAI Codex models');
+    return response.json();
+  },
+
+  async clearOpenAICodexLogin() {
+    const response = await fetch(`${API_BASE}/cloud-access/openai-codex`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to clear OpenAI Codex login');
     return response.json();
   },
 };

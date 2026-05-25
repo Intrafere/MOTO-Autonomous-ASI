@@ -17,6 +17,12 @@ from backend.shared.models import ProofAttemptFeedback
 logger = logging.getLogger(__name__)
 
 BRAINSTORM_LEAN_PROOF_MARKER = "[LEAN 4 VERIFIED BRAINSTORM PROOF]"
+NOVEL_PROOF_TIERS = {
+    "major_mathematical_discovery",
+    "mathematical_discovery",
+    "novel_variant",
+    "novel_formulation",
+}
 
 
 @dataclass
@@ -28,6 +34,10 @@ class BrainstormProofGateResult:
     theorem_statement: str = ""
     theorem_name: str = ""
     formal_sketch: str = ""
+    expected_novelty_tier: str = ""
+    prompt_relevance_rationale: str = ""
+    novelty_rationale: str = ""
+    why_not_standard_known_result: str = ""
     lean_code: str = ""
     reasoning: str = ""
     lean_feedback: str = ""
@@ -93,6 +103,10 @@ def _build_retry_prompt(
     source_context: str,
     theorem_statement: str,
     formal_sketch: str,
+    expected_novelty_tier: str,
+    prompt_relevance_rationale: str,
+    novelty_rationale: str,
+    why_not_standard_known_result: str,
     prior_attempts: list[ProofAttemptFeedback],
 ) -> str:
     context_excerpt = (source_context or "").strip()
@@ -113,6 +127,18 @@ INTENDED THEOREM STATEMENT:
 FORMALIZATION NOTES:
 {formal_sketch or "[none]"}
 
+EXPECTED NOVELTY TIER:
+{expected_novelty_tier}
+
+PROMPT RELEVANCE RATIONALE:
+{prompt_relevance_rationale}
+
+NOVELTY RATIONALE:
+{novelty_rationale}
+
+WHY THIS IS NOT A STANDARD KNOWN RESULT:
+{why_not_standard_known_result}
+
 BRAINSTORM CONTEXT EXCERPT:
 {context_excerpt or "[none]"}
 
@@ -124,6 +150,10 @@ Respond with ONLY valid JSON:
   "theorem_name": "Lean declaration name, if named",
   "theorem_statement": "natural-language theorem statement being proved",
   "formal_sketch": "updated formalization notes",
+  "expected_novelty_tier": "{expected_novelty_tier}",
+  "prompt_relevance_rationale": "{prompt_relevance_rationale}",
+  "novelty_rationale": "{novelty_rationale}",
+  "why_not_standard_known_result": "{why_not_standard_known_result}",
   "lean_code": "complete Lean 4 code",
   "reasoning": "brief explanation of the repair"
 }}
@@ -134,6 +164,10 @@ def _build_submission_content(
     *,
     theorem_statement: str,
     formal_sketch: str,
+    expected_novelty_tier: str,
+    prompt_relevance_rationale: str,
+    novelty_rationale: str,
+    why_not_standard_known_result: str,
     lean_code: str,
     reasoning: str,
     lean_feedback: str,
@@ -149,6 +183,17 @@ def _build_submission_content(
     ]
     if formal_sketch:
         sections.extend(["", f"Formalization notes: {formal_sketch}"])
+    if expected_novelty_tier:
+        sections.extend(["", f"Expected novelty tier: {expected_novelty_tier}"])
+    if prompt_relevance_rationale:
+        sections.extend(["", f"Prompt relevance rationale: {prompt_relevance_rationale}"])
+    if novelty_rationale:
+        sections.extend(["", f"Novelty rationale: {novelty_rationale}"])
+    if why_not_standard_known_result:
+        sections.extend([
+            "",
+            f"Why this is not merely standard known mathematics: {why_not_standard_known_result}",
+        ])
     if reasoning:
         sections.extend(["", f"Submitter reasoning: {reasoning}"])
     sections.extend(
@@ -186,6 +231,10 @@ async def verify_brainstorm_proof_candidate(
     theorem_statement = str(parsed.get("theorem_statement") or parsed.get("theorem_or_lemma") or parsed.get("submission") or "").strip()
     formal_sketch = str(parsed.get("formal_sketch") or parsed.get("proof_sketch") or "").strip()
     theorem_name = str(parsed.get("theorem_name") or "").strip()
+    expected_novelty_tier = str(parsed.get("expected_novelty_tier") or "").strip().lower()
+    prompt_relevance_rationale = str(parsed.get("prompt_relevance_rationale") or "").strip()
+    novelty_rationale = str(parsed.get("novelty_rationale") or "").strip()
+    why_not_standard_known_result = str(parsed.get("why_not_standard_known_result") or "").strip()
     lean_code = str(parsed.get("lean_code") or "").strip()
     reasoning = str(parsed.get("reasoning") or "").strip()
 
@@ -201,12 +250,18 @@ async def verify_brainstorm_proof_candidate(
             ),
             attempts=[],
         )
+    if expected_novelty_tier not in NOVEL_PROOF_TIERS:
+        expected_novelty_tier = expected_novelty_tier or "not_novel"
 
     attempts: list[ProofAttemptFeedback] = []
     current = {
         "theorem_statement": theorem_statement,
         "formal_sketch": formal_sketch,
         "theorem_name": theorem_name,
+        "expected_novelty_tier": expected_novelty_tier,
+        "prompt_relevance_rationale": prompt_relevance_rationale,
+        "novelty_rationale": novelty_rationale,
+        "why_not_standard_known_result": why_not_standard_known_result,
         "lean_code": lean_code,
         "reasoning": reasoning,
     }
@@ -215,6 +270,12 @@ async def verify_brainstorm_proof_candidate(
         theorem_statement = str(current.get("theorem_statement") or theorem_statement).strip()
         formal_sketch = str(current.get("formal_sketch") or formal_sketch).strip()
         theorem_name = str(current.get("theorem_name") or theorem_name).strip()
+        expected_novelty_tier = str(current.get("expected_novelty_tier") or expected_novelty_tier).strip()
+        prompt_relevance_rationale = str(current.get("prompt_relevance_rationale") or prompt_relevance_rationale).strip()
+        novelty_rationale = str(current.get("novelty_rationale") or novelty_rationale).strip()
+        why_not_standard_known_result = str(
+            current.get("why_not_standard_known_result") or why_not_standard_known_result
+        ).strip()
         lean_code = str(current.get("lean_code") or "").strip()
         reasoning = str(current.get("reasoning") or reasoning).strip()
 
@@ -252,22 +313,52 @@ async def verify_brainstorm_proof_candidate(
                 require_statement_alignment=True,
             )
             if integrity.valid:
+                stored_theorem_statement = (
+                    integrity.actual_theorem_statement.strip()
+                    or theorem_statement
+                )
+                stored_theorem_name = (
+                    integrity.actual_theorem_name.strip()
+                    or theorem_name
+                )
+                stored_formal_sketch = formal_sketch
+                if integrity.category in {"statement_downshifted", "statement_alignment_uncertain", "statement_alignment_unavailable"}:
+                    stored_formal_sketch = (
+                        f"{stored_formal_sketch}\n\n"
+                        f"Original intended theorem candidate: {theorem_statement}\n"
+                        f"Statement-alignment classification: {integrity.category}. "
+                        f"{integrity.reason or integrity.downshift_reason}"
+                    ).strip()
+                    lean_feedback = (
+                        f"{lean_feedback}\n\n"
+                        "MOTO preservation note: Lean accepted this proof. "
+                        f"It is stored under the actual proved statement because {integrity.category}: "
+                        f"{integrity.reason or integrity.downshift_reason}"
+                    ).strip()
                 feedback.success = True
                 feedback.error_output = ""
                 attempts.append(feedback)
                 return BrainstormProofGateResult(
                     accepted=True,
                     submission_content=_build_submission_content(
-                        theorem_statement=theorem_statement,
-                        formal_sketch=formal_sketch,
+                        theorem_statement=stored_theorem_statement,
+                        formal_sketch=stored_formal_sketch,
+                        expected_novelty_tier=expected_novelty_tier,
+                        prompt_relevance_rationale=prompt_relevance_rationale,
+                        novelty_rationale=novelty_rationale,
+                        why_not_standard_known_result=why_not_standard_known_result,
                         lean_code=lean_code,
                         reasoning=reasoning,
                         lean_feedback=lean_feedback,
                         attempts=attempts,
                     ),
-                    theorem_statement=theorem_statement,
-                    theorem_name=theorem_name,
-                    formal_sketch=formal_sketch,
+                    theorem_statement=stored_theorem_statement,
+                    theorem_name=stored_theorem_name,
+                    formal_sketch=stored_formal_sketch,
+                    expected_novelty_tier=expected_novelty_tier,
+                    prompt_relevance_rationale=prompt_relevance_rationale,
+                    novelty_rationale=novelty_rationale,
+                    why_not_standard_known_result=why_not_standard_known_result,
                     lean_code=lean_code,
                     reasoning=reasoning,
                     lean_feedback=lean_feedback,
@@ -286,6 +377,10 @@ async def verify_brainstorm_proof_candidate(
             source_context=source_context,
             theorem_statement=theorem_statement,
             formal_sketch=formal_sketch,
+            expected_novelty_tier=expected_novelty_tier,
+            prompt_relevance_rationale=prompt_relevance_rationale,
+            novelty_rationale=novelty_rationale,
+            why_not_standard_known_result=why_not_standard_known_result,
             prior_attempts=attempts,
         )
         try:
@@ -310,6 +405,18 @@ async def verify_brainstorm_proof_candidate(
                 "theorem_statement": str(repaired.get("theorem_statement") or theorem_statement).strip(),
                 "formal_sketch": str(repaired.get("formal_sketch") or formal_sketch).strip(),
                 "theorem_name": str(repaired.get("theorem_name") or theorem_name).strip(),
+                "expected_novelty_tier": str(
+                    repaired.get("expected_novelty_tier") or expected_novelty_tier
+                ).strip(),
+                "prompt_relevance_rationale": str(
+                    repaired.get("prompt_relevance_rationale") or prompt_relevance_rationale
+                ).strip(),
+                "novelty_rationale": str(
+                    repaired.get("novelty_rationale") or novelty_rationale
+                ).strip(),
+                "why_not_standard_known_result": str(
+                    repaired.get("why_not_standard_known_result") or why_not_standard_known_result
+                ).strip(),
                 "lean_code": str(repaired.get("lean_code") or "").strip(),
                 "reasoning": str(repaired.get("reasoning") or "").strip(),
             }
@@ -321,6 +428,10 @@ async def verify_brainstorm_proof_candidate(
                 "theorem_statement": theorem_statement,
                 "formal_sketch": formal_sketch,
                 "theorem_name": theorem_name,
+                "expected_novelty_tier": expected_novelty_tier,
+                "prompt_relevance_rationale": prompt_relevance_rationale,
+                "novelty_rationale": novelty_rationale,
+                "why_not_standard_known_result": why_not_standard_known_result,
                 "lean_code": lean_code,
                 "reasoning": f"Prior proof repair call failed before Lean verification: {exc}",
             }
@@ -331,6 +442,10 @@ async def verify_brainstorm_proof_candidate(
         theorem_statement=theorem_statement,
         theorem_name=theorem_name,
         formal_sketch=formal_sketch,
+        expected_novelty_tier=expected_novelty_tier,
+        prompt_relevance_rationale=prompt_relevance_rationale,
+        novelty_rationale=novelty_rationale,
+        why_not_standard_known_result=why_not_standard_known_result,
         lean_code=lean_code,
         reasoning=reasoning,
         attempts=attempts,

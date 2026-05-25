@@ -1,11 +1,12 @@
 # MOTO Internal Launcher (PowerShell)
 # This is an internal script. Use "Click To Launch MOTO.bat" instead.
-# If needed manually: powershell -ExecutionPolicy Bypass -File _moto_internal_launcher.ps1
+# If needed manually: powershell -ExecutionPolicy Bypass -File backend\scripts\startup\_moto_internal_launcher.ps1
 
 # ================================================================
 # CRITICAL: This prevents the window from closing on errors
 # ================================================================
 $ErrorActionPreference = "Stop"
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 
 function Exit-WithPause {
     param([int]$ExitCode = 0)
@@ -16,6 +17,7 @@ function Exit-WithPause {
 }
 
 try {
+    Set-Location $RepoRoot
     Clear-Host
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host "  ASI Aggregator-Compiler System - One-Click Launcher" -ForegroundColor Cyan
@@ -182,7 +184,7 @@ try {
     # Check if LM Studio is responding
     $lmStudioAvailable = $false
     try {
-        $response = Invoke-WebRequest -Uri "http://127.0.0.1:1234/v1/models" -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+        $null = Invoke-WebRequest -Uri "http://127.0.0.1:1234/v1/models" -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
         $lmStudioAvailable = $true
     } catch {
         $lmStudioAvailable = $false
@@ -277,7 +279,7 @@ try {
     Write-Host ""
 
     # Start backend in new window
-    $backendPath = Join-Path $PSScriptRoot "backend"
+    $backendPath = Join-Path $RepoRoot "backend"
     Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$backendPath'; Write-Host 'Starting Backend...' -ForegroundColor Cyan; python -m api.main"
 
     # Wait for backend to start
@@ -285,7 +287,7 @@ try {
     Start-Sleep -Seconds 5
 
     # Start frontend in new window
-    $frontendPath = Join-Path $PSScriptRoot "frontend"
+    $frontendPath = Join-Path $RepoRoot "frontend"
     Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$frontendPath'; Write-Host 'Starting Frontend...' -ForegroundColor Cyan; npm run dev"
 
     # Wait for frontend to initialize

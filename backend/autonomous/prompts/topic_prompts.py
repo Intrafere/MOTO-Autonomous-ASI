@@ -34,9 +34,11 @@ YOUR TASK:
 Select the optimal research avenue that most directly advances the user's research goal toward a rigorous answer.
 
 DIRECT-SOLUTION PREFERENCE:
-- Prefer avenues likely to produce a direct solution, direct partial solution, impossibility result, explicit construction, exact reduction, or sharp constraint
-- Use broader exploratory or background-heavy avenues only when no stronger direct path is currently available
-- Do not choose an avenue merely because it is broad or interesting if a more direct rigorous path exists
+- First prefer avenues that aggressively attack the user's WHOLE question as stated, no partial solutions
+- If the true answer is that the user's question is impossible or has no valid solution as stated, that counts as directly answering the whole question
+- If a whole-question attack is absolutely not possible in one superintelligence brainstorm, choose the next best necessary piece whose resolution would visibly advance the original question
+- Use broader exploratory or background-heavy avenues only when they are clearly required to make progress on that whole-question route
+- Do not choose an avenue merely because it is easier, practical, broad, or interesting if a more direct rigorous route to the user's full prompt exists
 
 DECISION OPTIONS:
 1. NEW_TOPIC - Create a brand new brainstorm topic to explore
@@ -50,26 +52,27 @@ When to choose NEW_TOPIC:
 - A genuinely new mathematical avenue would provide more direct-answer value than continuing existing work
 - The new topic addresses an unexplored area relevant to the research goal
 - Existing papers don't adequately cover this mathematical territory
-- The new topic offers a stronger direct route to resolving the user's question than current options
+- The new topic offers a stronger direct route to resolving the user's whole question than current options
 
 When to choose CONTINUE_EXISTING:
 - An incomplete brainstorm has significant untapped mathematical depth
 - The brainstorm has few submissions relative to its mathematical richness
 - Continuing would yield more valuable direct progress than starting fresh
-- The unfinished topic still contains a realistic path to a stronger direct answer
+- The unfinished topic still contains a realistic path to a stronger direct answer to the whole prompt or a necessary piece of it
 
 When to choose COMBINE_TOPICS:
 - Multiple existing brainstorms are deeply interconnected
 - A unified exploration would reveal insights neither topic could provide alone
 - The mathematical concepts naturally bridge multiple brainstorms
-- The combination produces a more direct route to answering the user's question than keeping them separate
+- The combination produces a more direct route to answering the user's whole question than keeping them separate
 
 CRITICAL REQUIREMENTS:
 - Focus on mathematical rigor and logical soundness
 - Avoid redundancy with existing work
 - Ensure topic selection serves the user's research goal
 - Consider the existing paper library to avoid redundant explorations
-- Prefer the avenue with the strongest justified direct-answer potential
+- Prefer the avenue with the strongest justified direct-answer potential for the user's whole prompt
+- Treat piecewise topics as acceptable only when they target a necessary piece on the route to solving the full user question
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -105,8 +108,8 @@ EXAMPLES:
 New Topic:
 {
   "action": "new_topic",
-  "topic_prompt": "Explore connections between modular forms and Galois representations in the context of the Langlands program",
-  "reasoning": "The existing brainstorms have covered L-functions and automorphic representations. Modular forms provide a concrete computational entry point to the Langlands correspondence that hasn't been explored yet."
+  "topic_prompt": "Attack the most direct route toward the target Langlands correspondence rather than surveying adjacent background",
+  "reasoning": "This topic prioritizes the user's full Langlands goal. If the full correspondence cannot be resolved in one brainstorm, it asks for the ASI's best necessary next piece rather than a broad or easier detour."
 }
 
 Continue Existing:
@@ -120,8 +123,8 @@ Combine Topics:
 {
   "action": "combine_topics",
   "topic_ids": ["topic_002", "topic_005"],
-  "topic_prompt": "Unified exploration of local and global class field theory with applications to the Langlands program",
-  "reasoning": "Topics 002 (local class field theory) and 005 (global reciprocity) are closely related and would benefit from unified treatment. Combining them will reveal deeper connections."
+  "topic_prompt": "Combine the existing topics only insofar as their union creates a more direct route toward the user's full Langlands goal",
+  "reasoning": "Topics 002 and 005 are only worth combining if the combined route directly serves the user's full prompt. The merged topic should not become a broad survey of related theory."
 }"""
 
 
@@ -163,7 +166,9 @@ ACCEPT the topic selection if:
 4. The choice is relevant to the user's research goal
 5. The reasoning is sound and mathematically grounded
 6. The topic doesn't duplicate existing completed work
-7. The choice is at least as direct a route to answering the user's question as the available alternatives
+7. The choice aggressively addresses the user's whole question where possible
+8. If it is piecewise, the piece is clearly necessary for progress on the full question
+9. The choice is at least as direct a route to answering the user's question as the available alternatives
 
 REJECT the topic selection if:
 1. NEW_TOPIC: The topic duplicates an existing brainstorm or completed paper
@@ -172,7 +177,9 @@ REJECT the topic selection if:
 4. The choice ignores more valuable research avenues
 5. The reasoning is flawed or lacks mathematical rigor
 6. The selection would lead to redundant work
-7. A clearly more direct rigorous avenue was available and unjustifiably ignored
+7. It retreats to an easier adjacent/practical/background route while a direct whole-question attack is available
+8. It proposes a piecewise topic without showing why that piece is necessary for solving the full user question
+9. A clearly more direct rigorous avenue was available and unjustifiably ignored
 
 REJECTION FEEDBACK FORMAT:
 If rejecting, provide CONCRETE, ACTIONABLE guidance:

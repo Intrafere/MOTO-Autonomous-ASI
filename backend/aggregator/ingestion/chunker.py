@@ -2,8 +2,7 @@
 Multi-configuration chunking for RAG system.
 Generates chunks at different sizes (256/512/768/1024 chars) with 20% overlap.
 """
-from typing import List, Tuple, Dict
-import re
+from typing import List, Dict
 from backend.shared.config import rag_config
 from backend.shared.models import DocumentChunk
 from backend.shared.utils import generate_chunk_id, split_into_sentences
@@ -61,7 +60,6 @@ class Chunker:
         sentences = split_into_sentences(text)
         
         current_chunk = ""
-        current_position = 0
         position_counter = 0
         
         for sentence in sentences:

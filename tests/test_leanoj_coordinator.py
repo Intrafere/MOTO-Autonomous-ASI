@@ -18,7 +18,11 @@ from backend.shared.models import DocumentChunk, LeanOJRoleConfig, LeanOJStartRe
 
 
 def _role() -> LeanOJRoleConfig:
-    return LeanOJRoleConfig(model_id="test-model")
+    return LeanOJRoleConfig(
+        model_id="test-model",
+        context_window=8192,
+        max_output_tokens=1024,
+    )
 
 
 def _request() -> LeanOJStartRequest:
@@ -183,9 +187,9 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         request = _request().model_copy(
             update={
                 "brainstorm_submitters": [
-                    LeanOJRoleConfig(model_id="submitter-1"),
-                    LeanOJRoleConfig(model_id="submitter-2"),
-                    LeanOJRoleConfig(model_id="submitter-3"),
+                    _role().model_copy(update={"model_id": "submitter-1"}),
+                    _role().model_copy(update={"model_id": "submitter-2"}),
+                    _role().model_copy(update={"model_id": "submitter-3"}),
                 ],
             }
         )
@@ -1178,8 +1182,8 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         coordinator = await self._initialized_coordinator()
         request = _request().model_copy(
             update={
-                "path_decider": LeanOJRoleConfig(model_id="legacy-path-model"),
-                "final_solver": LeanOJRoleConfig(model_id="final-model"),
+                "path_decider": _role().model_copy(update={"model_id": "legacy-path-model"}),
+                "final_solver": _role().model_copy(update={"model_id": "final-model"}),
             }
         )
         calls = []
@@ -1210,8 +1214,8 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
     def test_path_decision_actor_falls_back_to_topic_generator_without_final_option(self) -> None:
         request = _request().model_copy(
             update={
-                "topic_generator": LeanOJRoleConfig(model_id="topic-model"),
-                "final_solver": LeanOJRoleConfig(model_id="final-model"),
+                "topic_generator": _role().model_copy(update={"model_id": "topic-model"}),
+                "final_solver": _role().model_copy(update={"model_id": "final-model"}),
             }
         )
 
@@ -1611,7 +1615,7 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         leanoj_module.asyncio.sleep = noop_sleep  # type: ignore[assignment]
         try:
             result = await coordinator._call_json(  # type: ignore[attr-defined]
-                LeanOJRoleConfig(model_id="test-model"),
+                _role(),
                 "leanoj_brainstorm_val",
                 "leanoj_brainstorm_validator",
                 "Return the requested JSON.",

@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { compilerAPI } from '../../services/api';
+import { autonomousAPI, compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import {
   DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_MAX_OUTPUT_TOKENS,
 } from '../../utils/openRouterSelection';
 import TextFileUploader from '../TextFileUploader';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
@@ -27,9 +26,20 @@ function CompilerInterface({
   const [critiquePhaseActive, setCritiquePhaseActive] = useState(false);
   const [critiqueAcceptances, setCritiqueAcceptances] = useState(0);
   const [paperVersion, setPaperVersion] = useState(1);
-  const [isSkipping, setIsSkipping] = useState(false);
-  const [skipQueued, setSkipQueued] = useState(false);
+  const [proofOutputUpdating, setProofOutputUpdating] = useState(false);
+  const [allowedOutputs, setAllowedOutputs] = useState(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('compiler_allowed_outputs') || '{}');
+      return {
+        mathematicalProofs: parsed.mathematicalProofs ?? true,
+        researchPapers: parsed.researchPapers ?? true,
+      };
+    } catch {
+      return { mathematicalProofs: true, researchPapers: true };
+    }
+  });
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const proofOutputsAvailable = !capabilities?.genericMode;
 
   const normalizeCompilerSettingsForCapabilities = (settings = {}) => {
     if (lmStudioEnabled) {
@@ -76,29 +86,36 @@ function CompilerInterface({
       setPaperVersion(data.version || 1);
     };
     
-    const handleCritiquePhaseEnded = (data) => {
+    const handleCritiquePhaseEnded = () => {
       setCritiquePhaseActive(false);
-      // Don't reset skipQueued - if skip was queued, it worked
-    };
-    
-    const handleCritiquePhaseSkipped = (data) => {
-      setCritiquePhaseActive(false);
-      // Skip worked! Keep skipQueued=true to show checkmark
     };
     
     websocket.on('critique_phase_started', handleCritiquePhaseStarted);
     websocket.on('critique_progress', handleCritiqueProgress);
     websocket.on('critique_phase_ended', handleCritiquePhaseEnded);
-    websocket.on('critique_phase_skipped', handleCritiquePhaseSkipped);
     
     return () => {
       clearInterval(interval);
       websocket.off('critique_phase_started', handleCritiquePhaseStarted);
       websocket.off('critique_progress', handleCritiqueProgress);
       websocket.off('critique_phase_ended', handleCritiquePhaseEnded);
-      websocket.off('critique_phase_skipped', handleCritiquePhaseSkipped);
     };
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem('compiler_allowed_outputs', JSON.stringify(allowedOutputs));
+  }, [allowedOutputs]);
+
+  useEffect(() => {
+    if (proofOutputsAvailable || !allowedOutputs.mathematicalProofs) {
+      return;
+    }
+    setAllowedOutputs((current) => ({
+      ...current,
+      mathematicalProofs: false,
+      researchPapers: true,
+    }));
+  }, [proofOutputsAvailable, allowedOutputs.mathematicalProofs]);
 
   // Reload settings when tab becomes active
   useEffect(() => {
@@ -140,10 +157,6 @@ function CompilerInterface({
         setCritiqueAcceptances(response.data.critique_acceptances || 0);
         setPaperVersion(response.data.paper_version || 1);
       }
-      // Reset skip state when not running
-      if (!response.data.is_running) {
-        setSkipQueued(false);
-      }
     } catch (error) {
       console.error('Failed to load status:', error);
     }
@@ -170,6 +183,20 @@ function CompilerInterface({
       alert('Please enter a compiler-directing prompt');
       return;
     }
+    const mathematicalProofsAllowed = proofOutputsAvailable && allowedOutputs.mathematicalProofs;
+    const researchPapersAllowed = allowedOutputs.researchPapers;
+    if (!mathematicalProofsAllowed && !researchPapersAllowed) {
+      alert('Please allow at least one output: Mathematical Proofs or Research Papers.');
+      return;
+    }
+    const proofOnlyRequested = mathematicalProofsAllowed && !researchPapersAllowed;
+    const shouldSyncProofRuntime = mathematicalProofsAllowed;
+    if (proofOnlyRequested || shouldSyncProofRuntime) {
+      const enabled = await updateProofRuntimeSetting(true);
+      if (!enabled) {
+        return;
+      }
+    }
 
     const settings = window.compilerSettings || {};
     
@@ -190,8 +217,8 @@ function CompilerInterface({
         validator_openrouter_provider: settings.validatorOpenrouterProvider || null,
         validator_openrouter_reasoning_effort: settings.validatorOpenrouterReasoningEffort || 'auto',
         validator_lm_studio_fallback: lmStudioEnabled ? (settings.validatorLmStudioFallback || null) : null,
-        validator_context_size: settings.validatorContextSize || validatorContextSize,
-        validator_max_output_tokens: settings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        validator_context_size: settings.validatorContextSize ?? validatorContextSize,
+        validator_max_output_tokens: settings.validatorMaxOutput,
         validator_supercharge_enabled: developerModeEnabled && Boolean(settings.validatorSuperchargeEnabled),
         // High-context submitter config with OpenRouter support
         high_context_provider: lmStudioEnabled ? (settings.highContextProvider || 'lm_studio') : 'openrouter',
@@ -199,8 +226,8 @@ function CompilerInterface({
         high_context_openrouter_provider: settings.highContextOpenrouterProvider || null,
         high_context_openrouter_reasoning_effort: settings.highContextOpenrouterReasoningEffort || 'auto',
         high_context_lm_studio_fallback: lmStudioEnabled ? (settings.highContextLmStudioFallback || null) : null,
-        high_context_context_size: settings.highContextContextSize || highContextContextSize,
-        high_context_max_output_tokens: settings.highContextMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        high_context_context_size: settings.highContextContextSize ?? highContextContextSize,
+        high_context_max_output_tokens: settings.highContextMaxOutput,
         high_context_supercharge_enabled: developerModeEnabled && Boolean(settings.highContextSuperchargeEnabled),
         // High-param submitter config with OpenRouter support
         high_param_provider: lmStudioEnabled ? (settings.highParamProvider || 'lm_studio') : 'openrouter',
@@ -208,8 +235,8 @@ function CompilerInterface({
         high_param_openrouter_provider: settings.highParamOpenrouterProvider || null,
         high_param_openrouter_reasoning_effort: settings.highParamOpenrouterReasoningEffort || 'auto',
         high_param_lm_studio_fallback: lmStudioEnabled ? (settings.highParamLmStudioFallback || null) : null,
-        high_param_context_size: settings.highParamContextSize || highParamContextSize,
-        high_param_max_output_tokens: settings.highParamMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        high_param_context_size: settings.highParamContextSize ?? highParamContextSize,
+        high_param_max_output_tokens: settings.highParamMaxOutput,
         high_param_supercharge_enabled: developerModeEnabled && Boolean(settings.highParamSuperchargeEnabled),
         // Critique submitter config with OpenRouter support
         critique_submitter_provider: lmStudioEnabled
@@ -221,9 +248,11 @@ function CompilerInterface({
         critique_submitter_lm_studio_fallback: lmStudioEnabled
           ? (settings.critiqueSubmitterLmStudioFallback || null)
           : null,
-        critique_submitter_context_window: settings.critiqueSubmitterContextSize || critiqueSubmitterContextSize,
-        critique_submitter_max_tokens: settings.critiqueSubmitterMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
-        critique_submitter_supercharge_enabled: developerModeEnabled && Boolean(settings.critiqueSubmitterSuperchargeEnabled)
+        critique_submitter_context_window: settings.critiqueSubmitterContextSize ?? critiqueSubmitterContextSize,
+        critique_submitter_max_tokens: settings.critiqueSubmitterMaxOutput,
+        critique_submitter_supercharge_enabled: developerModeEnabled && Boolean(settings.critiqueSubmitterSuperchargeEnabled),
+        allow_mathematical_proofs: Boolean(mathematicalProofsAllowed),
+        allow_research_papers: Boolean(researchPapersAllowed)
       });
       onWorkflowRunningChange?.(true);
       
@@ -252,32 +281,69 @@ function CompilerInterface({
     }
   };
 
+  const updateProofRuntimeSetting = async (enabled) => {
+    if (capabilities?.genericMode) {
+      if (enabled) {
+        alert('Mathematical proof output is unavailable in this runtime.');
+        return false;
+      }
+      return true;
+    }
+
+    setProofOutputUpdating(true);
+    try {
+      const status = await autonomousAPI.getProofStatus();
+      const updatedStatus = await autonomousAPI.updateProofSettings({
+        enabled,
+        timeout: status.lean4_proof_timeout ?? 120,
+        lean4_lsp_enabled: Boolean(status.lean4_lsp_enabled),
+        lean4_lsp_idle_timeout: status.lean4_lsp_idle_timeout ?? 600,
+        max_parallel_candidates: status.proof_max_parallel_candidates ?? 6,
+        smt_enabled: Boolean(status.smt_enabled),
+        smt_timeout: status.smt_timeout ?? 30,
+      });
+      if (enabled) {
+        const leanVersion = String(updatedStatus.lean4_version || updatedStatus.lean_version || '').trim();
+        const leanVersionUnavailable = !leanVersion || /not found|no such file|not recognized/i.test(leanVersion);
+        // A cold Mathlib sanity check can exceed the short status timeout even when
+        // Lean is usable. Workflow proof stages wait on the real workspace check.
+        if (!updatedStatus.lean4_enabled || leanVersionUnavailable) {
+          alert(updatedStatus.manual_check_message || 'Lean 4 proof output is not ready. Check Lean 4 runtime settings before starting proof output.');
+          return false;
+        }
+      }
+      return true;
+    } catch (error) {
+      alert(`Failed to update Lean 4 proof setting: ${error.message}`);
+      return false;
+    } finally {
+      setProofOutputUpdating(false);
+    }
+  };
+
+  const updateAllowedOutput = async (key, checked) => {
+    const nextOutputs = { ...allowedOutputs, [key]: checked };
+    if (!nextOutputs.mathematicalProofs && !nextOutputs.researchPapers) {
+      alert('At least one allowed output must remain enabled.');
+      return;
+    }
+    if (key === 'mathematicalProofs') {
+      const updated = await updateProofRuntimeSetting(checked);
+      if (!updated) {
+        return;
+      }
+    }
+    setAllowedOutputs(nextOutputs);
+  };
+
   const handleStop = async () => {
     try {
       await compilerAPI.stop();
-      setSkipQueued(false);  // Reset skip state when compiler stops
       onWorkflowRunningChange?.(false);
       await loadStatus();
     } catch (error) {
       console.error('Failed to stop compiler:', error);
       alert('Failed to stop compiler: ' + error.message);
-    }
-  };
-
-  const handleSkipCritique = async () => {
-    if (!confirm('Skip the critique phase and continue to writing the conclusion? This cannot be undone.')) {
-      return;
-    }
-    
-    setIsSkipping(true);
-    try {
-      await compilerAPI.skipCritique();
-      setSkipQueued(true);  // Mark skip as successfully queued
-      await loadStatus(); // Reload status to reflect phase transition
-    } catch (error) {
-      alert('Failed to skip critique: ' + error.message);
-    } finally {
-      setIsSkipping(false);
     }
   };
 
@@ -299,29 +365,61 @@ function CompilerInterface({
             Compile the accepted aggregator database into one live mathematical paper.
           </p>
         </div>
-        <div className="autonomous-controls">
-          {!status.is_running ? (
-            <button
-              onClick={handleStart}
-              className="btn-start"
-              disabled={isStarting || (anyWorkflowRunning && !status.is_running)}
-            >
-              {isStarting ? 'Starting...' : 'Start Writer'}
-            </button>
-          ) : (
-            <>
-              <span className="runtime-indicator" role="status" aria-live="polite" title="Single paper writer is running">
-                <span className="runtime-indicator-dot" aria-hidden="true"></span>
-                <span className="runtime-indicator-label">Running</span>
-              </span>
+        <div className="autonomous-controls-stack">
+          <div className="autonomous-controls">
+            {!status.is_running ? (
               <button
-                onClick={handleStop}
-                className="btn-stop"
+                onClick={handleStart}
+                className="btn-start"
+                disabled={isStarting || (anyWorkflowRunning && !status.is_running)}
               >
-                Stop Writer
+                {isStarting ? 'Starting...' : 'Start Writer'}
               </button>
-            </>
-          )}
+            ) : (
+              <>
+                <span className="runtime-indicator" role="status" aria-live="polite" title="Single paper writer is running">
+                  <span className="runtime-indicator-dot" aria-hidden="true"></span>
+                  <span className="runtime-indicator-label">Running</span>
+                </span>
+                <button
+                  onClick={handleStop}
+                  className="btn-stop"
+                >
+                  Stop Writer
+                </button>
+              </>
+            )}
+          </div>
+          <div
+            className="allowed-outputs-row"
+            title="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
+          >
+            <span className="allowed-outputs-label">Allowed Outputs:</span>
+            <label
+              className="allowed-output-option"
+              title="Mathematical Proofs enables Lean 4 proof verification and proof-library output for this run."
+            >
+              <input
+                type="checkbox"
+                checked={proofOutputsAvailable && Boolean(allowedOutputs.mathematicalProofs)}
+                onChange={(event) => updateAllowedOutput('mathematicalProofs', event.target.checked)}
+                disabled={status.is_running || proofOutputUpdating || !proofOutputsAvailable}
+              />
+              <span className="allowed-output-text">Mathematical Proofs</span>
+            </label>
+            <label
+              className="allowed-output-option"
+              title="Research Papers enables the Single Paper Writer compilation output. When disabled, the writer runs proof extraction over the aggregator database instead of compiling a paper."
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(allowedOutputs.researchPapers)}
+                onChange={(event) => updateAllowedOutput('researchPapers', event.target.checked)}
+                disabled={status.is_running}
+              />
+              <span className="allowed-output-text">Research Papers</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -358,7 +456,7 @@ function CompilerInterface({
             {critiquePhaseActive ? (
               <>
                 <p style={{ margin: '0.25rem 0 0 0', color: '#ccc' }}>
-                  {critiqueAcceptances} / 10 critiques accepted
+                  {critiqueAcceptances} accepted critique{critiqueAcceptances === 1 ? '' : 's'}
                 </p>
                 <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.85rem', color: '#888' }}>
                   Collecting peer review feedback on the body section...
@@ -370,15 +468,6 @@ function CompilerInterface({
               </p>
             )}
           </div>
-          {/* Skip button - ALWAYS visible during paper writing */}
-          <button
-            onClick={handleSkipCritique}
-            className={`btn ${skipQueued ? 'btn-success' : 'btn-warning'}`}
-            style={{ marginLeft: 'auto' }}
-            disabled={isSkipping || skipQueued}
-          >
-            {isSkipping ? 'Skipping...' : skipQueued ? '✓ Skip Queued' : (critiquePhaseActive ? 'Skip Critique Now' : 'Skip Critique (Pre-emptive)')}
-          </button>
         </div>
       )}
 

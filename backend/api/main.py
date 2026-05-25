@@ -25,11 +25,13 @@ from backend.api.routes import (
     proofs,
     update,
     leanoj,
+    cloud_access,
 )
 from backend.shared.build_info import get_build_info
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.config import rag_config, system_config
 from backend.shared.lean4_client import clear_lean4_client, close_lean4_client, initialize_lean4_client
+from backend.shared.runtime_settings import apply_persisted_runtime_settings
 from backend.aggregator.core.coordinator import coordinator
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
@@ -179,6 +181,7 @@ async def lifespan(app: FastAPI):
     Path(system_config.data_dir).mkdir(parents=True, exist_ok=True)
     Path(system_config.logs_dir).mkdir(parents=True, exist_ok=True)
     Path(system_config.user_uploads_dir).mkdir(parents=True, exist_ok=True)
+    apply_persisted_runtime_settings()
 
     from backend.shared.api_client_manager import api_client_manager
 
@@ -287,8 +290,10 @@ async def lifespan(app: FastAPI):
         lean4_warm_start_task.cancel()
         try:
             await lean4_warm_start_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        except asyncio.CancelledError:
+            logger.debug("Lean 4 warm start task cancelled during shutdown")
+        except Exception as exc:
+            logger.debug("Lean 4 warm start task failed during shutdown: %s", exc)
     await coordinator.stop()
     await compiler_coordinator.stop()
     await autonomous_coordinator.stop()
@@ -296,6 +301,8 @@ async def lifespan(app: FastAPI):
     await close_lean4_client()
     clear_lean4_client()
     await lm_studio_client.close()
+    from backend.shared.openai_codex_client import openai_codex_client
+    await openai_codex_client.close()
     logger.info("Shutdown complete")
 
 
@@ -320,6 +327,7 @@ app.include_router(features.router)
 app.include_router(health.router)
 app.include_router(proofs.router)
 app.include_router(openrouter.router)
+app.include_router(cloud_access.router)
 app.include_router(download.router)
 app.include_router(update.router)
 app.include_router(leanoj.router)

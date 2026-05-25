@@ -3,14 +3,13 @@ import os
 from pathlib import Path
 import tarfile
 import tempfile
-import unittest
-from unittest import mock
+from unittest import TestCase, main, mock
 import zipfile
 
 import moto_launcher
 
 
-class ResolveInstanceRuntimeTests(unittest.TestCase):
+class ResolveInstanceRuntimeTests(TestCase):
     def test_defaults_free_uses_default_instance(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None):
@@ -191,7 +190,7 @@ class ResolveInstanceRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.secret_namespace, "stored_keyring_namespace")
 
 
-class WindowsLauncherStrategyTests(unittest.TestCase):
+class WindowsLauncherStrategyTests(TestCase):
     def test_build_windows_service_command_prefers_path_safe_executable_name(self) -> None:
         npm_path = r"C:\Program Files\nodejs\npm.cmd"
 
@@ -225,7 +224,7 @@ class WindowsLauncherStrategyTests(unittest.TestCase):
         self.assertEqual(popen.call_args.args[0], [tool_path, "run", "dev"])
 
 
-class LinuxLauncherStrategyTests(unittest.TestCase):
+class LinuxLauncherStrategyTests(TestCase):
     def test_using_repo_local_venv_detects_repo_scoped_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)
@@ -278,7 +277,7 @@ class LinuxLauncherStrategyTests(unittest.TestCase):
         popen.assert_called_once()
 
 
-class ArchiveExtractionTests(unittest.TestCase):
+class ArchiveExtractionTests(TestCase):
     def test_extract_archive_rejects_tar_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -314,4 +313,4 @@ class ArchiveExtractionTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()

@@ -3,7 +3,7 @@ Workflow Predictor - Predicts next 20 API calls based on current workflow state.
 Supports Aggregator, Compiler, and Autonomous Research modes.
 """
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional
 
 from backend.shared.models import WorkflowTask
 

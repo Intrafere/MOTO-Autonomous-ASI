@@ -1,7 +1,7 @@
 """
 Compiler RAG Manager - wrapper around aggregator RAG with configurable token budget.
 Handles compiler-specific context routing and document management.
-Default context window: 4096 tokens (user-configurable via settings).
+Compiler context windows are configured explicitly at workflow start.
 """
 import logging
 from typing import Optional, List
@@ -27,19 +27,20 @@ class CompilerRAGManager:
     """
     
     def __init__(self):
-        # Use the largest of the 3 context windows for RAG budget allocation (conservative approach)
+        # Workflow starts populate these explicit limits before initialization.
+        # Keep import-time construction lazy so API route loading does not require
+        # role settings that only exist after a start request.
         self.context_window = max(
             system_config.compiler_validator_context_window,
             system_config.compiler_high_context_context_window,
             system_config.compiler_high_param_context_window
         )
-        # Use the largest output tokens for conservative budget calculation
         self.max_output_tokens = max(
             system_config.compiler_validator_max_output_tokens,
             system_config.compiler_high_context_max_output_tokens,
             system_config.compiler_high_param_max_output_tokens
         )
-        self.available_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+        self.available_tokens = 0
         
         self._aggregator_db_loaded = False
         self._initialized = False
@@ -83,13 +84,19 @@ class CompilerRAGManager:
         logger.info("Initializing compiler RAG manager...")
         
         # Update context window from system config (in case it was changed)
-        # Use the largest of the 3 context windows
+        # Use the largest of the compiler context/output settings for a
+        # conservative shared RAG budget.
         max_context_window = max(
             system_config.compiler_validator_context_window,
             system_config.compiler_high_context_context_window,
             system_config.compiler_high_param_context_window
         )
-        self.update_context_window(max_context_window)
+        max_output_tokens = max(
+            system_config.compiler_validator_max_output_tokens,
+            system_config.compiler_high_context_max_output_tokens,
+            system_config.compiler_high_param_max_output_tokens
+        )
+        self.update_context_window(max_context_window, max_output_tokens)
         
         # Set up re-chunking callbacks for outline and paper
         outline_memory.set_rechunk_callback(self._rechunk_outline)
@@ -234,7 +241,9 @@ class CompilerRAGManager:
         query: str,
         mode: str,
         max_tokens: Optional[int] = None,
-        exclude_sources: Optional[List[str]] = None
+        exclude_sources: Optional[List[str]] = None,
+        role_context_window: Optional[int] = None,
+        role_max_output_tokens: Optional[int] = None,
     ) -> ContextPack:
         """
         Retrieve context optimized for specific compiler mode.
@@ -244,6 +253,8 @@ class CompilerRAGManager:
             mode: Compiler mode (construction, outline, review, rigor)
             max_tokens: Override max tokens (defaults to available_tokens)
             exclude_sources: Source names to skip (already direct-injected in prompt)
+            role_context_window: Caller role context window for default budget
+            role_max_output_tokens: Caller role output reserve for default budget
         
         Returns:
             ContextPack with retrieved context
@@ -256,7 +267,12 @@ class CompilerRAGManager:
         start_time = time.time()
         
         try:
-            max_tokens = max_tokens or self.available_tokens
+            if max_tokens is None:
+                if role_context_window is None or role_max_output_tokens is None:
+                    raise ValueError("Compiler RAG retrieval requires caller role limits when max_tokens is omitted.")
+                max_tokens = rag_config.get_available_input_tokens(role_context_window, role_max_output_tokens)
+            if int(max_tokens or 0) <= 0:
+                raise ValueError("Compiler RAG retrieval requires a positive context budget.")
             
             # Use 512 chunks (constant for compiler)
             chunk_size = rag_config.validator_chunk_size

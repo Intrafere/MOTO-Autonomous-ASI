@@ -6,8 +6,6 @@ import {
   settingsToAutonomousConfig,
 } from '../utils/autonomousProfiles';
 
-const DEFAULT_CONTEXT_WINDOW = 131072;
-const DEFAULT_MAX_OUTPUT_TOKENS = 25000;
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
 
 function isDeveloperModeEnabled() {
@@ -19,12 +17,15 @@ function buildSourceKey(sourceType, sourceId) {
 }
 
 function normalizeProvider(provider) {
-  return provider === 'openrouter' ? 'openrouter' : 'lm_studio';
+  if (provider === 'openrouter' || provider === 'openai_codex_oauth') {
+    return provider;
+  }
+  return 'lm_studio';
 }
 
-function toPositiveInteger(value, fallback) {
+function toPositiveInteger(value) {
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
 }
 
 function roleFromSubmitterConfig(config = {}) {
@@ -35,8 +36,8 @@ function roleFromSubmitterConfig(config = {}) {
     openrouter_provider: config.openrouterProvider ?? config.openrouter_provider ?? null,
     openrouter_reasoning_effort: config.openrouterReasoningEffort ?? config.openrouter_reasoning_effort ?? 'auto',
     lm_studio_fallback_id: config.lmStudioFallbackId ?? config.lm_studio_fallback_id ?? null,
-    context_window: toPositiveInteger(config.contextWindow ?? config.context_window, DEFAULT_CONTEXT_WINDOW),
-    max_output_tokens: toPositiveInteger(config.maxOutputTokens ?? config.max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
+    context_window: toPositiveInteger(config.contextWindow ?? config.context_window),
+    max_output_tokens: toPositiveInteger(config.maxOutputTokens ?? config.max_output_tokens),
     supercharge_enabled: superchargeAllowed && Boolean(config.superchargeEnabled ?? config.supercharge_enabled),
   };
 }
@@ -49,8 +50,8 @@ function roleFromAutonomousConfig(config, rolePrefix, fallbackModelId = '') {
     openrouter_provider: config[`${rolePrefix}_openrouter_provider`] ?? null,
     openrouter_reasoning_effort: config[`${rolePrefix}_openrouter_reasoning_effort`] ?? 'auto',
     lm_studio_fallback_id: config[`${rolePrefix}_lm_studio_fallback`] ?? null,
-    context_window: toPositiveInteger(config[`${rolePrefix}_context_window`], DEFAULT_CONTEXT_WINDOW),
-    max_output_tokens: toPositiveInteger(config[`${rolePrefix}_max_tokens`], DEFAULT_MAX_OUTPUT_TOKENS),
+    context_window: toPositiveInteger(config[`${rolePrefix}_context_window`]),
+    max_output_tokens: toPositiveInteger(config[`${rolePrefix}_max_tokens`]),
     supercharge_enabled: superchargeAllowed && Boolean(config[`${rolePrefix}_supercharge_enabled`]),
   };
 }
@@ -73,8 +74,14 @@ export function buildCurrentProofRuntimeConfig() {
 export function isProofRuntimeConfigComplete(config) {
   return Boolean(
     config?.brainstorm?.model_id &&
+    config?.brainstorm?.context_window &&
+    config?.brainstorm?.max_output_tokens &&
     config?.paper?.model_id &&
-    config?.validator?.model_id
+    config?.paper?.context_window &&
+    config?.paper?.max_output_tokens &&
+    config?.validator?.model_id &&
+    config?.validator?.context_window &&
+    config?.validator?.max_output_tokens
   );
 }
 

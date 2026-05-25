@@ -1,5 +1,5 @@
-export const DEFAULT_CONTEXT_WINDOW = 131072;
-export const DEFAULT_MAX_OUTPUT_TOKENS = 25000;
+export const DEFAULT_CONTEXT_WINDOW = '';
+export const DEFAULT_MAX_OUTPUT_TOKENS = '';
 export const DEFAULT_OPENROUTER_REASONING_EFFORT = 'auto';
 export const OPENROUTER_REASONING_EFFORT_OPTIONS = [
   { value: 'auto', label: 'Auto (max supported)' },
@@ -94,7 +94,7 @@ function selectAutoEndpointSet(endpoints, modelContext = null) {
   const outputThreshold = medianOutputCap && medianOutputCap >= AUTO_MIN_CAPABLE_OUTPUT_TOKENS
     ? Math.max(AUTO_MIN_CAPABLE_OUTPUT_TOKENS, Math.floor(medianOutputCap * AUTO_ENDPOINT_OUTLIER_RATIO))
     : null;
-  const contextThresholdFromModel = modelContext && modelContext >= DEFAULT_CONTEXT_WINDOW * 2
+  const contextThresholdFromModel = modelContext
     ? Math.floor(modelContext * AUTO_ENDPOINT_OUTLIER_RATIO)
     : null;
   const hasEndpointNearModelContext = contextThresholdFromModel !== null && metrics.some(
@@ -163,6 +163,31 @@ export function findOpenRouterModel(models, modelId) {
     return null;
   }
   return models.find((model) => model.id === modelId) || null;
+}
+
+export function computeCodexAutoSettings(model) {
+  const warnings = [];
+  const contextWindow = toPositiveInteger(model?.context_length);
+  const maxOutputTokens = toPositiveInteger(model?.max_output_tokens);
+
+  if (!contextWindow) {
+    warnings.push('Codex model metadata did not expose a known context window; preserving the current context setting.');
+  }
+  if (!maxOutputTokens) {
+    warnings.push('Codex model metadata did not expose a max output cap; preserving the current max output setting.');
+  }
+
+  return {
+    contextWindow,
+    contextWindowKnown: contextWindow !== null,
+    maxOutputTokens,
+    outputCapKnown: maxOutputTokens !== null,
+    outputCapSource: maxOutputTokens !== null ? 'codex-model-metadata' : 'unknown',
+    source: 'openai-codex-model-metadata',
+    inputContextWindow: toPositiveInteger(model?.input_context_window),
+    effectiveInputContextWindow: toPositiveInteger(model?.effective_input_context_window),
+    warnings,
+  };
 }
 
 export function hasEndpointMetadata(providerData) {
@@ -278,14 +303,14 @@ export function computeOpenRouterAutoSettings(model, providerData, selectedProvi
   }
 
   if (relevantEndpoints.length === 0) {
-    const contextWindow = modelContext || DEFAULT_CONTEXT_WINDOW;
+    const contextWindow = modelContext;
     const contextWindowKnown = modelContext !== null;
     const maxOutputTokens = null;
     const outputCapSource = 'unknown';
 
     if (!modelContext) {
       warnings.push(
-        `No endpoint metadata and no model.context_length; using default ${DEFAULT_CONTEXT_WINDOW}.`
+        'No endpoint metadata and no model.context_length; preserving the current context setting.'
       );
     } else {
       warnings.push(
@@ -313,8 +338,8 @@ export function computeOpenRouterAutoSettings(model, providerData, selectedProvi
       providerSelectionRecommended: autoEndpointSelection.providerSelectionRecommended,
       capableProviderNames: autoEndpointSelection.capableProviderNames,
       ignoredProviderNames: autoEndpointSelection.ignoredProviderNames,
-      fallbackModelContext: modelContext || DEFAULT_CONTEXT_WINDOW,
-      source: modelContext ? 'model-context-length' : 'hardcoded-default',
+      fallbackModelContext: modelContext,
+      source: modelContext ? 'model-context-length' : 'unknown-context',
       warnings,
     };
   }
@@ -341,15 +366,15 @@ export function computeOpenRouterAutoSettings(model, providerData, selectedProvi
   // The model-level OpenRouter context is the total context source of truth.
   // Endpoint context rows are provider diagnostics only; they must not shrink
   // the configured model context after weak providers have been filtered out.
-  const contextWindow = modelContext || DEFAULT_CONTEXT_WINDOW;
+  const contextWindow = modelContext;
   const contextWindowKnown = modelContext !== null;
   let contextSource;
   if (modelContext) {
     contextSource = 'model-context-length';
   } else {
-    contextSource = 'hardcoded-default';
+    contextSource = 'unknown-context';
     warnings.push(
-      `No OpenRouter model.context_length; preserving the current context setting unless callers need fallback ${DEFAULT_CONTEXT_WINDOW}.`
+      'No OpenRouter model.context_length; preserving the current context setting.'
     );
   }
 
@@ -395,7 +420,7 @@ export function computeOpenRouterAutoSettings(model, providerData, selectedProvi
     providerSelectionRecommended: autoEndpointSelection.providerSelectionRecommended,
     capableProviderNames: autoEndpointSelection.capableProviderNames,
     ignoredProviderNames: autoEndpointSelection.ignoredProviderNames,
-    fallbackModelContext: modelContext || DEFAULT_CONTEXT_WINDOW,
+    fallbackModelContext: modelContext,
     source,
     warnings,
   };

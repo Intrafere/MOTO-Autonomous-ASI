@@ -110,8 +110,7 @@ class IngestionPipeline:
             )
             
             logger.info(
-                "Ingested %s: %s total chunks",
-                redact_log_text(source_name, 120),
+                "Ingested text source: %s total chunks",
                 sum(len(chunks) for chunks in chunks_by_size.values()),
             )
             
@@ -119,8 +118,7 @@ class IngestionPipeline:
             
         except Exception as e:
             logger.error(
-                "Failed to ingest text %s: %s",
-                redact_log_text(source_name, 120),
+                "Failed to ingest text source: %s",
                 redact_log_text(e, 240),
             )
             raise

@@ -10,6 +10,13 @@ import { renderLatexToHtml, DOMPURIFY_CONFIG } from '../components/LatexRenderer
 import DOMPurify from 'dompurify';
 import { prependDisclaimer } from './disclaimerHelper';
 
+const API_BASE = import.meta.env.VITE_MOTO_API_BASE || '/api';
+export const PDF_UNAVAILABLE_MESSAGE = 'PDF generation is unavailable in hosted web mode. Use raw text download instead.';
+
+export const isPDFDownloadAvailable = (capabilities = {}) => (
+  capabilities?.pdfDownloadAvailable !== false
+);
+
 /**
  * Download raw text content as a .txt file.
  * @param {string} content - The text content
@@ -71,7 +78,14 @@ export const downloadPDFViaBackend = async (
   onComplete = null,
   onError = null,
   disclaimerType = null,
+  options = {},
 ) => {
+  if (options.pdfDownloadAvailable === false) {
+    const error = new Error(PDF_UNAVAILABLE_MESSAGE);
+    onError?.(error);
+    throw error;
+  }
+
   onStart?.();
 
   try {
@@ -81,7 +95,7 @@ export const downloadPDFViaBackend = async (
     const rawHtml = renderLatexToHtml(body);
     const sanitizedHtml = DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG);
 
-    const response = await fetch('/api/download/pdf', {
+    const response = await fetch(`${API_BASE}/download/pdf`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

@@ -2,7 +2,7 @@
 Completion Prompts - System prompts and JSON schemas for brainstorm completion review.
 Includes SPECIAL SELF-VALIDATION MODE where the same model validates its own assessment.
 """
-from typing import List, Dict, Any
+from typing import Dict, Any
 
 
 def get_completion_review_system_prompt() -> str:
@@ -39,14 +39,14 @@ This is an assessment of topic exploration completeness using all resources at y
 
 DIRECT-SOLUTION PREFERENCE:
 - Prefer moving to paper writing once the brainstorm can support the strongest rigorous direct answer currently justified
-- Continue brainstorming only when you can identify concrete additional work that is likely to produce a more direct solution, stronger partial solution, impossibility result, or sharper constraint
+- Continue brainstorming only when you can identify concrete additional work that is likely to more directly answer the user's whole prompt or a necessary piece of it
 - Do not extend brainstorming merely for breadth if the best direct answer is already ready to synthesize
 
 DECISION CRITERIA:
 
 Choose CONTINUE_BRAINSTORM if:
 - You can identify specific mathematical areas not yet covered in the submissions that are likely to improve the direct answer
-- You have additional theorems, proofs, techniques, constructions, or impossibility arguments relevant to the topic (from your knowledge or discoverable via web search)
+- You have additional rigorous work relevant to the topic (from your knowledge or discoverable via web search)
 - The brainstorm would benefit from deeper exploration in specific directions that materially strengthen direct resolution
 - You can still contribute valuable direct-progress insights using available resources (base knowledge, web search if available)
 

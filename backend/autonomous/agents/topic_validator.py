@@ -10,16 +10,15 @@ NO RAG BY DESIGN: Same rationale as topic selector — validates a strategic dec
 using only metadata summaries (topic prompts, statuses, paper titles/abstracts).
 Full content not needed for validating topic selection quality.
 """
-import asyncio
 import json
 import logging
 from typing import Optional, Dict, Any, List, Callable
 
-from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
+from backend.shared.config import rag_config
 from backend.shared.models import TopicSelectionSubmission, TopicValidationResult
 from backend.autonomous.prompts.topic_prompts import build_topic_validation_prompt
 
@@ -40,8 +39,8 @@ class TopicValidatorAgent:
     def __init__(
         self,
         model_id: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 15000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.model_id = model_id
         self.context_window = context_window
@@ -62,7 +61,7 @@ class TopicValidatorAgent:
     
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""
-        return self.context_window - self.max_output_tokens
+        return rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
     
     async def validate(
         self,

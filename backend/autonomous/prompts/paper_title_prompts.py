@@ -36,7 +36,7 @@ YOUR TASK:
 Choose a title that accurately captures the mathematical content and scope of the planned paper.
 
 DIRECT-SOLUTION PREFERENCE:
-- When the paper reaches a direct conclusion, theorem, impossibility result, or explicit construction, let the title foreground that result rather than sounding like generic exploration
+- When the paper reaches direct answer-bearing content, let the title foreground that content rather than sounding like generic exploration
 - Prefer titles that make the paper's answer-bearing content clear, while staying accurate to the actual scope
 
 IMPORTANT CLARIFICATION:

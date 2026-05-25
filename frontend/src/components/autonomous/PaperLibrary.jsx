@@ -4,14 +4,20 @@
 import React, { useEffect, useState } from 'react';
 import './AutonomousResearch.css';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import {
+  PDF_UNAVAILABLE_MESSAGE,
+  downloadRawText,
+  downloadPDFViaBackend,
+  isPDFDownloadAvailable,
+  sanitizeFilename,
+} from '../../utils/downloadHelpers';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
 import { websocket } from '../../services/websocket';
 
-const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
+const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities }) => {
   const [expandedId, setExpandedId] = useState(null);
   const [expandedContent, setExpandedContent] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -21,6 +27,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   const [deleteAllPrunedConfirm, setDeleteAllPrunedConfirm] = useState(false);
   const [deletingAllPruned, setDeletingAllPruned] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -154,6 +161,11 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
   const handleDownloadPDF = async (e, paper) => {
     e.stopPropagation();
 
+    if (!pdfDownloadAvailable) {
+      alert(PDF_UNAVAILABLE_MESSAGE);
+      return;
+    }
+
     if (!expandedContent || typeof expandedContent !== 'object') {
       alert('Paper content not loaded. Please expand the paper first.');
       return;
@@ -179,6 +191,8 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
         console.error('PDF generation error:', error);
         alert('PDF generation failed: ' + error.message);
       },
+      null,
+      { pdfDownloadAvailable },
     );
   };
 
@@ -416,8 +430,8 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0 }) => {
                   <button
                     className="btn-download"
                     onClick={(e) => handleDownloadPDF(e, paper)}
-                    disabled={isGeneratingPDF || !expandedContent}
-                    title="Download as PDF"
+                    disabled={isGeneratingPDF || !expandedContent || !pdfDownloadAvailable}
+                    title={pdfDownloadAvailable ? 'Download as PDF' : PDF_UNAVAILABLE_MESSAGE}
                   >
                     {isGeneratingPDF ? 'Preparing PDF...' : 'Download PDF'}
                   </button>

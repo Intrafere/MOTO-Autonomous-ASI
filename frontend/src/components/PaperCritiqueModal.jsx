@@ -183,7 +183,7 @@ export default function PaperCritiqueModal({
       const customPrompt = localStorage.getItem(storageKey);
 
       const validatorConfig = readStoredValidatorConfig(paperType, developerModeEnabled);
-      const result = await onGenerateCritique(customPrompt, validatorConfig);
+      await onGenerateCritique(customPrompt, validatorConfig);
       
       // Reload critiques to get the updated list
       await loadCritiques();

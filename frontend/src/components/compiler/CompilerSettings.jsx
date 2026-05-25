@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { openRouterAPI, api, aggregatorAPI, compilerAPI } from '../../services/api';
+import { cloudAccessAPI, openRouterAPI, api, aggregatorAPI, compilerAPI } from '../../services/api';
 import {
+  computeCodexAutoSettings,
   computeOpenRouterAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -28,8 +29,10 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   // LM Studio and OpenRouter models
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
+  const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
+  const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [loadingModels, setLoadingModels] = useState(true);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -128,6 +131,17 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
       } catch (err) {
         console.error('Failed to check OpenRouter key:', err);
       }
+      try {
+        const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+        const configured = Boolean(codexStatus.status?.configured);
+        setHasOpenAICodexLogin(configured);
+        if (configured) {
+          fetchOpenAICodexModels();
+        }
+      } catch (err) {
+        console.error('Failed to check OpenAI Codex login:', err);
+        setHasOpenAICodexLogin(false);
+      }
 
       // Fetch LM Studio models
       if (lmStudioEnabled) {
@@ -192,6 +206,14 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
         } catch (error) {
           console.error('Failed to load compiler settings:', error);
         }
+      }
+
+      try {
+        const freeModelSettings = await openRouterAPI.getFreeModelSettings();
+        setFreeModelLooping(freeModelSettings.looping_enabled ?? true);
+        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? true);
+      } catch (error) {
+        console.error('Failed to load free model settings:', error);
       }
       
       const loadWolframStatus = async () => {
@@ -381,6 +403,16 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
     }
   };
 
+  const fetchOpenAICodexModels = async () => {
+    try {
+      const result = await cloudAccessAPI.getOpenAICodexModels();
+      setOpenAICodexModels(result.models || []);
+    } catch (err) {
+      console.error('Failed to fetch OpenAI Codex models:', err);
+      setOpenAICodexModels([]);
+    }
+  };
+
   // Refetch models when free-only toggle changes
   useEffect(() => {
     if (hasOpenRouterKey && isLoaded) {
@@ -472,6 +504,19 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       if (autoSettings.warnings && autoSettings.warnings.length > 0) {
         console.warn('[CompilerAutoFill] auto-settings fallback used:', autoSettings.warnings);
       }
+    }
+    return autoSettings;
+  };
+
+  const getCodexAutoSettingsForModel = (modelId) => {
+    const model = openAICodexModels.find((item) => item.id === modelId);
+    if (!model) {
+      console.debug('[CompilerCodexAutoFill] model not in loaded list, skipping auto-fill', { modelId });
+      return null;
+    }
+    const autoSettings = computeCodexAutoSettings(model);
+    if (autoSettings.warnings.length > 0) {
+      console.warn('[CompilerCodexAutoFill] auto-settings fallback used:', autoSettings.warnings);
     }
     return autoSettings;
   };
@@ -629,38 +674,41 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setValidatorOpenrouterProvider(rawSettings.validatorOpenrouterProvider || null);
     setValidatorOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort));
     setValidatorLmStudioFallback(rawSettings.validatorLmStudioFallback || null);
-    setValidatorContextSize(Number(rawSettings.validatorContextSize || DEFAULT_CONTEXT_WINDOW));
-    setValidatorMaxOutput(Number(rawSettings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS));
+    setValidatorContextSize(rawSettings.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW);
+    setValidatorMaxOutput(rawSettings.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
     setValidatorSuperchargeEnabled(Boolean(rawSettings.validatorSuperchargeEnabled));
     setHighContextProvider(rawSettings.highContextProvider || 'lm_studio');
     setHighContextModel(rawSettings.highContextModel || '');
     setHighContextOpenrouterProvider(rawSettings.highContextOpenrouterProvider || null);
     setHighContextOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.highContextOpenrouterReasoningEffort));
     setHighContextLmStudioFallback(rawSettings.highContextLmStudioFallback || null);
-    setHighContextContextSize(Number(rawSettings.highContextContextSize || DEFAULT_CONTEXT_WINDOW));
-    setHighContextMaxOutput(Number(rawSettings.highContextMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS));
+    setHighContextContextSize(rawSettings.highContextContextSize ?? DEFAULT_CONTEXT_WINDOW);
+    setHighContextMaxOutput(rawSettings.highContextMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
     setHighContextSuperchargeEnabled(Boolean(rawSettings.highContextSuperchargeEnabled));
     setHighParamProvider(rawSettings.highParamProvider || 'lm_studio');
     setHighParamModel(rawSettings.highParamModel || '');
     setHighParamOpenrouterProvider(rawSettings.highParamOpenrouterProvider || null);
     setHighParamOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.highParamOpenrouterReasoningEffort));
     setHighParamLmStudioFallback(rawSettings.highParamLmStudioFallback || null);
-    setHighParamContextSize(Number(rawSettings.highParamContextSize || DEFAULT_CONTEXT_WINDOW));
-    setHighParamMaxOutput(Number(rawSettings.highParamMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS));
+    setHighParamContextSize(rawSettings.highParamContextSize ?? DEFAULT_CONTEXT_WINDOW);
+    setHighParamMaxOutput(rawSettings.highParamMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
     setHighParamSuperchargeEnabled(Boolean(rawSettings.highParamSuperchargeEnabled));
     setCritiqueSubmitterProvider(rawSettings.critiqueSubmitterProvider || 'lm_studio');
     setCritiqueSubmitterModel(rawSettings.critiqueSubmitterModel || '');
     setCritiqueSubmitterOpenrouterProvider(rawSettings.critiqueSubmitterOpenrouterProvider || null);
     setCritiqueSubmitterOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.critiqueSubmitterOpenrouterReasoningEffort));
     setCritiqueSubmitterLmStudioFallback(rawSettings.critiqueSubmitterLmStudioFallback || null);
-    setCritiqueSubmitterContextSize(Number(rawSettings.critiqueSubmitterContextSize || DEFAULT_CONTEXT_WINDOW));
-    setCritiqueSubmitterMaxOutput(Number(rawSettings.critiqueSubmitterMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS));
+    setCritiqueSubmitterContextSize(rawSettings.critiqueSubmitterContextSize ?? DEFAULT_CONTEXT_WINDOW);
+    setCritiqueSubmitterMaxOutput(rawSettings.critiqueSubmitterMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
     setCritiqueSubmitterSuperchargeEnabled(Boolean(rawSettings.critiqueSubmitterSuperchargeEnabled));
     setWolframEnabled(rawSettings.wolframEnabled ?? false);
     setFreeOnly(rawSettings.freeOnly ?? false);
     setFreeModelLooping(rawSettings.freeModelLooping ?? true);
     setFreeModelAutoSelector(rawSettings.freeModelAutoSelector ?? true);
     setModelProviders(rawSettings.modelProviders || {});
+    openRouterAPI
+      .setFreeModelSettings(rawSettings.freeModelLooping ?? true, rawSettings.freeModelAutoSelector ?? true)
+      .catch(() => {});
 
     if (updateRawText) {
       setRawSettingsText(formatRawSettings({
@@ -729,11 +777,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     contextSize, setContextSize,
     maxOutput, setMaxOutput,
     superchargeEnabled, setSuperchargeEnabled,
-    borderColor = '#333',
     showProofStrengthBadge = false
   }) => {
     const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
-    const models = effectiveProvider === 'openrouter' ? openRouterModels : lmStudioModels;
+    const models = effectiveProvider === 'openrouter'
+      ? openRouterModels
+      : (effectiveProvider === 'openai_codex_oauth' ? openAICodexModels : lmStudioModels);
     const providers = model && effectiveProvider === 'openrouter'
       ? getProviderNames(modelProviders[model])
       : [];
@@ -742,11 +791,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       : { hasEndpointMetadata: false, supportsReasoning: false };
 
     return (
-      <div
-        className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
-        style={{ borderColor: effectiveProvider === 'openrouter' ? undefined : borderColor }}
-      >
-        <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : ''} style={effectiveProvider === 'openrouter' ? undefined : { color: borderColor }}>
+      <div className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}>
+        <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : ''}>
           <span className="role-title-with-badges">
             <span>{title}</span>
             {showProofStrengthBadge && <ProofStrengthBadge />}
@@ -790,6 +836,23 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               >
                 OpenRouter
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (hasOpenAICodexLogin) {
+                    setProvider('openai_codex_oauth');
+                    setModel('');
+                    setOpenrouterProv(null);
+                    setOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
+                    setFallback(null);
+                  }
+                }}
+                disabled={!hasOpenAICodexLogin}
+                className={`provider-toggle-btn${provider === 'openai_codex_oauth' ? ' active-or-orange' : ''}`}
+                title={!hasOpenAICodexLogin ? 'Set OpenAI Codex login in Cloud Access & Keys first' : 'Use OpenAI Codex'}
+              >
+                OpenAI Codex
+              </button>
             </div>
           ) : (
             <small className="settings-hint">
@@ -808,8 +871,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               setModel(m);
               setOpenrouterProv(null);
               setOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
-              if (effectiveProvider === 'openrouter' && m) {
-                const autoSettings = await getAutoSettingsForModel(m, null);
+              if (['openrouter', 'openai_codex_oauth'].includes(effectiveProvider) && m) {
+                const autoSettings = effectiveProvider === 'openrouter'
+                  ? await getAutoSettingsForModel(m, null)
+                  : getCodexAutoSettingsForModel(m);
                 if (autoSettings) {
                   if (autoSettings.contextWindowKnown) {
                     setContextSize(autoSettings.contextWindow);
@@ -885,8 +950,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </div>
         )}
 
-        {/* LM Studio Fallback (if OpenRouter) */}
-        {effectiveProvider === 'openrouter' && lmStudioEnabled && (
+        {/* LM Studio Fallback (if cloud provider) */}
+        {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
           <div className="settings-row">
             <label className="label--muted">LM Studio Fallback (optional)</label>
             <select
@@ -898,7 +963,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 <option key={m.id} value={m.id}>{m.id}</option>
               ))}
             </select>
-            <small className="settings-hint">Used if OpenRouter credits run out</small>
+            <small className="settings-hint">Used if cloud provider access fails or credits run out</small>
           </div>
         )}
 
@@ -909,7 +974,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             value={contextSize}
             onChange={(e) => {
               const parsed = parseInt(e.target.value, 10);
-              setContextSize(isNaN(parsed) ? DEFAULT_CONTEXT_WINDOW : parsed);
+              setContextSize(isNaN(parsed) ? '' : parsed);
             }}
             min={4096}
             max={50000000}
@@ -924,7 +989,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             value={maxOutput}
             onChange={(e) => {
               const parsed = parseInt(e.target.value, 10);
-              setMaxOutput(isNaN(parsed) ? DEFAULT_MAX_OUTPUT_TOKENS : parsed);
+              setMaxOutput(isNaN(parsed) ? '' : parsed);
             }}
             min={1000}
             max={50000000}
@@ -1057,7 +1122,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <RoleConfig
           title="Validator"
           description="Validates all submissions for coherence, rigor, placement, and non-redundancy."
-          borderColor="#ff6b6b"
           provider={validatorProvider} setProvider={setValidatorProvider}
           model={validatorModel} setModel={setValidatorModel}
           openrouterProv={validatorOpenrouterProvider} setOpenrouterProv={setValidatorOpenrouterProvider}
@@ -1071,7 +1135,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <RoleConfig
           title="High-Context Model"
           description="Handles construction, outline creation/updates, and review modes. Needs large context for comprehensive outlines."
-          borderColor="#4CAF50"
           provider={highContextProvider} setProvider={setHighContextProvider}
           model={highContextModel} setModel={setHighContextModel}
           openrouterProv={highContextOpenrouterProvider} setOpenrouterProv={setHighContextOpenrouterProvider}
@@ -1086,7 +1149,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <RoleConfig
           title="High-Parameter Model"
           description="Rigor enhancement mode: adds citations, strengthens methodology, and clarifies assumptions."
-          borderColor="#2a2a2a"
           provider={highParamProvider} setProvider={setHighParamProvider}
           model={highParamModel} setModel={setHighParamModel}
           openrouterProv={highParamOpenrouterProvider} setOpenrouterProv={setHighParamOpenrouterProvider}
@@ -1101,7 +1163,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <RoleConfig
           title="Critique Submitter"
           description="Generates validated peer review critiques for the paper's AI self-review section."
-          borderColor="#e74c3c"
           provider={critiqueSubmitterProvider} setProvider={setCritiqueSubmitterProvider}
           model={critiqueSubmitterModel} setModel={setCritiqueSubmitterModel}
           openrouterProv={critiqueSubmitterOpenrouterProvider} setOpenrouterProv={setCritiqueSubmitterOpenrouterProvider}

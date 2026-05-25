@@ -15,6 +15,7 @@ from datetime import datetime
 import aiofiles
 
 from backend.shared.config import system_config
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.path_safety import (
     resolve_path_within_root,
     validate_single_path_component,
@@ -141,7 +142,11 @@ class FinalAnswerMemory:
             async with aiofiles.open(metadata_path, 'r', encoding='utf-8') as f:
                 metadata = json.loads(await f.read())
         except Exception as e:
-            logger.warning(f"Failed to read final answer prompt metadata for {session_id}: {e}")
+            logger.warning(
+                "Failed to read final answer prompt metadata for %s: %s",
+                redact_log_text(session_id, 160),
+                redact_log_text(e, 240),
+            )
             return cls._derive_prompt_from_session_id(session_id)
 
         return cls._select_user_prompt(
@@ -552,14 +557,13 @@ class FinalAnswerMemory:
         Follows the same enhanced format as other tiers.
         """
         # This is a synchronous wrapper - call get_rejections from async context
-        import asyncio
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 # Can't use sync wrapper in async context
                 return ""
         except RuntimeError:
-            pass
+            return ""
         return ""
     
     async def get_rejection_context_async(self, phase: str) -> str:
@@ -1040,7 +1044,11 @@ class FinalAnswerMemory:
                 "metadata": metadata
             }
         except Exception as e:
-            logger.error(f"Failed to read archived paper {paper_id}: {e}")
+            logger.error(
+                "Failed to read archived paper %s: %s",
+                redact_log_text(paper_id, 120),
+                redact_log_text(e, 240),
+            )
             return None
     
     async def get_archived_brainstorms_list(self) -> List[Dict[str, Any]]:
@@ -1063,7 +1071,7 @@ class FinalAnswerMemory:
                     data = json.loads(content)
                     brainstorms.append(data)
             except Exception as e:
-                logger.error(f"Failed to read archived brainstorm metadata: {e}")
+                logger.error("Failed to read archived brainstorm metadata: %s", redact_log_text(e, 240))
         
         # Sort by topic_id
         brainstorms.sort(key=lambda x: x.get('topic_id', ''))
@@ -1103,7 +1111,11 @@ class FinalAnswerMemory:
                 "metadata": metadata
             }
         except Exception as e:
-            logger.error(f"Failed to read archived brainstorm {topic_id}: {e}")
+            logger.error(
+                "Failed to read archived brainstorm %s: %s",
+                redact_log_text(topic_id, 120),
+                redact_log_text(e, 240),
+            )
             return None
 
     
@@ -1654,7 +1666,11 @@ class FinalAnswerMemory:
                 "chapters": chapters
             }
         except Exception as e:
-            logger.error(f"Failed to get final answer {answer_id}: {e}")
+            logger.error(
+                "Failed to get final answer %s: %s",
+                redact_log_text(answer_id, 160),
+                redact_log_text(e, 240),
+            )
             return None
 
 

@@ -14,12 +14,12 @@ and stable validation decisions across long research sessions.
 import httpx
 import asyncio
 import time
-import os
 import re
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 from backend.shared.config import rag_config, system_config
+from backend.shared.log_redaction import redact_log_text
 import logging
 
 logger = logging.getLogger(__name__)
@@ -35,9 +35,7 @@ def _sanitize_lm_studio_error_text(value: Any, max_chars: int = 500) -> str:
     text = re.sub(r'("api[_-]?key"\s*:\s*)"[^"]*"', r'\1"[redacted]"', text, flags=re.IGNORECASE)
     text = re.sub(r'("messages"\s*:\s*)\[[\s\S]*?\]', r'\1[redacted]', text, flags=re.IGNORECASE)
     text = re.sub(r'("prompt"\s*:\s*)"[\s\S]*?"', r'\1"[redacted]"', text, flags=re.IGNORECASE)
-    if len(text) > max_chars:
-        return text[:max_chars] + "...[truncated]"
-    return text
+    return redact_log_text(text, max_chars)
 
 
 class LMStudioClient:
@@ -154,7 +152,11 @@ class LMStudioClient:
             if model not in self._model_semaphores:
                 limit = max(1, int(system_config.max_model_concurrency_per_model or 1))
                 self._model_semaphores[model] = asyncio.Semaphore(limit)
-                logger.debug(f"Created semaphore for model: {model} (limit={limit})")
+                logger.debug(
+                    "Created semaphore for model: %s (limit=%s)",
+                    redact_log_text(model, 160),
+                    limit,
+                )
             return self._model_semaphores[model]
     
     async def list_models(self) -> List[Dict[str, Any]]:
@@ -165,7 +167,7 @@ class LMStudioClient:
             data = response.json()
             return data.get("data", [])
         except Exception as e:
-            logger.error(f"Failed to list models: {e}")
+            logger.error("Failed to list models: %s", redact_log_text(e, 240))
             return []
     
     async def get_loaded_models(self) -> List[str]:
@@ -444,11 +446,8 @@ class LMStudioClient:
             "temperature": temperature,
         }
         
-        # ALWAYS set max_tokens to prevent mid-generation context overflow
-        # If not explicitly provided, use a generous default for reasoning models
         if max_tokens is None:
-            max_tokens = 25000  # Increased to 25K to accommodate reasoning models with extensive thinking
-            logger.debug(f"Auto-limiting max_tokens to {max_tokens} (25K for reasoning model support)")
+            raise ValueError("LM Studio calls require an explicit max_tokens value from user settings.")
         
         payload["max_tokens"] = max_tokens
         
@@ -485,9 +484,14 @@ class LMStudioClient:
                     raw_error_detail = e.response.text if hasattr(e.response, 'text') else str(e)
                     error_detail = _sanitize_lm_studio_error_text(raw_error_detail)
                     logger.error(
-                        f"LM Studio 400 Bad Request (attempt {attempt + 1}/{max_retries + 1}): "
-                        f"model={model}, approx_tokens={approx_tokens}, "
-                        f"messages_count={len(messages)}, error={error_detail}"
+                        "LM Studio 400 Bad Request (attempt %s/%s): model=%s, "
+                        "approx_tokens=%s, messages_count=%s, error=%s",
+                        attempt + 1,
+                        max_retries + 1,
+                        redact_log_text(model, 160),
+                        approx_tokens,
+                        len(messages),
+                        error_detail,
                     )
                     
                     # Check error type
@@ -502,8 +506,9 @@ class LMStudioClient:
                     if is_model_crash:
                         # Model crashed - LM Studio has unloaded it
                         logger.critical(
-                            f"Model '{model}' CRASHED! Error: {error_detail}. "
-                            f"Please reload the model in LM Studio."
+                            "Model '%s' CRASHED! Error: %s. Please reload the model in LM Studio.",
+                            redact_log_text(model, 160),
+                            error_detail,
                         )
                         raise ValueError(f"Model '{model}' crashed. Please reload it in LM Studio.")
                     
@@ -529,7 +534,6 @@ class LMStudioClient:
                         )
                     
                     elif is_input_overflow:
-                        import re
                         limit_match = re.search(r'context.*?(\d+)', error_detail.lower())
                         context_limit = int(limit_match.group(1)) if limit_match else "unknown"
                         
@@ -551,21 +555,32 @@ class LMStudioClient:
                     raise
                     
                 elif e.response.status_code == 404:
-                    logger.error(f"Model '{model}' not found (404). Please ensure it is loaded in LM Studio.")
+                    logger.error(
+                        "Model '%s' not found (404). Please ensure it is loaded in LM Studio.",
+                        redact_log_text(model, 160),
+                    )
                     raise
                 else:
-                    logger.error(f"HTTP {e.response.status_code} error: {e}")
+                    logger.error(
+                        "HTTP %s error: %s",
+                        e.response.status_code,
+                        redact_log_text(e, 240),
+                    )
                     raise
                     
             except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
-                logger.error(f"Connection error for model '{model}': {e}")
+                logger.error(
+                    "Connection error for model '%s': %s",
+                    redact_log_text(model, 160),
+                    redact_log_text(e, 240),
+                )
                 if attempt < max_retries:
                     await asyncio.sleep(1.0 * (attempt + 1))
                     continue
                 raise
                     
             except Exception as e:
-                logger.error(f"Failed to generate completion: {e}")
+                logger.error("Failed to generate completion: %s", redact_log_text(e, 240))
                 raise
         
         raise RuntimeError("Completion generation failed after all retries")
@@ -664,6 +679,7 @@ class LMStudioClient:
             except Exception as e:
                 logger.error(f"Embedding failed with unexpected error: {e}")
                 raise
+        raise RuntimeError("Embedding retry loop exhausted without returning or raising")
     
     async def test_connection(self) -> bool:
         """Test connection to LM Studio (bounded, never blocks startup)."""
@@ -753,7 +769,7 @@ class LMStudioClient:
             logger.warning(f"LM Studio availability check failed: {result['error']}")
             return result
     
-    async def test_model_compatibility(self, model_name: str) -> tuple[bool, str, dict]:
+    async def test_model_compatibility(self, model_name: str, max_tokens: int) -> tuple[bool, str, dict]:
         """
         Test if a model is compatible with the ASI system.
         
@@ -764,18 +780,24 @@ class LMStudioClient:
         
         Args:
             model_name: Name of model to test
+            max_tokens: Explicit test output budget from the user's role settings
             
         Returns:
             Tuple of (is_compatible, error_message, details)
         """
         try:
+            if int(max_tokens or 0) <= 0:
+                return False, "Model compatibility test requires explicit positive max output tokens.", {
+                    "model_name": model_name,
+                    "max_tokens": max_tokens,
+                }
             test_prompt = 'Output JSON: {"status": "ok", "test": "Model is compatible"}'
             
             response = await self.generate_completion(
                 model=model_name,
                 messages=[{"role": "user", "content": test_prompt}],
                 temperature=0.0,  # Deterministic generation for model health checks
-                max_tokens=None
+                max_tokens=max_tokens
             )
             
             # Extract response details
@@ -794,15 +816,15 @@ class LMStudioClient:
             # Check 1: Empty or whitespace-only response
             if not content or not content.strip():
                 error = f"Model '{model_name}' returned empty response (completion_tokens={completion_tokens})"
-                logger.error(f"Compatibility test failed: {error}")
-                logger.error(f"Details: {details}")
+                logger.error("Compatibility test failed: %s", redact_log_text(error, 240))
+                logger.error("Details: %s", redact_log_text(details, 400))
                 return (False, error, details)
             
             # Check 2: Anomalously short response (< 5 tokens)
             if completion_tokens < 5:
                 error = f"Model '{model_name}' returned too few tokens (completion_tokens={completion_tokens})"
-                logger.warning(f"Compatibility test failed: {error}")
-                logger.warning(f"Details: {details}")
+                logger.warning("Compatibility test failed: %s", redact_log_text(error, 240))
+                logger.warning("Details: %s", redact_log_text(details, 400))
                 return (False, error, details)
             
             # Check 3: MUST parse as JSON (CRITICAL for ASI system)
@@ -814,14 +836,14 @@ class LMStudioClient:
                 parsed_json = json.loads(sanitized_content)
                 logger.info(
                     "Model '%s' produced valid JSON with keys: %s",
-                    model_name,
+                    redact_log_text(model_name, 160),
                     sorted(parsed_json.keys()) if isinstance(parsed_json, dict) else type(parsed_json).__name__,
                 )
             except json.JSONDecodeError as json_err:
                 error = f"Model '{model_name}' FAILED to produce valid JSON: {json_err}"
-                logger.error(f"Compatibility test FAILED: {error}")
+                logger.error("Compatibility test FAILED: %s", redact_log_text(error, 240))
                 logger.error("Response content redacted (length=%d)", len(content or ""))
-                logger.error(f"Details: {details}")
+                logger.error("Details: %s", redact_log_text(details, 400))
                 return (False, error, details)
             
             # SUCCESS - Cache model config
@@ -837,14 +859,15 @@ class LMStudioClient:
             await self.cache_model_load_config(model_name, model_config)
             
             logger.info(
-                f"Model '{model_name}' passed compatibility test "
-                f"(tokens={completion_tokens})"
+                "Model '%s' passed compatibility test (tokens=%s)",
+                redact_log_text(model_name, 160),
+                completion_tokens,
             )
             return (True, "", details)
             
         except Exception as e:
             error = f"Model '{model_name}' compatibility test failed with exception: {str(e)}"
-            logger.error(error)
+            logger.error("%s", redact_log_text(error, 240))
             details = {
                 "model_name": model_name,
                 "exception": str(e),
@@ -866,7 +889,7 @@ class LMStudioClient:
                 "cached_at": datetime.now().isoformat(),
                 **config
             }
-            logger.debug(f"Cached config for model '{model_id}'")
+            logger.debug("Cached config for model '%s'", redact_log_text(model_id, 160))
     
     async def get_cached_config(self, model_id: str) -> Optional[Dict[str, Any]]:
         """

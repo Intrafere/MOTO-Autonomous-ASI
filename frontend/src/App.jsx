@@ -36,11 +36,10 @@ import OpenRouterPrivacyWarningModal from './components/OpenRouterPrivacyWarning
 import CritiqueNotificationStack from './components/CritiqueNotificationStack';
 import ProofNotificationStack from './components/autonomous/ProofNotificationStack';
 import CreditExhaustionNotificationStack from './components/CreditExhaustionNotificationStack';
-import HungConnectionNotificationStack from './components/HungConnectionNotificationStack';
 import UpdateNotificationBanner from './components/UpdateNotificationBanner';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import { websocket } from './services/websocket';
-import { api, autonomousAPI, leanojAPI, openRouterAPI } from './services/api';
+import { api, autonomousAPI, cloudAccessAPI, leanojAPI, openRouterAPI } from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
   RECOMMENDED_PROFILE_KEY,
@@ -60,18 +59,23 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from './utils/openRouterSelection';
 
-const APP_MODE_STORAGE_KEY = 'appMode';
-const AUTONOMOUS_TAB_STORAGE_KEY = 'autonomousActiveTab';
-const MANUAL_TAB_STORAGE_KEY = 'manualActiveTab';
-const LEANOJ_TAB_STORAGE_KEY = 'leanojActiveTab';
-const COMPLETED_WORKS_SUB_TAB_STORAGE_KEY = 'completedWorksSubTab';
-const LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY = 'singlePaperWriterExpanded';
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
+const DEPRECATED_SCREEN_STATE_STORAGE_KEYS = [
+  'appMode',
+  'singlePaperWriterExpanded',
+  'autonomousActiveTab',
+  'completedWorksSubTab',
+  'manualActiveTab',
+  'leanojActiveTab',
+];
 const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'];
 const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'high_context', 'high_param', 'critique_submitter'];
 const HIGH_SCORE_CRITIQUE_THRESHOLD = 6.25;
 const SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY = 'seenHighScoreCritiqueNotifications';
 const MAX_SEEN_HIGH_SCORE_CRITIQUES = 500;
+const MAX_LIVE_ACTIVITY_EVENTS = 5000;
+const MAX_PROOF_NOTIFICATIONS = 20;
+const UPDATE_NOTICE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_CAPABILITIES = Object.freeze({
   genericMode: false,
   lmStudioEnabled: true,
@@ -235,45 +239,11 @@ function normalizeAutonomousConfigForCapabilities(config, lmStudioEnabled) {
 }
 
 function App() {
-  const [appMode, setAppMode] = useState(() => {
-    const savedMode = localStorage.getItem(APP_MODE_STORAGE_KEY);
-    if (savedMode === 'leanoj' && !readDeveloperModeEnabled()) {
-      return 'autonomous';
-    }
-    if (savedMode === 'autonomous' || savedMode === 'manual' || savedMode === 'leanoj') {
-      return savedMode;
-    }
-
-    const legacyExpanded = localStorage.getItem(LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY);
-    if (!legacyExpanded) {
-      return 'autonomous';
-    }
-
-    try {
-      return JSON.parse(legacyExpanded) ? 'manual' : 'autonomous';
-    } catch {
-      return 'autonomous';
-    }
-  });
-  const [autonomousActiveTab, setAutonomousActiveTab] = useState(() => {
-    const saved = localStorage.getItem(AUTONOMOUS_TAB_STORAGE_KEY);
-    if (saved === 'auto-stage2-history' || saved === 'auto-final-answer-library') {
-      return 'auto-completed-works';
-    }
-    return saved || 'auto-interface';
-  });
+  const [appMode, setAppMode] = useState('autonomous');
+  const [autonomousActiveTab, setAutonomousActiveTab] = useState('auto-interface');
   const [manualActiveTab, setManualActiveTab] = useState('aggregator-interface');
-  const [leanojActiveTab, setLeanojActiveTab] = useState(() => {
-    return localStorage.getItem(LEANOJ_TAB_STORAGE_KEY) || 'leanoj-interface';
-  });
-  const [completedWorksSubTab, setCompletedWorksSubTab] = useState(() => {
-    const savedSubTab = localStorage.getItem(COMPLETED_WORKS_SUB_TAB_STORAGE_KEY);
-    if (savedSubTab) return savedSubTab;
-    const savedTab = localStorage.getItem(AUTONOMOUS_TAB_STORAGE_KEY);
-    if (savedTab === 'auto-stage2-history') return 'stage2-history';
-    if (savedTab === 'auto-final-answer-library') return 'stage3-history';
-    return 'stage2-history';
-  });
+  const [leanojActiveTab, setLeanojActiveTab] = useState('leanoj-interface');
+  const [completedWorksSubTab, setCompletedWorksSubTab] = useState('stage2-history');
   const activeTab = appMode === 'manual'
     ? manualActiveTab
     : appMode === 'leanoj'
@@ -312,6 +282,7 @@ function App() {
   // a red "Set OpenRouter Key" chip) so that a slow-to-boot backend can never
   // make a stored key look like it "disappeared".
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(null);
+  const [hasCloudAccess, setHasCloudAccess] = useState(null);
   const [capabilities, setCapabilities] = useState(DEFAULT_CAPABILITIES);
   
   // Track if any workflow is running (for WorkflowPanel visibility)
@@ -331,28 +302,10 @@ function App() {
   const [updateNoticeDismissed, setUpdateNoticeDismissed] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem(APP_MODE_STORAGE_KEY, appMode);
-    localStorage.setItem(
-      LEGACY_SINGLE_PAPER_WRITER_STORAGE_KEY,
-      JSON.stringify(appMode === 'manual')
-    );
-  }, [appMode]);
-
-  useEffect(() => {
-    localStorage.setItem(AUTONOMOUS_TAB_STORAGE_KEY, autonomousActiveTab);
-  }, [autonomousActiveTab]);
-
-  useEffect(() => {
-    localStorage.setItem(MANUAL_TAB_STORAGE_KEY, manualActiveTab);
-  }, [manualActiveTab]);
-
-  useEffect(() => {
-    localStorage.setItem(LEANOJ_TAB_STORAGE_KEY, leanojActiveTab);
-  }, [leanojActiveTab]);
-
-  useEffect(() => {
-    localStorage.setItem(COMPLETED_WORKS_SUB_TAB_STORAGE_KEY, completedWorksSubTab);
-  }, [completedWorksSubTab]);
+    DEPRECATED_SCREEN_STATE_STORAGE_KEYS.forEach((key) => {
+      localStorage.removeItem(key);
+    });
+  }, []);
 
   useEffect(() => {
     if (!developerModeEnabled && appMode === 'leanoj') {
@@ -447,9 +400,10 @@ function App() {
           validatorOpenrouterProvider: settings.validatorOpenrouterProvider || null,
           validatorOpenrouterReasoningEffort: settings.validatorOpenrouterReasoningEffort || 'auto',
           validatorLmStudioFallback: settings.validatorLmStudioFallback || null,
-          validatorContextSize: settings.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
-          validatorMaxOutput: settings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+          validatorContextSize: settings.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
+          validatorMaxOutput: settings.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS,
           validatorSuperchargeEnabled: Boolean(settings.validatorSuperchargeEnabled),
+          creativityEmphasisBoostEnabled: Boolean(settings.creativityEmphasisBoostEnabled),
           uploadedFiles: [],
         };
       } catch (e) {
@@ -470,9 +424,10 @@ function App() {
           validatorOpenrouterProvider: parsed.validatorOpenrouterProvider || null,
           validatorOpenrouterReasoningEffort: parsed.validatorOpenrouterReasoningEffort || 'auto',
           validatorLmStudioFallback: parsed.validatorLmStudioFallback || null,
-          validatorContextSize: parsed.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
-          validatorMaxOutput: parsed.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+          validatorContextSize: parsed.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
+          validatorMaxOutput: parsed.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS,
           validatorSuperchargeEnabled: Boolean(parsed.validatorSuperchargeEnabled),
+          creativityEmphasisBoostEnabled: Boolean(parsed.creativityEmphasisBoostEnabled),
           uploadedFiles: [],
         };
       } catch (e) {
@@ -490,6 +445,7 @@ function App() {
       validatorContextSize: DEFAULT_CONTEXT_WINDOW,
       validatorMaxOutput: DEFAULT_MAX_OUTPUT_TOKENS,
       validatorSuperchargeEnabled: false,
+      creativityEmphasisBoostEnabled: false,
       uploadedFiles: [],
     };
   });
@@ -508,11 +464,12 @@ function App() {
       validatorContextSize: config.validatorContextSize,
       validatorMaxOutput: config.validatorMaxOutput,
       validatorSuperchargeEnabled: config.validatorSuperchargeEnabled,
+      creativityEmphasisBoostEnabled: config.creativityEmphasisBoostEnabled,
     };
     // Save to both old and new keys
     localStorage.setItem('aggregatorConfig', JSON.stringify(configToSave));
     localStorage.setItem('aggregator_settings', JSON.stringify(configToSave));
-  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorOpenrouterReasoningEffort, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput, config.validatorSuperchargeEnabled]);
+  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorOpenrouterReasoningEffort, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput, config.validatorSuperchargeEnabled, config.creativityEmphasisBoostEnabled]);
 
   // Autonomous mode state
   const [autonomousRunning, setAutonomousRunning] = useState(false);
@@ -554,9 +511,6 @@ function App() {
 
   // Credit exhaustion notification state (persistent until dismissed)
   const [creditExhaustionNotifications, setCreditExhaustionNotifications] = useState([]);
-
-  // Hung connection notification state (persistent until dismissed)
-  const [hungConnectionNotifications, setHungConnectionNotifications] = useState([]);
 
   // Live refs used by websocket listeners (which are registered once)
   const autonomousRunningRef = useRef(autonomousRunning);
@@ -635,7 +589,10 @@ function App() {
         critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
         critique_submitter_supercharge_enabled: autonomousConfig.critique_submitter_supercharge_enabled,
       },
+      allowMathematicalProofs: autonomousConfig.allow_mathematical_proofs ?? existingSettings.allowMathematicalProofs ?? true,
+      allowResearchPapers: autonomousConfig.allow_research_papers ?? existingSettings.allowResearchPapers ?? true,
       tier3Enabled: autonomousConfig.tier3_enabled ?? existingSettings.tier3Enabled ?? false,
+      creativityEmphasisBoostEnabled: autonomousConfig.creativity_emphasis_boost_enabled ?? existingSettings.creativityEmphasisBoostEnabled ?? false,
     });
   }, [autonomousConfig]);
 
@@ -716,9 +673,18 @@ function App() {
       }
     }
 
+    let codexConfigured = false;
+    try {
+      const cloudStatus = await cloudAccessAPI.getStatus();
+      codexConfigured = Boolean(cloudStatus.providers?.openai_codex_oauth?.configured);
+    } catch {
+      codexConfigured = false;
+    }
+
     const finalHasOpenRouterKey = Boolean(keyStatus.has_key);
     if (keyStatusOk) {
       setHasOpenRouterKey(finalHasOpenRouterKey);
+      setHasCloudAccess(finalHasOpenRouterKey || codexConfigured);
     }
 
     let availableModels = [];
@@ -739,6 +705,7 @@ function App() {
       capabilities: nextCapabilities,
       lmAvailable,
       hasOpenRouterKey: finalHasOpenRouterKey,
+      hasCloudAccess: finalHasOpenRouterKey || codexConfigured,
       keyStatusReachable: keyStatusOk,
       hasUsableLmStudioChatModel,
       lmStudioStatus: nextLmStudioStatus,
@@ -750,16 +717,32 @@ function App() {
     syncProviderAvailability();
   }, [syncProviderAvailability]);
 
-  // Fetch update notice from the backend on mount
+  // Fetch update notices on mount, then every 4 hours until one is shown or dismissed.
   useEffect(() => {
-    api.getUpdateNotice()
-      .then((notice) => {
-        if (notice && notice.update_available) {
+    if (updateNoticeDismissed || updateNotice?.update_available) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const fetchUpdateNotice = async () => {
+      try {
+        const notice = await api.getUpdateNotice();
+        if (!cancelled && notice && notice.update_available) {
           setUpdateNotice(notice);
         }
-      })
-      .catch(() => {});
-  }, []);
+      } catch {
+        // Backend unreachable, skip this cycle.
+      }
+    };
+
+    fetchUpdateNotice();
+    const intervalId = window.setInterval(fetchUpdateNotice, UPDATE_NOTICE_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [updateNoticeDismissed, updateNotice]);
 
   useEffect(() => {
     if (capabilities.lmStudioEnabled) {
@@ -781,7 +764,7 @@ function App() {
     }
   }, [capabilities.lmStudioEnabled]);
 
-  // Periodically re-check OpenRouter key status to keep indicator in sync.
+  // Periodically re-check cloud access status to keep indicator in sync.
   // We poll aggressively (5s) because the state mostly flips from "unknown"
   // to "known" shortly after backend startup, and users notice any delay as
   // "my key didn't save."
@@ -789,7 +772,14 @@ function App() {
     const interval = setInterval(async () => {
       try {
         const keyStatus = await openRouterAPI.getApiKeyStatus();
-        setHasOpenRouterKey(Boolean(keyStatus.has_key));
+        const hasKey = Boolean(keyStatus.has_key);
+        setHasOpenRouterKey(hasKey);
+        try {
+          const cloudStatus = await cloudAccessAPI.getStatus();
+          setHasCloudAccess(hasKey || Boolean(cloudStatus.providers?.openai_codex_oauth?.configured));
+        } catch {
+          setHasCloudAccess(hasKey);
+        }
       } catch {
         // Backend unreachable, skip this cycle
       }
@@ -957,11 +947,35 @@ function App() {
     const unsubscribers = [];
     
     // Helper to add activity with limit (prevents unbounded array growth causing UI freeze)
-    const MAX_ACTIVITY_EVENTS = 500;
     // Helper to get timestamp from server or fallback to client time
     const getTimestamp = (data) => data?._serverTimestamp || new Date().toISOString();
     const addActivity = (event) => {
-      setAutonomousActivity(prev => [...prev, event].slice(-MAX_ACTIVITY_EVENTS));
+      setAutonomousActivity(prev => [...prev, event].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+    };
+    const formatHungConnectionMessage = (data = {}) => {
+      const model = data.model || 'model';
+      const provider = data.provider || 'provider';
+      const elapsed = data.elapsed_minutes || 15;
+      return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
+    };
+    const addLeanOJActivityFromGlobalAlert = (event) => {
+      setLeanojActivity(prev => [...prev, event].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+    };
+    const shouldAddHungAlertToAutonomousFeed = (data = {}) => {
+      const roleId = String(data.role_id || '').toLowerCase();
+      if (roleId.startsWith('leanoj_')) {
+        return false;
+      }
+      if (roleId.startsWith('autonomous_') || roleId.startsWith('proof_')) {
+        return true;
+      }
+      if (autonomousRunningRef.current && (
+        roleId.startsWith('aggregator_') ||
+        roleId.startsWith('compiler_')
+      )) {
+        return true;
+      }
+      return false;
     };
     const isAutonomousTier2Active = () =>
       autonomousRunningRef.current && autonomousTierRef.current === 'tier2_paper_writing';
@@ -995,6 +1009,31 @@ function App() {
       const error = formatReason(data.error_summary || data.error_output || data.reason || '', 960);
       return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
     };
+    const formatProofNoveltyTier = (tier) => {
+      switch (tier) {
+        case 'major_mathematical_discovery':
+          return 'Major mathematical discovery';
+        case 'mathematical_discovery':
+          return 'Mathematical discovery';
+        case 'novel_variant':
+          return 'Novel variant';
+        case 'novel_formulation':
+          return 'Novel formulation';
+        case 'not_novel':
+          return 'Not novel';
+        case 'novel':
+          return 'Novel';
+        default:
+          return tier ? String(tier).replace(/_/g, ' ') : 'Not rated';
+      }
+    };
+    const proofNoveltyMessage = (data = {}) => {
+      const tierLabel = formatProofNoveltyTier(data.novelty_tier || (data.is_novel ? 'novel' : 'not_novel'));
+      const duplicateNote = data.duplicate ? ' (duplicate proof reused)' : '';
+      const reason = formatReason(data.novelty_reasoning || data.reasoning || '', 240);
+      const target = proofTarget(data);
+      return `${proofName(data)} Lean 4 novelty validator rating: ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${target ? ` (${target})` : ''}`;
+    };
     const isLeanOJProofEvent = (data = {}) => {
       const sourceType = String(data.source_type || '');
       const sourceId = String(data.source_id || '');
@@ -1003,6 +1042,11 @@ function App() {
         || sourceType === 'leanoj_subproof'
         || sourceId.startsWith('leanoj_')
         || trigger.startsWith('leanoj');
+    };
+    const shouldShowAutonomousProofNovelty = (data = {}) => {
+      if (isLeanOJProofEvent(data)) return false;
+      if (data.source_type === 'compiler_rigor' && !isAutonomousTier2Active()) return false;
+      return true;
     };
     const formatProofCheckCompleteMessage = (data = {}) => {
       const verified = data.verified_count ?? 0;
@@ -1093,20 +1137,22 @@ function App() {
     // Aggregator's direct submission events (per-submission with individual submitter_id)
     unsubscribers.push(websocket.on('submission_accepted', (data) => {
       const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : 'N/A';
+      const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
       addActivity({
         event: 'submission_accepted',
         timestamp: getTimestamp(data),
-        message: `Submitter ${data.submitter_id} [${modelName}]: ✓ ACCEPTED (total: ${data.total_acceptances})`,
+        message: `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✓ ACCEPTED (total: ${data.total_acceptances})`,
         data
       });
     }));
     
     unsubscribers.push(websocket.on('submission_rejected', (data) => {
       const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : 'N/A';
+      const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
       addActivity({
         event: 'submission_rejected',
         timestamp: getTimestamp(data),
-        message: `Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED (total: ${data.total_rejections})`,
+        message: `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED (total: ${data.total_rejections})`,
         data
       });
     }));
@@ -1238,15 +1284,6 @@ function App() {
       });
     }));
     
-    unsubscribers.push(websocket.on('critique_phase_skipped', (data) => {
-      addActivity({
-        event: 'critique_phase_skipped',
-        timestamp: getTimestamp(data),
-        message: `Critique phase skipped: ${data.reason || 'user override'}`,
-        data
-      });
-    }));
-    
     // Phase transitions during paper writing
     unsubscribers.push(websocket.on('phase_transition', (data) => {
       const fromPhase = data.from_phase || '?';
@@ -1371,6 +1408,14 @@ function App() {
 
     unsubscribers.push(websocket.on('novel_proof_discovered', (data) => {
       setProofRefreshToken((prev) => prev + 1);
+      if (shouldShowAutonomousProofNovelty(data)) {
+        addActivity({
+          event: 'novel_proof_discovered',
+          timestamp: getTimestamp(data),
+          message: proofNoveltyMessage(data),
+          data
+        });
+      }
       setProofNotifications((prev) => {
         const next = [
           ...prev,
@@ -1384,12 +1429,34 @@ function App() {
             timestamp: getTimestamp(data),
           }
         ];
-        return next.length > 3 ? next.slice(-3) : next;
+        return next.length > MAX_PROOF_NOTIFICATIONS
+          ? next.slice(-MAX_PROOF_NOTIFICATIONS)
+          : next;
       });
     }));
 
     unsubscribers.push(websocket.on('known_proof_verified', (data) => {
       setProofRefreshToken((prev) => prev + 1);
+      if (shouldShowAutonomousProofNovelty(data)) {
+        addActivity({
+          event: 'known_proof_verified',
+          timestamp: getTimestamp(data),
+          message: proofNoveltyMessage(data),
+          data
+        });
+      }
+    }));
+
+    unsubscribers.push(websocket.on('proof_registration_duplicate', (data) => {
+      setProofRefreshToken((prev) => prev + 1);
+      if (shouldShowAutonomousProofNovelty(data)) {
+        addActivity({
+          event: 'proof_registration_duplicate',
+          timestamp: getTimestamp(data),
+          message: proofNoveltyMessage({ ...data, duplicate: true }),
+          data: { ...data, duplicate: true }
+        });
+      }
     }));
 
     unsubscribers.push(websocket.on('proof_dependency_added', (data) => {
@@ -1445,7 +1512,6 @@ function App() {
       setAutonomousStopping(false);
       setAnyWorkflowRunning(false);
       autonomousTierRef.current = null;
-      setHungConnectionNotifications([]);
     }));
     
     // Tier 3 events
@@ -1665,30 +1731,10 @@ function App() {
       });
     }));
 
-    unsubscribers.push(websocket.on('serial_bottleneck_paused', (data) => {
-      console.warn('Serial bottleneck - workflow paused:', data);
-      addActivity({
-        event: 'serial_bottleneck_paused',
-        timestamp: getTimestamp(data),
-        message: `⏸️ SERIAL BOTTLENECK: ${data.role_id} paused for ${Math.round((data.wait_seconds || 0) / 60)} min`,
-        ...data
-      });
-    }));
-
-    unsubscribers.push(websocket.on('serial_bottleneck_resumed', (data) => {
-      console.info('Serial bottleneck resolved:', data);
-      addActivity({
-        event: 'serial_bottleneck_resumed',
-        timestamp: getTimestamp(data),
-        message: `▶️ SERIAL BOTTLENECK resolved: ${data.role_id} resumed`,
-        ...data
-      });
-    }));
-
-    unsubscribers.push(websocket.on('all_free_models_exhausted', (data) => {
+    unsubscribers.push(websocket.on('free_models_exhausted', (data) => {
       console.error('All free models exhausted:', data);
       addActivity({
-        event: 'all_free_models_exhausted',
+        event: 'free_models_exhausted',
         timestamp: getTimestamp(data),
         message: `❌ All free models exhausted: ${data.message}`,
         ...data
@@ -1760,6 +1806,68 @@ function App() {
       });
     }));
 
+    unsubscribers.push(websocket.on('leanoj_provider_paused', (data) => {
+      console.warn('Proof Solver paused for provider credits:', data);
+      addActivity({
+        event: 'leanoj_provider_paused',
+        timestamp: getTimestamp(data),
+        message: `Proof Solver paused until OpenRouter credits are reset: ${data.message || data.role_id || 'provider credits exhausted'}`,
+        ...data
+      });
+      setCreditExhaustionNotifications(prev => {
+        const roleId = data.role_id || 'Proof Solver';
+        if (prev.some(n => n.role_id === roleId && n.reason === 'provider_paused')) return prev;
+        return [...prev, {
+          id: `leanoj_provider_paused_${roleId}_${Date.now()}`,
+          role_id: roleId,
+          reason: 'provider_paused',
+          message: data.message || 'Proof Solver is paused until OpenRouter credits are reset.',
+          timestamp: getTimestamp(data)
+        }];
+      });
+    }));
+
+    unsubscribers.push(websocket.on('leanoj_provider_resumed', (data) => {
+      console.info('Proof Solver provider pause resumed:', data);
+      addActivity({
+        event: 'leanoj_provider_resumed',
+        timestamp: getTimestamp(data),
+        message: 'Proof Solver resumed after OpenRouter reset.',
+        ...data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('autonomous_proof_provider_paused', (data) => {
+      console.warn('Autonomous proof verification paused for provider credits:', data);
+      addActivity({
+        event: 'autonomous_proof_provider_paused',
+        timestamp: getTimestamp(data),
+        message: `Autonomous proof verification paused until OpenRouter credits are reset: ${data.message || data.source_id || 'provider credits exhausted'}`,
+        ...data
+      });
+      setCreditExhaustionNotifications(prev => {
+        const roleId = `Autonomous Proof (${data.source_id || data.source_type || 'checkpoint'})`;
+        if (prev.some(n => n.role_id === roleId && n.reason === 'provider_paused')) return prev;
+        return [...prev, {
+          id: `auto_proof_provider_paused_${Date.now()}`,
+          role_id: roleId,
+          reason: 'provider_paused',
+          message: data.message || 'Autonomous proof verification is paused until OpenRouter credits are reset.',
+          timestamp: getTimestamp(data)
+        }];
+      });
+    }));
+
+    unsubscribers.push(websocket.on('autonomous_proof_provider_resumed', (data) => {
+      console.info('Autonomous proof verification resumed:', data);
+      addActivity({
+        event: 'autonomous_proof_provider_resumed',
+        timestamp: getTimestamp(data),
+        message: 'Autonomous proof verification resumed after OpenRouter reset.',
+        ...data
+      });
+    }));
+
     // Boost credits exhausted
     unsubscribers.push(websocket.on('boost_credits_exhausted', (data) => {
       console.warn('Boost credits exhausted:', data);
@@ -1790,24 +1898,21 @@ function App() {
         ...data
       });
       setCreditExhaustionNotifications([]);
-      setHungConnectionNotifications([]);
     }));
 
     unsubscribers.push(websocket.on('hung_connection_alert', (data) => {
       console.warn('Hung connection alert:', data);
-      addLog({
-        type: 'warning',
-        message: `⏳ Possible hung connection: ${data.model} via ${data.provider} (${data.elapsed_minutes}+ min)`,
-        ...data
-      });
-      setHungConnectionNotifications(prev => {
-        if (prev.some(n => n.role_id === data.role_id)) return prev;
-        return [...prev, {
-          id: `hung_${data.role_id}_${Date.now()}`,
-          ...data,
-          timestamp: Date.now()
-        }];
-      });
+      const event = {
+        event: 'hung_connection_alert',
+        timestamp: getTimestamp(data),
+        message: formatHungConnectionMessage(data),
+        data
+      };
+      if (String(data.role_id || '').toLowerCase().startsWith('leanoj_')) {
+        addLeanOJActivityFromGlobalAlert(event);
+      } else if (shouldAddHungAlertToAutonomousFeed(data)) {
+        addActivity(event);
+      }
     }));
 
     unsubscribers.push(websocket.on('final_answer_complete', (data) => {
@@ -1877,7 +1982,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const MAX_LEANOJ_ACTIVITY_EVENTS = 500;
     const getTimestamp = (data = {}) => data?._serverTimestamp || data?.timestamp || new Date().toISOString();
     const shouldTrackLeanOJModelCall = (data = {}) => {
       const taskId = String(data.task_id || '');
@@ -1904,7 +2008,7 @@ function App() {
           message: message || data.message || data.reasoning || data.decision || data.phase || 'Proof Solver update',
           data,
         },
-      ].slice(-MAX_LEANOJ_ACTIVITY_EVENTS));
+      ].slice(-MAX_LIVE_ACTIVITY_EVENTS));
     };
     const summarizeLeanOJText = (text = '', limit = 220) => {
       const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
@@ -1937,6 +2041,7 @@ function App() {
     const formatLeanOJBrainstormMessage = (data = {}, accepted = true) => {
       const submitterId = data.submitter_id ?? data.submitter ?? '?';
       const modelName = formatModelName(data.submitter_model || data.model) || 'N/A';
+      const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
       const totalValue = accepted ? data.total_acceptances : data.total_rejections;
       const total = totalValue !== undefined ? ` (total: ${totalValue})` : '';
       const detail = accepted
@@ -1949,7 +2054,17 @@ function App() {
             || data.submission,
           160
         );
-      return `Brainstorm Submitter ${submitterId} [${modelName}]: ${accepted ? '✓ ACCEPTED' : '✗ REJECTED'}${total}${detail ? ` - ${detail}` : ''}`;
+      return `${creativityPrefix}Brainstorm Submitter ${submitterId} [${modelName}]: ${accepted ? '✓ ACCEPTED' : '✗ REJECTED'}${total}${detail ? ` - ${detail}` : ''}`;
+    };
+    const formatLeanOJTopicValidationMessage = (data = {}, accepted = true) => {
+      const submitterId = data.submitter_id ?? data.submitter ?? '?';
+      const modelName = formatModelName(data.submitter_model || data.model) || 'N/A';
+      const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
+      const count = data.accepted_topics !== undefined && data.target_topics !== undefined
+        ? ` (${data.accepted_topics}/${data.target_topics})`
+        : '';
+      const detail = summarizeLeanOJText(data.topic, 160);
+      return `${creativityPrefix}Topic Submitter ${submitterId} [${modelName}]: ${accepted ? '✓ ACCEPTED' : '✗ REJECTED'}${count}${detail ? ` - ${detail}` : ''}`;
     };
     const leanOJProofName = (data = {}) => {
       const attempt = data.attempt || {};
@@ -1978,6 +2093,31 @@ function App() {
         960
       );
       return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
+    };
+    const formatLeanOJNoveltyTier = (tier) => {
+      switch (tier) {
+        case 'major_mathematical_discovery':
+          return 'Major mathematical discovery';
+        case 'mathematical_discovery':
+          return 'Mathematical discovery';
+        case 'novel_variant':
+          return 'Novel variant';
+        case 'novel_formulation':
+          return 'Novel formulation';
+        case 'not_novel':
+          return 'Not novel';
+        case 'novel':
+          return 'Novel';
+        default:
+          return tier ? String(tier).replace(/_/g, ' ') : 'Not rated';
+      }
+    };
+    const leanOJNoveltyMessage = (data = {}) => {
+      const tierLabel = formatLeanOJNoveltyTier(data.novelty_tier || (data.is_novel ? 'novel' : 'not_novel'));
+      const duplicateNote = data.duplicate ? ' (duplicate proof reused)' : '';
+      const reason = summarizeLeanOJText(data.novelty_reasoning || data.reasoning || '', 240);
+      const target = leanOJProofTarget(data);
+      return `${leanOJProofName(data)} Lean 4 novelty validator rating: ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${target ? ` (${target})` : ''}`;
     };
     const leanOJAttemptStartedMessage = (data = {}) => {
       const attemptNumber = data.attempt?.attempt || data.attempt || 1;
@@ -2033,8 +2173,8 @@ function App() {
       ['leanoj_topic_empty', (data) => addLeanOJActivity('leanoj_topic_empty', data, `Topic submitter ${data.submitter_id ?? data.submitter ?? '?'} returned empty output on attempt ${data.attempt || '?'}`)],
       ['leanoj_topic_candidate_queued', (data) => addLeanOJActivity('leanoj_topic_candidate_queued', data, `Submitter ${data.submitter_id ?? data.submitter ?? '?'} queued topic for validation: ${summarizeLeanOJText(data.topic_preview, 140)}`)],
       ['leanoj_topic_batch_validation_started', (data) => addLeanOJActivity('leanoj_topic_batch_validation_started', data, `Topic validator reviewing batch of ${data.batch_size || 0} topic(s)`)],
-      ['leanoj_topic_validated', (data) => addLeanOJActivity('leanoj_topic_validated', data, `Topic accepted: ${summarizeLeanOJText(data.topic, 140)}`)],
-      ['leanoj_topic_rejected', (data) => addLeanOJActivity('leanoj_topic_rejected', data, `Topic rejected: ${summarizeLeanOJText(data.topic, 140)}`)],
+      ['leanoj_topic_validated', (data) => addLeanOJActivity('leanoj_topic_validated', data, formatLeanOJTopicValidationMessage(data, true))],
+      ['leanoj_topic_rejected', (data) => addLeanOJActivity('leanoj_topic_rejected', data, formatLeanOJTopicValidationMessage(data, false))],
       ['leanoj_recursive_brainstorm_started', (data) => addLeanOJActivity('leanoj_recursive_brainstorm_started', data, `Recursive brainstorm cycle ${data.cycle || '?'} ${data.resumed ? 'resumed' : 'started'}; targeting the current proof attempt`)],
       ['leanoj_topic_submitter_failed', (data) => addLeanOJActivity('leanoj_topic_submitter_failed', data, `Topic submitter ${data.submitter || '?'} failed: ${summarizeLeanOJText(data.message, 160)}`)],
       ['leanoj_recursive_brainstorm_completed', (data) => addLeanOJActivity('leanoj_recursive_brainstorm_completed', data, `Recursive brainstorm cycle ${data.cycle || '?'} completed with ${data.accepted_delta || 0} new accepted ideas`)],
@@ -2085,8 +2225,9 @@ function App() {
       ['proof_integrity_rejected', (data) => addLeanOJSharedProofActivity('proof_integrity_rejected', data, (eventData) => `${leanOJProofName(eventData)} error: integrity rejected - ${summarizeLeanOJText(eventData.reason || leanOJProofTarget(eventData), 960)}`)],
       ['proof_verified', (data) => addLeanOJSharedProofActivity('proof_verified', data, (eventData) => `${leanOJProofName(eventData)} verified and accepted: ${leanOJProofTarget(eventData)}`)],
       ['proof_attempts_exhausted', (data) => addLeanOJSharedProofActivity('proof_attempts_exhausted', data, (eventData) => `${leanOJProofName(eventData)} terminated: proof attempts exhausted for ${leanOJProofTarget(eventData)}`)],
-      ['novel_proof_discovered', (data) => addLeanOJSharedProofActivity('novel_proof_discovered', data, (eventData) => `${leanOJProofName(eventData)} novel proof discovered: ${eventData.theorem_statement || leanOJProofTarget(eventData)}`)],
-      ['known_proof_verified', (data) => addLeanOJSharedProofActivity('known_proof_verified', data, (eventData) => `${leanOJProofName(eventData)} known proof verified for ${eventData.source_type} ${eventData.source_id}`)],
+      ['novel_proof_discovered', (data) => addLeanOJSharedProofActivity('novel_proof_discovered', data, leanOJNoveltyMessage)],
+      ['known_proof_verified', (data) => addLeanOJSharedProofActivity('known_proof_verified', data, leanOJNoveltyMessage)],
+      ['proof_registration_duplicate', (data) => addLeanOJSharedProofActivity('proof_registration_duplicate', data, (eventData) => leanOJNoveltyMessage({ ...eventData, duplicate: true }))],
       ['proof_dependency_added', (data) => addLeanOJSharedProofActivity('proof_dependency_added', data, () => 'Proof Solver proof dependency added')],
       ['proof_check_complete', (data) => addLeanOJSharedProofActivity('proof_check_complete', data, (eventData) => `Proof check complete: ${eventData.verified_count || 0} verified, ${eventData.novel_count || 0} novel`)],
       ['leanoj_error', (data) => addLeanOJActivity('leanoj_error', data, data.message || 'Proof Solver error')],
@@ -2188,6 +2329,7 @@ function App() {
       await autonomousAPI.start({
         user_research_prompt: researchPrompt,
         submitter_configs: submitterConfigs,
+        creativity_emphasis_boost_enabled: developerModeEnabled && Boolean(autonomousConfig.creativity_emphasis_boost_enabled),
         // Validator config with OpenRouter support
         validator_provider: normalizeRuntimeProvider(
           autonomousConfig.validator_provider,
@@ -2244,6 +2386,8 @@ function App() {
         critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
         critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
         critique_submitter_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.critique_submitter_supercharge_enabled),
+        allow_mathematical_proofs: !capabilities.genericMode && (autonomousConfig.allow_mathematical_proofs ?? true),
+        allow_research_papers: autonomousConfig.allow_research_papers ?? true,
         tier3_enabled: autonomousConfig.tier3_enabled ?? false
       });
       setAutonomousRunning(true);
@@ -2316,6 +2460,7 @@ function App() {
 
   const normalizeLeanOJRequestForCapabilities = (request) => ({
     ...request,
+    creativity_emphasis_boost_enabled: developerModeEnabled && Boolean(request.creativity_emphasis_boost_enabled),
     topic_generator: normalizeLeanOJRoleForCapabilities(request.topic_generator),
     topic_validator: normalizeLeanOJRoleForCapabilities(request.topic_validator),
     brainstorm_submitters: (request.brainstorm_submitters || []).map(normalizeLeanOJRoleForCapabilities),
@@ -2478,11 +2623,6 @@ function App() {
     setCreditExhaustionNotifications(prev => prev.filter(n => n.id !== notificationId));
   };
 
-  // Hung connection notification handler
-  const handleDismissHungNotification = (notificationId) => {
-    setHungConnectionNotifications(prev => prev.filter(n => n.id !== notificationId));
-  };
-  
   // Critique modal API functions
   const handleGenerateCritique = async (customPrompt, validatorConfig) => {
     if (!selectedCritiquePaper) return;
@@ -2510,10 +2650,11 @@ function App() {
       capabilities: nextCapabilities,
       lmAvailable,
       hasOpenRouterKey: keyPresent,
+      hasCloudAccess: cloudAccessPresent,
       keyStatusReachable,
       hasUsableLmStudioChatModel,
     } = await syncProviderAvailability();
-    if (keyPresent) {
+    if (keyPresent || cloudAccessPresent) {
       return;
     }
 
@@ -2560,7 +2701,7 @@ function App() {
 
   const handleCloseOpenRouterKeyModal = () => {
     const keyWasJustSaved = openRouterKeyJustSavedRef.current;
-    const shouldReturnToStartup = openRouterKeyReason === 'startup_setup' && !keyWasJustSaved && !hasOpenRouterKey;
+    const shouldReturnToStartup = openRouterKeyReason === 'startup_setup' && !keyWasJustSaved && !hasCloudAccess;
     openRouterKeyJustSavedRef.current = false;
     setShowOpenRouterKeyModal(false);
 
@@ -2616,6 +2757,7 @@ function App() {
 
     openRouterKeyJustSavedRef.current = true;
     setHasOpenRouterKey(true);
+    setHasCloudAccess(true);
     console.log('OpenRouter API key set successfully');
   };
 
@@ -2778,9 +2920,9 @@ function App() {
         </div>
         <button
           className={`header-status-chip ${
-            hasOpenRouterKey === true
+            hasCloudAccess === true
               ? 'header-status-chip--ready'
-              : hasOpenRouterKey === false
+              : hasCloudAccess === false
                 ? 'header-status-chip--inactive'
                 : 'header-status-chip--pending'
           }`}
@@ -2789,18 +2931,18 @@ function App() {
             setShowOpenRouterKeyModal(true);
           }}
           title={
-            hasOpenRouterKey === true
-              ? 'OpenRouter API key is configured'
-              : hasOpenRouterKey === false
-                ? 'Configure OpenRouter API Key'
-                : 'Checking OpenRouter key status...'
+            hasCloudAccess === true
+              ? 'Cloud access is configured'
+              : hasCloudAccess === false
+                ? 'Configure Cloud Access & Keys'
+                : 'Checking cloud access status...'
           }
         >
-          {hasOpenRouterKey === true
-            ? 'OpenRouter ✓'
-            : hasOpenRouterKey === false
-              ? 'Set OpenRouter Key'
-              : 'OpenRouter…'}
+          {hasCloudAccess === true
+            ? 'Cloud Access & Keys ✓'
+            : hasCloudAccess === false
+              ? 'Cloud Access & Keys'
+              : 'Cloud Access…'}
         </button>
         {capabilities.lmStudioEnabled ? (
           <span
@@ -2966,6 +3108,9 @@ function App() {
               onStop={handleAutonomousStop}
               onClear={handleAutonomousClear}
               config={autonomousConfig}
+              onConfigChange={setAutonomousConfig}
+              developerModeEnabled={developerModeEnabled}
+              capabilities={capabilities}
               api={autonomousAPI}
             />
           )}
@@ -2984,6 +3129,7 @@ function App() {
               papers={papers}
               onRefresh={refreshPapers}
               archivedCount={autonomousStats?.paper_counts?.pruned || autonomousStats?.paper_counts?.archived || 0}
+              capabilities={capabilities}
               api={{ 
                 getAutonomousPaper: autonomousAPI.getAutonomousPaper,
                 deletePaper: autonomousAPI.deletePaper,
@@ -3004,6 +3150,7 @@ function App() {
               api={autonomousAPI}
               isRunning={autonomousRunning}
               status={autonomousStatus}
+              capabilities={capabilities}
             />
           )}
           {activeTab === 'auto-completed-works' && (
@@ -3037,13 +3184,14 @@ function App() {
               <div className="completed-works-content">
                 {completedWorksSubTab === 'stage2-history' && (
                   <Stage2PaperHistory
+                    capabilities={capabilities}
                     onCurrentSessionDataChanged={async () => {
                       await Promise.all([refreshPapers(), refreshBrainstorms()]);
                     }}
                   />
                 )}
                 {completedWorksSubTab === 'stage3-history' && (
-                  <FinalAnswerLibrary />
+                  <FinalAnswerLibrary capabilities={capabilities} />
                 )}
                 {completedWorksSubTab === 'proof-library' && (
                   <ProofLibrary />
@@ -3071,6 +3219,7 @@ function App() {
               onClear={handleLeanOJClear}
               onSkipBrainstorm={handleLeanOJSkipBrainstorm}
               onForceBrainstorm={handleLeanOJForceBrainstorm}
+              developerModeEnabled={developerModeEnabled}
             />
           )}
           {activeTab === 'leanoj-brainstorms' && (
@@ -3126,7 +3275,7 @@ function App() {
           )}
           {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
           {activeTab === 'compiler-logs' && <CompilerLogs />}
-          {activeTab === 'compiler-live-paper' && <LivePaper />}
+          {activeTab === 'compiler-live-paper' && <LivePaper capabilities={capabilities} />}
         </div>
       </div>
       
@@ -3258,6 +3407,7 @@ function App() {
         isOpen={showOpenRouterKeyModal}
         onClose={handleCloseOpenRouterKeyModal}
         onKeySet={handleOpenRouterKeySet}
+        onCloudAccessChanged={(configured) => setHasCloudAccess(Boolean(configured) || Boolean(hasOpenRouterKey))}
         reason={openRouterKeyReason}
         capabilities={capabilities}
       />
@@ -3292,12 +3442,6 @@ function App() {
         onDismissAll={() => setCreditExhaustionNotifications([])}
       />
 
-      {/* Hung Connection Notification Stack - Persists until user dismisses */}
-      <HungConnectionNotificationStack
-        notifications={hungConnectionNotifications}
-        onDismiss={handleDismissHungNotification}
-      />
-      
       {/* Critique Modal - Opens when notification is clicked */}
       {showCritiqueModal && selectedCritiquePaper && (
         <PaperCritiqueModal
@@ -3339,12 +3483,12 @@ function App() {
               Purchase Custom Industrial-Grade ASI Programs
             </a>
             <a
-              href="https://github.com/"
+              href="https://github.com/Intrafere/MOTO-Autonomous-ASI"
               target="_blank"
               rel="noopener noreferrer"
               className="footer-link footer-link-github"
             >
-              Intrafere GitHub
+              Star Our GitHub!
             </a>
           </div>
         </div>

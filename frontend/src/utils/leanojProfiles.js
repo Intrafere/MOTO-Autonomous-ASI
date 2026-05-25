@@ -38,7 +38,7 @@ const DEFAULT_SUBMITTER_CONFIG = {
   ...DEFAULT_ROLE_CONFIG,
 };
 
-const role = (modelId, contextWindow = 262000, maxOutputTokens = 40000) => ({
+const role = (modelId, contextWindow = DEFAULT_CONTEXT_WINDOW, maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS) => ({
   provider: 'openrouter',
   modelId,
   openrouterProvider: null,
@@ -125,6 +125,7 @@ const DEFAULT_SETTINGS = {
   freeOnly: false,
   freeModelLooping: true,
   freeModelAutoSelector: true,
+  creativityEmphasisBoostEnabled: false,
   modelProviders: {},
   selectedProfile: LEANOJ_RECOMMENDED_PROFILE_KEY,
 };
@@ -166,6 +167,7 @@ export function normalizeLeanOJSettings(settings = {}) {
     maxInitialBrainstormAccepts: settings.maxInitialBrainstormAccepts ?? DEFAULT_SETTINGS.maxInitialBrainstormAccepts,
     maxRecursiveBrainstormAccepts: settings.maxRecursiveBrainstormAccepts ?? DEFAULT_SETTINGS.maxRecursiveBrainstormAccepts,
     finalAttemptsPerCycle: Math.max(30, Number(settings.finalAttemptsPerCycle ?? DEFAULT_SETTINGS.finalAttemptsPerCycle)),
+    creativityEmphasisBoostEnabled: settings.creativityEmphasisBoostEnabled ?? DEFAULT_SETTINGS.creativityEmphasisBoostEnabled,
     modelProviders: settings.modelProviders || DEFAULT_SETTINGS.modelProviders,
     selectedProfile: settings.selectedProfile ?? DEFAULT_SETTINGS.selectedProfile,
   };
@@ -188,14 +190,22 @@ export function persistLeanOJSettings(settings) {
   return normalized;
 }
 
-const roleToApi = (config = {}) => ({
+function positiveRoleSetting(value, label) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be configured as a positive number in Proof Solver Settings.`);
+  }
+  return Math.floor(parsed);
+}
+
+const roleToApi = (config = {}, label = 'Role') => ({
   provider: config.provider || 'lm_studio',
   model_id: config.modelId || '',
-  openrouter_provider: config.openrouterProvider || null,
+  openrouter_provider: config.openRouterProvider || config.openrouterProvider || null,
   openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort),
   lm_studio_fallback_id: config.lmStudioFallbackId || null,
-  context_window: Number(config.contextWindow || DEFAULT_CONTEXT_WINDOW),
-  max_output_tokens: Number(config.maxOutputTokens || DEFAULT_MAX_OUTPUT_TOKENS),
+  context_window: positiveRoleSetting(config.contextWindow, `${label} context window`),
+  max_output_tokens: positiveRoleSetting(config.maxOutputTokens, `${label} max output tokens`),
   supercharge_enabled: Boolean(config.superchargeEnabled),
 });
 
@@ -206,12 +216,13 @@ export function settingsToLeanOJRequest(settings, prompt, leanTemplate) {
   return {
     user_prompt: prompt ?? normalized.prompt ?? '',
     lean_template: leanTemplate ?? normalized.leanTemplate ?? '',
-    topic_generator: roleToApi(topicGenerator),
-    topic_validator: roleToApi(roles.topic_validator),
-    brainstorm_submitters: normalized.submitterConfigs.map(roleToApi),
-    brainstorm_validator: roleToApi(roles.brainstorm_validator),
-    path_decider: roleToApi(roles.final_solver),
-    final_solver: roleToApi(roles.final_solver),
+    creativity_emphasis_boost_enabled: Boolean(normalized.creativityEmphasisBoostEnabled),
+    topic_generator: roleToApi(topicGenerator, 'Topic generator'),
+    topic_validator: roleToApi(roles.topic_validator, 'Topic validator'),
+    brainstorm_submitters: normalized.submitterConfigs.map((config, index) => roleToApi(config, `Brainstorm submitter ${index + 1}`)),
+    brainstorm_validator: roleToApi(roles.brainstorm_validator, 'Brainstorm validator'),
+    path_decider: roleToApi(roles.final_solver, 'Final proof solver'),
+    final_solver: roleToApi(roles.final_solver, 'Final proof solver'),
     max_initial_brainstorm_accepts: Number(normalized.maxInitialBrainstormAccepts || 30),
     max_recursive_brainstorm_accepts: Number(normalized.maxRecursiveBrainstormAccepts || 10),
     final_attempts_per_cycle: Number(normalized.finalAttemptsPerCycle || 30),

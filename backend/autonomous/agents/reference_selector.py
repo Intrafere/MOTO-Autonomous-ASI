@@ -19,20 +19,16 @@ CONTEXT HANDLING:
 - Expansion phase: Direct inject full papers if they fit, else use RAG
 - Validates prompt size before sending to prevent overflow
 """
-import asyncio
-import json
 import logging
-from typing import Optional, Dict, Any, List, Tuple, Callable
+from typing import Optional, Dict, Any, List, Callable
 
-from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config, system_config
-from backend.shared.models import ReferenceExpansionRequest, ReferenceSelectionResult
+from backend.shared.models import ReferenceExpansionRequest
 from backend.autonomous.prompts.paper_reference_prompts import (
-    build_reference_expansion_prompt,
     build_reference_selection_prompt,
     build_pre_brainstorm_expansion_prompt,
     build_additional_reference_expansion_prompt
@@ -58,8 +54,8 @@ class ReferenceSelectorAgent:
     def __init__(
         self,
         model_id: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 25000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.model_id = model_id
         self.context_window = context_window
@@ -80,7 +76,7 @@ class ReferenceSelectorAgent:
     
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""
-        return self.context_window - self.max_output_tokens
+        return rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
     
     async def select_references(
         self,
@@ -301,7 +297,10 @@ class ReferenceSelectorAgent:
         
         for paper_id in paper_ids:
             # Get full paper content
-            content = await paper_library.get_paper_content(paper_id)
+            content = await paper_library.get_paper_content(
+                paper_id,
+                strip_proofs=True,
+            )
             
             # NEW: Also get outline
             outline = await paper_library.get_outline(paper_id)

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,7 @@ _DEFAULT_MANIFEST = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build5-v12",
+    "api_contract_version": "build5-v22",
 }
 
 _DEFAULT_PRESERVED_ROOTS = {
@@ -93,6 +94,12 @@ class UpdateCheckResult:
     def update_available(self) -> bool:
         if self.remote_manifest is None:
             return False
+        version_comparison = _compare_version_strings(
+            self.local_manifest.version,
+            self.remote_manifest.version,
+        )
+        if version_comparison is not None and version_comparison > 0:
+            return False
         return self.remote_manifest.build_commit != self.local_manifest.build_commit
 
     @property
@@ -115,6 +122,29 @@ class _CopyJournal:
         self.created_files = []
         self.overwritten_files = []
         self.overwritten_directories = []
+
+
+def _parse_version_tuple(version: str) -> tuple[int, ...] | None:
+    normalized = str(version or "").strip().lower()
+    if normalized.startswith("v"):
+        normalized = normalized[1:]
+    match = re.match(r"^(\d+(?:\.\d+)*)(?:[-+].*)?$", normalized)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _compare_version_strings(local_version: str, remote_version: str) -> int | None:
+    """Compare numeric version segments; return None for unparseable versions."""
+    local_parts = _parse_version_tuple(local_version)
+    remote_parts = _parse_version_tuple(remote_version)
+    if local_parts is None or remote_parts is None:
+        return None
+
+    width = max(len(local_parts), len(remote_parts))
+    padded_local = local_parts + (0,) * (width - len(local_parts))
+    padded_remote = remote_parts + (0,) * (width - len(remote_parts))
+    return (padded_local > padded_remote) - (padded_local < padded_remote)
 
 
 def _read_json(path: Path) -> dict | None:
@@ -406,7 +436,7 @@ def _save_launcher_state(payload: dict) -> None:
     _write_json(LAUNCHER_STATE_PATH, payload)
 
 
-def cleanup_launcher_state() -> list[dict]:
+def cleanup_launcher_state(exclude_instance_id: str | None = None) -> list[dict]:
     payload = _load_launcher_state()
     active_instances: list[dict] = []
     for instance in payload.get("instances", []):
@@ -422,7 +452,13 @@ def cleanup_launcher_state() -> list[dict]:
             active_instances.append(normalized)
 
     _save_launcher_state({"instances": active_instances})
-    return active_instances
+    if not exclude_instance_id:
+        return active_instances
+    return [
+        instance
+        for instance in active_instances
+        if str(instance.get("instance_id", "")).strip() != exclude_instance_id
+    ]
 
 
 def register_active_instance(
@@ -611,9 +647,9 @@ def classify_install_state(active_instances: list[dict]) -> InstallState:
     )
 
 
-def check_for_updates() -> UpdateCheckResult:
+def check_for_updates(exclude_instance_id: str | None = None) -> UpdateCheckResult:
     local_manifest = load_local_manifest()
-    active_instances = cleanup_launcher_state()
+    active_instances = cleanup_launcher_state(exclude_instance_id=exclude_instance_id)
     install_state = classify_install_state(active_instances)
     try:
         remote_manifest = fetch_remote_manifest(local_manifest)

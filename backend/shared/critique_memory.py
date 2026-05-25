@@ -36,6 +36,7 @@ import uuid
 
 from backend.shared.config import system_config
 from backend.shared.models import PaperCritique
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.path_safety import (
     resolve_path_within_root,
     validate_single_path_component,
@@ -260,11 +261,17 @@ async def save_critique(
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(critiques_data, f, indent=2, default=str)
         logger.info(
-            f"Saved critique {critique.critique_id} for {paper_type}"
-            + (f" paper_id={paper_id}" if paper_id else "")
+            "Saved critique %s for %s%s",
+            redact_log_text(critique.critique_id, 120),
+            redact_log_text(paper_type, 80),
+            f" paper_id={redact_log_text(paper_id, 120)}" if paper_id else "",
         )
     except Exception as e:
-        logger.error(f"Failed to save critique for {paper_type}: {e}")
+        logger.error(
+            "Failed to save critique for %s: %s",
+            redact_log_text(paper_type, 80),
+            redact_log_text(e, 240),
+        )
         raise
 
     return critique
@@ -295,10 +302,18 @@ async def get_critiques(
 
         return critiques
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse critiques for {paper_type}: {e}")
+        logger.error(
+            "Failed to parse critiques for %s: %s",
+            redact_log_text(paper_type, 80),
+            redact_log_text(e, 240),
+        )
         return []
     except Exception as e:
-        logger.error(f"Failed to load critiques for {paper_type}: {e}")
+        logger.error(
+            "Failed to load critiques for %s: %s",
+            redact_log_text(paper_type, 80),
+            redact_log_text(e, 240),
+        )
         return []
 
 
@@ -313,12 +328,17 @@ async def clear_critiques(
         try:
             file_path.unlink()
             logger.info(
-                f"Cleared critiques for {paper_type}"
-                + (f" paper_id={paper_id}" if paper_id else "")
+                "Cleared critiques for %s%s",
+                redact_log_text(paper_type, 80),
+                f" paper_id={redact_log_text(paper_id, 120)}" if paper_id else "",
             )
             return True
         except Exception as e:
-            logger.error(f"Failed to delete critiques for {paper_type}: {e}")
+            logger.error(
+                "Failed to delete critiques for %s: %s",
+                redact_log_text(paper_type, 80),
+                redact_log_text(e, 240),
+            )
             raise
 
     return False

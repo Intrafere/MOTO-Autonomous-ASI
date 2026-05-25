@@ -5,6 +5,7 @@ Stores user-provided credentials in the OS-backed keyring instead of browser
 storage so keys survive restarts without being written to frontend localStorage.
 """
 from typing import Optional
+import json
 import logging
 
 import keyring
@@ -16,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SERVICE_NAME = "MOTO-Autonomous-ASI"
 _OPENROUTER_KEY = "openrouter_api_key"
+_OPENAI_CODEX_OAUTH = "openai_codex_oauth"
+_OPENAI_CODEX_OAUTH_CHUNK_PREFIX = "openai_codex_oauth_chunk"
+_OPENAI_CODEX_OAUTH_CHUNK_COUNT = "openai_codex_oauth_chunk_count"
+# Windows Credential Manager limits blobs to 2560 bytes, which is about
+# 1280 UTF-16 characters through keyring/win32cred. Keep chunks below that.
+_SECRET_CHUNK_SIZE = 1000
 _WOLFRAM_KEY = "wolfram_alpha_api_key"
 
 
@@ -99,6 +106,92 @@ def store_openrouter_api_key(api_key: str) -> None:
 def clear_openrouter_api_key() -> None:
     """Delete the persisted global OpenRouter API key."""
     _delete_secret(_OPENROUTER_KEY)
+
+
+def _load_chunked_secret(prefix: str, count_name: str) -> Optional[str]:
+    """Load a large secret split across several keyring entries."""
+    raw_count = _get_secret(count_name)
+    if not raw_count:
+        return None
+    try:
+        count = int(raw_count)
+    except ValueError as exc:
+        raise SecretStoreError("Stored chunked credential metadata is invalid.") from exc
+    if count < 1 or count > 100:
+        raise SecretStoreError("Stored chunked credential metadata is out of range.")
+    chunks = []
+    for index in range(count):
+        chunk = _get_secret(f"{prefix}_{index}")
+        if chunk is None:
+            raise SecretStoreError("Stored chunked credential is incomplete.")
+        chunks.append(chunk)
+    return "".join(chunks)
+
+
+def _store_chunked_secret(prefix: str, count_name: str, secret_value: str) -> None:
+    """Store a large secret across several keyring entries."""
+    _delete_chunked_secret(prefix, count_name)
+    chunks = [
+        secret_value[index:index + _SECRET_CHUNK_SIZE]
+        for index in range(0, len(secret_value), _SECRET_CHUNK_SIZE)
+    ]
+    if not chunks:
+        raise ValueError("Secret value is required")
+    for index, chunk in enumerate(chunks):
+        _set_secret(f"{prefix}_{index}", chunk)
+    _set_secret(count_name, str(len(chunks)))
+
+
+def _delete_chunked_secret(prefix: str, count_name: str) -> None:
+    """Delete a chunked secret, tolerating missing chunks."""
+    raw_count = None
+    try:
+        raw_count = _get_secret(count_name)
+    except SecretStoreError:
+        raw_count = None
+    max_count = 100
+    if raw_count:
+        try:
+            max_count = max(100, int(raw_count) + 5)
+        except ValueError:
+            max_count = 100
+    for index in range(max_count):
+        try:
+            _delete_secret(f"{prefix}_{index}")
+        except SecretStoreError:
+            continue
+    try:
+        _delete_secret(count_name)
+    except SecretStoreError:
+        return
+
+
+def load_openai_codex_oauth_tokens() -> Optional[dict]:
+    """Load persisted OpenAI Codex OAuth tokens."""
+    raw_value = _load_chunked_secret(_OPENAI_CODEX_OAUTH_CHUNK_PREFIX, _OPENAI_CODEX_OAUTH_CHUNK_COUNT)
+    if not raw_value:
+        raw_value = _get_secret(_OPENAI_CODEX_OAUTH)
+    if not raw_value:
+        return None
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise SecretStoreError("Stored OpenAI Codex OAuth token payload is invalid.") from exc
+    return payload if isinstance(payload, dict) else None
+
+
+def store_openai_codex_oauth_tokens(tokens: dict) -> None:
+    """Persist OpenAI Codex OAuth tokens securely."""
+    payload = json.dumps(tokens, separators=(",", ":"))
+    _store_chunked_secret(_OPENAI_CODEX_OAUTH_CHUNK_PREFIX, _OPENAI_CODEX_OAUTH_CHUNK_COUNT, payload)
+    # Remove the pre-chunking storage entry if it exists.
+    _delete_secret(_OPENAI_CODEX_OAUTH)
+
+
+def clear_openai_codex_oauth_tokens() -> None:
+    """Delete persisted OpenAI Codex OAuth tokens."""
+    _delete_secret(_OPENAI_CODEX_OAUTH)
+    _delete_chunked_secret(_OPENAI_CODEX_OAUTH_CHUNK_PREFIX, _OPENAI_CODEX_OAUTH_CHUNK_COUNT)
 
 
 def load_wolfram_api_key() -> Optional[str]:

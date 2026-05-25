@@ -6,6 +6,7 @@ import hashlib
 from fastapi import APIRouter, HTTPException
 import logging
 from pathlib import Path
+from datetime import datetime
 import aiofiles
 
 from backend.api.routes import websocket
@@ -13,6 +14,7 @@ from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueR
 from backend.shared.config import system_config
 from backend.shared.token_tracker import token_tracker
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.compiler.core.compiler_coordinator import CRITIQUE_ATTEMPT_TARGET, compiler_coordinator
 from backend.compiler.memory.outline_memory import outline_memory
@@ -20,12 +22,67 @@ from backend.compiler.memory.paper_memory import paper_memory
 from backend.aggregator.core.coordinator import coordinator
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
+from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.memory.proof_database import proof_database
 from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/compiler", tags=["compiler"])
+
+_compiler_proof_only_task: asyncio.Task | None = None
+
+
+def _bounded_context(value: str, max_chars: int = 50000) -> str:
+    text = (value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2
+    tail = max_chars - head
+    return (
+        text[:head].rstrip()
+        + "\n\n[... source context truncated; full source remains available through compiler RAG ...]\n\n"
+        + text[-tail:].lstrip()
+    )
+
+
+def _positive_int_setting(value, setting_name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed <= 0:
+        raise ValueError(f"{setting_name} must be explicitly configured as a positive integer.")
+    return parsed
+
+
+def _validate_positive_role_limits(role_limits: dict[str, tuple[object, object]]) -> None:
+    """Validate context/max-output limits before mutating shared runtime state."""
+    for role, (context_window, max_tokens) in role_limits.items():
+        context = _positive_int_setting(context_window, f"{role} context window")
+        output = _positive_int_setting(max_tokens, f"{role} max output tokens")
+        if output >= context:
+            raise ValueError(f"{role} max output tokens must be smaller than its context window.")
+
+
+async def _read_manual_aggregator_context() -> str:
+    try:
+        shared_path = Path(system_config.shared_training_file)
+        if not shared_path.exists():
+            return ""
+        return await asyncio.to_thread(shared_path.read_text, encoding="utf-8")
+    except Exception as exc:
+        logger.debug("Unable to read manual compiler aggregator context for proof check: %s", exc)
+        return ""
+
+
+async def _build_saved_compiler_proof_content(full_content: str) -> str:
+    paper_content = paper_library.strip_verified_proofs_from_content(full_content or "")
+    source_context = _bounded_context(await _read_manual_aggregator_context())
+    parts = [f"SAVED MANUAL COMPILER PAPER:\n{paper_content.strip()}"]
+    if source_context:
+        parts.append(f"PART 1 AGGREGATOR DATABASE CONTEXT:\n{source_context}")
+    return "\n\n---\n\n".join(part for part in parts if part.strip())
 
 
 async def _run_saved_compiler_paper_proof_check(
@@ -39,6 +96,8 @@ async def _run_saved_compiler_paper_proof_check(
         return
     if not full_content.strip():
         return
+    source_content = paper_library.strip_verified_proofs_from_content(full_content)
+    proof_content = await _build_saved_compiler_proof_content(full_content)
     submitter_model = str(proof_config.get("submitter_model") or "")
     validator_model = str(proof_config.get("validator_model") or "")
     if not submitter_model:
@@ -48,9 +107,14 @@ async def _run_saved_compiler_paper_proof_check(
         logger.warning("Skipping saved compiler paper proof check: validator model is unavailable")
         return
 
-    source_hash = hashlib.sha256(full_content.encode("utf-8")).hexdigest()[:16]
+    source_hash = hashlib.sha256(source_content.encode("utf-8")).hexdigest()[:16]
     source_id = f"compiler_manual_{source_hash}"
     role_suffix = "compiler_manual_paper"
+
+    submitter_context = proof_config.get("submitter_context")
+    submitter_max_tokens = proof_config.get("submitter_max_tokens")
+    validator_context = proof_config.get("validator_context")
+    validator_max_tokens = proof_config.get("validator_max_tokens")
 
     submitter_config = ModelConfig(
         provider=str(proof_config.get("submitter_provider") or "lm_studio"),
@@ -58,8 +122,8 @@ async def _run_saved_compiler_paper_proof_check(
         openrouter_provider=proof_config.get("submitter_openrouter_provider"),
         openrouter_reasoning_effort=proof_config.get("submitter_openrouter_reasoning_effort", "auto"),
         lm_studio_fallback_id=proof_config.get("submitter_lm_studio_fallback"),
-        context_window=int(proof_config.get("submitter_context") or system_config.compiler_high_context_context_window),
-        max_output_tokens=int(proof_config.get("submitter_max_tokens") or system_config.compiler_high_context_max_output_tokens),
+        context_window=_positive_int_setting(submitter_context, "submitter proof context window"),
+        max_output_tokens=_positive_int_setting(submitter_max_tokens, "submitter proof max output tokens"),
         supercharge_enabled=bool(proof_config.get("submitter_supercharge_enabled", False)),
     )
     validator_config = ModelConfig(
@@ -68,8 +132,8 @@ async def _run_saved_compiler_paper_proof_check(
         openrouter_provider=proof_config.get("validator_openrouter_provider"),
         openrouter_reasoning_effort=proof_config.get("validator_openrouter_reasoning_effort", "auto"),
         lm_studio_fallback_id=proof_config.get("validator_lm_studio_fallback"),
-        context_window=int(proof_config.get("validator_context") or system_config.compiler_validator_context_window),
-        max_output_tokens=int(proof_config.get("validator_max_tokens") or system_config.compiler_validator_max_output_tokens),
+        context_window=_positive_int_setting(validator_context, "validator proof context window"),
+        max_output_tokens=_positive_int_setting(validator_max_tokens, "validator proof max output tokens"),
         supercharge_enabled=bool(proof_config.get("validator_supercharge_enabled", False)),
     )
     for role_id in (
@@ -82,10 +146,10 @@ async def _run_saved_compiler_paper_proof_check(
 
     stage = ProofVerificationStage()
     await stage.run(
-        content=full_content,
+        content=proof_content,
         source_type="paper",
         source_id=source_id,
-        user_prompt=str(proof_config.get("user_prompt") or ""),
+        user_prompt=proof_database.inject_into_prompt(str(proof_config.get("user_prompt") or "")),
         submitter_model=submitter_model,
         submitter_context=submitter_config.context_window,
         submitter_max_tokens=submitter_config.max_output_tokens,
@@ -106,6 +170,9 @@ def _get_start_conflict() -> str | None:
     if compiler_coordinator.is_running:
         return "Compiler is already running"
 
+    if _compiler_proof_only_task and not _compiler_proof_only_task.done():
+        return "Compiler proof verification is already running"
+
     if coordinator.is_running:
         return "Cannot start Compiler while Aggregator is running. Stop Aggregator first."
 
@@ -117,6 +184,82 @@ def _get_start_conflict() -> str | None:
         return "Cannot start Compiler while Proof Solver is running. Stop Proof Solver first."
 
     return None
+
+
+async def _run_compiler_aggregator_proof_check(request: CompilerStartRequest) -> None:
+    """Run proof verification over the manual Aggregator database without writing a paper."""
+    try:
+        token_tracker.reset()
+        token_tracker.start_timer()
+        content = await _read_manual_aggregator_context()
+        if not content.strip():
+            await websocket.broadcast_event(
+                "compiler_proof_check_skipped",
+                {"reason": "Aggregator database is empty."},
+            )
+            return
+
+        source_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        source_id = f"compiler_aggregator_{source_hash}"
+        role_suffix = "compiler_aggregator"
+
+        submitter_config = ModelConfig(
+            provider=request.high_context_provider,
+            model_id=request.high_context_model,
+            openrouter_provider=request.high_context_openrouter_provider,
+            openrouter_reasoning_effort=request.high_context_openrouter_reasoning_effort,
+            lm_studio_fallback_id=request.high_context_lm_studio_fallback,
+            context_window=request.high_context_context_size,
+            max_output_tokens=request.high_context_max_output_tokens,
+            supercharge_enabled=request.high_context_supercharge_enabled,
+        )
+        validator_config = ModelConfig(
+            provider=request.validator_provider,
+            model_id=request.validator_model,
+            openrouter_provider=request.validator_openrouter_provider,
+            openrouter_reasoning_effort=request.validator_openrouter_reasoning_effort,
+            lm_studio_fallback_id=request.validator_lm_studio_fallback,
+            context_window=request.validator_context_size,
+            max_output_tokens=request.validator_max_output_tokens,
+            supercharge_enabled=request.validator_supercharge_enabled,
+        )
+        for role_id in (
+            f"autonomous_proof_identification_{role_suffix}",
+            f"autonomous_proof_lemma_search_{role_suffix}",
+            f"autonomous_proof_formalization_{role_suffix}",
+        ):
+            api_client_manager.configure_role(role_id, submitter_config)
+        api_client_manager.configure_role("autonomous_proof_novelty", validator_config)
+
+        await websocket.broadcast_event(
+            "compiler_proof_check_started",
+            {"source_type": "brainstorm", "source_id": source_id},
+        )
+        stage = ProofVerificationStage()
+        await stage.run(
+            content=f"PART 1 AGGREGATOR DATABASE:\n{content}",
+            source_type="brainstorm",
+            source_id=source_id,
+            user_prompt=proof_database.inject_into_prompt(request.compiler_prompt),
+            submitter_model=request.high_context_model,
+            submitter_context=request.high_context_context_size,
+            submitter_max_tokens=request.high_context_max_output_tokens,
+            validator_model=request.validator_model,
+            validator_context=request.validator_context_size,
+            validator_max_tokens=request.validator_max_output_tokens,
+            broadcast_fn=websocket.broadcast_event,
+            novel_proofs_db=proof_database,
+            source_title=request.compiler_prompt or "Compiler Aggregator Database",
+            role_suffix_override=role_suffix,
+            trigger="manual_compiler_aggregator",
+            append_to_source=False,
+        )
+        await websocket.broadcast_event(
+            "compiler_proof_check_complete",
+            {"source_type": "brainstorm", "source_id": source_id},
+        )
+    finally:
+        token_tracker.stop_timer()
 
 
 def _log_background_task_failure(task: asyncio.Task) -> None:
@@ -131,11 +274,58 @@ def _log_background_task_failure(task: asyncio.Task) -> None:
 @router.post("/start")
 async def start_compiler(request: CompilerStartRequest):
     """Start the compiler system."""
+    global _compiler_proof_only_task
     try:
         async with workflow_start_guard.reserve():
             conflict = _get_start_conflict()
             if conflict:
                 raise HTTPException(status_code=400, detail=conflict)
+
+            if not request.allow_mathematical_proofs and not request.allow_research_papers:
+                raise HTTPException(
+                    status_code=400,
+                    detail="At least one allowed output must be enabled.",
+                )
+
+            _validate_positive_role_limits({
+                "validator": (request.validator_context_size, request.validator_max_output_tokens),
+                "high-context submitter": (request.high_context_context_size, request.high_context_max_output_tokens),
+                "high-param submitter": (request.high_param_context_size, request.high_param_max_output_tokens),
+                "critique submitter": (request.critique_submitter_context_window, request.critique_submitter_max_tokens),
+            })
+
+            effective_allow_mathematical_proofs = bool(
+                request.allow_mathematical_proofs and not system_config.generic_mode
+            )
+            if request.allow_mathematical_proofs and not system_config.lean4_enabled:
+                if not (system_config.generic_mode and request.allow_research_papers):
+                    raise HTTPException(
+                        status_code=501,
+                        detail={
+                            "lean4_enabled": False,
+                            "message": "Mathematical proof output requires Lean 4 proof verification to be enabled.",
+                        },
+                    )
+
+            if not request.allow_research_papers:
+                if not effective_allow_mathematical_proofs:
+                    raise HTTPException(status_code=400, detail="At least one allowed output must be enabled.")
+                if not system_config.lean4_enabled:
+                    raise HTTPException(
+                        status_code=501,
+                        detail={
+                            "lean4_enabled": False,
+                            "message": "Mathematical proof output requires Lean 4 proof verification to be enabled.",
+                        },
+                    )
+                _compiler_proof_only_task = asyncio.create_task(
+                    _run_compiler_aggregator_proof_check(request)
+                )
+                _compiler_proof_only_task.add_done_callback(_log_background_task_failure)
+                return {
+                    "status": "proof_check_started",
+                    "message": "Compiler proof verification started over the Aggregator database",
+                }
 
             # Update system config with user-provided context sizes
             system_config.compiler_validator_context_window = request.validator_context_size
@@ -153,10 +343,10 @@ async def start_compiler(request: CompilerStartRequest):
             system_config.compiler_critique_submitter_model = request.critique_submitter_model
 
             logger.info(
-                f"Compiler max output tokens - "
-                f"Validator: {request.validator_max_output_tokens}, "
-                f"High-context: {request.high_context_max_output_tokens}, "
-                f"High-param: {request.high_param_max_output_tokens}"
+                "Compiler max output tokens - Validator: %s, High-context: %s, High-param: %s",
+                redact_log_text(request.validator_max_output_tokens, 40),
+                redact_log_text(request.high_context_max_output_tokens, 40),
+                redact_log_text(request.high_param_max_output_tokens, 40),
             )
 
             # Initialize coordinator with OpenRouter provider configurations
@@ -186,7 +376,8 @@ async def start_compiler(request: CompilerStartRequest):
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
                 high_context_supercharge_enabled=request.high_context_supercharge_enabled,
                 high_param_supercharge_enabled=request.high_param_supercharge_enabled,
-                critique_submitter_supercharge_enabled=request.critique_submitter_supercharge_enabled
+                critique_submitter_supercharge_enabled=request.critique_submitter_supercharge_enabled,
+                allow_mathematical_proofs=effective_allow_mathematical_proofs
             )
 
             # Start coordinator
@@ -199,9 +390,13 @@ async def start_compiler(request: CompilerStartRequest):
     except HTTPException:
         raise
     except ValueError as e:
-        # Model compatibility errors - provide structured error response
+        # Configuration/model compatibility errors - provide structured error response
         error_msg = str(e)
-        logger.error(f"Model compatibility error: {e}", exc_info=True)
+        is_settings_error = any(
+            marker in error_msg.lower()
+            for marker in ("context", "max output", "max_output", "tokens", "positive integer", "configured")
+        )
+        logger.error(f"Compiler configuration error: {e}", exc_info=True)
         
         # Determine which model failed
         failed_model_type = "unknown"
@@ -223,11 +418,15 @@ async def start_compiler(request: CompilerStartRequest):
             reason = error_msg.split("Model incompatibility detected:")[1].split(".")[0].strip()
         
         error_response = {
-            "error": "model_compatibility",
+            "error": "configuration_error" if is_settings_error else "model_compatibility",
             "failed_model_type": failed_model_type,
             "failed_model_name": failed_model_name,
             "reason": reason,
-            "suggestion": "Try using 'openai/gpt-oss-20b' or 'openai/gpt-oss-20b:3' which are known to work. You can also click 'Use Aggregator Models' to auto-fill working models.",
+            "suggestion": (
+                "Configure positive context window and max output token values for every compiler role in Settings."
+                if is_settings_error
+                else "Try using a compatible model or click 'Use Aggregator Models' to auto-fill working models."
+            ),
             "full_error": error_msg
         }
         
@@ -242,42 +441,17 @@ async def start_compiler(request: CompilerStartRequest):
 @router.post("/stop")
 async def stop_compiler():
     """Stop the compiler system."""
+    global _compiler_proof_only_task
     try:
+        if _compiler_proof_only_task and not _compiler_proof_only_task.done():
+            _compiler_proof_only_task.cancel()
+            await asyncio.gather(_compiler_proof_only_task, return_exceptions=True)
+            _compiler_proof_only_task = None
         await compiler_coordinator.stop()
         token_tracker.stop_timer()
         return {"status": "stopped", "message": "Compiler stopped"}
     except Exception as e:
         logger.error(f"Failed to stop compiler: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@router.post("/skip-critique")
-async def skip_critique():
-    """Skip the critique phase (immediately or pre-emptively)."""
-    try:
-        if not compiler_coordinator.is_running:
-            raise HTTPException(status_code=400, detail="Compiler is not running")
-        
-        was_in_critique = compiler_coordinator.in_critique_phase
-        success = await compiler_coordinator.skip_critique_phase()
-        
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to skip critique phase")
-        
-        if was_in_critique:
-            message = "Critique phase skipped, continuing to conclusion"
-        else:
-            message = "Critique skip queued - will skip when critique phase is reached"
-        
-        return {
-            "success": True,
-            "message": message,
-            "was_immediate": was_in_critique
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to skip critique: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -293,19 +467,28 @@ async def test_models(request: CompilerStartRequest):
     }
     
     # Test validator model
-    is_compat, error, details = await lm_studio_client.test_model_compatibility(request.validator_model)
+    is_compat, error, details = await lm_studio_client.test_model_compatibility(
+        request.validator_model,
+        request.validator_max_output_tokens,
+    )
     results["validator"]["passed"] = is_compat
     results["validator"]["error"] = error
     results["validator"]["details"] = details
     
     # Test high-context model
-    is_compat, error, details = await lm_studio_client.test_model_compatibility(request.high_context_model)
+    is_compat, error, details = await lm_studio_client.test_model_compatibility(
+        request.high_context_model,
+        request.high_context_max_output_tokens,
+    )
     results["high_context"]["passed"] = is_compat
     results["high_context"]["error"] = error
     results["high_context"]["details"] = details
     
     # Test high-param model
-    is_compat, error, details = await lm_studio_client.test_model_compatibility(request.high_param_model)
+    is_compat, error, details = await lm_studio_client.test_model_compatibility(
+        request.high_param_model,
+        request.high_param_max_output_tokens,
+    )
     results["high_param"]["passed"] = is_compat
     results["high_param"]["error"] = error
     results["high_param"]["details"] = details
@@ -323,6 +506,8 @@ async def test_models(request: CompilerStartRequest):
 async def get_status():
     """Get current compiler status."""
     try:
+        if _compiler_proof_only_task and not _compiler_proof_only_task.done():
+            return CompilerState(is_running=True, current_mode="proof_verification")
         status = await compiler_coordinator.get_status()
         return status
     except Exception as e:
@@ -389,15 +574,14 @@ async def save_paper():
                 generate_attribution_for_existing_paper,
                 generate_credits_for_existing_paper
             )
-            from datetime import datetime
             
             # Parse generation date if available
             gen_date = None
             if model_data.get("generation_date"):
                 try:
                     gen_date = datetime.fromisoformat(model_data["generation_date"])
-                except:
-                    pass
+                except (TypeError, ValueError) as exc:
+                    logger.debug("Ignoring invalid saved compiler generation date: %s", exc)
             
             # Generate attribution header (no reference papers for manual mode)
             attribution_section = generate_attribution_for_existing_paper(
@@ -444,6 +628,7 @@ async def save_paper():
         high_context = compiler_coordinator.high_context_submitter
         proof_check_scheduled = bool(
             system_config.lean4_enabled
+            and getattr(compiler_coordinator, "allow_mathematical_proofs", True)
             and full_content.strip()
             and high_context is not None
             and getattr(high_context, "model_name", "")
@@ -623,10 +808,8 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
     from backend.shared.critique_prompts import build_critique_prompt, DEFAULT_CRITIQUE_PROMPT
     from backend.shared.critique_memory import save_critique
     from backend.shared.models import PaperCritique
-    from backend.shared.api_client_manager import api_client_manager
     from backend.shared.utils import count_tokens
     import uuid
-    from datetime import datetime
     
     # Handle None critique_request (for backwards compatibility)
     if critique_request is None:
@@ -668,6 +851,17 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
                 status_code=400,
                 detail="No validator model configured. Please configure a validator model in Compiler Settings."
             )
+        try:
+            validator_context_window = _positive_int_setting(
+                validator_context_window,
+                "validator critique context window",
+            )
+            validator_max_tokens = _positive_int_setting(
+                validator_max_tokens,
+                "validator critique max output tokens",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         
         # Get paper title from coordinator or use prompt
         paper_title = None
@@ -709,8 +903,6 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         
         # Configure the paper_critic role with the validator settings BEFORE making the API call
         # This ensures routing goes to the correct provider (OpenRouter vs LM Studio)
-        from backend.shared.models import ModelConfig
-        
         api_client_manager.configure_role(
             "paper_critic",
             ModelConfig(
@@ -727,7 +919,10 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         )
         
         # Make the API call to the validator model
-        logger.info(f"Requesting critique for compiler paper from validator model {validator_model}")
+        logger.info(
+            "Requesting critique for compiler paper from validator model %s",
+            redact_log_text(validator_model, 160),
+        )
         
         response = await api_client_manager.generate_completion(
             task_id=f"compiler_paper_critique_{datetime.now().strftime('%Y%m%d_%H%M%S')}",

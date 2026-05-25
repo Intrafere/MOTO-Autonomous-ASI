@@ -31,7 +31,7 @@ _pull_state: Dict[str, Any] = {
 
 
 def _parse_semver(version_str: str) -> Tuple[int, ...]:
-    """Extract numeric version tuple from a semver string (e.g. '1.0.8' -> (1,0,8))."""
+    """Extract numeric version tuple from a semver string (e.g. '1.0.9' -> (1,0,9))."""
     parts = re.findall(r"\d+", version_str or "")
     return tuple(int(p) for p in parts) if parts else (0,)
 

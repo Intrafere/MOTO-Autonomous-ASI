@@ -3,10 +3,10 @@ Submitter agent - generates submissions in parallel with other submitters.
 Cycles through chunk sizes (256 → 512 → 768 → 1024) independently.
 """
 import asyncio
-from typing import Optional, Dict, Callable
+import contextlib
+from typing import Any, Optional, Dict, Callable
 import logging
 import httpx
-from datetime import datetime
 import uuid
 
 from backend.shared.config import rag_config, system_config
@@ -21,11 +21,12 @@ from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.local_training import LocalTrainingMemory
-from backend.aggregator.prompts.submitter_prompts import build_submitter_prompt
-from backend.aggregator.validation.json_validator import json_validator
+from backend.aggregator.prompts.submitter_prompts import (
+    CREATIVITY_EMPHASIS_BOOST_PROMPT,
+    build_submitter_prompt,
+)
 
 logger = logging.getLogger(__name__)
-
 
 class SubmitterAgent:
     """
@@ -43,7 +44,8 @@ class SubmitterAgent:
         websocket_broadcaster: Optional[Callable] = None,
         context_window: Optional[int] = None,
         max_output_tokens: Optional[int] = None,
-        coordinator: Optional['Coordinator'] = None
+        coordinator: Optional[Any] = None,
+        creativity_emphasis_boost_enabled: bool = False
     ):
         self.submitter_id = submitter_id
         self.model_name = model_name
@@ -51,6 +53,7 @@ class SubmitterAgent:
         self.user_files_content = user_files_content
         self.websocket_broadcaster = websocket_broadcaster
         self.coordinator = coordinator
+        self.creativity_emphasis_boost_enabled = creativity_emphasis_boost_enabled
         
         # Per-submitter context settings (fall back to global config if not provided)
         self.context_window = context_window if context_window is not None else rag_config.submitter_context_window
@@ -96,6 +99,13 @@ class SubmitterAgent:
         if self.coordinator and not getattr(self.coordinator, "single_model_mode", False):
             return api_client_manager.parallel_brainstorm_submitter_temperature(self.submitter_id)
         return 0.0
+
+    def _should_use_creativity_emphasis(self) -> bool:
+        """Enable the special prompt on every fifth valid submission slot."""
+        return (
+            self.creativity_emphasis_boost_enabled
+            and (self.state.total_submissions + 1) % 5 == 0
+        )
     
     async def start(self) -> None:
         """Start the submitter agent."""
@@ -110,10 +120,8 @@ class SubmitterAgent:
         self.state.is_active = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         logger.info(f"Submitter {self.submitter_id} stopped")
     
     async def _run_loop(self) -> None:
@@ -176,6 +184,7 @@ class SubmitterAgent:
     async def _generate_submission(self) -> Optional[Submission]:
         """Generate a single submission."""
         try:
+            creativity_emphasized = self._should_use_creativity_emphasis()
             # Get current chunk size
             chunk_size = self.chunk_sizes[self.current_chunk_index]
             
@@ -191,7 +200,11 @@ class SubmitterAgent:
             allocation = await context_allocator.allocate_submitter_context(
                 user_prompt=self.user_prompt,
                 json_schema=self._get_json_schema(),
-                system_prompt=self._get_system_prompt(),
+                system_prompt=(
+                    f"{self._get_system_prompt()}\n\n{CREATIVITY_EMPHASIS_BOOST_PROMPT}"
+                    if creativity_emphasized
+                    else self._get_system_prompt()
+                ),
                 shared_training_content=shared_training_content,
                 local_training_content=local_training_content,
                 rejection_log_content=rejection_log_content,
@@ -209,13 +222,46 @@ class SubmitterAgent:
             prompt = build_submitter_prompt(
                 self.user_prompt,
                 allocation["direct"],
-                rag_evidence
+                rag_evidence,
+                creativity_emphasized=creativity_emphasized
             )
             
             # CRITICAL: Verify actual prompt size fits in context window
             from backend.shared.utils import count_tokens
             actual_prompt_tokens = count_tokens(prompt)
             max_allowed_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+
+            if creativity_emphasized and actual_prompt_tokens > max_allowed_tokens:
+                logger.warning(
+                    "Submitter %s skipped creativity emphasis because assembled prompt exceeded context budget "
+                    "(%s > %s tokens). Retrying this turn with the normal submitter prompt.",
+                    self.submitter_id,
+                    actual_prompt_tokens,
+                    max_allowed_tokens,
+                )
+                creativity_emphasized = False
+                allocation = await context_allocator.allocate_submitter_context(
+                    user_prompt=self.user_prompt,
+                    json_schema=self._get_json_schema(),
+                    system_prompt=self._get_system_prompt(),
+                    shared_training_content=shared_training_content,
+                    local_training_content=local_training_content,
+                    rejection_log_content=rejection_log_content,
+                    user_files_content=self.user_files_content,
+                    chunk_size=chunk_size,
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens
+                )
+                rag_evidence = ""
+                if allocation["rag_context"]:
+                    rag_evidence = allocation["rag_context"].text
+                prompt = build_submitter_prompt(
+                    self.user_prompt,
+                    allocation["direct"],
+                    rag_evidence,
+                    creativity_emphasized=False
+                )
+                actual_prompt_tokens = count_tokens(prompt)
             
             if actual_prompt_tokens > max_allowed_tokens:
                 logger.error(
@@ -316,15 +362,14 @@ class SubmitterAgent:
                     "context_length": self.context_window,
                     "model_path": self.model_name
                 })
-            except Exception:
-                # Silently ignore - only applies to LM Studio models
-                pass
+            except Exception as exc:
+                # Only applies to LM Studio models; cache misses should not fail a submission.
+                logger.debug("Submitter %s skipped LM Studio cache warmup: %s", self.submitter_id, exc)
             
             # Parse JSON
             try:
                 parsed = parse_json(llm_output)
                 valid = True
-                error = None
             except Exception as parse_error:
                 # Not corrupted, just invalid JSON - continue with conversational retry
                 valid = False
@@ -586,6 +631,10 @@ class SubmitterAgent:
                         "theorem_statement": gate_result.theorem_statement,
                         "theorem_name": gate_result.theorem_name,
                         "formal_sketch": gate_result.formal_sketch,
+                        "expected_novelty_tier": gate_result.expected_novelty_tier,
+                        "prompt_relevance_rationale": gate_result.prompt_relevance_rationale,
+                        "novelty_rationale": gate_result.novelty_rationale,
+                        "why_not_standard_known_result": gate_result.why_not_standard_known_result,
                         "lean_code": gate_result.lean_code,
                         "lean_feedback": gate_result.lean_feedback,
                         "reasoning": gate_result.reasoning,
@@ -617,16 +666,18 @@ class SubmitterAgent:
                 metadata={
                     "chunk_size": chunk_size,
                     "rag_used": bool(allocation["rag_context"]),
+                    "creativity_emphasized": creativity_emphasized,
                     "llm_call": call_metadata,
                     **proof_metadata,
                 }
             )
             
-            # CRITICAL: Validate submission size before sending to validator
-            # If submission is larger than output_reserve_tokens, it indicates an error or overflow
+            # CRITICAL: Validate submission size before sending to validator.
+            # Use this submitter's configured output budget; there is no global
+            # hidden fallback budget.
             from backend.shared.utils import count_tokens
             submission_tokens = count_tokens(parsed["submission"])
-            max_submission_tokens = rag_config.output_reserve_tokens  # Should match max_tokens limit
+            max_submission_tokens = self.max_output_tokens
             if submission_tokens > max_submission_tokens:
                 logger.error(
                     f"Submitter {self.submitter_id}: Generated submission is too large "

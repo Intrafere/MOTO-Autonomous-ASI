@@ -120,7 +120,7 @@ class CritiqueMemory:
             # Find critique with matching number
             for i, critique in enumerate(self.critiques):
                 if critique.get('number') == critique_number:
-                    removed = self.critiques.pop(i)
+                    self.critiques.pop(i)
                     logger.info(f"Removed critique #{critique_number} from critique memory")
                     
                     # Save updated database

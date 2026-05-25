@@ -29,6 +29,8 @@ export const getActivityIcon = (event = '') => {
       return '✓';
     case 'completion_review_started':
       return '◎';
+    case 'hung_connection_alert':
+      return '⧗';
     case 'completion_review_result':
       return '□';
     case 'manual_paper_writing_triggered':
@@ -46,7 +48,6 @@ export const getActivityIcon = (event = '') => {
       return '◈';
     case 'critique_phase_ended':
       return '✓';
-    case 'critique_phase_skipped':
     case 'compiler_decline':
       return '↷';
     case 'phase_transition':
@@ -123,6 +124,7 @@ export const getActivityIcon = (event = '') => {
       return '⚠';
     case 'proof_verified':
     case 'known_proof_verified':
+    case 'proof_registration_duplicate':
     case 'proof_check_complete':
       return '✓';
     case 'novel_proof_discovered':
@@ -208,6 +210,10 @@ export const getActivityClass = (event = '', item = {}) => {
     return 'activity-tier3-complete';
   }
 
+  if (event === 'hung_connection_alert') {
+    return 'activity-warning';
+  }
+
   if (
     event.includes('accepted') ||
     event === 'compiler_acceptance' ||
@@ -224,6 +230,7 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'proof_lean_accepted' ||
     event === 'novel_proof_discovered' ||
     event === 'known_proof_verified' ||
+    event === 'proof_registration_duplicate' ||
     event === 'proof_check_complete' ||
     event === 'smt_check_complete' ||
     event === 'leanoj_model_call_completed' ||
@@ -280,7 +287,6 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'reference_selection_started' ||
     event === 'compiler_decline' ||
     event === 'critique_phase_ended' ||
-    event === 'critique_phase_skipped' ||
     event === 'brainstorm_continuation_decided' ||
     event === 'brainstorm_paper_limit_reached' ||
     event === 'proof_framing_decided' ||

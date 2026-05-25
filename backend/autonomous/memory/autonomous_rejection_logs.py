@@ -5,12 +5,14 @@ Handles topic selection rejections, completion feedback, and per-brainstorm subm
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
 import aiofiles
 
 from backend.shared.config import system_config
+from backend.shared.path_safety import validate_single_path_component
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,13 @@ class AutonomousRejectionLogs:
         self._topic_rejections_path.parent.mkdir(parents=True, exist_ok=True)
         self._brainstorms_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Autonomous rejection logs initialized")
+
+    def _safe_topic_id(self, topic_id: str) -> str:
+        """Validate topic_id before using it in rejection-log filenames."""
+        safe_topic_id = validate_single_path_component(topic_id, "topic ID")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", safe_topic_id):
+            raise ValueError(f"Invalid topic ID: {topic_id}")
+        return safe_topic_id
     
     # ========================================================================
     # TOPIC SELECTION REJECTIONS (Global - Last 5)
@@ -119,7 +128,7 @@ class AutonomousRejectionLogs:
     
     def _get_completion_feedback_path(self, topic_id: str) -> Path:
         """Get path to completion feedback file for a topic."""
-        return self._brainstorms_dir / f"completion_feedback_{topic_id}.txt"
+        return self._brainstorms_dir / f"completion_feedback_{self._safe_topic_id(topic_id)}.txt"
     
     async def add_completion_feedback(
         self,
@@ -202,7 +211,9 @@ class AutonomousRejectionLogs:
     
     def _get_submitter_rejections_path(self, topic_id: str, submitter_id: int) -> Path:
         """Get path to submitter rejection log file."""
-        return self._brainstorms_dir / f"brainstorm_{topic_id}_submitter_{submitter_id}_rejections.txt"
+        return self._brainstorms_dir / (
+            f"brainstorm_{self._safe_topic_id(topic_id)}_submitter_{submitter_id}_rejections.txt"
+        )
     
     async def add_brainstorm_submitter_rejection(
         self,

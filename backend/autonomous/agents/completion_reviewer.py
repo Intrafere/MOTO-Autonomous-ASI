@@ -7,18 +7,16 @@ CONTEXT HANDLING:
 - Tries to inject full brainstorm database for accurate exhaustion assessment
 - Falls back to RAG if database doesn't fit in context
 """
-import asyncio
 import json
 import logging
-from typing import Optional, Dict, Any, Tuple, Callable
+from typing import Optional, Tuple, Callable
 
-from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
-from backend.shared.models import CompletionReviewResult, CompletionSelfValidationResult
+from backend.shared.models import CompletionReviewResult
 from backend.autonomous.prompts.completion_prompts import (
     build_completion_review_prompt,
     build_completion_self_validation_prompt
@@ -43,8 +41,8 @@ class CompletionReviewerAgent:
     def __init__(
         self,
         model_id: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 25000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.model_id = model_id
         self.context_window = context_window
@@ -65,10 +63,11 @@ class CompletionReviewerAgent:
     
     def _calculate_available_context(self) -> int:
         """Calculate available tokens for brainstorm database content."""
-        # Reserve for: output, system prompts, JSON schema, user prompt, topic prompt, etc.
-        reserved_tokens = self.max_output_tokens + 10000  # Generous reserve for prompts
+        # Reserve the user-configured output budget; prompt overhead is checked by
+        # the normal prompt-size validation path instead of a hidden fixed cap.
+        reserved_tokens = self.max_output_tokens
         available = self.context_window - reserved_tokens
-        return max(available, 20000)  # Minimum 20k for brainstorm content
+        return max(available, 0)
     
     async def review_completion(
         self,
@@ -210,7 +209,7 @@ class CompletionReviewerAgent:
             
             # Validate prompt size before sending
             prompt_tokens = count_tokens(prompt)
-            max_input_tokens = self.context_window - self.max_output_tokens
+            max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
             
             if prompt_tokens > max_input_tokens:
                 logger.error(f"CompletionReviewer: Prompt ({prompt_tokens} tokens) exceeds input limit ({max_input_tokens})")
@@ -315,7 +314,7 @@ class CompletionReviewerAgent:
             
             # Validate prompt size before sending
             prompt_tokens = count_tokens(prompt)
-            max_input_tokens = self.context_window - self.max_output_tokens
+            max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
             
             if prompt_tokens > max_input_tokens:
                 logger.error(f"CompletionReviewer: Self-validation prompt ({prompt_tokens} tokens) exceeds input limit")

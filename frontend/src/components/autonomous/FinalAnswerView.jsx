@@ -6,13 +6,19 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { websocket } from '../../services/websocket';
 import ArchiveViewerModal from './ArchiveViewerModal';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import {
+  PDF_UNAVAILABLE_MESSAGE,
+  downloadRawText,
+  downloadPDFViaBackend,
+  isPDFDownloadAvailable,
+  sanitizeFilename,
+} from '../../utils/downloadHelpers';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
 import './AutonomousResearch.css';
 
-const FinalAnswerView = ({ api, isRunning, status }) => {
+const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
   const [finalAnswerData, setFinalAnswerData] = useState(null);
   const [volumeContent, setVolumeContent] = useState(null);
   const [shortFormPaper, setShortFormPaper] = useState(null);
@@ -24,6 +30,7 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
   const [showLatex, setShowLatex] = useState(false); // Raw text by default for performance with large docs
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const containerRef = useRef(null);
+  const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -85,6 +92,11 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
   const handleDownloadPDF = async (e) => {
     e.stopPropagation();
 
+    if (!pdfDownloadAvailable) {
+      alert(PDF_UNAVAILABLE_MESSAGE);
+      return;
+    }
+
     // Use already-loaded state, or fetch now and use the returned data directly
     // (can't rely on React state after await since state updates are async)
     let resolvedShortForm = shortFormPaper;
@@ -135,6 +147,8 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
         console.error('PDF generation error:', error);
         alert(`PDF generation failed: ${error.message}`);
       },
+      null,
+      { pdfDownloadAvailable },
     );
   };
 
@@ -254,6 +268,8 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
   // Get certainty level display
   const getCertaintyDisplay = (level) => {
     const displays = {
+      'total_answer': { icon: '✓', color: '#2ecc71', text: 'Can Be Totally Answered' },
+      'partial_answer': { icon: '◐', color: '#f39c12', text: 'Partially Answerable' },
       'totally_answered': { icon: '✓', color: '#2ecc71', text: 'Can Be Totally Answered' },
       'partially_answered': { icon: '◐', color: '#f39c12', text: 'Partially Answerable' },
       'no_answer_known': { icon: '?', color: '#e74c3c', text: 'No Answer Known' },
@@ -601,8 +617,8 @@ const FinalAnswerView = ({ api, isRunning, status }) => {
                       <button
                         className="btn-download-pdf"
                         onClick={handleDownloadPDF}
-                        disabled={isGeneratingPDF || (!shortFormPaper && !volumeContent)}
-                        title="Download as PDF"
+                        disabled={isGeneratingPDF || (!shortFormPaper && !volumeContent) || !pdfDownloadAvailable}
+                        title={pdfDownloadAvailable ? 'Download as PDF' : PDF_UNAVAILABLE_MESSAGE}
                       >
                         {isGeneratingPDF ? 'Preparing PDF...' : 'Download PDF'}
                       </button>

@@ -88,6 +88,31 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       const error = data.error_summary || data.error_output || data.reason || '';
       return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
     };
+    const formatProofNoveltyTier = (tier) => {
+      switch (tier) {
+        case 'major_mathematical_discovery':
+          return 'Major mathematical discovery';
+        case 'mathematical_discovery':
+          return 'Mathematical discovery';
+        case 'novel_variant':
+          return 'Novel variant';
+        case 'novel_formulation':
+          return 'Novel formulation';
+        case 'not_novel':
+          return 'Not novel';
+        case 'novel':
+          return 'Novel';
+        default:
+          return tier ? String(tier).replace(/_/g, ' ') : 'Not rated';
+      }
+    };
+    const proofNoveltyMessage = () => {
+      const tierLabel = formatProofNoveltyTier(data.novelty_tier || (data.is_novel ? 'novel' : 'not_novel'));
+      const duplicateNote = data.duplicate ? ' (duplicate proof reused)' : '';
+      const rawReason = String(data.novelty_reasoning || data.reasoning || '').replace(/\s+/g, ' ').trim();
+      const reason = rawReason.length > 240 ? `${rawReason.slice(0, 240)}...` : rawReason;
+      return `${proofName} Lean 4 novelty validator rating: ${tierLabel}${duplicateNote}${reason ? ` - ${reason}` : ''}${proofTarget ? ` (${proofTarget})` : ''}`;
+    };
     
     switch (event.event) {
       case 'auto_research_started':
@@ -119,11 +144,13 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       // Aggregator's direct per-submission events
       case 'submission_accepted': {
         const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : '';
-        return `Submitter ${data.submitter_id} [${modelName}]: ✓ ACCEPTED (total: ${data.total_acceptances})`;
+        const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
+        return `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✓ ACCEPTED (total: ${data.total_acceptances})`;
       }
       case 'submission_rejected': {
         const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : '';
-        return `Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED (total: ${data.total_rejections})`;
+        const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
+        return `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED (total: ${data.total_rejections})`;
       }
       case 'completion_review_started':
         return `[${data.topic_id}] Completion review at ${data.submission_count} submissions`;
@@ -172,11 +199,19 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'proof_attempts_exhausted':
         return `${proofName} terminated: proof attempts exhausted for ${proofTarget}`;
       case 'novel_proof_discovered':
-        return `${proofName} novel proof discovered: ${data.theorem_statement}`;
+        return proofNoveltyMessage();
       case 'known_proof_verified':
-        return `${proofName} known proof verified for ${data.source_type} ${data.source_id}`;
+        return proofNoveltyMessage();
+      case 'proof_registration_duplicate':
+        return proofNoveltyMessage();
       case 'proof_check_complete':
         return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
+      case 'hung_connection_alert': {
+        const model = data.model || 'model';
+        const provider = data.provider || 'provider';
+        const elapsed = data.elapsed_minutes || 15;
+        return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
+      }
       default:
         return event.event;
     }
@@ -197,9 +232,15 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       eventName === 'proof_verified' ||
       eventName === 'novel_proof_discovered' ||
       eventName === 'known_proof_verified' ||
+      eventName === 'proof_registration_duplicate' ||
       eventName === 'proof_check_complete'
     ) {
       return 'log-success';
+    }
+    if (
+      eventName === 'hung_connection_alert'
+    ) {
+      return 'log-warning';
     }
     if (
       eventName === 'proof_framing_decided' ||

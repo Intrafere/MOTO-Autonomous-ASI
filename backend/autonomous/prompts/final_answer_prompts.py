@@ -46,7 +46,7 @@ Review all existing research papers and determine what can be answered WITH CERT
 
 DIRECT-ANSWER-FIRST REQUIREMENT:
 - Identify the strongest direct answer the papers justify, not just nearby facts
-- Prefer a precise answer, partial answer, impossibility result, or sharp limitation statement over broad summary
+- Prefer the strongest answer the papers justify over broad summary
 
 ASSESSMENT CRITERIA:
 
@@ -66,7 +66,7 @@ ASSESSMENT CRITERIA:
    - The system should continue research (Tier 3 will not complete)
 
 4. APPEARS_IMPOSSIBLE - The question appears mathematically impossible
-   - Research has established impossibility results
+   - Research supports that the question as posed has no valid answer
    - The question as posed has no valid answer
    - Can still provide a paper explaining why it's impossible
 
@@ -105,8 +105,8 @@ FIELD REQUIREMENTS:
 EXAMPLE (Partial Answer):
 {
   "certainty_level": "partial_answer",
-  "known_certainties_summary": "From the research papers, we have established with certainty: (1) The impossibility of squaring the circle using compass and straightedge (paper_003), (2) The transcendence of pi and its implications (paper_007), (3) The connection between constructibility and algebraic field extensions (paper_012). However, the specific computational bounds requested by the user remain unexplored.",
-  "reasoning": "Papers 003, 007, and 012 provide rigorous proofs for the core impossibility result. However, the user's question also asks about approximation algorithms, which none of the papers address. Therefore, only a partial answer can be given with certainty."
+  "known_certainties_summary": "From the research papers, we have established with certainty: (1) the answer to the core circle-squaring question (paper_003), (2) the role of pi's transcendence (paper_007), (3) the connection between constructibility and algebraic field extensions (paper_012). However, the specific computational bounds requested by the user remain unexplored.",
+  "reasoning": "Papers 003, 007, and 012 provide rigorous support for the core answer. However, the user's question also asks about approximation algorithms, which none of the papers address. Therefore, only a partial answer can be given with certainty."
 }
 
 EXAMPLE (Total Answer):
@@ -360,8 +360,7 @@ Choose a title that:
 
 TITLE GUIDELINES:
 - The title should make the answer's conclusion clear when possible
-- For impossibility results: title can indicate the impossibility
-- For constructive results: title can indicate what was achieved
+- The title can indicate the answer when the papers justify one
 - Be specific about the mathematical content
 - Avoid vague or overly general titles
 

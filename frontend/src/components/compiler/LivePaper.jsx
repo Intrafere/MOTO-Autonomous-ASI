@@ -2,12 +2,18 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import {
+  PDF_UNAVAILABLE_MESSAGE,
+  downloadRawText,
+  downloadPDFViaBackend,
+  isPDFDownloadAvailable,
+  sanitizeFilename,
+} from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import '../settings-common.css';
 
-function LivePaper() {
+function LivePaper({ capabilities }) {
   const [paper, setPaper] = useState('');
   const [outline, setOutline] = useState('');
   const [wordCount, setWordCount] = useState(0);
@@ -17,6 +23,7 @@ function LivePaper() {
   const [showLatex, setShowLatex] = useState(true);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const paperContainerRef = useRef(null);
+  const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -135,7 +142,7 @@ function LivePaper() {
     }
 
     try {
-      const response = await compilerAPI.clearPaper();
+      await compilerAPI.clearPaper();
       alert('Paper reset successfully. Starting fresh from outline creation.');
       // Refresh paper to show empty state
       loadPaper();
@@ -147,6 +154,11 @@ function LivePaper() {
   };
 
   const handleDownloadPDF = async () => {
+    if (!pdfDownloadAvailable) {
+      alert(PDF_UNAVAILABLE_MESSAGE);
+      return;
+    }
+
     if (!paper) {
       alert('No paper content available to download');
       return;
@@ -173,6 +185,7 @@ function LivePaper() {
         alert('PDF generation failed: ' + error.message);
       },
       'paper',
+      { pdfDownloadAvailable },
     );
   };
 
@@ -219,8 +232,8 @@ function LivePaper() {
           <button
             onClick={handleDownloadPDF}
             className="btn btn-secondary"
-            disabled={!paper || isGeneratingPDF}
-            title="Download as PDF"
+            disabled={!paper || isGeneratingPDF || !pdfDownloadAvailable}
+            title={pdfDownloadAvailable ? 'Download as PDF' : PDF_UNAVAILABLE_MESSAGE}
           >
             {isGeneratingPDF ? 'Preparing PDF...' : 'PDF'}
           </button>

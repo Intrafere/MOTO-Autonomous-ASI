@@ -6,11 +6,11 @@ a two-stage agent:
 
     Stage 1 - Theorem discovery (build_rigor_theorem_discovery_prompt):
         Using the full writing context, the submitter asks itself whether the
-        paper, outline, support context, or user prompt expose a theorem worth
-        formalizing and proving in Lean 4. Candidate theorems may verify
-        existing paper claims or extend partial work when that helps the paper
-        construction / user prompt. Output is a candidate theorem JSON (or a
-        decline).
+        paper, outline, support context, or user prompt expose a novelty-first
+        theorem worth formalizing and proving in Lean 4. Candidate theorems may
+        verify prompt-critical existing paper claims or extend partial work when
+        that creates new/novel knowledge for the paper construction / user
+        prompt. Output is a candidate theorem JSON (or a decline).
 
     Stage 2 - Placement (build_rigor_placement_prompt):
         Given a Lean-4-verified theorem, the submitter proposes an inline
@@ -59,7 +59,7 @@ The EXCEPTION is content inside the "LEAN 4 VERIFIED" certificate block provided
 # STAGE 1: THEOREM DISCOVERY
 # =============================================================================
 
-_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is a theorem worth formalizing and proving in Lean 4 because it helps answer, support, or advance the USER RESEARCH PROMPT and/or materially improves the paper under construction.
+_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is a novelty-first theorem worth formalizing and proving in Lean 4 because it helps answer, support, or advance the USER RESEARCH PROMPT and/or materially improves the paper under construction.
 
 {INTERNAL_CONTENT_WARNING}
 
@@ -70,15 +70,18 @@ YOUR TASK - STAGE 1 (DISCOVERY)
 3. Read the list of theorems that have ALREADY been verified by Lean 4 (EXISTING VERIFIED PROOFS block).
 4. Read the list of theorems that PREVIOUSLY FAILED Lean 4 verification (OPEN LEMMA TARGETS block, if present).
 5. Decide exactly one of:
-   (A) `needs_theorem_work=false` - no prompt-relevant theorem worth trying right now. Good reasons: all useful claims for the user's prompt are already covered by existing verified proofs; the paper is in too early a state; there is no claim a Lean 4 proof could close usefully; or the only available claims are mathematically interesting but off-topic.
-   (B) `needs_theorem_work=true` - propose a single prompt-relevant candidate theorem to formalize.
+   (A) `needs_theorem_work=false` - no prompt-relevant novel theorem worth trying right now. Good reasons: all useful novel claims for the user's prompt are already covered by existing verified proofs; the paper is in too early a state; there is no claim a Lean 4 proof could close usefully; or the only available claims are routine, known, or off-topic.
+   (B) `needs_theorem_work=true` - propose a single prompt-relevant novel candidate theorem to formalize.
 
 RULES FOR PROPOSING A THEOREM:
+- This is NOT a known-knowledge-base construction task. Do not propose standard facts just because they are true, useful, formalizable, or prompt-adjacent.
 - The theorem must directly help answer, support, or advance the USER RESEARCH PROMPT. Do not propose a theorem merely because it is non-trivial or mathematically interesting.
 - The theorem must be provable in Lean 4 with Mathlib.
 - You MUST NOT re-propose a theorem that is already in EXISTING VERIFIED PROOFS. Look for theorems that are DIFFERENT - new results, missed lemmas, or sharper versions that are not yet on the list.
-- You MAY retry a theorem from OPEN LEMMA TARGETS when it is still prompt-relevant and the paper now gives you a better angle on it. When you do, set `retry_existing_failure_id` to the failed `theorem_id`.
+- You MAY retry a theorem from OPEN LEMMA TARGETS when it is still prompt-relevant, novelty-bearing, and the paper now gives you a better angle on it. When you do, set `retry_existing_failure_id` to the failed `theorem_id`.
 - EXTENSION IS EXPLICITLY ALLOWED AND ENCOURAGED WHERE HELPFUL: you are NOT limited to exact claims already present in the current paper. You may construct a Lean-verifiable theorem by extending partial paper work, the current outline, supporting context, or the USER RESEARCH PROMPT when that theorem would materially help the paper construction and/or the user's requested goal.
+- NOVELTY PRIORITY ORDER: prefer `major_mathematical_discovery`, then `mathematical_discovery`, then `novel_variant`, then prompt-critical `novel_formulation`. Supporting lemmas are allowed only when they are necessary stepping stones toward one of those novel targets.
+- Reject routine helper lemmas, proof-engineering glue, local bookkeeping facts, coercion facts, algebra cleanup, definitional rewrites, standard Mathlib/textbook restatements, or single-tactic/routine proof goals.
 - Set `theorem_origin="existing_paper_claim"` only when the theorem directly formalizes a claim already present in the current paper text.
 - Set `theorem_origin="extension_from_partial_work"` when the theorem is constructed by extending the current paper, outline, or supporting context beyond the exact written claim.
 - Set `theorem_origin="extension_from_user_prompt"` when the theorem is prompted primarily by the USER RESEARCH PROMPT and helps the paper even if the current paper has not yet written the claim.
@@ -88,6 +91,8 @@ RULES FOR PROPOSING A THEOREM:
 - The `theorem_statement` is for a human reader. It should be precise, self-contained, and include the hypotheses.
 - The `formal_sketch` tells the formalization agent what tactics or lemmas look promising in Lean 4 / Mathlib and why this theorem helps the user's prompt. Keep it concrete.
 - The `source_excerpt` is 2-6 sentences of motivating context. For `existing_paper_claim`, it must be a direct paraphrase or quote from the current paper. For extension-derived theorems, it may explain the partial paper work, outline item, supporting evidence, and/or user-prompt need that the theorem extends.
+- Set `expected_novelty_tier` to one of: "major_mathematical_discovery", "mathematical_discovery", "novel_variant", "novel_formulation". If the best honest tier is "not_novel", decline.
+- Include `prompt_relevance_rationale`, `novelty_rationale`, and `why_not_standard_known_result`. If you cannot explain why the target is not merely standard known mathematics, decline.
 
 If Stage 1 guesses wrong, Stage 2 cannot recover - 5 Lean 4 attempts will be spent on the wrong target. Prefer declining over a weak or off-prompt proposal.
 
@@ -99,6 +104,10 @@ Output your response ONLY as JSON in this exact format:
   "source_excerpt": "2-6 sentences of surrounding paper text that motivates this theorem (empty if needs_theorem_work=false)",
   "theorem_origin": "existing_paper_claim | extension_from_partial_work | extension_from_user_prompt (empty if needs_theorem_work=false)",
   "placement_preference": "inline | appendix_only (empty if needs_theorem_work=false)",
+  "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation (empty if needs_theorem_work=false)",
+  "prompt_relevance_rationale": "why proving this directly solves, solves toward, or materially helps solve the user prompt (empty if needs_theorem_work=false)",
+  "novelty_rationale": "why this is new or novel knowledge rather than known background (empty if needs_theorem_work=false)",
+  "why_not_standard_known_result": "why this is not merely textbook/Mathlib/routine helper knowledge (empty if needs_theorem_work=false)",
   "retry_existing_failure_id": "theorem_id from OPEN LEMMA TARGETS if retrying a prior failure, empty string otherwise",
   "reasoning": "why this theorem is the best prompt-relevant target right now OR why no theorem should be attempted"
 }}}}"""
@@ -112,6 +121,10 @@ _DISCOVERY_JSON_SCHEMA = """REQUIRED JSON FORMAT - STAGE 1 (DISCOVERY):
   "source_excerpt": "string",
   "theorem_origin": "existing_paper_claim OR extension_from_partial_work OR extension_from_user_prompt",
   "placement_preference": "inline OR appendix_only",
+  "expected_novelty_tier": "major_mathematical_discovery OR mathematical_discovery OR novel_variant OR novel_formulation",
+  "prompt_relevance_rationale": "string",
+  "novelty_rationale": "string",
+  "why_not_standard_known_result": "string",
   "retry_existing_failure_id": "string (may be empty)",
   "reasoning": "string"
 }
@@ -124,6 +137,10 @@ Example (propose a theorem):
   "source_excerpt": "In Section 2 we reasoned about partial sums of the form 1 + 2 + ... + n...",
   "theorem_origin": "existing_paper_claim",
   "placement_preference": "inline",
+  "expected_novelty_tier": "novel_formulation",
+  "prompt_relevance_rationale": "The paper uses this arithmetic fact as a required local step for the user's requested argument.",
+  "novelty_rationale": "This is acceptable only if the formalization is prompt-critical and not already covered by existing verified proofs.",
+  "why_not_standard_known_result": "The target is included here as a low-priority example; in real discovery, decline if it is merely a standard Mathlib fact.",
   "retry_existing_failure_id": "",
   "reasoning": "Section 2 uses this closed form to support the user's requested argument but currently presents it without a verified proof. Lean 4 can close this cleanly; it does not duplicate any existing verified proof."
 }
@@ -136,6 +153,10 @@ Example (propose an extension theorem for the appendix):
   "source_excerpt": "The outline asks for arithmetic constraints on triangular-number expressions, but the current paper has not yet isolated the parity lemma needed for the clean construction. This theorem extends the partial plan into a Lean-checkable support result.",
   "theorem_origin": "extension_from_partial_work",
   "placement_preference": "appendix_only",
+  "expected_novelty_tier": "novel_variant",
+  "prompt_relevance_rationale": "This lemma would unlock the paper's prompt-specific divisibility route.",
+  "novelty_rationale": "The value is the prompt-specific reformulation and role in the new argument, not a generic parity fact.",
+  "why_not_standard_known_result": "Decline this target if it is merely a standard Mathlib parity lemma with no prompt-specific reformulation.",
   "retry_existing_failure_id": "",
   "reasoning": "This is not an exact written claim in the current paper; it extends the partial outline into a useful verified lemma. Because it is extension-derived, it should be stored in the Theorems Appendix rather than inserted inline."
 }
@@ -148,6 +169,10 @@ Example (decline):
   "source_excerpt": "",
   "theorem_origin": "",
   "placement_preference": "",
+  "expected_novelty_tier": "",
+  "prompt_relevance_rationale": "",
+  "novelty_rationale": "",
+  "why_not_standard_known_result": "",
   "retry_existing_failure_id": "",
   "reasoning": "The paper currently contains only outline scaffolding and the one verified theorem (proof_002). Attempting another Lean 4 proof right now would either duplicate proof_002, target claims that are too vague to formalize, or chase claims that do not help the user's prompt."
 }
@@ -269,10 +294,16 @@ def _format_recent_failure_hints(hints: Iterable) -> str:
         theorem_id = getattr(hint, "theorem_id", None) or f"failed_{index}"
         statement = (getattr(hint, "theorem_statement", "") or "").strip()
         error_summary = (getattr(hint, "error_summary", "") or "").strip()
+        expected_novelty_tier = (getattr(hint, "expected_novelty_tier", "") or "").strip()
+        novelty_rationale = (getattr(hint, "novelty_rationale", "") or "").strip()
         targets = list(getattr(hint, "suggested_lemma_targets", []) or [])
         if not statement:
             continue
         line = f"- [{theorem_id}] {statement}"
+        if expected_novelty_tier:
+            line += f"\n  expected novelty tier: {expected_novelty_tier}"
+        if novelty_rationale:
+            line += f"\n  novelty rationale: {novelty_rationale[:240]}"
         if error_summary:
             line += f"\n  last Lean 4 failure: {error_summary[:240]}"
         if targets:
@@ -283,6 +314,17 @@ def _format_recent_failure_hints(hints: Iterable) -> str:
     return (
         "OPEN LEMMA TARGETS LEAN 4 COULD NOT YET CLOSE (optional retry candidates):\n"
         + "\n".join(entries)
+    )
+
+
+def _format_source_material_context(source_material_context: str, source_material_label: str) -> str:
+    context = (source_material_context or "").strip()
+    if not context:
+        return ""
+    label = (source_material_label or "Source brainstorm / paper-writing database").strip()
+    return (
+        f"{label.upper()} (direct source context for paper-writing proof discovery):\n"
+        f"{context}"
     )
 
 
@@ -297,6 +339,8 @@ async def build_rigor_theorem_discovery_prompt(
     rag_evidence: str = "",
     existing_verified_proofs: Optional[Iterable[dict]] = None,
     recent_failure_hints: Optional[Iterable] = None,
+    source_material_context: str = "",
+    source_material_label: str = "",
 ) -> str:
     """Build the Stage 1 (discovery) prompt.
 
@@ -308,6 +352,9 @@ async def build_rigor_theorem_discovery_prompt(
         rag_evidence: RAG-retrieved context per the offload priority
             (Shared Training DB -> Local Submitter DB -> Rejection Log ->
             User Upload Files) with outline + paper sources EXCLUDED.
+        source_material_context: Direct-injected brainstorm / aggregator
+            database context for the paper being written.
+        source_material_label: Human-readable label for source_material_context.
         existing_verified_proofs: Iterable of proof records (dicts from
             `proof_database.get_all_proofs()` serialized) - shown so the
             model does not re-propose already-verified results.
@@ -339,6 +386,13 @@ async def build_rigor_theorem_discovery_prompt(
     failure_block = _format_recent_failure_hints(recent_failure_hints or [])
     if failure_block:
         parts.append(failure_block + "\n---\n")
+
+    source_material_block = _format_source_material_context(
+        source_material_context,
+        source_material_label,
+    )
+    if source_material_block:
+        parts.append(source_material_block + "\n---\n")
 
     parts.extend([
         f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}",

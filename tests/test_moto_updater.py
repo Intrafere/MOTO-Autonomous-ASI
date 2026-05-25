@@ -2,15 +2,14 @@ import base64
 import json
 from pathlib import Path
 import tempfile
-import unittest
 import urllib.error
-from unittest import mock
+from unittest import TestCase, main, mock
 import zipfile
 
 import moto_updater
 
 
-class RepoSlugTests(unittest.TestCase):
+class RepoSlugTests(TestCase):
     def test_normalize_repo_slug_handles_common_github_formats(self) -> None:
         cases = {
             "https://github.com/Intrafere/MOTO-Autonomous-ASI": "Intrafere/MOTO-Autonomous-ASI",
@@ -34,7 +33,7 @@ class RepoSlugTests(unittest.TestCase):
                 self.assertIsNone(moto_updater._normalize_repo_slug(raw))
 
 
-class InstallStateTests(unittest.TestCase):
+class InstallStateTests(TestCase):
     def test_classify_zip_install_when_repo_has_no_git_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)
@@ -65,13 +64,13 @@ class InstallStateTests(unittest.TestCase):
 
     def test_check_for_updates_falls_back_to_branch_head_when_manifest_missing(self) -> None:
         local_manifest = moto_updater.BuildManifest(
-            version="1.0.7",
+            version="1.0.9",
             build_commit="localcommit",
             update_channel="main",
             api_contract_version="build5-v1",
         )
         fallback_manifest = moto_updater.BuildManifest(
-            version="1.0.6",
+            version="1.0.9",
             build_commit="remotecommit",
             update_channel="main",
             api_contract_version="build5-v1",
@@ -108,17 +107,17 @@ class InstallStateTests(unittest.TestCase):
 
     def test_fetch_remote_manifest_uses_branch_head_as_update_key(self) -> None:
         local_manifest = moto_updater.BuildManifest(
-            version="1.0.7",
+            version="1.0.9",
             build_commit="localcommit",
             update_channel="main",
             api_contract_version="build5-v1",
         )
         manifest_payload = {
             "manifest_version": 1,
-            "version": "1.0.8",
+            "version": "1.0.9",
             "build_commit": "stale-manifest-commit",
             "update_channel": "main",
-            "api_contract_version": "build5-v12",
+            "api_contract_version": "build5-v22",
         }
         branch_payload = {"commit": {"sha": "actual-branch-head"}}
 
@@ -126,9 +125,9 @@ class InstallStateTests(unittest.TestCase):
             with mock.patch.object(moto_updater, "_fetch_json_url", return_value=branch_payload):
                 remote_manifest = moto_updater.fetch_remote_manifest(local_manifest)
 
-        self.assertEqual(remote_manifest.version, "1.0.8")
+        self.assertEqual(remote_manifest.version, "1.0.9")
         self.assertEqual(remote_manifest.build_commit, "actual-branch-head")
-        self.assertEqual(remote_manifest.api_contract_version, "build5-v12")
+        self.assertEqual(remote_manifest.api_contract_version, "build5-v22")
         fetch_file.assert_called_once_with(
             "actual-branch-head",
             "moto-update-manifest.json",
@@ -139,7 +138,7 @@ class InstallStateTests(unittest.TestCase):
         file_payload = {
             "type": "file",
             "encoding": "base64",
-            "content": base64.b64encode(b'{"version": "1.0.8"}').decode("ascii"),
+            "content": base64.b64encode(b'{"version": "1.0.9"}').decode("ascii"),
         }
 
         with mock.patch.object(moto_updater, "_fetch_json_url", return_value=file_payload) as fetch_json:
@@ -150,7 +149,7 @@ class InstallStateTests(unittest.TestCase):
             ):
                 payload = moto_updater._fetch_repo_file_json("main", "package.json", 10)
 
-        self.assertEqual(payload["version"], "1.0.8")
+        self.assertEqual(payload["version"], "1.0.9")
         fetch_json.assert_called_once_with(
             "https://api.github.com/repos/owner/repo/contents/package.json?ref=main",
             10,
@@ -164,10 +163,10 @@ class InstallStateTests(unittest.TestCase):
                 json.dumps(
                     {
                         "manifest_version": 1,
-                        "version": "1.0.8",
+                        "version": "1.0.9",
                         "build_commit": "stale-local-commit",
                         "update_channel": "main",
-                        "api_contract_version": "build5-v12",
+                        "api_contract_version": "build5-v22",
                     }
                 ),
                 encoding="utf-8",
@@ -183,7 +182,50 @@ class InstallStateTests(unittest.TestCase):
         self.assertEqual(local_manifest.build_commit, "actual-local-head")
 
 
-class LauncherStateTests(unittest.TestCase):
+class UpdateAvailabilityTests(TestCase):
+    def _result(self, local_version: str, remote_version: str) -> moto_updater.UpdateCheckResult:
+        install_state = moto_updater.InstallState(
+            kind="zip_install",
+            label="ZIP / extracted consumer install",
+            can_auto_apply=True,
+            reason="ZIP / extracted consumer install.",
+        )
+        return moto_updater.UpdateCheckResult(
+            moto_updater.BuildManifest(
+                version=local_version,
+                build_commit="localcommit",
+                update_channel="main",
+                api_contract_version="build5-v1",
+            ),
+            moto_updater.BuildManifest(
+                version=remote_version,
+                build_commit="remotecommit",
+                update_channel="main",
+                api_contract_version="build5-v1",
+            ),
+            install_state,
+            metadata_source="manifest",
+        )
+
+    def test_update_available_false_when_local_version_is_newer(self) -> None:
+        result = self._result("1.0.9", "1.0.8")
+
+        self.assertFalse(result.update_available)
+        self.assertFalse(result.can_apply_update)
+
+    def test_update_available_uses_numeric_version_comparison(self) -> None:
+        result = self._result("1.0.10", "1.0.9")
+
+        self.assertFalse(result.update_available)
+
+    def test_update_available_still_true_for_same_version_new_commit(self) -> None:
+        result = self._result("1.0.9", "1.0.9")
+
+        self.assertTrue(result.update_available)
+        self.assertTrue(result.can_apply_update)
+
+
+class LauncherStateTests(TestCase):
     def test_cleanup_launcher_state_removes_dead_instances(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / ".moto_launcher_state.json"
@@ -208,6 +250,35 @@ class LauncherStateTests(unittest.TestCase):
 
             self.assertEqual(len(instances), 1)
             self.assertEqual(instances[0]["instance_id"], "alive")
+
+    def test_cleanup_launcher_state_can_exclude_current_instance_from_returned_active_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / ".moto_launcher_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "instances": [
+                            {"instance_id": "current", "backend_window_pid": 100, "frontend_window_pid": 101},
+                            {"instance_id": "other", "backend_window_pid": 200, "frontend_window_pid": 201},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_is_pid_running(pid: int | None) -> bool:
+                return pid in {100, 101, 200, 201}
+
+            with mock.patch.object(moto_updater, "LAUNCHER_STATE_PATH", state_path):
+                with mock.patch.object(moto_updater, "_is_pid_running", side_effect=fake_is_pid_running):
+                    instances = moto_updater.cleanup_launcher_state(exclude_instance_id="current")
+                    saved_payload = json.loads(state_path.read_text(encoding="utf-8"))
+
+            self.assertEqual([instance["instance_id"] for instance in instances], ["other"])
+            self.assertEqual(
+                [instance["instance_id"] for instance in saved_payload["instances"]],
+                ["current", "other"],
+            )
 
     def test_last_instance_record_does_not_persist_keyring_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -264,7 +335,7 @@ class LauncherStateTests(unittest.TestCase):
             self.assertFalse(outside.exists())
 
 
-class SnapshotSyncTests(unittest.TestCase):
+class SnapshotSyncTests(TestCase):
     def test_collect_preserved_relatives_includes_explicit_instance_runtime_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             repo_root = Path(temp_dir)
@@ -332,7 +403,7 @@ class SnapshotSyncTests(unittest.TestCase):
                 json.dumps(
                     {
                         "manifest_version": 1,
-                        "version": "1.0.7",
+                        "version": "1.0.9",
                         "build_commit": "old-local",
                         "update_channel": "main",
                         "api_contract_version": "build5-v1",
@@ -358,10 +429,10 @@ class SnapshotSyncTests(unittest.TestCase):
                     archive.writestr("MOTO/moto_launcher.py", "new launcher\n")
 
             remote_manifest = moto_updater.BuildManifest(
-                version="1.0.8",
+                version="1.0.9",
                 build_commit="resolved-remote-head",
                 update_channel="main",
-                api_contract_version="build5-v12",
+                api_contract_version="build5-v22",
             )
 
             with mock.patch.object(moto_updater, "REPO_ROOT", repo_root):
@@ -378,14 +449,14 @@ class SnapshotSyncTests(unittest.TestCase):
             installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
         self.assertTrue(applied, message)
-        self.assertEqual(installed_manifest["version"], "1.0.8")
+        self.assertEqual(installed_manifest["version"], "1.0.9")
         self.assertEqual(installed_manifest["build_commit"], "resolved-remote-head")
 
 
-class RelaunchCommandTests(unittest.TestCase):
+class RelaunchCommandTests(TestCase):
     def test_build_relaunch_command_prefers_linux_entrypoint_when_provided(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            entrypoint = Path(temp_dir) / "Launch MOTO.sh"
+            entrypoint = Path(temp_dir) / "linux-ubuntu-launcher.sh"
             entrypoint.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
 
             command = moto_updater._build_relaunch_command(
@@ -402,4 +473,4 @@ class RelaunchCommandTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    main()

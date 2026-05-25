@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { api, openRouterAPI } from '../../services/api';
+import { api, cloudAccessAPI, openRouterAPI } from '../../services/api';
 import {
+  computeCodexAutoSettings,
   computeOpenRouterAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -44,6 +45,7 @@ export default function AggregatorSettings({
 }) {
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
+  const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({}); // { modelId: { providers: [], endpoints: [] } }
   const [loading, setLoading] = useState(true);
   const [saveMessage, setSaveMessage] = useState('');
@@ -57,7 +59,7 @@ export default function AggregatorSettings({
       { ...DEFAULT_SUBMITTER_CONFIG, submitterId: 3 }
     ]
   );
-  const [validatorMaxOutput, setValidatorMaxOutput] = useState(config.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS);
+  const [validatorMaxOutput, setValidatorMaxOutput] = useState(config.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
   
   // Validator OpenRouter state
   const [validatorProvider, setValidatorProvider] = useState(config.validatorProvider || 'lm_studio');
@@ -68,6 +70,7 @@ export default function AggregatorSettings({
   
   // OpenRouter API key status
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
+  const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -115,6 +118,13 @@ export default function AggregatorSettings({
           console.error('Failed to load aggregator settings:', error);
         }
       }
+      try {
+        const freeModelSettings = await openRouterAPI.getFreeModelSettings();
+        setFreeModelLooping(freeModelSettings.looping_enabled ?? true);
+        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? true);
+      } catch (error) {
+        console.error('Failed to load free model settings:', error);
+      }
       setIsLoaded(true);
     };
     loadSettings();
@@ -153,10 +163,11 @@ export default function AggregatorSettings({
       freeOnly,
       freeModelLooping,
       freeModelAutoSelector,
-      modelProviders
+      modelProviders,
+      creativityEmphasisBoostEnabled: config.creativityEmphasisBoostEnabled,
     };
     localStorage.setItem('aggregator_settings', JSON.stringify(settings));
-  }, [isLoaded, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback, validatorSuperchargeEnabled, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders]);
+  }, [isLoaded, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback, validatorSuperchargeEnabled, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders, config.creativityEmphasisBoostEnabled]);
 
   useEffect(() => {
     if (lmStudioEnabled) {
@@ -232,6 +243,17 @@ export default function AggregatorSettings({
     } catch (err) {
       console.error('Failed to check OpenRouter key status:', err);
     }
+    try {
+      const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+      const configured = Boolean(codexStatus.status?.configured);
+      setHasOpenAICodexLogin(configured);
+      if (configured) {
+        fetchOpenAICodexModels();
+      }
+    } catch (err) {
+      console.error('Failed to check OpenAI Codex login status:', err);
+      setHasOpenAICodexLogin(false);
+    }
   };
 
   const fetchOpenRouterModels = async (freeFilter = freeOnly) => {
@@ -243,6 +265,16 @@ export default function AggregatorSettings({
       console.error('Failed to fetch OpenRouter models:', err);
     } finally {
       setLoadingOpenRouter(false);
+    }
+  };
+
+  const fetchOpenAICodexModels = async () => {
+    try {
+      const result = await cloudAccessAPI.getOpenAICodexModels();
+      setOpenAICodexModels(result.models || []);
+    } catch (err) {
+      console.error('Failed to fetch OpenAI Codex models:', err);
+      setOpenAICodexModels([]);
     }
   };
 
@@ -300,6 +332,19 @@ export default function AggregatorSettings({
     return autoSettings;
   };
 
+  const getCodexAutoSettingsForModel = (modelId) => {
+    const model = openAICodexModels.find((item) => item.id === modelId);
+    if (!model) {
+      console.debug('[AggregatorCodexAutoFill] model not in loaded list, skipping auto-fill', { modelId });
+      return null;
+    }
+    const autoSettings = computeCodexAutoSettings(model);
+    if (autoSettings.warnings.length > 0) {
+      console.warn('[AggregatorCodexAutoFill] auto-settings fallback used:', autoSettings.warnings);
+    }
+    return autoSettings;
+  };
+
   const handleSubmitterModelChange = async (submitterId, modelId) => {
     const baseConfigs = submitterConfigs.map(c =>
       c.submitterId === submitterId
@@ -310,11 +355,13 @@ export default function AggregatorSettings({
     setConfig(prev => ({ ...prev, submitterConfigs: baseConfigs }));
 
     const targetConfig = baseConfigs.find(c => c.submitterId === submitterId);
-    if (targetConfig?.provider !== 'openrouter' || !modelId) {
+    if (!modelId || !['openrouter', 'openai_codex_oauth'].includes(targetConfig?.provider)) {
       return;
     }
 
-    const autoSettings = await getAutoSettingsForModel(modelId, null);
+    const autoSettings = targetConfig.provider === 'openrouter'
+      ? await getAutoSettingsForModel(modelId, null)
+      : getCodexAutoSettingsForModel(modelId);
     if (!autoSettings) {
       return;
     }
@@ -374,11 +421,13 @@ export default function AggregatorSettings({
     setValidatorOpenrouterProvider(null);
     setValidatorOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
 
-    if (validatorProvider !== 'openrouter' || !modelId) {
+    if (!modelId || !['openrouter', 'openai_codex_oauth'].includes(validatorProvider)) {
       return;
     }
 
-    const autoSettings = await getAutoSettingsForModel(modelId, null);
+    const autoSettings = validatorProvider === 'openrouter'
+      ? await getAutoSettingsForModel(modelId, null)
+      : getCodexAutoSettingsForModel(modelId);
     if (!autoSettings) {
       return;
     }
@@ -567,7 +616,7 @@ export default function AggregatorSettings({
     validatorOpenrouterReasoningEffort,
     validatorLmStudioFallback,
     validatorSuperchargeEnabled,
-    validatorContextSize: config.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
+    validatorContextSize: config.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
     validatorMaxOutput,
     freeOnly,
     freeModelLooping,
@@ -588,8 +637,8 @@ export default function AggregatorSettings({
     const nextValidatorOpenrouterReasoningEffort = normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort);
     const nextValidatorLmStudioFallback = rawSettings.validatorLmStudioFallback || null;
     const nextValidatorSuperchargeEnabled = Boolean(rawSettings.validatorSuperchargeEnabled);
-    const nextValidatorContextSize = Number(rawSettings.validatorContextSize || DEFAULT_CONTEXT_WINDOW);
-    const nextValidatorMaxOutput = Number(rawSettings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS);
+    const nextValidatorContextSize = rawSettings.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW;
+    const nextValidatorMaxOutput = rawSettings.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS;
     const nextModelProviders = rawSettings.modelProviders || {};
 
     setNumSubmitters(nextNumSubmitters);
@@ -604,6 +653,9 @@ export default function AggregatorSettings({
     setFreeModelLooping(rawSettings.freeModelLooping ?? true);
     setFreeModelAutoSelector(rawSettings.freeModelAutoSelector ?? true);
     setModelProviders(nextModelProviders);
+    openRouterAPI
+      .setFreeModelSettings(rawSettings.freeModelLooping ?? true, rawSettings.freeModelAutoSelector ?? true)
+      .catch(() => {});
 
     const nextConfig = {
       ...config,
@@ -681,7 +733,9 @@ export default function AggregatorSettings({
     label = 'Model'
   }) => {
     const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
-    const models = effectiveProvider === 'openrouter' ? openRouterModels : lmStudioModels;
+    const models = effectiveProvider === 'openrouter'
+      ? openRouterModels
+      : (effectiveProvider === 'openai_codex_oauth' ? openAICodexModels : lmStudioModels);
     const providers = modelId && effectiveProvider === 'openrouter'
       ? getProviderNames(modelProviders[modelId])
       : [];
@@ -711,6 +765,15 @@ export default function AggregatorSettings({
                 title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
               >
                 OpenRouter
+              </button>
+              <button
+                type="button"
+                onClick={() => hasOpenAICodexLogin && onProviderChange('openai_codex_oauth')}
+                disabled={!hasOpenAICodexLogin}
+                className={`provider-toggle-btn${provider === 'openai_codex_oauth' ? ' active-or-orange' : ''}`}
+                title={!hasOpenAICodexLogin ? 'Set OpenAI Codex login in Cloud Access & Keys first' : 'Use OpenAI Codex'}
+              >
+                OpenAI Codex
               </button>
             </div>
           ) : (
@@ -779,8 +842,8 @@ export default function AggregatorSettings({
           </div>
         )}
 
-        {/* LM Studio Fallback (only for OpenRouter) */}
-        {effectiveProvider === 'openrouter' && lmStudioEnabled && (
+        {/* LM Studio Fallback (only for cloud providers) */}
+        {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
           <div className="settings-row">
             <label className="label--muted">
               LM Studio Fallback (optional)
@@ -795,7 +858,7 @@ export default function AggregatorSettings({
               ))}
             </select>
             <small className="settings-hint" style={{ marginTop: '0.25rem' }}>
-              Used if OpenRouter credits run out
+              Used if cloud provider access fails or credits run out
             </small>
           </div>
         )}
@@ -920,9 +983,9 @@ export default function AggregatorSettings({
                 return (
               <div 
                 key={cfg.submitterId}
-                className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : (idx === 0 ? ' role-config-card--main' : '')}`}
+                className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
               >
-                <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : (idx === 0 ? 'card-title--green' : '')}>
+                <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : ''}>
                   <span className="role-title-with-badges">
                     <span>{idx === 0 ? 'Submitter 1 (Main Submitter)' : `Submitter ${idx + 1}`}</span>
                     {idx === 0 && <ProofStrengthBadge />}
@@ -1037,7 +1100,7 @@ export default function AggregatorSettings({
                   value={config.validatorContextSize}
                   onChange={(e) => {
                     const parsed = parseInt(e.target.value);
-                    setConfig({ ...config, validatorContextSize: isNaN(parsed) ? DEFAULT_CONTEXT_WINDOW : parsed });
+                    setConfig({ ...config, validatorContextSize: isNaN(parsed) ? '' : parsed });
                   }}
                   min="4096"
                   max="50000000"
@@ -1053,7 +1116,7 @@ export default function AggregatorSettings({
                     anchorClassName="help-tooltip-anchor--inline"
                     buttonContent="?"
                   >
-                    LM Studio default: {DEFAULT_MAX_OUTPUT_TOKENS}. OpenRouter selections auto-fill from provider metadata when available.
+                    Uses the max output token setting you enter here. OpenRouter and Codex selections auto-fill from provider metadata when available.
                   </HelpTooltip>
                 </label>
                 <input
@@ -1061,7 +1124,7 @@ export default function AggregatorSettings({
                   value={validatorMaxOutput}
                   onChange={(e) => {
                     const parsed = parseInt(e.target.value);
-                    const value = isNaN(parsed) ? DEFAULT_MAX_OUTPUT_TOKENS : parsed;
+                    const value = isNaN(parsed) ? '' : parsed;
                     setValidatorMaxOutput(value);
                     setConfig({ ...config, validatorMaxOutput: value });
                   }}

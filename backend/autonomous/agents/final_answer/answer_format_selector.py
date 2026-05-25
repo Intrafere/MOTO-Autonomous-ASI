@@ -12,8 +12,6 @@ assessment result and paper metadata summaries (titles/abstracts). Full paper co
 is not needed to decide short-form vs long-form — that's a structural question about
 the research landscape, not a content-deep analysis.
 """
-import asyncio
-import json
 import logging
 from typing import Optional, List, Dict, Any, Callable
 
@@ -21,6 +19,7 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
+from backend.shared.config import rag_config
 from backend.shared.models import AnswerFormatSelection, CertaintyAssessment
 from backend.autonomous.prompts.final_answer_prompts import (
     build_format_selection_prompt,
@@ -49,8 +48,8 @@ class AnswerFormatSelector:
         self,
         submitter_model: str,
         validator_model: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 25000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.submitter_model = submitter_model
         self.validator_model = validator_model
@@ -72,7 +71,7 @@ class AnswerFormatSelector:
     
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""
-        return self.context_window - self.max_output_tokens
+        return rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
     
     async def select_format(
         self,

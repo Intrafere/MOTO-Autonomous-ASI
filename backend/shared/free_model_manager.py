@@ -10,6 +10,8 @@ import logging
 import time
 from typing import Dict, List, Optional, Any, Set
 
+from backend.shared.log_redaction import redact_log_text
+
 logger = logging.getLogger(__name__)
 
 # How long to remember failed models before allowing retry (seconds)
@@ -20,7 +22,7 @@ class FreeModelManager:
     """Singleton managing free model rotation and account exhaustion state."""
 
     AUTO_SELECTOR_MODEL = "openrouter/free"
-    AUTO_SELECTOR_CONTEXT = 131072
+    AUTO_SELECTOR_CONTEXT = 0
 
     def __init__(self):
         self.looping_enabled: bool = True
@@ -40,7 +42,9 @@ class FreeModelManager:
         self.looping_enabled = looping
         self.auto_selector_enabled = auto_selector
         logger.info(
-            f"Free model settings: looping={looping}, auto_selector={auto_selector}"
+            "Free model settings: looping=%s, auto_selector=%s",
+            redact_log_text(looping, 20),
+            redact_log_text(auto_selector, 20),
         )
 
     def reset(self) -> None:

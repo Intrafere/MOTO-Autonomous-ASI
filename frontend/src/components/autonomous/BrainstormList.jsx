@@ -15,7 +15,7 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
   const [loading, setLoading] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [deleting, setDeleting] = useState(false);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [autoRefresh] = useState(true);
   const [showLatex, setShowLatex] = useState(true);
   const [userChoseLatex, setUserChoseLatex] = useState(false);
   const unsubscribeRef = useRef(null);

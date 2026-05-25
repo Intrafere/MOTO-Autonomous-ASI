@@ -11,21 +11,19 @@ It only needs metadata summaries (topic prompts, statuses, paper titles/abstract
 not full brainstorm databases or full paper content. Metadata is small enough to
 direct-inject; abstract truncation is the overflow fallback.
 """
-import asyncio
 import json
 import logging
 from typing import Optional, Dict, Any, List, Callable
 
-from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
+from backend.shared.config import rag_config
 from backend.shared.models import TopicSelectionSubmission
 from backend.autonomous.prompts.topic_prompts import (
     build_topic_selection_prompt
 )
-from backend.autonomous.memory.research_metadata import research_metadata
 from backend.autonomous.memory.autonomous_rejection_logs import autonomous_rejection_logs
 
 logger = logging.getLogger(__name__)
@@ -45,8 +43,8 @@ class TopicSelectorAgent:
     def __init__(
         self,
         model_id: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 25000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.model_id = model_id
         self.context_window = context_window
@@ -67,7 +65,7 @@ class TopicSelectorAgent:
     
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""
-        return self.context_window - self.max_output_tokens
+        return rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
     
     async def select_topic(
         self,

@@ -4,16 +4,23 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import {
+  PDF_UNAVAILABLE_MESSAGE,
+  downloadRawText,
+  downloadPDFViaBackend,
+  isPDFDownloadAvailable,
+  sanitizeFilename,
+} from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 
-const LivePaperProgress = ({ api, isCompiling }) => {
+const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
   const [paperData, setPaperData] = useState(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [isExpanded, setIsExpanded] = useState(true);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const containerRef = useRef(null);
+  const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
 
   // Memoize loadPaperProgress with useCallback
   const loadPaperProgress = useCallback(async () => {
@@ -65,6 +72,11 @@ const LivePaperProgress = ({ api, isCompiling }) => {
   };
 
   const handleDownloadPdf = async () => {
+    if (!pdfDownloadAvailable) {
+      alert(PDF_UNAVAILABLE_MESSAGE);
+      return;
+    }
+
     if (!paperData?.content) return;
 
     const filename = sanitizeFilename(paperData.title || paperData.paper_id || 'paper');
@@ -88,6 +100,7 @@ const LivePaperProgress = ({ api, isCompiling }) => {
         alert('PDF generation failed: ' + error.message);
       },
       'paper',
+      { pdfDownloadAvailable },
     );
   };
 
@@ -158,8 +171,8 @@ const LivePaperProgress = ({ api, isCompiling }) => {
               <button
                 className="btn-download-pdf"
                 onClick={handleDownloadPdf}
-                disabled={!paperData?.content || isDownloadingPdf}
-                title="Download as PDF"
+                disabled={!paperData?.content || isDownloadingPdf || !pdfDownloadAvailable}
+                title={pdfDownloadAvailable ? 'Download as PDF' : PDF_UNAVAILABLE_MESSAGE}
               >
                 {isDownloadingPdf ? 'Preparing PDF...' : 'PDF'}
               </button>

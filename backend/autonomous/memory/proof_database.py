@@ -16,6 +16,7 @@ from typing import Dict, Any, List, Optional
 import aiofiles
 
 from backend.shared.config import system_config
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import FailedProofCandidate, ProofCandidate, ProofRecord
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.autonomous.prompts.proof_prompts import format_failure_hints_for_injection
@@ -313,6 +314,10 @@ class ProofDatabase:
             if existing:
                 existing.theorem_statement = theorem_candidate.statement
                 existing.formal_sketch = theorem_candidate.formal_sketch
+                existing.expected_novelty_tier = theorem_candidate.expected_novelty_tier
+                existing.prompt_relevance_rationale = theorem_candidate.prompt_relevance_rationale
+                existing.novelty_rationale = theorem_candidate.novelty_rationale
+                existing.why_not_standard_known_result = theorem_candidate.why_not_standard_known_result
                 existing.source_excerpt = theorem_candidate.source_excerpt
                 existing.error_summary = error_summary
                 if cleaned_targets:
@@ -325,6 +330,10 @@ class ProofDatabase:
                     theorem_id=theorem_candidate.theorem_id,
                     theorem_statement=theorem_candidate.statement,
                     formal_sketch=theorem_candidate.formal_sketch,
+                    expected_novelty_tier=theorem_candidate.expected_novelty_tier,
+                    prompt_relevance_rationale=theorem_candidate.prompt_relevance_rationale,
+                    novelty_rationale=theorem_candidate.novelty_rationale,
+                    why_not_standard_known_result=theorem_candidate.why_not_standard_known_result,
                     source_excerpt=theorem_candidate.source_excerpt,
                     error_summary=error_summary,
                     suggested_lemma_targets=cleaned_targets,
@@ -418,7 +427,11 @@ class ProofDatabase:
                     async with aiofiles.open(lean_path, "r", encoding="utf-8") as handle:
                         return await handle.read()
                 except Exception as exc:
-                    logger.error("Failed to read Lean file for %s: %s", proof_id, exc)
+                    logger.error(
+                        "Failed to read Lean file for %s: %s",
+                        redact_log_text(proof_id, 120),
+                        redact_log_text(exc, 240),
+                    )
 
             if self._index_data is None:
                 await self._load_index()
@@ -586,7 +599,11 @@ class ProofDatabase:
                     async with aiofiles.open(record_path, "r", encoding="utf-8") as handle:
                         return self._deserialize_record(json.loads(await handle.read()))
                 except Exception as exc:
-                    logger.error("Failed to read proof %s: %s", proof_id, exc)
+                    logger.error(
+                        "Failed to read proof %s: %s",
+                        redact_log_text(proof_id, 120),
+                        redact_log_text(exc, 240),
+                    )
 
             if self._index_data is None:
                 await self._load_index()
@@ -777,8 +794,8 @@ class ProofDatabase:
                 async with aiofiles.open(session_metadata_path, "r", encoding="utf-8") as handle:
                     meta = json.loads(await handle.read())
                     user_prompt = meta.get("user_prompt", "")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to read proof library session metadata at %s: %s", session_metadata_path, exc)
 
         results: List[Dict[str, Any]] = []
         for proof_data in index_data.get("proofs", []):
@@ -833,7 +850,12 @@ class ProofDatabase:
             async with aiofiles.open(str(record_path), "r", encoding="utf-8") as handle:
                 proof_data = json.loads(await handle.read())
         except Exception as exc:
-            logger.error("Failed to read proof %s from session %s: %s", proof_id, session_id, exc)
+            logger.error(
+                "Failed to read proof %s from session %s: %s",
+                redact_log_text(proof_id, 120),
+                redact_log_text(session_id, 160),
+                redact_log_text(exc, 240),
+            )
             return None
 
         lean_code = ""
@@ -841,7 +863,8 @@ class ProofDatabase:
             try:
                 async with aiofiles.open(str(lean_path), "r", encoding="utf-8") as handle:
                     lean_code = await handle.read()
-            except Exception:
+            except Exception as exc:
+                logger.debug("Failed to read Lean source %s; using embedded proof record code: %s", lean_path, exc)
                 lean_code = str(proof_data.get("lean_code", "") or "")
         else:
             lean_code = str(proof_data.get("lean_code", "") or "")

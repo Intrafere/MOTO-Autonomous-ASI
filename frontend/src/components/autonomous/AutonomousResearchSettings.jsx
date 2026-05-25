@@ -5,8 +5,9 @@
  * Now supports per-role OpenRouter model selection with provider and fallback options.
  */
 import React, { useState, useEffect } from 'react';
-import { openRouterAPI, api, autonomousAPI } from '../../services/api';
+import { cloudAccessAPI, openRouterAPI, api, autonomousAPI } from '../../services/api';
 import {
+  computeCodexAutoSettings,
   computeOpenRouterAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -65,13 +66,17 @@ const ModelSelector = ({
   onFallbackChange,
   lmStudioModels,
   openRouterModels,
+  openAICodexModels,
   modelProviders,
   hasOpenRouterKey,
+  hasOpenAICodexLogin,
   isRunning,
   lmStudioEnabled,
 }) => {
   const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
-  const currentModels = effectiveProvider === 'openrouter' ? openRouterModels : lmStudioModels;
+  const currentModels = effectiveProvider === 'openrouter'
+    ? openRouterModels
+    : (effectiveProvider === 'openai_codex_oauth' ? openAICodexModels : lmStudioModels);
   const providers = modelId && effectiveProvider === 'openrouter'
     ? getProviderNames(modelProviders[modelId])
     : [];
@@ -103,6 +108,16 @@ const ModelSelector = ({
               title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
             >
               OpenRouter
+            </button>
+            <button
+              type="button"
+              className={`provider-toggle-btn${provider === 'openai_codex_oauth' ? ' active-or-orange' : ''}`}
+              onClick={() => hasOpenAICodexLogin && onProviderChange('openai_codex_oauth')}
+              disabled={isRunning || !hasOpenAICodexLogin}
+              style={!hasOpenAICodexLogin ? { color: '#666' } : undefined}
+              title={!hasOpenAICodexLogin ? 'Set OpenAI Codex login in Cloud Access & Keys first' : 'Use OpenAI Codex'}
+            >
+              OpenAI Codex
             </button>
           </div>
         ) : (
@@ -172,8 +187,8 @@ const ModelSelector = ({
         </div>
       )}
 
-      {/* LM Studio Fallback (if OpenRouter) */}
-      {effectiveProvider === 'openrouter' && lmStudioEnabled && (
+      {/* LM Studio Fallback (if cloud provider) */}
+      {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
         <div className="settings-row">
           <label className="label--muted">LM Studio Fallback (optional)</label>
           <select
@@ -186,7 +201,7 @@ const ModelSelector = ({
               <option key={m.id} value={m.id}>{m.id}</option>
             ))}
           </select>
-          <small className="settings-hint">Used if OpenRouter credits run out</small>
+          <small className="settings-hint">Used if cloud provider access fails or credits run out</small>
         </div>
       )}
     </>
@@ -198,7 +213,6 @@ const RoleConfig = ({
   title,
   hint,
   rolePrefix,
-  borderColor = '#333',
   localConfig,
   handleProviderChange,
   handleModelChange,
@@ -208,8 +222,10 @@ const RoleConfig = ({
   isRunning,
   lmStudioModels,
   openRouterModels,
+  openAICodexModels,
   modelProviders,
   hasOpenRouterKey,
+  hasOpenAICodexLogin,
   lmStudioEnabled,
   developerModeEnabled = false,
   showProofStrengthBadge = false,
@@ -220,15 +236,13 @@ const RoleConfig = ({
   const openrouterProv = localConfig[`${rolePrefix}_openrouter_provider`];
   const openrouterReasoningEffort = localConfig[`${rolePrefix}_openrouter_reasoning_effort`];
   const fallback = localConfig[`${rolePrefix}_lm_studio_fallback`];
-  const contextWindow = localConfig[`${rolePrefix}_context_window`] || DEFAULT_CONTEXT_WINDOW;
-  const maxTokens = localConfig[`${rolePrefix}_max_tokens`] || DEFAULT_MAX_OUTPUT_TOKENS;
+  const contextWindow = localConfig[`${rolePrefix}_context_window`] ?? DEFAULT_CONTEXT_WINDOW;
+  const maxTokens = localConfig[`${rolePrefix}_max_tokens`] ?? DEFAULT_MAX_OUTPUT_TOKENS;
   const superchargeEnabled = Boolean(localConfig[`${rolePrefix}_supercharge_enabled`]);
 
   return (
-    <div className={`submitter-config-section${provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`} style={{
-      borderColor: provider === 'openrouter' ? undefined : borderColor
-    }}>
-      <h5 className={provider === 'openrouter' ? 'card-title--orange' : ''} style={provider !== 'openrouter' ? { color: borderColor } : undefined}>
+    <div className={`submitter-config-section${provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}>
+      <h5 className={provider === 'openrouter' ? 'card-title--orange' : ''}>
         <span className="role-title-with-badges">
           <span>{title}</span>
           {showProofStrengthBadge && <ProofStrengthBadge />}
@@ -250,8 +264,10 @@ const RoleConfig = ({
         onFallbackChange={(f) => handleChange(`${rolePrefix}_lm_studio_fallback`, f)}
         lmStudioModels={lmStudioModels}
         openRouterModels={openRouterModels}
+        openAICodexModels={openAICodexModels}
         modelProviders={modelProviders}
         hasOpenRouterKey={hasOpenRouterKey}
+        hasOpenAICodexLogin={hasOpenAICodexLogin}
         isRunning={isRunning}
         lmStudioEnabled={lmStudioEnabled}
       />
@@ -320,8 +336,10 @@ const AutonomousResearchSettings = ({
   // Models and OpenRouter state
   const [lmStudioModels, setLmStudioModels] = useState(models || []);
   const [openRouterModels, setOpenRouterModels] = useState([]);
+  const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
+  const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -350,6 +368,7 @@ const AutonomousResearchSettings = ({
   const [proofSettingsTimeout, setProofSettingsTimeout] = useState('120');
   const [proofSettingsLspEnabled, setProofSettingsLspEnabled] = useState(false);
   const [proofSettingsLspIdleTimeout, setProofSettingsLspIdleTimeout] = useState('600');
+  const [proofSettingsMaxParallelCandidates, setProofSettingsMaxParallelCandidates] = useState('6');
   const [proofSettingsSmtEnabled, setProofSettingsSmtEnabled] = useState(false);
   const [proofSettingsSmtTimeout, setProofSettingsSmtTimeout] = useState('30');
   const [savingProofSettings, setSavingProofSettings] = useState(false);
@@ -524,6 +543,14 @@ const AutonomousResearchSettings = ({
       if (settings.freeModelAutoSelector !== undefined) setFreeModelAutoSelector(settings.freeModelAutoSelector);
       if (settings.tier3Enabled !== undefined) setTier3Enabled(settings.tier3Enabled);
       if (settings.modelProviders) setModelProviders(settings.modelProviders);
+
+      try {
+        const freeModelSettings = await openRouterAPI.getFreeModelSettings();
+        setFreeModelLooping(freeModelSettings.looping_enabled ?? true);
+        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? true);
+      } catch (err) {
+        console.error('Failed to load free model settings:', err);
+      }
       
       try {
         const status = await openRouterAPI.getApiKeyStatus();
@@ -533,6 +560,17 @@ const AutonomousResearchSettings = ({
         }
       } catch (err) {
         console.error('Failed to check OpenRouter key:', err);
+      }
+      try {
+        const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+        const configured = Boolean(codexStatus.status?.configured);
+        setHasOpenAICodexLogin(configured);
+        if (configured) {
+          fetchOpenAICodexModels();
+        }
+      } catch (err) {
+        console.error('Failed to check OpenAI Codex login:', err);
+        setHasOpenAICodexLogin(false);
       }
       
       try {
@@ -576,6 +614,7 @@ const AutonomousResearchSettings = ({
         setProofSettingsTimeout(String(status.lean4_proof_timeout ?? 120));
         setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
         setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? 600));
+        setProofSettingsMaxParallelCandidates(String(status.proof_max_parallel_candidates ?? 6));
         setProofSettingsSmtEnabled(Boolean(status.smt_enabled));
         setProofSettingsSmtTimeout(String(status.smt_timeout ?? 30));
       } catch (err) {
@@ -683,11 +722,15 @@ const AutonomousResearchSettings = ({
     const currentConfig = {
       ...localConfig,
       submitter_configs: submitterConfigs.slice(0, numSubmitters),
+      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? true,
+      allow_research_papers: config?.allow_research_papers ?? true,
       tier3_enabled: tier3Enabled,
     };
     const nextConfig = {
       ...normalizedLocalConfig,
       submitter_configs: normalizedSubmitters.slice(0, numSubmitters),
+      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? true,
+      allow_research_papers: config?.allow_research_papers ?? true,
       tier3_enabled: tier3Enabled,
     };
     if (JSON.stringify(nextConfig) !== JSON.stringify(currentConfig)) {
@@ -718,7 +761,13 @@ const AutonomousResearchSettings = ({
   // Propagate tier3Enabled to parent config whenever it changes
   useEffect(() => {
     if (!isLoadedFromStorage) return;
-    onConfigChange({ ...localConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters), tier3_enabled: tier3Enabled });
+    onConfigChange({
+      ...localConfig,
+      submitter_configs: submitterConfigs.slice(0, numSubmitters),
+      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? true,
+      allow_research_papers: config?.allow_research_papers ?? true,
+      tier3_enabled: tier3Enabled
+    });
   }, [tier3Enabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Initialize from config only once on mount
@@ -743,6 +792,16 @@ const AutonomousResearchSettings = ({
       console.error('Failed to fetch OpenRouter models:', err);
     } finally {
       setLoadingOpenRouter(false);
+    }
+  };
+
+  const fetchOpenAICodexModels = async () => {
+    try {
+      const result = await cloudAccessAPI.getOpenAICodexModels();
+      setOpenAICodexModels(result.models || []);
+    } catch (err) {
+      console.error('Failed to fetch OpenAI Codex models:', err);
+      setOpenAICodexModels([]);
     }
   };
 
@@ -841,6 +900,19 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     return autoSettings;
   };
 
+  const getCodexAutoSettingsForModel = (modelId) => {
+    const model = openAICodexModels.find((item) => item.id === modelId);
+    if (!model) {
+      console.debug('[AutonomousCodexAutoFill] model not in loaded list, skipping auto-fill', { modelId });
+      return null;
+    }
+    const autoSettings = computeCodexAutoSettings(model);
+    if (autoSettings.warnings.length > 0) {
+      console.warn('[AutonomousCodexAutoFill] auto-settings fallback used:', autoSettings.warnings);
+    }
+    return autoSettings;
+  };
+
   const markProfileAsCustom = () => {
     if (selectedProfile) {
       setSelectedProfile('');
@@ -884,8 +956,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     
     if (numericFields.includes(field)) {
       const parsed = parseInt(value, 10);
-      const isContextField = field.includes('context_window');
-      const finalValue = isNaN(parsed) ? (isContextField ? DEFAULT_CONTEXT_WINDOW : DEFAULT_MAX_OUTPUT_TOKENS) : parsed;
+      const finalValue = isNaN(parsed) ? '' : parsed;
       
       const newConfig = { ...localConfig, [field]: finalValue };
       markProfileAsCustom();
@@ -919,11 +990,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setLocalConfig(newConfig);
     onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
 
-    if (localConfig[`${rolePrefix}_provider`] !== 'openrouter' || !modelId) {
+    const provider = localConfig[`${rolePrefix}_provider`];
+    if (!modelId || !['openrouter', 'openai_codex_oauth'].includes(provider)) {
       return;
     }
 
-    const autoSettings = await getAutoSettingsForModel(modelId, null);
+    const autoSettings = provider === 'openrouter'
+      ? await getAutoSettingsForModel(modelId, null)
+      : getCodexAutoSettingsForModel(modelId);
     if (!autoSettings) {
       return;
     }
@@ -981,7 +1055,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         modelId: submitterConfigs[0]?.modelId || ''
       });
     }
-    const slicedConfigs = newConfigs.slice(0, count);
     setSubmitterConfigs(newConfigs);
     // Don't propagate immediately - will propagate on blur
   };
@@ -1056,11 +1129,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setSubmitterConfigs(newConfigs);
     onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
 
-    if (newConfigs[index].provider !== 'openrouter' || !modelId) {
+    if (!modelId || !['openrouter', 'openai_codex_oauth'].includes(newConfigs[index].provider)) {
       return;
     }
 
-    const autoSettings = await getAutoSettingsForModel(modelId, null);
+    const autoSettings = newConfigs[index].provider === 'openrouter'
+      ? await getAutoSettingsForModel(modelId, null)
+      : getCodexAutoSettingsForModel(modelId);
     if (!autoSettings) {
       return;
     }
@@ -1114,7 +1189,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     
     if (numericFields.includes(field)) {
       const parsed = parseInt(value, 10);
-      const finalValue = isNaN(parsed) ? (field === 'contextWindow' ? DEFAULT_CONTEXT_WINDOW : DEFAULT_MAX_OUTPUT_TOKENS) : parsed;
+      const finalValue = isNaN(parsed) ? '' : parsed;
       
       const newConfigs = [...submitterConfigs];
       newConfigs[index] = {
@@ -1206,17 +1281,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 120;
     const parsedLspIdleTimeout = parseInt(proofSettingsLspIdleTimeout, 10);
     const lspIdleTimeout = Number.isFinite(parsedLspIdleTimeout) ? parsedLspIdleTimeout : 600;
+    const parsedMaxParallelCandidates = parseInt(proofSettingsMaxParallelCandidates, 10);
+    const maxParallelCandidates = Number.isFinite(parsedMaxParallelCandidates)
+      ? Math.max(0, parsedMaxParallelCandidates)
+      : 6;
     const parsedSmtTimeout = parseInt(proofSettingsSmtTimeout, 10);
     const smtTimeout = Number.isFinite(parsedSmtTimeout) ? parsedSmtTimeout : 30;
 
     try {
       setSavingProofSettings(true);
       setProofSettingsMessage('');
+      const latestProofStatus = await autonomousAPI.getProofStatus().catch(() => null);
+      const leanEnabled = latestProofStatus
+        ? Boolean(latestProofStatus.lean4_enabled)
+        : proofSettingsEnabled;
       const status = await autonomousAPI.updateProofSettings({
-        enabled: proofSettingsEnabled,
+        enabled: leanEnabled,
         timeout,
         lean4_lsp_enabled: proofSettingsLspEnabled,
         lean4_lsp_idle_timeout: lspIdleTimeout,
+        max_parallel_candidates: maxParallelCandidates,
         smt_enabled: proofSettingsSmtEnabled,
         smt_timeout: smtTimeout,
       });
@@ -1225,6 +1309,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       setProofSettingsTimeout(String(status.lean4_proof_timeout ?? timeout));
       setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
       setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? lspIdleTimeout));
+      setProofSettingsMaxParallelCandidates(String(status.proof_max_parallel_candidates ?? maxParallelCandidates));
       setProofSettingsSmtEnabled(Boolean(status.smt_enabled));
       setProofSettingsSmtTimeout(String(status.smt_timeout ?? smtTimeout));
       setProofSettingsMessage('Lean 4 / SMT proof settings saved.');
@@ -1372,7 +1457,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     freeOnly,
     freeModelLooping,
     freeModelAutoSelector,
+    allowMathematicalProofs: config?.allow_mathematical_proofs ?? true,
+    allowResearchPapers: config?.allow_research_papers ?? true,
     tier3Enabled,
+    creativityEmphasisBoostEnabled: config?.creativity_emphasis_boost_enabled ?? false,
     modelProviders,
     selectedProfile,
   });
@@ -1385,7 +1473,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       freeOnly: rawSettings.freeOnly,
       freeModelLooping: rawSettings.freeModelLooping,
       freeModelAutoSelector: rawSettings.freeModelAutoSelector,
+      allowMathematicalProofs: rawSettings.allowMathematicalProofs,
+      allowResearchPapers: rawSettings.allowResearchPapers,
       tier3Enabled: rawSettings.tier3Enabled,
+      creativityEmphasisBoostEnabled: rawSettings.creativityEmphasisBoostEnabled,
       modelProviders: rawSettings.modelProviders,
       selectedProfile: rawSettings.selectedProfile,
     });
@@ -1399,6 +1490,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setTier3Enabled(nextSettings.tier3Enabled);
     setModelProviders(nextSettings.modelProviders || {});
     setSelectedProfile(nextSettings.selectedProfile || '');
+    openRouterAPI
+      .setFreeModelSettings(nextSettings.freeModelLooping, nextSettings.freeModelAutoSelector)
+      .catch(() => {});
     onConfigChange(settingsToAutonomousConfig(nextSettings));
 
     if (updateRawText) {
@@ -1447,7 +1541,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       <div className="settings-group" style={{ marginBottom: '1.5rem' }}>
         <h4>Profile Selection</h4>
         <p className="settings-info">
-          Load one of the preselected example profiles as a starting point, or create your own custom profile. (These models and hosts are not affiliated with MOTO/Intrafere)
+          Load one of the preselected example profiles as a starting point, or create your own custom profile. Expect MOTO to run for at least 3 or more hours before seeing the first completed stage 2 paper. MOTO does a lot of research seeking novel discoveries before writing.
         </p>
         
         <div className="settings-row">
@@ -1689,9 +1783,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             return (
           <div 
             key={idx} 
-            className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : (idx === 0 ? ' role-config-card--main' : '')}`}
+            className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
           >
-            <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : (idx === 0 ? 'card-title--green' : '')}>
+            <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : ''}>
               <span className="role-title-with-badges">
                 <span>{idx === 0 ? 'Submitter 1 (Main Submitter)' : `Submitter ${idx + 1}`}</span>
                 {idx === 0 && <ProofStrengthBadge />}
@@ -1712,8 +1806,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               onFallbackChange={(f) => handleSubmitterConfigChange(idx, 'lmStudioFallbackId', f)}
               lmStudioModels={lmStudioModels}
               openRouterModels={openRouterModels}
+              openAICodexModels={openAICodexModels}
               modelProviders={modelProviders}
               hasOpenRouterKey={hasOpenRouterKey}
+              hasOpenAICodexLogin={hasOpenAICodexLogin}
               isRunning={isRunning}
               lmStudioEnabled={lmStudioEnabled}
             />
@@ -1783,7 +1879,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         <RoleConfig
           title="Validator"
           rolePrefix="validator"
-          borderColor="#ff6b6b"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
@@ -1793,8 +1888,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
+          openAICodexModels={openAICodexModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
+          hasOpenAICodexLogin={hasOpenAICodexLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />
@@ -1811,7 +1908,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           title="High-Context Submitter"
           hint="Handles outline, construction, and review modes."
           rolePrefix="high_context"
-          borderColor="#4CAF50"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
@@ -1821,8 +1917,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
+          openAICodexModels={openAICodexModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
+          hasOpenAICodexLogin={hasOpenAICodexLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
           showProofStrengthBadge
@@ -1832,7 +1930,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           title="High-Parameter Submitter"
           hint="Handles mathematical rigor enhancement."
           rolePrefix="high_param"
-          borderColor="#2a2a2a"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
@@ -1842,8 +1939,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
+          openAICodexModels={openAICodexModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
+          hasOpenAICodexLogin={hasOpenAICodexLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
           showProofStrengthBadge
@@ -1853,7 +1952,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           title="Critique Submitter"
           hint="Handles post-body peer review feedback for the AI self-review section."
           rolePrefix="critique_submitter"
-          borderColor="#e74c3c"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
@@ -1863,8 +1961,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           isRunning={isRunning}
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
+          openAICodexModels={openAICodexModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
+          hasOpenAICodexLogin={hasOpenAICodexLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />
@@ -1968,21 +2068,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                   <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ cursor: isRunning ? 'not-allowed' : 'pointer', marginTop: '1rem' }}>
                     <input
                       type="checkbox"
-                      checked={proofSettingsEnabled}
-                      onChange={(e) => setProofSettingsEnabled(e.target.checked)}
-                      disabled={isRunning || savingProofSettings}
-                    />
-                    <span className="settings-option-copy">
-                      <span className="settings-option-title">Enable Lean 4 proof verification</span>
-                      <span className="settings-option-description">
-                        Turns on automatic proof checks after brainstorm and paper completion plus manual proof checks from the Proofs tab.
-                      </span>
-                    </span>
-                  </label>
-
-                  <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ cursor: isRunning ? 'not-allowed' : 'pointer', marginTop: '1rem' }}>
-                    <input
-                      type="checkbox"
                       checked={proofSettingsLspEnabled}
                       onChange={(e) => setProofSettingsLspEnabled(e.target.checked)}
                       disabled={isRunning || savingProofSettings}
@@ -2006,6 +2091,24 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                       max={3600}
                       step={5}
                     />
+                  </div>
+
+                  <div className="settings-row">
+                    <label>Concurrent Proof Attempts</label>
+                    <div>
+                      <input
+                        type="number"
+                        value={proofSettingsMaxParallelCandidates}
+                        onChange={(e) => setProofSettingsMaxParallelCandidates(e.target.value)}
+                        disabled={isRunning || savingProofSettings}
+                        min={0}
+                        max={1000}
+                        step={1}
+                      />
+                      <small className="settings-hint" style={{ display: 'block', marginTop: '0.35rem' }}>
+                        Default is 6. Set 0 for unlimited. Positive values run autonomous proof checks in strict batches; rigor mode stays one proof at a time. Setting this number to 0 will make the program faster but more expensive and less efficient.
+                      </small>
+                    </div>
                   </div>
 
                   <div className="settings-row">

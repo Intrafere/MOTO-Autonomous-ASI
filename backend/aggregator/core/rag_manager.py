@@ -4,7 +4,7 @@ Stages: Query Rewriting -> Hybrid Recall -> Reranking+MMR -> Packing+Compression
 """
 import chromadb
 from chromadb.config import Settings
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 import numpy as np
 from rank_bm25 import BM25Okapi
 from collections import OrderedDict
@@ -18,7 +18,7 @@ from backend.shared.config import rag_config, system_config
 from backend.shared.models import DocumentChunk, ContextPack
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.rag_lock import rag_operation_lock
-from backend.shared.utils import count_tokens, compress_text
+from backend.shared.utils import count_tokens
 from backend.shared.log_redaction import redact_log_text
 from backend.aggregator.ingestion.pipeline import ingestion_pipeline
 
@@ -168,12 +168,11 @@ class RAGManager:
             # Enforce per-size chunk cap
             await self._enforce_chunk_cap()
             
-            logger.info("Added text: %s", redact_log_text(source_name, 120))
+            logger.info("Added text source with %d characters", len(text or ""))
             
         except Exception as e:
             logger.error(
-                "Failed to add text %s: %s",
-                redact_log_text(source_name, 120),
+                "Failed to add text source: %s",
                 redact_log_text(e, 240),
             )
             raise
@@ -201,7 +200,13 @@ class RAGManager:
         Returns:
             ContextPack with retrieved context
         """
-        max_tokens = max_tokens or rag_config.get_available_input_tokens(rag_config.submitter_context_window, rag_config.submitter_max_output_tokens)
+        if max_tokens is None:
+            max_tokens = rag_config.get_available_input_tokens(
+                rag_config.submitter_context_window,
+                rag_config.submitter_max_output_tokens,
+            )
+        elif int(max_tokens or 0) <= 0:
+            raise ValueError("RAG retrieval max_tokens must be a positive integer.")
         
         # Stage A: Query Rewriting
         logger.debug(f"RAG Stage 1/4: Query rewriting for '{query[:50]}...'")
