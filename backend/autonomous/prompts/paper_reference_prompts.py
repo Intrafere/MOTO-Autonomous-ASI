@@ -53,7 +53,7 @@ YOUR TASK:
 Determine which papers (if any) would be VERY USEFUL to inform and enhance your brainstorm exploration.
 
 DIRECT-SOLUTION PREFERENCE:
-- Prefer papers that most directly help produce a rigorous direct answer, direct partial answer, impossibility result, explicit construction, exact reduction, or sharp constraint
+- Prefer papers that most directly help answer the user's whole prompt or a necessary piece of it
 - Do not select papers merely because they are broadly related if they do not materially strengthen the most direct route to the goal
 
 WHY THIS MATTERS - COMPOUNDING KNOWLEDGE:
@@ -265,7 +265,7 @@ Make your final selection of reference papers (maximum {max_papers}) that will b
 
 DIRECT-SOLUTION PREFERENCE:
 - Select papers that most directly strengthen the answer you intend to write
-- Prefer papers that support the core proof, construction, impossibility argument, or key reduction over broader background
+- Prefer papers that directly strengthen the answer over broader background
 
 SELECTION CRITERIA:
 - Papers that provide essential mathematical background for the direct answer

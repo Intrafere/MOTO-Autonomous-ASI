@@ -23,6 +23,9 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import OpenRouterClient
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.free_model_manager import free_model_manager
+from backend.shared.log_redaction import redact_log_text
+from backend.shared.provider_pause import resume_provider_pauses
+from backend.shared.runtime_settings import RuntimeSettingsError, save_free_model_runtime_settings
 from backend.shared.secret_store import (
     SecretStoreError,
     clear_openrouter_api_key,
@@ -346,7 +349,11 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to fetch providers for model {model_id}: {e}")
+        logger.error(
+            "Failed to fetch providers for model %s: %s",
+            redact_log_text(model_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Failed to fetch providers")
 
 
@@ -391,16 +398,25 @@ async def get_free_model_settings() -> Dict[str, Any]:
 @router.post("/api/openrouter/free-model-settings")
 async def set_free_model_settings(request: FreeModelSettings) -> Dict[str, Any]:
     """Update free model looping and auto-selector settings."""
+    previous_status = free_model_manager.get_status()
     try:
         free_model_manager.configure(
             looping=request.looping_enabled,
             auto_selector=request.auto_selector_enabled
         )
+        save_free_model_runtime_settings()
         return {
             "success": True,
             "message": "Free model settings updated",
             **free_model_manager.get_status()
         }
+    except RuntimeSettingsError as e:
+        free_model_manager.configure(
+            looping=bool(previous_status.get("looping_enabled", True)),
+            auto_selector=bool(previous_status.get("auto_selector_enabled", True)),
+        )
+        logger.error(f"Failed to persist free model settings: {e}")
+        raise HTTPException(status_code=500, detail="Failed to persist free model settings")
     except Exception as e:
         logger.error(f"Failed to update free model settings: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -464,15 +480,21 @@ async def reset_credit_exhaustion() -> Dict[str, Any]:
     try:
         free_model_manager.clear_account_exhaustion()
         reset_roles = await api_client_manager.reset_openrouter_fallbacks()
+        paused_workflows_resumed = resume_provider_pauses()
         
         roles_list = list(reset_roles.keys())
-        logger.info(f"Credit exhaustion reset: {len(roles_list)} role(s) restored, account exhaustion flag cleared")
+        logger.info(
+            "Credit exhaustion reset: %s role(s) restored, account exhaustion flag cleared, %s paused workflow(s) resumed",
+            len(roles_list),
+            paused_workflows_resumed,
+        )
         
         return {
             "success": True,
             "message": f"Reset {len(roles_list)} role(s) back to OpenRouter" if roles_list else "Exhaustion flags cleared (no roles needed reset)",
             "roles_reset": roles_list,
-            "account_exhaustion_cleared": True
+            "account_exhaustion_cleared": True,
+            "paused_workflows_resumed": paused_workflows_resumed,
         }
     except Exception as e:
         logger.error(f"Failed to reset credit exhaustion: {e}")

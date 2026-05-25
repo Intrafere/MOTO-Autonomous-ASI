@@ -1,4 +1,5 @@
 ---
+description: LaTeX renderer security, KaTeX parsing, and large-document rendering requirements
 alwaysApply: false
 ---
 
@@ -76,16 +77,15 @@ Dual rendering: **Rendered LaTeX View** (KaTeX math, dark theme on screen, white
 
 ## Rendering Pipeline (CRITICAL ORDER)
 
-Must execute in this exact order in `renderLatexToHtml()`:
+The raw conversion inside `renderLatexToHtml()` may include targeted preprocessing repairs between these anchors. Preserve these order constraints rather than treating every intermediate fix as a rule-level invariant:
 
 1. **`decodeHtmlEntities()`** — FIRST
-2. **`autoWrapMath()`** — Auto-wrap unwrapped math
-3. **`processTheoremEnvironments()`** — TikZ handling happens HERE (all three patterns: `\[...\]`, `$$...$$`, standalone)
-4. **`replaceSectionCommand()`** — Section headers
-5. **Text formatting, citations, footnotes, lists, tables, QED symbols**
-6. **KaTeX rendering** via `renderKatexSafely()` — `maxExpand: 5000`, skips HTML placeholder content
-7. **Line breaks/horizontal rules** (`\\` → `<br/>`, `\hrule` → `<hr/>`) — AFTER KaTeX
-8. **DOMPurify sanitization** — LAST
+2. Apply renderer-specific text/LaTeX repairs and auto-wrap unwrapped math before theorem/section/text formatting
+3. **`processTheoremEnvironments()`** — TikZ handling happens before KaTeX (all three patterns: `\[...\]`, `$$...$$`, standalone)
+4. **KaTeX rendering** via `renderKatexSafely()` — `maxExpand: 5000`, skips HTML placeholder content
+5. **Line breaks/horizontal rules** (`\\` → `<br/>`, `\hrule` → `<hr/>`) — AFTER KaTeX
+
+DOMPurify sanitization is intentionally outside `renderLatexToHtml()` and must run immediately after it at every HTML sink (`renderedHtmlSmall`, `RenderedChunk.renderedHtml`, and PDF helper rendering).
 
 **Critical:** `\\` line break conversion MUST be after KaTeX (valid syntax in `aligned`, `matrix`, etc.)
 
@@ -99,7 +99,7 @@ Must execute in this exact order in `renderLatexToHtml()`:
 
 **Auto-threshold**: Documents >50K chars (`LARGE_DOC_THRESHOLD`) auto-default to raw mode with a banner offering to switch to rendered view.
 
-**Invariant**: Each chunk independently runs the full `renderLatexToHtml()` → `DOMPurify.sanitize()` pipeline. The pipeline order within each chunk is identical to the single-document path.
+**Invariant**: Each chunk independently runs `renderLatexToHtml()` and then `DOMPurify.sanitize()`. Chunked and single-document paths must share the same conversion helpers and ordering anchors.
 
 ---
 
@@ -111,7 +111,7 @@ Must execute in this exact order in `renderLatexToHtml()`:
 
 **`sanitizeFilename()`**: Remove special chars, underscores for whitespace, truncate to 100 chars.
 
-**Backend PDF route**: `POST /api/download/pdf` — accepts `{html_body, title, word_count, date, models, outline, filename}`. Builds a standalone HTML document (KaTeX + LatexRenderer CSS both inlined from local filesystem + PDF print overrides that convert dark theme to light). `wait_until="load"` (no external requests). Runs `sync_playwright()` in `asyncio.get_running_loop().run_in_executor`. Returns `Response(content=pdf_bytes, media_type="application/pdf")`.
+**Backend PDF route**: `POST /api/download/pdf` — default/desktop mode accepts `{html_body, title, word_count, date, models, outline, filename}`. Builds a standalone HTML document (KaTeX + LatexRenderer CSS both inlined from local filesystem + PDF print overrides that convert dark theme to light). `wait_until="load"` (no external requests). Runs `sync_playwright()` in `asyncio.get_running_loop().run_in_executor`. Returns `Response(content=pdf_bytes, media_type="application/pdf")`. Generic mode returns `501`; current clients surface that backend unavailability and raw export remains available.
 
 **Playwright install**: `python -m playwright install chromium` — runs automatically in both launcher scripts after `pip install -r requirements.txt`. One-time ~150MB download of bundled Chromium (no system Chrome/Chromium required). Failure is non-fatal (warning shown, startup continues).
 
@@ -179,7 +179,7 @@ When a frontend storage prefix is active for multi-instance shared-origin use, t
 5. TikZ environments MUST be pre-processed — KaTeX cannot render them; remove surrounding math delimiters (all three patterns)
 6. KaTeX maxExpand MUST be 5000
 7. Line break conversion MUST happen AFTER KaTeX — prevents SVG corruption
-8. Rendering pipeline order MUST be preserved (same order in each chunk)
+8. Rendering pipeline ordering anchors MUST be preserved (same helpers/order in each chunk)
 9. Raw text view never processes HTML — plain text only
 10. PDF generation captures sanitized content
 11. Chunks MUST split at safe boundaries (section headers, double-newlines) — never mid-math-environment

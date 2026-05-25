@@ -2,22 +2,19 @@
 High-context submitter agent for compiler.
 Handles 3 modes: construction, outline update, and review.
 """
-import asyncio
 import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
-from backend.shared.models import CompilerSubmission
+from backend.shared.models import CompilerSubmission, ContextPack
 from backend.shared.config import system_config, rag_config
 from backend.shared.utils import count_tokens
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.autonomous.memory.proof_database import proof_database
-from backend.aggregator.validation.json_validator import json_validator
 from backend.compiler.prompts.outline_prompts import (
     build_outline_create_prompt,
     build_outline_update_prompt
@@ -33,9 +30,6 @@ from backend.compiler.prompts.review_prompts import build_review_prompt
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import (
     paper_memory,
-    ABSTRACT_PLACEHOLDER,
-    INTRO_PLACEHOLDER,
-    CONCLUSION_PLACEHOLDER,
 )
 from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
 
@@ -198,7 +192,7 @@ class HighContextSubmitter:
         self.websocket_broadcaster = websocket_broadcaster
         self._initialized = False
         
-        # Calculate context budget (user-configurable, default 131072)
+        # Calculate context budget from the user-configured role settings.
         self.context_window = system_config.compiler_high_context_context_window
         self.max_output_tokens = system_config.compiler_high_context_max_output_tokens
         self.available_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
@@ -244,7 +238,9 @@ class HighContextSubmitter:
             logger.info("Retrieving aggregator database evidence via RAG...")
             context_pack = await compiler_rag_manager.retrieve_for_mode(
                 query=self.user_prompt,
-                mode="outline_create"
+                mode="outline_create",
+                role_context_window=self.context_window,
+                role_max_output_tokens=self.max_output_tokens,
             )
             logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
             
@@ -388,7 +384,9 @@ class HighContextSubmitter:
             context_pack = await compiler_rag_manager.retrieve_for_mode(
                 query=self.user_prompt,
                 mode="outline_update",
-                exclude_sources=["compiler_outline.txt", "compiler_paper.txt"]
+                exclude_sources=["compiler_outline.txt", "compiler_paper.txt"],
+                role_context_window=self.context_window,
+                role_max_output_tokens=self.max_output_tokens,
             )
             logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
             
@@ -556,13 +554,13 @@ class HighContextSubmitter:
             system_overhead = 5000  # system prompt, JSON schema, headers, separators, rejection history
             
             reserved_tokens = outline_tokens + paper_tokens + brainstorm_tokens + system_overhead
-            rag_budget = max(5000, max_allowed_tokens - reserved_tokens)
+            rag_budget = max_allowed_tokens - reserved_tokens
             
             if brainstorm_content and brainstorm_tokens > 0:
                 logger.info(
                     f"Context budget: max={max_allowed_tokens}, outline={outline_tokens}, "
                     f"paper={paper_tokens}, brainstorm={brainstorm_tokens}, overhead={system_overhead}, "
-                    f"rag_budget={rag_budget}"
+                    f"rag_budget={max(rag_budget, 0)}"
                 )
             
             # Retrieve aggregator database evidence
@@ -571,19 +569,26 @@ class HighContextSubmitter:
             if brainstorm_source_name:
                 exclude_sources.append(brainstorm_source_name)
             
-            logger.info("Retrieving aggregator database evidence via RAG...")
             query = self.user_prompt
             if not is_first_portion and paper_for_llm:
                 # Use last part of paper to guide next section
                 query += " " + paper_for_llm[-500:]
-            
-            context_pack = await compiler_rag_manager.retrieve_for_mode(
-                query=query,
-                mode="construction",
-                max_tokens=rag_budget,
-                exclude_sources=exclude_sources
-            )
-            logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
+
+            if rag_budget > 0:
+                logger.info("Retrieving aggregator database evidence via RAG...")
+                context_pack = await compiler_rag_manager.retrieve_for_mode(
+                    query=query,
+                    mode="construction",
+                    max_tokens=rag_budget,
+                    exclude_sources=exclude_sources
+                )
+                logger.info(f"RAG retrieval complete: {len(context_pack.text)} chars retrieved")
+            else:
+                logger.warning(
+                    "Skipping construction RAG retrieval because mandatory direct context uses the configured input budget "
+                    f"(reserved={reserved_tokens}, max_input={max_allowed_tokens})."
+                )
+                context_pack = ContextPack(text="")
             
             # Build prompt based on section phase (uses phase-specific prompts for explicit completion tracking)
             logger.info(f"Building construction prompt for phase: {section_phase or 'generic'}...")

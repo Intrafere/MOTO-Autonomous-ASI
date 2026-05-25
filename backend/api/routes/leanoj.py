@@ -219,6 +219,36 @@ def _get_start_conflict() -> Optional[str]:
     return None
 
 
+def _validate_role_limits(label: str, role_config) -> None:
+    try:
+        context_window = int(role_config.context_window)
+        max_output_tokens = int(role_config.max_output_tokens)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} context window and max output tokens must be configured as positive integers.",
+        )
+    if context_window <= 0 or max_output_tokens <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} context window and max output tokens must be configured as positive integers.",
+        )
+    if max_output_tokens >= context_window:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} max output tokens must be smaller than its context window.",
+        )
+
+
+def _validate_start_role_limits(request: LeanOJStartRequest) -> None:
+    _validate_role_limits("Topic generator", request.topic_generator)
+    _validate_role_limits("Topic validator", request.topic_validator)
+    _validate_role_limits("Brainstorm validator", request.brainstorm_validator)
+    _validate_role_limits("Final proof solver", request.final_solver)
+    for index, submitter in enumerate(request.brainstorm_submitters, start=1):
+        _validate_role_limits(f"Brainstorm submitter {index}", submitter)
+
+
 @router.post("/start")
 async def start_leanoj(request: LeanOJStartRequest):
     """Start a Proof Solver run."""
@@ -229,6 +259,7 @@ async def start_leanoj(request: LeanOJStartRequest):
                 raise HTTPException(status_code=400, detail=conflict)
             if not system_config.lean4_enabled:
                 raise HTTPException(status_code=400, detail="Lean 4 is disabled. Enable Lean 4 proof verification before starting Proof Solver.")
+            _validate_start_role_limits(request)
             resumed = await leanoj_coordinator.resume_or_initialize(request)
             if not leanoj_coordinator.start_in_background():
                 raise HTTPException(status_code=400, detail="Proof Solver is already running")

@@ -11,30 +11,22 @@ CRITICAL: Operates ONLY on Tier 2 papers, NOT on Tier 1 brainstorm databases.
 NO RAG FOR ABSTRACTS (by design): Step 1 browses abstracts/outlines which are small metadata.
 EXPANDED PAPERS OVERFLOW: Step 2 uses RAG fallback for expanded papers when full direct injection does not fit.
 """
-import asyncio
-import json
 import logging
 from typing import Optional, List, Dict, Any, Callable
 
-from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
-from backend.shared.models import CertaintyAssessment, ReferenceExpansionRequest
+from backend.shared.config import rag_config
+from backend.shared.models import CertaintyAssessment
 from backend.autonomous.prompts.final_answer_prompts import (
     build_certainty_assessment_prompt,
-    build_certainty_validation_prompt,
-    get_certainty_assessment_system_prompt,
-    get_certainty_assessment_json_schema
+    build_certainty_validation_prompt
 )
 from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.memory.final_answer_memory import final_answer_memory
 from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
-from backend.autonomous.prompts.paper_reference_prompts import (
-    get_reference_expansion_system_prompt,
-    get_reference_expansion_json_schema
-)
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +49,8 @@ class CertaintyAssessor:
         self,
         submitter_model: str,
         validator_model: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 25000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.submitter_model = submitter_model
         self.validator_model = validator_model
@@ -80,7 +72,7 @@ class CertaintyAssessor:
     
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""
-        return self.context_window - self.max_output_tokens
+        return rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
     
     async def assess_certainty(
         self,
@@ -291,7 +283,10 @@ USER'S RESEARCH QUESTION:
         expanded = []
         
         for paper_id in paper_ids:
-            content = await paper_library.get_paper_content(paper_id)
+            content = await paper_library.get_paper_content(
+                paper_id,
+                strip_proofs=True,
+            )
             outline = await paper_library.get_outline(paper_id)
             
             if content:

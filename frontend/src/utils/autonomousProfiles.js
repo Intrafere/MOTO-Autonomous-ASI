@@ -155,7 +155,7 @@ export const RECOMMENDED_PROFILES = {
   },
   [RECOMMENDED_ALTERNATE_PROFILE_KEY]: {
     name: 'Fast, affordable, mid-tier knowledge',
-    numSubmitters: 4,
+    numSubmitters: 2,
     submitters: [
       {
         modelId: 'moonshotai/kimi-k2.6',
@@ -166,28 +166,12 @@ export const RECOMMENDED_PROFILES = {
         maxOutputTokens: 40000,
       },
       {
-        modelId: 'openai/gpt-oss-120b',
-        provider: 'openrouter',
-        openrouterProvider: 'Groq',
-        lmStudioFallbackId: null,
-        contextWindow: 131072,
-        maxOutputTokens: 25000,
-      },
-      {
         modelId: 'deepseek/deepseek-v4-pro',
         provider: 'openrouter',
         openrouterProvider: null,
         lmStudioFallbackId: null,
         contextWindow: 1048576,
         maxOutputTokens: 65500,
-      },
-      {
-        modelId: 'inception/mercury-2',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 128000,
-        maxOutputTokens: 25000,
       },
     ],
     validator: {
@@ -276,7 +260,7 @@ export const RECOMMENDED_PROFILES = {
     },
   },
   [RECOMMENDED_LAB_MAX_PROFILE_KEY]: {
-    name: 'Lab grade, SOTA models, slower, costly (starts at ~$20 per hour), max knowledge',
+    name: 'Lab grade, SOTA models, slower, very costly (starts at ~$40 per hour), max knowledge, too expensive and overkill for most home users',
     numSubmitters: 4,
     submitters: [
       {
@@ -409,7 +393,10 @@ const DEFAULT_AUTONOMOUS_SETTINGS = {
   freeOnly: false,
   freeModelLooping: true,
   freeModelAutoSelector: true,
+  allowMathematicalProofs: true,
+  allowResearchPapers: true,
   tier3Enabled: false,
+  creativityEmphasisBoostEnabled: false,
   modelProviders: {},
   selectedProfile: RECOMMENDED_PROFILE_KEY,
 };
@@ -440,7 +427,10 @@ function normalizeStoredSettings(settings = {}) {
     freeOnly: settings.freeOnly ?? DEFAULT_AUTONOMOUS_SETTINGS.freeOnly,
     freeModelLooping: settings.freeModelLooping ?? DEFAULT_AUTONOMOUS_SETTINGS.freeModelLooping,
     freeModelAutoSelector: settings.freeModelAutoSelector ?? DEFAULT_AUTONOMOUS_SETTINGS.freeModelAutoSelector,
+    allowMathematicalProofs: settings.allowMathematicalProofs ?? DEFAULT_AUTONOMOUS_SETTINGS.allowMathematicalProofs,
+    allowResearchPapers: settings.allowResearchPapers ?? DEFAULT_AUTONOMOUS_SETTINGS.allowResearchPapers,
     tier3Enabled: settings.tier3Enabled ?? DEFAULT_AUTONOMOUS_SETTINGS.tier3Enabled,
+    creativityEmphasisBoostEnabled: settings.creativityEmphasisBoostEnabled ?? DEFAULT_AUTONOMOUS_SETTINGS.creativityEmphasisBoostEnabled,
     modelProviders: settings.modelProviders || DEFAULT_AUTONOMOUS_SETTINGS.modelProviders,
     selectedProfile: settings.selectedProfile ?? DEFAULT_AUTONOMOUS_SETTINGS.selectedProfile,
   };
@@ -476,6 +466,7 @@ export function settingsToAutonomousConfig(settings) {
       openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(cfg.openrouterReasoningEffort),
       supercharge_enabled: Boolean(cfg.superchargeEnabled),
     })),
+    creativity_emphasis_boost_enabled: Boolean(normalized.creativityEmphasisBoostEnabled),
     validator_provider: localConfig.validator_provider,
     validator_model: localConfig.validator_model,
     validator_openrouter_provider: localConfig.validator_openrouter_provider,
@@ -508,6 +499,8 @@ export function settingsToAutonomousConfig(settings) {
     critique_submitter_context_window: localConfig.critique_submitter_context_window,
     critique_submitter_max_tokens: localConfig.critique_submitter_max_tokens,
     critique_submitter_supercharge_enabled: Boolean(localConfig.critique_submitter_supercharge_enabled),
+    allow_mathematical_proofs: Boolean(normalized.allowMathematicalProofs),
+    allow_research_papers: Boolean(normalized.allowResearchPapers),
     tier3_enabled: normalized.tier3Enabled ?? false,
   };
 }

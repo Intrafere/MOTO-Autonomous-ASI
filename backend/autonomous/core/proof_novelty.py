@@ -14,6 +14,7 @@ from typing import Tuple
 
 from backend.autonomous.prompts.proof_prompts import build_proof_novelty_prompt
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.config import rag_config
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
 
@@ -73,7 +74,7 @@ async def assess_proof_novelty(
         existing_novel_proofs=existing_novel_proofs,
     )
 
-    max_input_tokens = validator_context - validator_max_tokens
+    max_input_tokens = rag_config.get_available_input_tokens(validator_context, validator_max_tokens)
     while count_tokens(prompt) > max_input_tokens and len(existing_novel_proofs) > 2000:
         existing_novel_proofs = existing_novel_proofs[
             : max(len(existing_novel_proofs) // 2, 2000)
@@ -84,6 +85,8 @@ async def assess_proof_novelty(
             lean_code=lean_code,
             existing_novel_proofs=existing_novel_proofs,
         )
+    if count_tokens(prompt) > max_input_tokens:
+        return "not_novel", "Novelty validator prompt exceeded the configured context window."
 
     response = await api_client_manager.generate_completion(
         task_id=task_id,

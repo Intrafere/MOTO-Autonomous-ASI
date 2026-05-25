@@ -4,7 +4,7 @@ Handles paper file I/O, real-time updates, and word count tracking.
 """
 import aiofiles
 import asyncio
-from typing import Optional, Callable, List, Dict
+from typing import Optional, Callable
 from pathlib import Path
 import logging
 import re
@@ -604,15 +604,12 @@ class PaperMemory:
             has_abstract_placeholder = ABSTRACT_PLACEHOLDER in paper
             has_intro_placeholder = INTRO_PLACEHOLDER in paper
             has_conclusion_placeholder = CONCLUSION_PLACEHOLDER in paper
-            has_anchor = PAPER_ANCHOR in paper
             has_appendix_start = THEOREMS_APPENDIX_START in paper
             has_appendix_end = THEOREMS_APPENDIX_END in paper
             
             # Check for actual section content (not placeholders)
             # Use flexible patterns to detect if sections have been written
             # CRITICAL: Must distinguish between real content and fake placeholders inserted by model
-            import re
-            
             # Helper function to check if section has REAL content (not just a fake placeholder)
             def has_real_section_content(section_pattern: str, paper_text: str) -> bool:
                 """Check if section exists with real content, not just fake placeholder text."""
@@ -759,8 +756,6 @@ class PaperMemory:
             
             # Check for actual section content (not placeholders)
             # CRITICAL: Must distinguish between real content and fake placeholders inserted by model
-            import re
-            
             # Helper function to check if section has REAL content (not just a fake placeholder)
             def has_real_section_content(section_pattern: str, paper_text: str) -> bool:
                 """Check if section exists with real content, not just fake placeholder text."""

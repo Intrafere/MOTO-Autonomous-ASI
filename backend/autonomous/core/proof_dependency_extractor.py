@@ -5,12 +5,9 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Iterable, List
+from typing import Iterable, List
 
 from backend.shared.models import MathlibLemmaHint, ProofDependency
-
-if TYPE_CHECKING:
-    from backend.autonomous.agents.lemma_search_agent import MathlibLemmaSearchAgent
 
 logger = logging.getLogger(__name__)
 

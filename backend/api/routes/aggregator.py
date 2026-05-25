@@ -12,6 +12,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.config import system_config, rag_config
 from backend.shared.token_tracker import token_tracker
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.core.context_allocator import context_allocator
@@ -25,6 +26,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/aggregator", tags=["aggregator"])
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+
+
+def _require_positive_setting(value: int, label: str) -> int:
+    """Reject missing context/max-output settings before workflow state mutates."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be configured as a positive integer in Settings.",
+        )
+    return parsed
+
+
+def _require_valid_role_limits(context_window: int, max_output_tokens: int, label: str) -> None:
+    context = _require_positive_setting(context_window, f"{label} context window")
+    max_tokens = _require_positive_setting(max_output_tokens, f"{label} max output tokens")
+    if max_tokens >= context:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} max output tokens must be smaller than its context window.",
+        )
 
 
 def _get_start_conflict() -> Optional[str]:
@@ -61,6 +86,14 @@ async def start_aggregator(request: AggregatorStartRequest):
                     status_code=400,
                     detail=f"Number of submitters must be {system_config.min_submitters}-{system_config.max_submitters}, got {num_submitters}"
                 )
+            _require_valid_role_limits(
+                request.validator_context_size,
+                request.validator_max_output_tokens,
+                "Validator",
+            )
+            for config in request.submitter_configs:
+                label = "Main submitter" if config.submitter_id == 1 else f"Submitter {config.submitter_id}"
+                _require_valid_role_limits(config.context_window, config.max_output_tokens, label)
 
             # Update validator context window configuration
             rag_config.validator_context_window = request.validator_context_size
@@ -82,12 +115,18 @@ async def start_aggregator(request: AggregatorStartRequest):
             for config in request.submitter_configs:
                 label = "(Main Submitter)" if config.submitter_id == 1 else ""
                 logger.info(
-                    f"Submitter {config.submitter_id} {label}: model={config.model_id}, "
-                    f"context={config.context_window}, max_tokens={config.max_output_tokens}"
+                    "Submitter %s %s: model=%s, context=%s, max_tokens=%s",
+                    config.submitter_id,
+                    label,
+                    redact_log_text(config.model_id, 160),
+                    redact_log_text(config.context_window, 40),
+                    redact_log_text(config.max_output_tokens, 40),
                 )
             logger.info(
-                f"Validator: model={request.validator_model}, "
-                f"context={request.validator_context_size}, max_tokens={request.validator_max_output_tokens}"
+                "Validator: model=%s, context=%s, max_tokens=%s",
+                redact_log_text(request.validator_model, 160),
+                redact_log_text(request.validator_context_size, 40),
+                redact_log_text(request.validator_max_output_tokens, 40),
             )
 
             # Initialize coordinator with per-submitter configs (includes OpenRouter provider fields)
@@ -103,7 +142,8 @@ async def start_aggregator(request: AggregatorStartRequest):
                 validator_openrouter_provider=request.validator_openrouter_provider,
                 validator_openrouter_reasoning_effort=request.validator_openrouter_reasoning_effort,
                 validator_lm_studio_fallback=request.validator_lm_studio_fallback,
-                validator_supercharge_enabled=request.validator_supercharge_enabled
+                validator_supercharge_enabled=request.validator_supercharge_enabled,
+                creativity_emphasis_boost_enabled=request.creativity_emphasis_boost_enabled,
             )
 
             # Start coordinator
@@ -120,9 +160,8 @@ async def start_aggregator(request: AggregatorStartRequest):
     except HTTPException:
         raise
     except ValueError as e:
-        # Model compatibility errors
-        logger.error(f"Model compatibility error: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail="Model compatibility error")
+        logger.error(f"Aggregator configuration error: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
     
     except Exception as e:
         # Other errors

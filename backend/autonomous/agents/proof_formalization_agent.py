@@ -10,11 +10,14 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.lean4_client import get_lean4_client
-from backend.shared.model_error_utils import is_non_retryable_model_error
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_retryable_model_output_error,
+)
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.utils import count_tokens
-from backend.shared.config import system_config
+from backend.shared.config import rag_config, system_config
 from backend.autonomous.prompts.proof_prompts import (
     build_proof_formalization_prompt,
     build_proof_tactic_script_prompt,
@@ -46,7 +49,12 @@ _JSON_PARSE_ERROR_MARKERS = (
     "upstream provider timeout",
 )
 _MALFORMED_MODEL_OUTPUT_REASON = "Model returned malformed output (not valid JSON); retrying with clean context."
+_INCOMPLETE_MODEL_OUTPUT_ERROR = (
+    "MODEL OUTPUT INCOMPLETE: provider stopped before returning usable proof output "
+    "(max_output_tokens). Preserve the proof checkpoint and retry with adjusted output budget or prompt size."
+)
 _LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
+_MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX = "MANDATORY FULL SOURCE CONTEXT OVERFLOW"
 
 
 def _is_stop_requested(should_stop: ShouldStopFn) -> bool:
@@ -81,6 +89,14 @@ def _is_lean_workspace_error_feedback(feedback: ProofAttemptFeedback) -> bool:
     return (
         not feedback.success
         and error_output.startswith(_LEAN_WORKSPACE_ERROR_PREFIX)
+    )
+
+
+def _is_context_overflow_feedback(feedback: ProofAttemptFeedback) -> bool:
+    error_output = feedback.error_output or ""
+    return (
+        not feedback.success
+        and error_output.startswith(_MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX)
     )
 
 
@@ -174,8 +190,13 @@ class ProofFormalizationAgent:
         **prompt_kwargs,
     ) -> tuple[str, str, int, int]:
         prompt = prompt_builder(source_excerpt=source_excerpt, **prompt_kwargs)
-        max_input_tokens = self.context_window - self.max_output_tokens
         prompt_tokens = count_tokens(prompt)
+        try:
+            max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+        except ValueError:
+            return prompt, source_excerpt, 0, prompt_tokens
+        # Full source content is mandatory proof context. Only the focused
+        # excerpt may be reduced to fit the prompt.
         while prompt_tokens > max_input_tokens and len(source_excerpt) > min_excerpt_length:
             source_excerpt = source_excerpt[: max(len(source_excerpt) // 2, min_excerpt_length)]
             prompt = prompt_builder(source_excerpt=source_excerpt, **prompt_kwargs)
@@ -190,8 +211,10 @@ class ProofFormalizationAgent:
         theorem_candidate: ProofCandidate,
         prior_attempts: List[ProofAttemptFeedback],
         source_excerpt: str,
+        source_content: str,
         attempt_number: int,
         smt_hint: Optional[SmtHint] = None,
+        source_title: str = "",
     ) -> tuple[str, str, ProofAttemptFeedback]:
         prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
             build_proof_formalization_prompt,
@@ -200,18 +223,28 @@ class ProofFormalizationAgent:
             source_type=source_type,
             theorem_statement=theorem_candidate.statement,
             formal_sketch=theorem_candidate.formal_sketch,
+            full_source_content=source_content,
             source_excerpt=source_excerpt,
             prior_attempts=prior_attempts,
             relevant_lemmas=theorem_candidate.relevant_lemmas,
             smt_hint=smt_hint,
+            source_title=source_title,
+            expected_novelty_tier=theorem_candidate.expected_novelty_tier,
+            prompt_relevance_rationale=theorem_candidate.prompt_relevance_rationale,
+            novelty_rationale=theorem_candidate.novelty_rationale,
+            why_not_standard_known_result=theorem_candidate.why_not_standard_known_result,
         )
 
         if prompt_tokens > max_input_tokens:
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
                 theorem_id=theorem_candidate.theorem_id,
-                reasoning="Prompt too large for configured context window.",
-                error_output=f"Prompt too large ({prompt_tokens} > {max_input_tokens}).",
+                reasoning="Mandatory full-source proof context is too large for the configured context window.",
+                error_output=(
+                    f"{_MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX}: Prompt too large after shrinking only the focused excerpt "
+                    f"({prompt_tokens} > {max_input_tokens}). Full source content is mandatory "
+                    "and was not truncated or dropped."
+                ),
                 strategy="full_script",
                 success=False,
             )
@@ -269,6 +302,8 @@ class ProofFormalizationAgent:
         except Exception as exc:
             if is_non_retryable_model_error(exc):
                 raise
+            if is_retryable_model_output_error(exc):
+                raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
             is_parse_error = _is_json_parse_error(exc)
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
@@ -305,6 +340,7 @@ class ProofFormalizationAgent:
         prior_attempts: Optional[List[ProofAttemptFeedback]] = None,
         starting_attempt_number: Optional[int] = None,
         smt_hint: Optional[SmtHint] = None,
+        source_title: str = "",
         should_stop: ShouldStopFn = None,
     ) -> Tuple[bool, str, str, List[ProofAttemptFeedback]]:
         """Attempt to formalize and verify one theorem candidate with full scripts."""
@@ -343,8 +379,10 @@ class ProofFormalizationAgent:
                 theorem_candidate=theorem_candidate,
                 prior_attempts=attempts,
                 source_excerpt=source_excerpt,
+                source_content=source_content,
                 attempt_number=attempt_number,
                 smt_hint=smt_hint,
+                source_title=source_title,
             )
 
             terminal_malformed_output = False
@@ -373,6 +411,8 @@ class ProofFormalizationAgent:
                 return True, theorem_name, feedback.lean_code, attempts
             if _is_lean_workspace_error_feedback(feedback):
                 break
+            if _is_context_overflow_feedback(feedback):
+                break
             if terminal_malformed_output:
                 break
             attempt_offset += 1
@@ -393,6 +433,7 @@ class ProofFormalizationAgent:
         prior_attempts: Optional[List[ProofAttemptFeedback]] = None,
         starting_attempt_number: Optional[int] = None,
         smt_hint: Optional[SmtHint] = None,
+        source_title: str = "",
         should_stop: ShouldStopFn = None,
     ) -> Tuple[bool, str, str, List[ProofAttemptFeedback]]:
         """Attempt to formalize and verify one theorem candidate with tactic scripts."""
@@ -432,27 +473,35 @@ class ProofFormalizationAgent:
                 source_type=source_type,
                 theorem_statement=theorem_candidate.statement,
                 formal_sketch=theorem_candidate.formal_sketch,
+                full_source_content=source_content,
                 source_excerpt=source_excerpt,
                 prior_attempts=attempts,
                 relevant_lemmas=theorem_candidate.relevant_lemmas,
                 smt_hint=smt_hint,
+                source_title=source_title,
+                expected_novelty_tier=theorem_candidate.expected_novelty_tier,
+                prompt_relevance_rationale=theorem_candidate.prompt_relevance_rationale,
+                novelty_rationale=theorem_candidate.novelty_rationale,
+                why_not_standard_known_result=theorem_candidate.why_not_standard_known_result,
             )
 
             if prompt_tokens > max_input_tokens:
-                malformed_output_retries = 0
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,
                     theorem_id=theorem_candidate.theorem_id,
-                    reasoning="Prompt too large for configured context window.",
-                    error_output=f"Prompt too large ({prompt_tokens} > {max_input_tokens}).",
+                    reasoning="Mandatory full-source proof context is too large for the configured context window.",
+                    error_output=(
+                        f"{_MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX}: Prompt too large after shrinking only the focused excerpt "
+                        f"({prompt_tokens} > {max_input_tokens}). Full source content is mandatory "
+                        "and was not truncated or dropped."
+                    ),
                     strategy="tactic_script",
                     success=False,
                 )
                 attempts.append(feedback)
                 if attempt_callback:
                     await attempt_callback(feedback)
-                attempt_offset += 1
-                continue
+                break
 
             task_id = self.get_current_task_id()
             self.task_sequence += 1
@@ -499,8 +548,10 @@ class ProofFormalizationAgent:
                         theorem_candidate=theorem_candidate,
                         prior_attempts=attempts,
                         source_excerpt=source_excerpt,
+                        source_content=source_content,
                         attempt_number=attempt_number,
                         smt_hint=smt_hint,
+                        source_title=source_title,
                     )
                     if current_theorem_name:
                         theorem_name = current_theorem_name
@@ -525,6 +576,8 @@ class ProofFormalizationAgent:
                     if feedback.success:
                         return True, theorem_name, feedback.lean_code, attempts
                     if _is_lean_workspace_error_feedback(feedback):
+                        break
+                    if _is_context_overflow_feedback(feedback):
                         break
                     if terminal_malformed_output:
                         break
@@ -557,12 +610,16 @@ class ProofFormalizationAgent:
                     return True, theorem_name, lean_code, attempts
                 if _is_lean_workspace_error_feedback(feedback):
                     break
+                if _is_context_overflow_feedback(feedback):
+                    break
                 attempt_offset += 1
             except FreeModelExhaustedError:
                 raise
             except Exception as exc:
                 if is_non_retryable_model_error(exc):
                     raise
+                if is_retryable_model_output_error(exc):
+                    raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
                 is_parse_error = _is_json_parse_error(exc)
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,
@@ -604,7 +661,14 @@ class ProofFormalizationAgent:
                     await attempt_callback(feedback)
                 if terminal_malformed_output:
                     break
+                if _is_context_overflow_feedback(feedback):
+                    break
                 attempt_offset += 1
 
         final_code = attempts[-1].lean_code if attempts else ""
         return False, theorem_name, final_code, attempts
+
+    @staticmethod
+    def is_context_overflow_feedback(feedback: ProofAttemptFeedback) -> bool:
+        """True when the attempt failed because mandatory full source did not fit."""
+        return _is_context_overflow_feedback(feedback)

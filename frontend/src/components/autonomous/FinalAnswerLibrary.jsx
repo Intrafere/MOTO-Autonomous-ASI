@@ -2,7 +2,13 @@ import React, { useState, useEffect, useMemo } from 'react';
 import LatexRenderer from '../LatexRenderer';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
-import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import {
+  PDF_UNAVAILABLE_MESSAGE,
+  downloadRawText,
+  downloadPDFViaBackend,
+  isPDFDownloadAvailable,
+  sanitizeFilename,
+} from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 import { buildResearchRunGroups } from '../../utils/researchRunHistory';
 import './FinalAnswerLibrary.css';
@@ -21,7 +27,7 @@ import './FinalAnswerLibrary.css';
  * - Download individual answers
  * - Shows certainty level and word count
  */
-function FinalAnswerLibrary() {
+function FinalAnswerLibrary({ capabilities }) {
   const [finalAnswers, setFinalAnswers] = useState([]);
   const [stage2Papers, setStage2Papers] = useState([]);
   const [prunedPapers, setPrunedPapers] = useState([]);
@@ -38,6 +44,7 @@ function FinalAnswerLibrary() {
   const [expandedPrunedPaperId, setExpandedPrunedPaperId] = useState(null);
   const [expandedPrunedContent, setExpandedPrunedContent] = useState(null);
   const [downloadingPrunedPDF, setDownloadingPrunedPDF] = useState(null);
+  const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -167,6 +174,11 @@ function FinalAnswerLibrary() {
   const downloadAnswerPDF = async (e, answer) => {
     e.stopPropagation();
 
+    if (!pdfDownloadAvailable) {
+      alert(PDF_UNAVAILABLE_MESSAGE);
+      return;
+    }
+
     if (downloadingPDF) {
       alert('Already preparing a PDF, please wait...');
       return;
@@ -201,6 +213,7 @@ function FinalAnswerLibrary() {
           alert(`PDF generation failed: ${error.message}`);
         },
         'paper',
+        { pdfDownloadAvailable },
       );
     } catch (error) {
       setDownloadingPDF(null);
@@ -235,6 +248,11 @@ function FinalAnswerLibrary() {
 
   const downloadPrunedPDF = async (e, paper) => {
     e.stopPropagation();
+    if (!pdfDownloadAvailable) {
+      alert(PDF_UNAVAILABLE_MESSAGE);
+      return;
+    }
+
     if (downloadingPrunedPDF) {
       alert('Already preparing a PDF, please wait...');
       return;
@@ -260,6 +278,8 @@ function FinalAnswerLibrary() {
           console.error('Pruned paper PDF generation failed:', error);
           alert(`PDF generation failed: ${error.message}`);
         },
+        null,
+        { pdfDownloadAvailable },
       );
     } catch (error) {
       setDownloadingPrunedPDF(null);
@@ -527,8 +547,8 @@ function FinalAnswerLibrary() {
                           <button
                             className="quick-download-pdf"
                             onClick={(e) => downloadAnswerPDF(e, answer)}
-                            disabled={downloadingPDF === answer.answer_id}
-                            title="Generate and download PDF"
+                            disabled={downloadingPDF === answer.answer_id || !pdfDownloadAvailable}
+                            title={pdfDownloadAvailable ? 'Generate and download PDF' : PDF_UNAVAILABLE_MESSAGE}
                           >
                             {downloadingPDF === answer.answer_id ? '⏳ Preparing PDF...' : '📑 Download PDF'}
                           </button>
@@ -638,7 +658,8 @@ function FinalAnswerLibrary() {
                               <button
                                 className="quick-download-pdf"
                                 onClick={(e) => downloadPrunedPDF(e, paper)}
-                                disabled={downloadingPrunedPDF === paper.history_id}
+                                disabled={downloadingPrunedPDF === paper.history_id || !pdfDownloadAvailable}
+                                title={pdfDownloadAvailable ? 'Generate and download PDF' : PDF_UNAVAILABLE_MESSAGE}
                               >
                                 {downloadingPrunedPDF === paper.history_id ? 'Preparing PDF...' : 'Download PDF'}
                               </button>

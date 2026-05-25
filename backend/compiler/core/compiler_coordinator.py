@@ -5,16 +5,13 @@ Manages mode switching, submission/validation loop, and paper/outline updates.
 import asyncio
 import logging
 import re
-import time
-import traceback
 import uuid
 from pathlib import Path
 from typing import Optional, Dict, Callable, List, Tuple
 from datetime import datetime
 
 from backend.shared.config import system_config, rag_config
-from backend.shared.models import CompilerState, CompilerSubmission, CompilerValidationResult, WorkflowTask, SubmitterConfig, ValidationResult, ModelConfig
-from backend.shared.workflow_predictor import workflow_predictor
+from backend.shared.models import CompilerState, CompilerSubmission, CompilerValidationResult, WorkflowTask, ValidationResult, ModelConfig
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
 from backend.shared.brainstorm_proof_gate import BRAINSTORM_LEAN_PROOF_MARKER
@@ -41,6 +38,18 @@ from backend.autonomous.memory.paper_model_tracker import PaperModelTracker
 logger = logging.getLogger(__name__)
 
 CRITIQUE_ATTEMPT_TARGET = 3
+MAX_RIGOR_CYCLES_PER_LOOP = 5
+
+
+async def _cancel_and_drain_task(task: asyncio.Task) -> None:
+    """Cancel a task, suppressing only cancellation while preserving real failures."""
+    task.cancel()
+    for result in await asyncio.gather(task, return_exceptions=True):
+        if isinstance(result, asyncio.CancelledError):
+            continue
+        if isinstance(result, BaseException):
+            raise result
+
 
 LEAN_PROOF_EDIT_DENIAL_REASON = (
     "REJECTION REASON: Protected Lean 4 Proof\n\n"
@@ -129,7 +138,10 @@ class CompilerCoordinator:
         self.autonomous_mode = False
         self.autonomous_section_phase = None  # "body", "conclusion", "introduction", "abstract"
         self._current_topic_id = None  # Set by autonomous coordinator for retroactive brainstorm corrections
+        self._current_paper_id: Optional[str] = None  # Set by autonomous coordinator for proof source identity
+        self._current_rigor_proof_source_title: Optional[str] = None
         self._current_reference_paper_ids: List[str] = []  # Autonomous/Tier 3 references preserved for critique context
+        self.allow_mathematical_proofs: bool = True
         
         # Critique phase state (post-body peer review)
         self.critique_submitter = None  # CritiqueSubmitterAgent instance
@@ -138,7 +150,6 @@ class CompilerCoordinator:
         self.critique_acceptances = 0
         self.paper_version = 1  # Track version number
         self.paper_title: Optional[str] = None  # Track current paper title
-        self._skip_critique_requested = False  # Pre-emptive skip flag (user can set before critique phase)
         
         # Aggregator monitoring for incremental re-RAG
         self.aggregator_acceptances_last_rag = 0
@@ -191,7 +202,8 @@ class CompilerCoordinator:
         validator_supercharge_enabled: bool = False,
         high_context_supercharge_enabled: bool = False,
         high_param_supercharge_enabled: bool = False,
-        critique_submitter_supercharge_enabled: bool = False
+        critique_submitter_supercharge_enabled: bool = False,
+        allow_mathematical_proofs: bool = True
     ) -> None:
         """
         Initialize the compiler coordinator.
@@ -225,6 +237,7 @@ class CompilerCoordinator:
         # Store user prompt, paper title, and model configs
         self.user_prompt = compiler_prompt
         self.paper_title = compiler_prompt  # Initial title is the compiler prompt
+        self._current_rigor_proof_source_title = compiler_prompt
         self.validator_model = validator_model
         self.validator_context_window = system_config.compiler_validator_context_window
         self.validator_max_tokens = system_config.compiler_validator_max_output_tokens
@@ -251,6 +264,7 @@ class CompilerCoordinator:
         self.high_context_supercharge_enabled = high_context_supercharge_enabled
         self.high_param_supercharge_enabled = high_param_supercharge_enabled
         self.critique_submitter_supercharge_enabled = critique_submitter_supercharge_enabled
+        self.allow_mathematical_proofs = bool(allow_mathematical_proofs)
         
         # Reset workflow state for fresh start
         self.outline_accepted = False
@@ -365,6 +379,10 @@ class CompilerCoordinator:
             validator_model=validator_model,
             validator_context_window=self.validator_context_window,
             validator_max_tokens=self.validator_max_tokens,
+        )
+        self.high_param_submitter.set_rigor_proof_source(
+            self._current_paper_id or "",
+            self._current_rigor_proof_source_title or compiler_prompt,
         )
         await self.high_param_submitter.initialize()
         # Set up task tracking callback for workflow panel integration
@@ -586,8 +604,6 @@ class CompilerCoordinator:
             event_type: "started" or "completed"
             task_id: The task ID (e.g., "comp_hc_001", "comp_hp_002", "comp_val_003")
         """
-        import asyncio
-        
         if event_type == "started":
             try:
                 loop = asyncio.get_event_loop()
@@ -629,6 +645,20 @@ class CompilerCoordinator:
         self.autonomous_mode = True
         self.autonomous_section_phase = "body"
         logger.info("Autonomous mode enabled - section order: Body → Conclusion → Intro → Abstract")
+
+    def set_rigor_proof_source(self, paper_id: Optional[str], paper_title: Optional[str] = None) -> None:
+        """Bind compiler rigor proof records to the real paper being written."""
+        self._current_paper_id = (paper_id or "").strip() or None
+        self._current_rigor_proof_source_title = (
+            (paper_title or "").strip()
+            or self.paper_title
+            or getattr(self, "user_prompt", "")
+        )
+        if self.high_param_submitter:
+            self.high_param_submitter.set_rigor_proof_source(
+                self._current_paper_id or "",
+                self._current_rigor_proof_source_title or "",
+            )
     
     def _is_body_complete(self, paper: str) -> bool:
         """
@@ -681,6 +711,31 @@ class CompilerCoordinator:
         
         await self._broadcast("compiler_started", {"message": "Compiler started"})
         logger.info("Compiler started successfully")
+
+    async def _load_rigor_source_material_context(self) -> tuple[str, str]:
+        """Load direct brainstorm/aggregator context for paper-writing proof mode."""
+        if self.autonomous_mode and self._current_topic_id:
+            try:
+                from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
+
+                content = await brainstorm_memory.get_database_content(
+                    self._current_topic_id,
+                    strip_proofs=True,
+                )
+                return content or "", f"Source brainstorm {self._current_topic_id}"
+            except Exception as exc:
+                logger.debug("Unable to load autonomous brainstorm context for rigor: %s", exc)
+                return "", ""
+
+        try:
+            shared_path = Path(system_config.shared_training_file)
+            if not shared_path.exists():
+                return "", ""
+            content = await asyncio.to_thread(shared_path.read_text, encoding="utf-8")
+            return content or "", "Part 1 aggregator database"
+        except Exception as exc:
+            logger.debug("Unable to load manual aggregator context for rigor: %s", exc)
+            return "", ""
     
     async def stop(self) -> None:
         """Stop the compiler system."""
@@ -697,18 +752,10 @@ class CompilerCoordinator:
                        f"{self._paper_model_tracker.total_calls} API calls")
         
         if self._main_task:
-            self._main_task.cancel()
-            try:
-                await self._main_task
-            except asyncio.CancelledError:
-                pass
+            await _cancel_and_drain_task(self._main_task)
         
         if self._aggregator_monitor_task:
-            self._aggregator_monitor_task.cancel()
-            try:
-                await self._aggregator_monitor_task
-            except asyncio.CancelledError:
-                pass
+            await _cancel_and_drain_task(self._aggregator_monitor_task)
         
         await self._broadcast("compiler_stopped", {"message": "Compiler stopped"})
         logger.info("Compiler stopped")
@@ -790,8 +837,6 @@ class CompilerCoordinator:
         This provides IMMEDIATE, CONSISTENT feedback on structural issues
         without relying on LLM validator interpretation.
         """
-        import re
-        
         # Abstract is OPTIONAL - if included, it must be properly formatted
         # Valid formats: "Abstract", "I. Abstract", "0. Abstract" (case-insensitive)
         # If Abstract is not present, that's also fine - outline can start with Introduction
@@ -1050,8 +1095,8 @@ INVALID:
                         from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
                         first_brainstorm_content = await brainstorm_memory.get_database_content(self._current_topic_id, strip_proofs=True)
                         first_brainstorm_source = f"brainstorm_{self._current_topic_id}.txt"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Unable to load initial brainstorm context for construction: %s", exc)
                 
                 submission = await self.high_context_submitter.submit_construction(
                     is_first_portion=True,
@@ -1251,18 +1296,28 @@ INVALID:
     async def _rigor_loop(self) -> None:
         """LOOP 2: Rigor enhancement.
 
-        With the new Lean-4-verified-theorem flow, every verified theorem
-        lands somewhere (inline or appendix). So the rigor loop continues
-        as long as `_submit_and_validate_rigor` returns True (theorem was
-        placed somewhere in this cycle) and ends on the first decline
-        (no theorem worth proposing, 5 Lean attempts failed, or Lean 4 is
-        disabled).
+        With the Lean-4-verified-theorem flow, every verified theorem lands
+        somewhere (inline or appendix). The loop continues while
+        `_submit_and_validate_rigor` returns True, but yields back to
+        construction after at most MAX_RIGOR_CYCLES_PER_LOOP consecutive
+        theorem cycles.
         """
         logger.info("Starting rigor loop...")
         self.rigor_cycle_active = True
-        
-        # Continue until first decline (no theorem found or Lean failed 5x).
-        while self.is_running and self.rigor_cycle_active:
+        rigor_cycles_run = 0
+
+        # Continue until first decline or the consecutive-cycle cap.
+        while (
+            self.is_running
+            and self.rigor_cycle_active
+            and rigor_cycles_run < MAX_RIGOR_CYCLES_PER_LOOP
+        ):
+            rigor_cycles_run += 1
+            logger.info(
+                "Running rigor cycle %s/%s",
+                rigor_cycles_run,
+                MAX_RIGOR_CYCLES_PER_LOOP,
+            )
             continued = await self._submit_and_validate_rigor()
             
             if not continued:
@@ -1270,6 +1325,17 @@ INVALID:
                 self.rigor_cycle_active = False
                 logger.info("Rigor cycle ended (decline: no more theorems or Lean failed)")
         
+        if (
+            self.is_running
+            and self.rigor_cycle_active
+            and rigor_cycles_run >= MAX_RIGOR_CYCLES_PER_LOOP
+        ):
+            self.rigor_cycle_active = False
+            logger.info(
+                "Rigor cycle cap reached (%s); returning to construction",
+                MAX_RIGOR_CYCLES_PER_LOOP,
+            )
+
         logger.info("Rigor loop complete")
     
     # Maximum retries for premature decline/completion rejections
@@ -2192,19 +2258,27 @@ INVALID:
         self.current_mode = "rigor"
 
         # Hard guard: Lean 4 disabled system-wide means rigor mode has no work.
-        if not system_config.lean4_enabled:
-            logger.info("Rigor loop: Lean 4 disabled; declining cycle")
+        if not self.allow_mathematical_proofs or not system_config.lean4_enabled:
+            reason = (
+                "Mathematical proof outputs are disabled for this run"
+                if not self.allow_mathematical_proofs
+                else "Lean 4 is disabled in system configuration"
+            )
+            logger.info("Rigor loop: %s; declining cycle", reason)
             self.rigor_declines += 1
             await compiler_rejection_log.add_decline(
-                "rigor", "Lean 4 is disabled in system configuration"
+                "rigor", reason
             )
             await self._broadcast(
                 "compiler_decline",
-                {"mode": "rigor", "reasoning": "Lean 4 is disabled"},
+                {"mode": "rigor", "reasoning": reason},
             )
             return False
 
         try:
+            if self.high_param_submitter:
+                source_context, source_label = await self._load_rigor_source_material_context()
+                self.high_param_submitter.set_source_material_context(source_context, source_label)
             lean_result = await self.high_param_submitter.submit_rigor_lean_theorem()
         except ValueError as exc:
             logger.error(f"Rigor lean flow error: {exc}")
@@ -2445,6 +2519,8 @@ INVALID:
             )
             await paper_memory.ensure_markers_intact()
             appended = await paper_memory.append_to_theorems_appendix(appendix_entry)
+            if not appended:
+                logger.warning("Appendix append still failed after marker repair; preserving proof record without paper appendix entry")
 
         self.rigor_acceptances += 1
         word_count = await paper_memory.get_word_count()
@@ -2758,29 +2834,6 @@ INVALID:
         Runs after body is complete, before conclusion.
         Uses simple generate-validate loop (similar to aggregator workflow).
         """
-        # Check for pre-emptive skip request
-        if self._skip_critique_requested:
-            logger.info("=" * 80)
-            logger.info("PRE-EMPTIVE SKIP: User requested critique skip before phase started")
-            logger.info("Skipping critique phase, transitioning directly to conclusion")
-            logger.info("=" * 80)
-            
-            self._skip_critique_requested = False  # Reset flag
-            
-            await self._broadcast("critique_phase_skipped", {
-                "reason": "user_override_preemptive",
-                "version": self.paper_version
-            })
-            
-            # Transition directly to conclusion phase
-            self.autonomous_section_phase = "conclusion"
-            await self._broadcast("phase_transition", {
-                "from_phase": "body",
-                "to_phase": "conclusion",
-                "skip_reason": "preemptive_user_override"
-            })
-            return
-        
         logger.info("=" * 80)
         logger.info("STARTING CRITIQUE PHASE")
         logger.info("=" * 80)
@@ -2907,9 +2960,10 @@ INVALID:
             )
             direct_tokens = count_tokens(direct_injected_context)
 
-            # Reserve headroom for system prompt, JSON schema, rejection memory,
-            # and the static prompt framing around reference content.
-            reference_budget = min(16000, max_input_tokens - direct_tokens - 10000)
+            # Scale reference budget from the user-configured critique context
+            # instead of applying a hidden fixed cap/headroom.
+            available_after_direct = max_input_tokens - direct_tokens
+            reference_budget = max(0, int(available_after_direct * 0.35))
             if reference_budget <= 0:
                 logger.warning(
                     "Skipping critique reference context due to prompt budget "
@@ -3129,9 +3183,6 @@ INVALID:
             current_outline = await outline_memory.get_outline()
             existing_critiques = await critique_memory.get_all_critiques()
             
-            from backend.aggregator.memory.shared_training import shared_training_memory
-            aggregator_db = await shared_training_memory.get_all_content()
-            
             # Build prompt using critique validator prompts
             from backend.compiler.prompts.critique_prompts import (
                 get_critique_validator_system_prompt,
@@ -3334,57 +3385,12 @@ INVALID:
         logger.info("=" * 80)
         logger.info("NO SELF-REVIEW APPENDED - No critiques accepted")
         logger.info("=" * 80)
-        
-        await self._broadcast("critique_phase_skipped", {
-            "reason": "no_critiques_accepted",
-            "version": self.paper_version
-        })
-        
+
         await self._end_critique_phase(self_review_appended=False)
         
         # The _end_critique_phase already transitions to conclusion.
         logger.info("Transitioning to CONCLUSION phase (body accepted as-is)")
-    
-    async def skip_critique_phase(self) -> bool:
-        """
-        Skip the critique phase and continue to conclusion.
-        User override to bypass peer review and self-review appending.
-        
-        Can be called:
-        - During critique phase: immediately skips
-        - Before critique phase: sets flag to auto-skip when reached
-        
-        Returns:
-            True if successfully skipped or queued for skip
-        """
-        if self.in_critique_phase:
-            # Currently in critique phase - skip immediately
-            logger.info("=" * 80)
-            logger.info("USER OVERRIDE: Skipping critique phase NOW, continuing to conclusion")
-            logger.info("=" * 80)
-            
-            await self._broadcast("critique_phase_skipped", {
-                "reason": "user_override",
-                "version": self.paper_version
-            })
-            
-            await self._end_critique_phase(self_review_appended=False)
-            return True
-        else:
-            # Not in critique phase yet - set flag to skip when reached
-            logger.info("=" * 80)
-            logger.info("USER OVERRIDE: Pre-emptive critique skip requested - will skip when phase is reached")
-            logger.info("=" * 80)
-            
-            self._skip_critique_requested = True
-            
-            await self._broadcast("critique_skip_queued", {
-                "message": "Critique phase will be skipped when reached",
-                "version": self.paper_version
-            })
-            
-            return True
-    
+
     async def _monitor_aggregator_for_rerag(self) -> None:
         """Monitor aggregator acceptances and trigger incremental re-RAG every 10."""
         logger.info("Aggregator monitoring started - will check for new acceptances every 30 seconds")
@@ -3556,8 +3562,7 @@ INVALID:
             minuscule_edit_count=self.minuscule_edit_count,
             in_critique_phase=self.in_critique_phase,
             critique_acceptances=self.critique_acceptances,
-            paper_version=self.paper_version,
-            skip_critique_requested=self._skip_critique_requested
+            paper_version=self.paper_version
         )
     
     def get_model_tracking_data(self) -> Optional[Dict]:
@@ -3642,7 +3647,6 @@ INVALID:
         self.critique_acceptances = 0
         self.paper_version = 1
         self.paper_title = None
-        self._skip_critique_requested = False
         logger.info("Reset critique phase state")
         
         logger.info("Paper and outline cleared - system reset to fresh start")

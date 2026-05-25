@@ -17,6 +17,7 @@ from backend.shared.config import rag_config, system_config
 from backend.shared.models import BoostConfig
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.openrouter_client import OpenRouterClient
 
 router = APIRouter()
@@ -83,8 +84,12 @@ async def enable_boost(config: BoostConfig) -> Dict[str, Any]:
         # Enable boost
         await boost_manager.set_boost_config(config)
         
-        provider_info = f", provider={config.boost_provider}" if config.boost_provider else " (auto-routing)"
-        logger.info(f"Boost enabled: model={config.boost_model_id}{provider_info}")
+        provider_info = (
+            f", provider={redact_log_text(config.boost_provider, 120)}"
+            if config.boost_provider
+            else " (auto-routing)"
+        )
+        logger.info("Boost enabled: model=%s%s", redact_log_text(config.boost_model_id, 160), provider_info)
         
         return {
             "success": True,
@@ -162,12 +167,19 @@ async def update_boost_model(config: BoostConfig) -> Dict[str, Any]:
         await boost_manager.set_boost_config(config)
         
         # Log the change
-        provider_info = f", provider={config.boost_provider}" if config.boost_provider else " (auto-routing)"
+        provider_info = (
+            f", provider={redact_log_text(config.boost_provider, 120)}"
+            if config.boost_provider
+            else " (auto-routing)"
+        )
         logger.info(
-            f"Boost model updated: {config.boost_model_id}{provider_info}\n"
-            f"  Preserved state: boost_next_count={old_boost_next_count}, "
-            f"boosted_categories={len(old_boosted_categories)}, "
-            f"boosted_tasks={len(old_boosted_task_ids)}"
+            "Boost model updated: %s%s; preserved state: boost_next_count=%s, "
+            "boosted_categories=%s, boosted_tasks=%s",
+            redact_log_text(config.boost_model_id, 160),
+            provider_info,
+            old_boost_next_count,
+            len(old_boosted_categories),
+            len(old_boosted_task_ids),
         )
         
         return {
@@ -326,7 +338,11 @@ async def get_model_providers(model_id: str, authorization: Optional[str] = Head
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to fetch providers for model {model_id}: {e}")
+        logger.error(
+            "Failed to fetch providers for model %s: %s",
+            redact_log_text(model_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Failed to fetch providers")
 
 
@@ -354,7 +370,7 @@ async def set_boost_always_prefer(request: BoostAlwaysPreferRequest) -> Dict[str
         
         await boost_manager.set_always_prefer(request.enabled)
         
-        logger.info(f"Boost always-prefer set to {request.enabled}")
+        logger.info("Boost always-prefer set to %s", redact_log_text(request.enabled, 20))
         
         return {
             "success": True,
@@ -391,7 +407,7 @@ async def set_boost_next_count(request: BoostNextCountRequest) -> Dict[str, Any]
         
         await boost_manager.set_boost_next_count(request.count)
         
-        logger.info(f"Boost next count set to {request.count}")
+        logger.info("Boost next count set to %s", redact_log_text(request.count, 20))
         
         return {
             "success": True,

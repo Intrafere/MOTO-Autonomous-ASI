@@ -7,6 +7,7 @@ import './AutonomousResearch.css';
 import LivePaperProgress from './LivePaperProgress';
 import LiveTier3Progress from './LiveTier3Progress';
 import TextFileUploader from '../TextFileUploader';
+import '../settings-common.css';
 import { getActivityClass as getSharedActivityClass, getActivityIcon as getSharedActivityIcon } from '../../utils/activityStyles';
 
 const AutonomousResearchInterface = ({
@@ -19,6 +20,9 @@ const AutonomousResearchInterface = ({
   onStop,
   onClear,
   config,
+  onConfigChange,
+  developerModeEnabled = false,
+  capabilities = {},
   api
 }) => {
   const [researchPrompt, setResearchPrompt] = useState(() => {
@@ -32,12 +36,12 @@ const AutonomousResearchInterface = ({
   const [showTier3Dialog, setShowTier3Dialog] = useState(false);
   const [isForcingTier3, setIsForcingTier3] = useState(false);
   const [critiquePhaseActive, setCritiquePhaseActive] = useState(false);
-  const [isSkipping, setIsSkipping] = useState(false);
-  const [skipQueued, setSkipQueued] = useState(false);  // Skip has been queued pre-emptively
   const [explorationProgress, setExplorationProgress] = useState(null);  // Topic exploration phase tracking
   const [titleExplorationProgress, setTitleExplorationProgress] = useState(null);  // Paper title exploration tracking
+  const [proofOutputUpdating, setProofOutputUpdating] = useState(false);
   const activityFeedRef = useRef(null);
   const prevActivityLengthRef = useRef(0);
+  const proofOutputsAvailable = !capabilities?.genericMode;
 
   // Save research prompt to localStorage
   useEffect(() => {
@@ -62,10 +66,6 @@ const AutonomousResearchInterface = ({
       setCritiquePhaseActive(true);
     } else if (lastEvent.event === 'critique_phase_ended') {
       setCritiquePhaseActive(false);
-    } else if (lastEvent.event === 'critique_phase_skipped') {
-      setCritiquePhaseActive(false);
-    } else if (lastEvent.event === 'paper_writing_started' || lastEvent.event === 'paper_completed') {
-      setSkipQueued(false);  // Reset skip state for new paper
     }
     
     // Topic exploration phase tracking
@@ -87,10 +87,9 @@ const AutonomousResearchInterface = ({
     }
   }, [activity]);
 
-  // Reset skip state when tier changes away from paper writing
+  // Reset critique phase state when tier changes away from paper writing
   useEffect(() => {
     if (status?.current_tier !== 'tier2_paper_writing') {
-      setSkipQueued(false);
       setCritiquePhaseActive(false);
     }
   }, [status?.current_tier]);
@@ -102,7 +101,7 @@ const AutonomousResearchInterface = ({
     setResearchPrompt(newPrompt);
   };
 
-  const handleStart = () => {
+  const handleStart = async () => {
     if (anyWorkflowRunning && !isRunning) {
       alert('Another workflow is already running. Stop it before starting Autonomous Research.');
       return;
@@ -112,7 +111,84 @@ const AutonomousResearchInterface = ({
       alert('Please enter a research prompt');
       return;
     }
+    const mathematicalProofsAllowed = proofOutputsAvailable && (config?.allow_mathematical_proofs ?? true);
+    const researchPapersAllowed = config?.allow_research_papers ?? true;
+    if (!mathematicalProofsAllowed && !researchPapersAllowed) {
+      alert('Please allow at least one output: Mathematical Proofs or Research Papers.');
+      return;
+    }
+    const proofOnlyRequested = mathematicalProofsAllowed && !researchPapersAllowed;
+    const shouldSyncProofRuntime = mathematicalProofsAllowed && !capabilities?.genericMode;
+    if (proofOnlyRequested || shouldSyncProofRuntime) {
+      const enabled = await updateProofRuntimeSetting(true);
+      if (!enabled) {
+        return;
+      }
+    }
     onStart(researchPrompt);
+  };
+
+  const updateProofRuntimeSetting = async (enabled) => {
+    if (!api?.getProofStatus || !api?.updateProofSettings || capabilities?.genericMode) {
+      if (enabled) {
+        alert('Mathematical proof output is unavailable in this runtime.');
+        return false;
+      }
+      return true;
+    }
+
+    setProofOutputUpdating(true);
+    try {
+      const status = await api.getProofStatus();
+      const updatedStatus = await api.updateProofSettings({
+        enabled,
+        timeout: status.lean4_proof_timeout ?? 120,
+        lean4_lsp_enabled: Boolean(status.lean4_lsp_enabled),
+        lean4_lsp_idle_timeout: status.lean4_lsp_idle_timeout ?? 600,
+        max_parallel_candidates: status.proof_max_parallel_candidates ?? 6,
+        smt_enabled: Boolean(status.smt_enabled),
+        smt_timeout: status.smt_timeout ?? 30,
+      });
+      if (enabled) {
+        const leanVersion = String(updatedStatus.lean4_version || updatedStatus.lean_version || '').trim();
+        const leanVersionUnavailable = !leanVersion || /not found|no such file|not recognized/i.test(leanVersion);
+        // A cold Mathlib sanity check can exceed the short status timeout even when
+        // Lean is usable. Workflow proof stages wait on the real workspace check.
+        if (!updatedStatus.lean4_enabled || leanVersionUnavailable) {
+          alert(updatedStatus.manual_check_message || 'Lean 4 proof output is not ready. Check Lean 4 runtime settings before starting proof output.');
+          return false;
+        }
+      }
+      return true;
+    } catch (error) {
+      alert(`Failed to update Lean 4 proof setting: ${error.message}`);
+      return false;
+    } finally {
+      setProofOutputUpdating(false);
+    }
+  };
+
+  const updateAllowedOutput = async (key, checked) => {
+    const nextConfig = {
+      ...config,
+      allow_mathematical_proofs: config?.allow_mathematical_proofs ?? true,
+      allow_research_papers: config?.allow_research_papers ?? true,
+      [key]: checked
+    };
+
+    if (!nextConfig.allow_mathematical_proofs && !nextConfig.allow_research_papers) {
+      alert('At least one allowed output must remain enabled.');
+      return;
+    }
+
+    if (key === 'allow_mathematical_proofs') {
+      const updated = await updateProofRuntimeSetting(checked);
+      if (!updated) {
+        return;
+      }
+    }
+
+    onConfigChange?.(nextConfig);
   };
 
   const handleClear = async () => {
@@ -151,6 +227,7 @@ const AutonomousResearchInterface = ({
   const handleForceTier3 = async (mode) => {
     // Close dialog immediately - don't wait for API
     setShowTier3Dialog(false);
+    setIsForcingTier3(true);
     
     try {
       // Fire and forget - API returns immediately, Tier 3 runs in background
@@ -161,22 +238,8 @@ const AutonomousResearchInterface = ({
       // Success message will come through WebSocket activity feed
     } catch (error) {
       alert(`Failed to force Tier 3: ${error.details || error.message}`);
-    }
-  };
-
-  const handleSkipCritique = async () => {
-    if (!confirm('Skip the critique phase and continue to writing the conclusion? This cannot be undone.')) {
-      return;
-    }
-    
-    setIsSkipping(true);
-    try {
-      await api.skipCritique();
-      setSkipQueued(true);  // Mark skip as successfully queued
-    } catch (error) {
-      alert('Failed to skip critique: ' + error.message);
     } finally {
-      setIsSkipping(false);
+      setIsForcingTier3(false);
     }
   };
 
@@ -211,260 +274,100 @@ const AutonomousResearchInterface = ({
     }
   };
 
-  const getActivityIcon = (event) => {
-    switch (event) {
-      case 'brainstorm_submission_accepted':
-      case 'submission_accepted':
-      case 'compiler_acceptance':
-      case 'outline_locked':
-        return '✓';
-      case 'brainstorm_submission_rejected':
-      case 'submission_rejected':
-      case 'compiler_rejection':
-        return '✗';
-      case 'topic_selected':
-        return '»';
-      case 'topic_selection_rejected':
-        return '⚠';
-      case 'topic_exploration_started':
-        return '◉';
-      case 'topic_exploration_progress':
-        return '◈';
-      case 'topic_exploration_rejected':
-        return '⚠';
-      case 'topic_exploration_complete':
-        return '✓';
-      case 'paper_title_exploration_started':
-        return '◉';
-      case 'paper_title_exploration_progress':
-        return '◈';
-      case 'paper_title_exploration_complete':
-        return '✓';
-      case 'completion_review_started':
-        return '◎';
-      case 'completion_review_result':
-        return '□';
-      case 'manual_paper_writing_triggered':
-        return '▶';
-      case 'brainstorm_hard_limit_reached':
-        return '⊘';
-      case 'paper_writing_started':
-      case 'paper_writing_resumed':
-        return '▬';
-      case 'critique_phase_started':
-        return '◎';
-      case 'critique_progress':
-        return '⊟';
-      case 'self_review_appended':
-        return '◈';
-      case 'critique_phase_ended':
-        return '✓';
-      case 'critique_phase_skipped':
-      case 'compiler_decline':
-        return '↷';
-      case 'phase_transition':
-        return '□';
-      case 'paper_completed':
-        return '⊟';
-      case 'paper_redundancy_review':
-        return '◇';
-      case 'brainstorm_continuation_started':
-        return '◎';
-      case 'brainstorm_continuation_decided':
-        return '⊞';
-      case 'brainstorm_paper_limit_reached':
-        return '⊘';
-      // Reference selection events
-      case 'reference_selection_started':
-        return '▭';
-      case 'reference_selection_complete':
-        return '✓';
-      // Research lifecycle events
-      case 'auto_research_resumed':
-        return '↻';
-      // Tier 3 events
-      case 'tier3_started':
-        return '★';
-      case 'tier3_result':
-        return '⊟';
-      case 'tier3_format_selected':
-        return '▬';
-      case 'tier3_volume_organized':
-        return '▭';
-      case 'tier3_chapter_started':
-        return '✎';
-      case 'tier3_chapter_complete':
-        return '✓';
-      case 'tier3_complete':
-        return '◆';
-      case 'tier3_rejection':
-        return '⚠';
-      case 'tier3_forced':
-        return '▶';
-      case 'tier3_phase_changed':
-        return '↻';
-      case 'tier3_paper_started':
-        return '▬';
-      case 'tier3_short_form_complete':
-      case 'tier3_long_form_complete':
-        return '✓';
-      case 'final_answer_complete':
-        return '◆';
-      case 'proof_framing_decided':
-        return 'P';
-      case 'proof_check_started':
-        return '◌';
-      case 'proof_retry_scheduled':
-        return '↺';
-      case 'proof_retry_started':
-        return '↻';
-      case 'proof_check_candidates_found':
-        return '#';
-      case 'proof_check_no_candidates':
-        return '-';
-      case 'smt_check_started':
-        return 'S';
-      case 'smt_check_complete':
-        return 'Z';
-      case 'proof_attempt_started':
-        return '>';
-      case 'proof_lean_accepted':
-        return '>';
-      case 'proof_integrity_rejected':
-        return '⚠';
-      case 'proof_attempt_failed':
-      case 'proof_attempts_exhausted':
-        return '⚠';
-      case 'proof_verified':
-      case 'known_proof_verified':
-      case 'proof_check_complete':
-        return '✓';
-      case 'novel_proof_discovered':
-        return '◆';
-      case 'proof_dependency_added':
-        return '↗';
-      default:
-        return '•';
-    }
-  };
-
-  const getActivityClass = (event) => {
-    // Tier 3 completion events are special highlights
-    if (event === 'tier3_complete' || event === 'final_answer_complete') {
-      return 'activity-tier3-complete';
-    }
-    // Success events
-    if (event.includes('accepted') || 
-        event === 'compiler_acceptance' ||
-        event === 'outline_locked' ||
-        event === 'paper_completed' || 
-        event === 'self_review_appended' ||
-        event === 'topic_exploration_complete' ||
-        event === 'paper_title_exploration_complete' ||
-        event === 'tier3_chapter_complete' ||
-        event === 'tier3_short_form_complete' ||
-        event === 'tier3_long_form_complete' ||
-        event === 'reference_selection_complete' ||
-        event === 'proof_verified' ||
-        event === 'proof_lean_accepted' ||
-        event === 'novel_proof_discovered' ||
-        event === 'known_proof_verified' ||
-        event === 'proof_check_complete' ||
-        event === 'proof_dependency_added' ||
-        event === 'smt_check_complete') {
-      return 'activity-success';
-    }
-    // Rejection events
-    if (
-        event.includes('rejected') ||
-        event === 'compiler_rejection' ||
-        event === 'tier3_rejection' ||
-        event === 'proof_attempt_failed' ||
-        event === 'proof_attempts_exhausted' ||
-        event === 'proof_integrity_rejected'
-    ) {
-      return 'activity-reject';
-    }
-    // Info events (reviews, starts, tier3 progress, etc.)
-    if (event.includes('review') || 
-        event.includes('started') || 
-        event.includes('resumed') ||
-        event.includes('progress') ||
-        event.includes('transition') ||
-        event === 'manual_paper_writing_triggered' ||
-        event === 'brainstorm_hard_limit_reached' ||
-        event === 'tier3_forced' ||
-        event === 'tier3_phase_changed' ||
-        event === 'tier3_result' ||
-        event === 'tier3_format_selected' ||
-        event === 'tier3_volume_organized' ||
-        event === 'topic_selected' ||
-        event === 'reference_selection_started' ||
-        event === 'compiler_decline' ||
-        event === 'critique_phase_ended' ||
-        event === 'critique_phase_skipped' ||
-        event === 'brainstorm_continuation_decided' ||
-        event === 'brainstorm_paper_limit_reached' ||
-        event === 'proof_framing_decided' ||
-        event === 'proof_retry_scheduled' ||
-        event === 'proof_retry_started' ||
-        event === 'proof_check_candidates_found' ||
-        event === 'proof_check_no_candidates' ||
-        event === 'proof_attempt_started' ||
-        event === 'smt_check_started') {
-      return 'activity-info';
-    }
-    return 'activity-neutral';
-  };
-
   return (
     <div className={`autonomous-interface workflow-main-interface ${isRunning || isStopping ? 'workflow-main-interface--running' : ''}`}>
       {/* Header */}
       <div className="autonomous-header">
         <h2>Autonomous Research</h2>
-        <div className="autonomous-controls">
-          {!isRunning && !isStopping ? (
-            <button 
-              className="btn-start"
-              onClick={handleStart}
-              disabled={
-                !config?.submitter_configs?.some(s => s.modelId) ||
-                (anyWorkflowRunning && !isRunning)
-              }
-            >
-              Start Research
-            </button>
-          ) : (
-            <>
-              <span
-                className="runtime-indicator"
-                role="status"
-                aria-live="polite"
-                title={isStopping ? "Autonomous research is stopping" : "Autonomous research is currently running"}
+        <div className="autonomous-controls-stack">
+          <div className="autonomous-controls">
+            {!isRunning && !isStopping ? (
+              <button
+                className="btn-start"
+                onClick={handleStart}
+                disabled={
+                  !config?.submitter_configs?.some(s => s.modelId) ||
+                  (anyWorkflowRunning && !isRunning)
+                }
               >
-                <span className="runtime-indicator-dot" aria-hidden="true"></span>
-                <span className="runtime-indicator-label">{isStopping ? 'Stopping' : 'Running'}</span>
-              </span>
-              <button className="btn-stop" onClick={onStop} disabled={isStopping}>
-                {isStopping ? 'Stopping...' : 'Stop Research'}
+                Start Research
               </button>
-            </>
-          )}
-          <button 
-            className={`btn-clear ${showClearConfirm ? 'btn-confirm' : ''}`}
-            onClick={handleClear}
-            disabled={isRunning || isStopping || isClearing}
-          >
-            {isClearing ? 'Clearing...' : (showClearConfirm ? 'Confirm Clear' : 'Clear All')}
-          </button>
-          {showClearConfirm && !isClearing && (
-            <button 
-              className="btn-cancel"
-              onClick={() => setShowClearConfirm(false)}
+            ) : (
+              <>
+                <span
+                  className="runtime-indicator"
+                  role="status"
+                  aria-live="polite"
+                  title={isStopping ? "Autonomous research is stopping" : "Autonomous research is currently running"}
+                >
+                  <span className="runtime-indicator-dot" aria-hidden="true"></span>
+                  <span className="runtime-indicator-label">{isStopping ? 'Stopping' : 'Running'}</span>
+                </span>
+                <button className="btn-stop" onClick={onStop} disabled={isStopping}>
+                  {isStopping ? 'Stopping...' : 'Stop Research'}
+                </button>
+              </>
+            )}
+            {developerModeEnabled && (
+              <label className="settings-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={Boolean(config?.creativity_emphasis_boost_enabled)}
+                  onChange={(event) => onConfigChange?.({
+                    ...config,
+                    creativity_emphasis_boost_enabled: event.target.checked
+                  })}
+                  disabled={isRunning || isStopping}
+                />
+                Creativity Emphasis Boost
+              </label>
+            )}
+              <button
+              className={`btn-clear ${showClearConfirm ? 'btn-confirm' : ''}`}
+              onClick={handleClear}
+              disabled={isRunning || isStopping || isClearing}
             >
-              Cancel
+              {isClearing ? 'Clearing...' : (showClearConfirm ? 'Confirm Clear' : 'Clear All')}
             </button>
-          )}
+            {showClearConfirm && !isClearing && (
+              <button
+                className="btn-cancel"
+                onClick={() => setShowClearConfirm(false)}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+          <div
+            className="allowed-outputs-row"
+            title="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
+          >
+            <span className="allowed-outputs-label">Allowed Outputs:</span>
+            <label
+              className="allowed-output-option"
+              title="Mathematical Proofs enables Lean 4 proof verification and proof-library output for this run."
+            >
+              <input
+                type="checkbox"
+                checked={proofOutputsAvailable && Boolean(config?.allow_mathematical_proofs ?? true)}
+                onChange={(event) => updateAllowedOutput('allow_mathematical_proofs', event.target.checked)}
+                disabled={isRunning || isStopping || proofOutputUpdating || !proofOutputsAvailable}
+              />
+              <span className="allowed-output-text">Mathematical Proofs</span>
+            </label>
+            <label
+              className="allowed-output-option"
+              title="Research Papers enables paper compilation output. When disabled, autonomous research loops through brainstorms and proof checks without writing papers."
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(config?.allow_research_papers ?? true)}
+                onChange={(event) => updateAllowedOutput('allow_research_papers', event.target.checked)}
+                disabled={isRunning || isStopping}
+              />
+              <span className="allowed-output-text">Research Papers</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -615,15 +518,6 @@ const AutonomousResearchInterface = ({
                 </p>
               )}
             </div>
-            {/* Skip button - ALWAYS visible during Tier 2 paper writing */}
-            <button
-              onClick={handleSkipCritique}
-              className={`btn ${skipQueued ? 'btn-success' : 'btn-warning'}`}
-              style={{ marginLeft: 'auto' }}
-              disabled={isSkipping || skipQueued}
-            >
-              {isSkipping ? 'Skipping...' : skipQueued ? '✓ Skip Queued' : (critiquePhaseActive ? 'Skip Critique Now' : 'Skip Critique (Pre-emptive)')}
-            </button>
           </div>
         )}
       </div>
@@ -697,6 +591,7 @@ const AutonomousResearchInterface = ({
         <LivePaperProgress 
           api={api} 
           isCompiling={status?.current_tier === 'tier2_paper_writing'}
+          capabilities={capabilities}
         />
       )}
 
@@ -705,6 +600,7 @@ const AutonomousResearchInterface = ({
         <LiveTier3Progress 
           api={api}
           status={status}
+          capabilities={capabilities}
         />
       )}
 

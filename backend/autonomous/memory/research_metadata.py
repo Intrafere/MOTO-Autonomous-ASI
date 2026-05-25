@@ -11,6 +11,7 @@ from datetime import datetime
 import aiofiles
 
 from backend.shared.config import system_config
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BrainstormMetadata, PaperMetadata
 from backend.shared.path_safety import resolve_path_within_root
 
@@ -260,6 +261,7 @@ class ResearchMetadata:
             "current_paper_id": None,
             "current_paper_title": None,
             "paper_phase": None,  # "body", "conclusion", "introduction", "abstract"
+            "proof_checkpoint": None,
             "base_user_research_prompt": "",
             "proof_framing_active": False,
             "proof_framing_context": "",
@@ -281,14 +283,14 @@ class ResearchMetadata:
                 "validator_model": None,
                 "high_context_model": None,
                 "high_param_model": None,
-                "submitter_context_window": 131072,
-                "validator_context_window": 131072,
-                "high_context_context_window": 131072,
-                "high_param_context_window": 10000,
-                "submitter_max_tokens": 25000,
-                "validator_max_tokens": 15000,
-                "high_context_max_tokens": 25000,
-                "high_param_max_tokens": 15000
+                "submitter_context_window": 0,
+                "validator_context_window": 0,
+                "high_context_context_window": 0,
+                "high_param_context_window": 0,
+                "submitter_max_tokens": 0,
+                "validator_max_tokens": 0,
+                "high_context_max_tokens": 0,
+                "high_param_max_tokens": 0
             },
             "last_updated": datetime.now().isoformat()
         }
@@ -296,6 +298,11 @@ class ResearchMetadata:
     async def save_workflow_state(self, state: Dict[str, Any]) -> None:
         """Save workflow state for crash recovery / resume."""
         async with self._lock:
+            existing_checkpoint = None
+            if self._workflow_state:
+                existing_checkpoint = self._workflow_state.get("proof_checkpoint")
+            if "proof_checkpoint" not in state:
+                state["proof_checkpoint"] = existing_checkpoint
             self._workflow_state = state
             self._workflow_state["last_updated"] = datetime.now().isoformat()
             async with aiofiles.open(self._workflow_state_path, 'w', encoding='utf-8') as f:
@@ -306,6 +313,113 @@ class ResearchMetadata:
         if self._workflow_state is None:
             await self._load_workflow_state()
         return self._workflow_state.copy()
+
+    async def save_proof_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        """Persist the active proof-verification cursor inside workflow state."""
+        async with self._lock:
+            if self._workflow_state is None:
+                await self._load_workflow_state()
+            if self._workflow_state is None:
+                self._workflow_state = self._get_default_workflow_state()
+
+            existing = self._workflow_state.get("proof_checkpoint") or {}
+            same_source = (
+                isinstance(existing, dict)
+                and existing.get("source_type") == checkpoint.get("source_type")
+                and existing.get("source_id") == checkpoint.get("source_id")
+            )
+            completed_triggers = set(existing.get("completed_triggers") or []) if same_source else set()
+            completed_triggers.update(checkpoint.get("completed_triggers") or [])
+            checkpoint["completed_triggers"] = sorted(completed_triggers)
+            checkpoint["updated_at"] = datetime.now().isoformat()
+            self._workflow_state["proof_checkpoint"] = checkpoint
+            self._workflow_state["last_updated"] = datetime.now().isoformat()
+            self._workflow_state_path.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(self._workflow_state_path, 'w', encoding='utf-8') as f:
+                await f.write(json.dumps(self._workflow_state, indent=2))
+
+    async def get_proof_checkpoint(
+        self,
+        source_type: Optional[str] = None,
+        source_id: Optional[str] = None,
+        trigger: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the active proof checkpoint when it matches the requested source."""
+        if self._workflow_state is None:
+            await self._load_workflow_state()
+        checkpoint = (self._workflow_state or {}).get("proof_checkpoint")
+        if not isinstance(checkpoint, dict):
+            return None
+        if source_type and checkpoint.get("source_type") != source_type:
+            return None
+        if source_id and checkpoint.get("source_id") != source_id:
+            return None
+        if trigger and checkpoint.get("trigger") != trigger:
+            return None
+        return checkpoint.copy()
+
+    async def mark_proof_checkpoint_trigger_complete(
+        self,
+        source_type: str,
+        source_id: str,
+        trigger: str,
+        source_title: str = "",
+    ) -> None:
+        """Record that one proof-verification substage completed for this source."""
+        checkpoint = await self.get_proof_checkpoint(source_type, source_id) or {
+            "source_type": source_type,
+            "source_id": source_id,
+            "source_title": source_title,
+            "candidates": [],
+            "processed_candidate_ids": [],
+            "attempts_by_candidate": {},
+            "results": [],
+        }
+        completed_triggers = set(checkpoint.get("completed_triggers") or [])
+        completed_triggers.add(trigger)
+        checkpoint.update(
+            {
+                "source_type": source_type,
+                "source_id": source_id,
+                "source_title": source_title or checkpoint.get("source_title", ""),
+                "trigger": trigger,
+                "status": "trigger_complete",
+                "completed_triggers": sorted(completed_triggers),
+            }
+        )
+        await self.save_proof_checkpoint(checkpoint)
+
+    async def is_proof_checkpoint_trigger_complete(
+        self,
+        source_type: str,
+        source_id: str,
+        trigger: str,
+    ) -> bool:
+        checkpoint = await self.get_proof_checkpoint(source_type, source_id)
+        if not checkpoint:
+            return False
+        return trigger in set(checkpoint.get("completed_triggers") or [])
+
+    async def clear_proof_checkpoint(
+        self,
+        source_type: Optional[str] = None,
+        source_id: Optional[str] = None,
+    ) -> None:
+        """Clear the persisted proof cursor, optionally only when it matches a source."""
+        async with self._lock:
+            if self._workflow_state is None:
+                await self._load_workflow_state()
+            checkpoint = (self._workflow_state or {}).get("proof_checkpoint")
+            if not isinstance(checkpoint, dict):
+                return
+            if source_type and checkpoint.get("source_type") != source_type:
+                return
+            if source_id and checkpoint.get("source_id") != source_id:
+                return
+            self._workflow_state["proof_checkpoint"] = None
+            self._workflow_state["last_updated"] = datetime.now().isoformat()
+            async with aiofiles.open(self._workflow_state_path, 'w', encoding='utf-8') as f:
+                await f.write(json.dumps(self._workflow_state, indent=2))
     
     async def clear_workflow_state(self) -> None:
         """Clear workflow state (called on clean stop)."""
@@ -693,11 +807,18 @@ class ResearchMetadata:
                 self._stats["total_brainstorms_completed"] = completed_count
                 await self._save_stats()
                 
-                logger.info(f"Removed brainstorm {topic_id} from central metadata")
+                logger.info(
+                    "Removed brainstorm %s from central metadata",
+                    redact_log_text(topic_id, 120),
+                )
                 return True
                 
             except Exception as e:
-                logger.error(f"Failed to remove brainstorm {topic_id} from metadata: {e}")
+                logger.error(
+                    "Failed to remove brainstorm %s from metadata: %s",
+                    redact_log_text(topic_id, 120),
+                    redact_log_text(e, 240),
+                )
                 return False
     
     async def delete_paper(self, paper_id: str) -> bool:

@@ -71,7 +71,9 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
         zIndex: 999998,
         display: 'flex',
         flexDirection: 'column',
+        alignItems: 'flex-end',
         gap: scalePx(8),
+        overflow: 'visible',
         pointerEvents: 'none',
         transition: 'right 0.15s ease',
       }}

@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 
 from backend.shared.config import rag_config
-from backend.shared.models import ContextPack
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.utils import count_tokens
 from backend.aggregator.core.rag_manager import rag_manager
 
@@ -45,7 +45,11 @@ class ContextAllocator:
             self.submitter_max_output_tokens = submitter_max_output
         if validator_max_output is not None:
             self.validator_max_output_tokens = validator_max_output
-        logger.info(f"Context windows updated - Submitter: {submitter_context}, Validator: {validator_context}")
+        logger.info(
+            "Context windows updated - Submitter: %s, Validator: %s",
+            redact_log_text(submitter_context, 40),
+            redact_log_text(validator_context, 40),
+        )
 
     def _get_shared_training_rag_sources(self) -> List[str]:
         """

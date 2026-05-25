@@ -33,7 +33,6 @@ export default function WorkflowPanel({ isRunning }) {
   const [localElapsed, setLocalElapsed] = useState(0);
   const lastSyncRef = useRef(Date.now());
   const hasElapsedSyncRef = useRef(false);
-  const lastAutoOpenedHourRef = useRef(0);
 
   // Auto-open: pop open exactly once, 10 minutes after user presses Start.
   // No persistence. Resets every time isRunning goes true.

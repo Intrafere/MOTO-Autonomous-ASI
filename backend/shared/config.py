@@ -27,19 +27,17 @@ class RAGConfig(BaseSettings):
     coverage_threshold: float = 0.25
     answerability_threshold: float = 0.15
     
-    # Context allocation (tokens)
-    # NOTE: These are DEFAULT values only. User sets actual context via GUI settings.
-    # The system will use whatever context the user configured in LM Studio and enters in settings.
-    # NO LIMIT is enforced - these defaults are just fallbacks.
-    submitter_context_window: int = 131072  # Default if user doesn't specify
-    validator_context_window: int = 131072  # Default if user doesn't specify
+    # Context allocation (tokens). Runtime workflow starts must set these from
+    # explicit user/provider settings before any model call.
+    submitter_context_window: int = 0
+    validator_context_window: int = 0
     context_buffer_tokens: int = 500  # Small buffer for token counting estimation errors
-    output_reserve_tokens: int = 25000  # CRITICAL: Reserve for model output generation (matches default max_output_tokens)
+    output_reserve_tokens: int = 0
     rag_allocation_percentage: float = 0.85  # 85% RAG, 15% direct injection (of remaining context)
     
     # Output token limits (user-configurable)
-    submitter_max_output_tokens: int = 25000  # Default for aggregator submitters
-    validator_max_output_tokens: int = 25000  # Default for aggregator validator
+    submitter_max_output_tokens: int = 0
+    validator_max_output_tokens: int = 0
     
     # Memory limits
     max_documents: int = 10000  # For RAG document cache; user files never evicted; high for infinite runtime
@@ -94,13 +92,23 @@ class RAGConfig(BaseSettings):
         Returns:
             Available tokens for input prompt assembly
         """
-        # Use provided output tokens or fall back to default
+        if int(context_window or 0) <= 0:
+            raise ValueError("Context window must be explicitly configured as a positive integer.")
+
+        # Use provided output tokens or fall back to process state set by the active workflow.
         output_reserve = output_tokens if output_tokens is not None else self.output_reserve_tokens
+        if int(output_reserve or 0) <= 0:
+            raise ValueError("Max output tokens must be explicitly configured as a positive integer.")
         
         # Fixed buffer for token counting estimation errors (industry standard approach)
         buffer = self.context_buffer_tokens
-        
-        return context_window - output_reserve - buffer
+        available_input = context_window - output_reserve - buffer
+        if available_input <= 0:
+            raise ValueError(
+                "Configured context window is too small for the selected max output tokens and safety buffer."
+            )
+
+        return available_input
     
     def get_prompt_assembly_overhead_estimate(self) -> int:
         """
@@ -201,35 +209,33 @@ class SystemConfig(BaseSettings):
         ),
     )
     
-    # Compiler settings (Phase 2)
-    # NOTE: Compiler contexts are set by user in GUI, these are just default fallbacks
-    # Compiler context windows (separate for each role)
-    compiler_validator_context_window: int = 131072
-    compiler_high_context_context_window: int = 131072
-    compiler_high_param_context_window: int = 131072
-    compiler_critique_submitter_context_window: int = 131072  # For critique generation and rewrite decision
+    # Compiler settings (Phase 2). Set from explicit user/provider settings at runtime.
+    compiler_validator_context_window: int = 0
+    compiler_high_context_context_window: int = 0
+    compiler_high_param_context_window: int = 0
+    compiler_critique_submitter_context_window: int = 0
     
     # Compiler output token limits (user-configurable)
-    compiler_validator_max_output_tokens: int = 25000
-    compiler_high_context_max_output_tokens: int = 25000  # For outline_create, outline_update, construction, review
-    compiler_high_param_max_output_tokens: int = 25000  # For rigor mode
-    compiler_critique_submitter_max_tokens: int = 25000  # For critique and rewrite decision
+    compiler_validator_max_output_tokens: int = 0
+    compiler_high_context_max_output_tokens: int = 0
+    compiler_high_param_max_output_tokens: int = 0
+    compiler_critique_submitter_max_tokens: int = 0
     
     # Compiler model selections (set at runtime by API)
     compiler_critique_submitter_model: str = ""  # Set by user in GUI
     
     # Autonomous Research settings (Part 3)
-    # Context windows (separate for each role)
-    autonomous_submitter_context_window: int = 131072
-    autonomous_validator_context_window: int = 131072
-    autonomous_high_context_context_window: int = 131072
-    autonomous_high_param_context_window: int = 131072
+    # Context windows (separate for each role, set from user settings)
+    autonomous_submitter_context_window: int = 0
+    autonomous_validator_context_window: int = 0
+    autonomous_high_context_context_window: int = 0
+    autonomous_high_param_context_window: int = 0
     
     # Autonomous output token limits (user-configurable)
-    autonomous_submitter_max_tokens: int = 25000
-    autonomous_validator_max_tokens: int = 25000
-    autonomous_high_context_max_tokens: int = 25000
-    autonomous_high_param_max_tokens: int = 25000
+    autonomous_submitter_max_tokens: int = 0
+    autonomous_validator_max_tokens: int = 0
+    autonomous_high_context_max_tokens: int = 0
+    autonomous_high_param_max_tokens: int = 0
     
     # Autonomous workflow settings
     autonomous_completion_review_interval: int = 10  # Every 10 acceptances
@@ -271,9 +277,10 @@ class SystemConfig(BaseSettings):
         validation_alias=AliasChoices("MOTO_LEANOJ_AUTO_RESUME_ENABLED", "LEANOJ_AUTO_RESUME_ENABLED"),
     )
     # Maximum number of theorem candidates whose Lean 4 formalization attempts
-    # may run concurrently within a single proof-verification stage. Novelty
-    # assessment and proof-database persistence remain serialized after each
-    # candidate's Lean pipeline completes.
+    # may run concurrently within a single proof-verification stage. Defaults to
+    # six; zero remains the explicit unlimited override.
+    # Novelty assessment and proof-database persistence remain serialized after
+    # each candidate's Lean pipeline completes.
     proof_max_parallel_candidates: int = Field(
         default=6,
         validation_alias=AliasChoices(

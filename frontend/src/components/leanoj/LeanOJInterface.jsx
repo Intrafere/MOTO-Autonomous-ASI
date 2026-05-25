@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { persistLeanOJSettings, settingsToLeanOJRequest } from '../../utils/leanojProfiles';
 import LiveActivityFeed from '../LiveActivityFeed';
 import '../autonomous/AutonomousResearch.css';
+import '../settings-common.css';
 
 export default function LeanOJInterface({
   isRunning,
@@ -15,6 +16,7 @@ export default function LeanOJInterface({
   onClear,
   onSkipBrainstorm,
   onForceBrainstorm,
+  developerModeEnabled = false,
 }) {
   const [prompt, setPrompt] = useState(settings.prompt || '');
   const [leanTemplate, setLeanTemplate] = useState(settings.leanTemplate || '');
@@ -45,8 +47,12 @@ export default function LeanOJInterface({
   };
 
   const handleStart = async () => {
-    const nextSettings = persistDraft(prompt, leanTemplate);
-    await onStart(settingsToLeanOJRequest(nextSettings, prompt, leanTemplate));
+    try {
+      const nextSettings = persistDraft(prompt, leanTemplate);
+      await onStart(settingsToLeanOJRequest(nextSettings, prompt, leanTemplate));
+    } catch (error) {
+      alert(error.message || 'Failed to start Proof Solver');
+    }
   };
 
   const canStart = !isRunning && !anyWorkflowRunning && prompt.trim() && leanTemplate.trim();
@@ -78,6 +84,20 @@ export default function LeanOJInterface({
                 Stop Proof Solver
               </button>
             </>
+          )}
+          {developerModeEnabled && (
+            <label className="settings-checkbox-label">
+              <input
+                type="checkbox"
+                checked={Boolean(settings.creativityEmphasisBoostEnabled)}
+                onChange={(event) => onSettingsChange(persistLeanOJSettings({
+                  ...settings,
+                  creativityEmphasisBoostEnabled: event.target.checked,
+                }))}
+                disabled={isRunning}
+              />
+              Creativity Emphasis Boost
+            </label>
           )}
           <button className="btn-clear" onClick={onSkipBrainstorm} disabled={!isRunning}>
             Skip Brainstorm
@@ -127,6 +147,12 @@ export default function LeanOJInterface({
           <div className="current-brainstorm">
             <span className="status-label">Current Path:</span>
             <p className="brainstorm-prompt">{status.current_path_decision}</p>
+          </div>
+        )}
+        {status?.provider_paused && (
+          <div className="settings-notice">
+            Proof Solver is paused until OpenRouter credits are reset. Add credits, then press Retry OpenRouter.
+            {status.provider_pause_message ? ` ${status.provider_pause_message}` : ''}
           </div>
         )}
         {status?.last_error && (

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { api, openRouterAPI } from '../../services/api';
+import { api, cloudAccessAPI, openRouterAPI } from '../../services/api';
 import {
+  computeCodexAutoSettings,
   computeOpenRouterAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -42,13 +43,17 @@ function ModelSelector({
   onChange,
   lmStudioModels,
   openRouterModels,
+  openAICodexModels,
   modelProviders,
   hasOpenRouterKey,
+  hasOpenAICodexLogin,
   isRunning,
   lmStudioEnabled,
 }) {
   const provider = lmStudioEnabled ? (config.provider || 'lm_studio') : 'openrouter';
-  const models = provider === 'openrouter' ? openRouterModels : lmStudioModels;
+  const models = provider === 'openrouter'
+    ? openRouterModels
+    : (provider === 'openai_codex_oauth' ? openAICodexModels : lmStudioModels);
   const providers = provider === 'openrouter' && config.modelId
     ? getProviderNames(modelProviders[config.modelId])
     : [];
@@ -78,6 +83,15 @@ function ModelSelector({
               title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
             >
               OpenRouter
+            </button>
+            <button
+              type="button"
+              className={`provider-toggle-btn${provider === 'openai_codex_oauth' ? ' active-or-orange' : ''}`}
+              disabled={isRunning || !hasOpenAICodexLogin}
+              onClick={() => onChange({ ...config, provider: 'openai_codex_oauth', modelId: '', openrouterProvider: null, openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT })}
+              title={!hasOpenAICodexLogin ? 'Set OpenAI Codex login in Cloud Access & Keys first' : 'Use OpenAI Codex'}
+            >
+              OpenAI Codex
             </button>
           </div>
         ) : (
@@ -141,7 +155,7 @@ function ModelSelector({
         </div>
       )}
 
-      {provider === 'openrouter' && lmStudioEnabled && (
+      {provider !== 'lm_studio' && lmStudioEnabled && (
         <div className="settings-row">
           <label>LM Studio Fallback</label>
           <select
@@ -176,9 +190,9 @@ function RoleEditor(props) {
           type="number"
           min={4096}
           step={1024}
-          value={config.contextWindow || DEFAULT_CONTEXT_WINDOW}
+          value={config.contextWindow ?? DEFAULT_CONTEXT_WINDOW}
           disabled={isRunning}
-          onChange={(event) => updateNumber('contextWindow', event.target.value, DEFAULT_CONTEXT_WINDOW)}
+          onChange={(event) => updateNumber('contextWindow', event.target.value, '')}
         />
       </div>
       <div className="settings-row">
@@ -187,9 +201,9 @@ function RoleEditor(props) {
           type="number"
           min={1000}
           step={1000}
-          value={config.maxOutputTokens || DEFAULT_MAX_OUTPUT_TOKENS}
+          value={config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS}
           disabled={isRunning}
-          onChange={(event) => updateNumber('maxOutputTokens', event.target.value, DEFAULT_MAX_OUTPUT_TOKENS)}
+          onChange={(event) => updateNumber('maxOutputTokens', event.target.value, '')}
         />
       </div>
       {developerModeEnabled && (
@@ -225,8 +239,10 @@ export default function LeanOJSettings({
 }) {
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
+  const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [modelProviders, setModelProviders] = useState(settings.modelProviders || {});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
+  const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [userProfiles, setUserProfiles] = useState({});
   const [selectedProfile, setSelectedProfile] = useState(settings.selectedProfile || '');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -256,6 +272,20 @@ export default function LeanOJSettings({
         }
       } catch (error) {
         console.error('Failed to load OpenRouter state for Proof Solver:', error);
+      }
+
+      try {
+        const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+        const configured = Boolean(codexStatus.status?.configured);
+        setHasOpenAICodexLogin(configured);
+        if (configured) {
+          const codexModels = await cloudAccessAPI.getOpenAICodexModels();
+          setOpenAICodexModels(codexModels.models || []);
+        }
+      } catch (error) {
+        console.error('Failed to load OpenAI Codex state for Proof Solver:', error);
+        setHasOpenAICodexLogin(false);
+        setOpenAICodexModels([]);
       }
 
       if (lmStudioEnabled) {
@@ -301,7 +331,7 @@ export default function LeanOJSettings({
   }, { markCustom: true });
 
   const shouldAutoFillRole = (previousConfig = {}, config = {}) => (
-    config.provider === 'openrouter' && config.modelId && (
+    ['openrouter', 'openai_codex_oauth'].includes(config.provider) && config.modelId && (
       previousConfig.provider !== config.provider ||
       previousConfig.modelId !== config.modelId ||
       previousConfig.openrouterProvider !== config.openrouterProvider
@@ -324,7 +354,7 @@ export default function LeanOJSettings({
 
   const updateSubmitter = (index, config) => {
     const previousConfig = settings.submitterConfigs[index] || {};
-    const shouldAutoFill = config.provider === 'openrouter' && config.modelId && (
+    const shouldAutoFill = ['openrouter', 'openai_codex_oauth'].includes(config.provider) && config.modelId && (
       previousConfig.provider !== config.provider ||
       previousConfig.modelId !== config.modelId ||
       previousConfig.openrouterProvider !== config.openrouterProvider
@@ -381,9 +411,24 @@ export default function LeanOJSettings({
     return autoSettings;
   };
 
+  const getCodexAutoSettingsForModel = (modelId) => {
+    const model = openAICodexModels.find((item) => item.id === modelId);
+    if (!model) {
+      console.debug('[ProofSolverCodexAutoFill] model not in loaded list, skipping auto-fill', { modelId });
+      return null;
+    }
+    const autoSettings = computeCodexAutoSettings(model);
+    if (autoSettings.warnings.length > 0) {
+      console.warn('[ProofSolverCodexAutoFill] auto-settings fallback used:', autoSettings.warnings);
+    }
+    return autoSettings;
+  };
+
   const applyAutoSettingsToConfig = async (config, baseSettings = settings) => {
-    if (config.provider !== 'openrouter' || !config.modelId) return;
-    const auto = await getAutoSettingsForModel(config.modelId, config.openrouterProvider || null, baseSettings);
+    if (!['openrouter', 'openai_codex_oauth'].includes(config.provider) || !config.modelId) return;
+    const auto = config.provider === 'openrouter'
+      ? await getAutoSettingsForModel(config.modelId, config.openrouterProvider || null, baseSettings)
+      : getCodexAutoSettingsForModel(config.modelId);
     if (!auto) return null;
     return {
       ...config,
@@ -757,8 +802,10 @@ export default function LeanOJSettings({
             onChange={(next) => updateSubmitter(index, next)}
             lmStudioModels={lmStudioModels}
             openRouterModels={openRouterModels}
+            openAICodexModels={openAICodexModels}
             modelProviders={modelProviders}
             hasOpenRouterKey={hasOpenRouterKey}
+            hasOpenAICodexLogin={hasOpenAICodexLogin}
             isRunning={isRunning}
             lmStudioEnabled={lmStudioEnabled}
             developerModeEnabled={developerModeEnabled}
@@ -776,8 +823,10 @@ export default function LeanOJSettings({
               onChange={(next) => updateRoles(group.roleKeys, next)}
               lmStudioModels={lmStudioModels}
               openRouterModels={openRouterModels}
+              openAICodexModels={openAICodexModels}
               modelProviders={modelProviders}
               hasOpenRouterKey={hasOpenRouterKey}
+              hasOpenAICodexLogin={hasOpenAICodexLogin}
               isRunning={isRunning}
               lmStudioEnabled={lmStudioEnabled}
               developerModeEnabled={developerModeEnabled}

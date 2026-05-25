@@ -179,11 +179,6 @@
   transition: border-color var(--transition-fast);
 }
 
-.role-config-card--main {
-  border-color: rgba(76, 175, 80, 0.35);
-  background: rgba(26, 36, 40, 0.8);
-}
-
 .role-config-card--openrouter {
   border-color: #2a2a2a;
   background: rgba(26, 26, 56, 0.8);
@@ -207,8 +202,6 @@
 }
 
 /* Card title colours */
-.card-title--green { color: var(--accent-green); }
-.card-title--purple { color: #18cc17; }
 .card-title--orange { color: #FF6700; }
 
 /* Inline provider badge */

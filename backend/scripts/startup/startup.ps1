@@ -1,5 +1,8 @@
 # Startup script to cache OpenRouter models (PowerShell)
 
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
+Set-Location $RepoRoot
+
 Write-Host "🔄 Caching OpenRouter models..."
 
 # Run the cache script

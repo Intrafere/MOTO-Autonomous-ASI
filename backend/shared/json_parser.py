@@ -11,7 +11,6 @@ import json
 import logging
 import re
 import hashlib
-from typing import Any
 
 logger = logging.getLogger(__name__)
 

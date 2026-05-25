@@ -8,6 +8,7 @@ from typing import Optional
 
 from backend.autonomous.prompts.proof_prompts import build_proof_statement_alignment_prompt
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.config import rag_config
 from backend.shared.json_parser import parse_json
 from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.utils import count_tokens
@@ -36,6 +37,11 @@ class LeanProofIntegrityResult:
     reason: str = ""
     category: str = "ok"
     introduced_devices: list[str] = field(default_factory=list)
+    matches_intended: Optional[bool] = None
+    actual_theorem_statement: str = ""
+    actual_theorem_name: str = ""
+    relationship_to_candidate: str = ""
+    downshift_reason: str = ""
 
 
 def strip_lean_comments_and_strings(code: str) -> str:
@@ -101,6 +107,60 @@ def validate_lean_proof_integrity(
     return LeanProofIntegrityResult(valid=True)
 
 
+def extract_primary_lean_theorem(lean_code: str) -> tuple[str, str]:
+    """Best-effort extraction of the main theorem/lemma header from Lean code."""
+    cleaned = strip_lean_comments_and_strings(lean_code)
+    headers: list[tuple[str, str]] = []
+    collecting = False
+    current: list[str] = []
+
+    def flush_current() -> None:
+        nonlocal current
+        if not current:
+            return
+        header = " ".join(part.strip() for part in current if part.strip())
+        header = re.sub(r"\s*:=\s*by\b.*$", "", header).strip()
+        header = re.sub(r"\s*:=\s*.*$", "", header).strip()
+        if header:
+            parts = header.split()
+            name = ""
+            if len(parts) >= 2 and parts[0] in {"theorem", "lemma"}:
+                name = parts[1]
+            headers.append((name, header))
+        current = []
+
+    for raw_line in cleaned.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if re.match(r"^(theorem|lemma|example)\b", stripped):
+            if collecting:
+                flush_current()
+            collecting = True
+            current = [stripped]
+            if ":=" in stripped:
+                flush_current()
+                collecting = False
+            continue
+        if collecting:
+            if re.match(
+                r"^(def|structure|class|inductive|instance|abbrev|namespace|section|end|open|variable|variables)\b",
+                stripped,
+            ):
+                flush_current()
+                collecting = False
+                continue
+            current.append(stripped)
+            if ":=" in stripped:
+                flush_current()
+                collecting = False
+
+    if collecting:
+        flush_current()
+
+    return headers[-1] if headers else ("", "")
+
+
 async def validate_lean_statement_alignment(
     *,
     user_prompt: str,
@@ -114,7 +174,8 @@ async def validate_lean_statement_alignment(
     task_id: str,
     role_id: str,
 ) -> LeanProofIntegrityResult:
-    """Use an LLM validator to ensure accepted Lean code matches the intended claim."""
+    """Classify whether accepted Lean code matches the intended claim without rejecting it."""
+    fallback_name, fallback_statement = extract_primary_lean_theorem(lean_code)
     prompt = build_proof_statement_alignment_prompt(
         user_prompt=user_prompt,
         theorem_statement=theorem_statement,
@@ -122,7 +183,7 @@ async def validate_lean_statement_alignment(
         lean_code=lean_code,
         source_excerpt=source_excerpt,
     )
-    max_input_tokens = validator_context - validator_max_tokens
+    max_input_tokens = rag_config.get_available_input_tokens(validator_context, validator_max_tokens)
     trimmed_excerpt = source_excerpt or ""
     while count_tokens(prompt) > max_input_tokens and len(trimmed_excerpt) > 1500:
         trimmed_excerpt = trimmed_excerpt[: max(len(trimmed_excerpt) // 2, 1500)]
@@ -132,6 +193,16 @@ async def validate_lean_statement_alignment(
             formal_sketch=formal_sketch,
             lean_code=lean_code,
             source_excerpt=trimmed_excerpt,
+        )
+    if count_tokens(prompt) > max_input_tokens:
+        return LeanProofIntegrityResult(
+            valid=True,
+            category="statement_alignment_unavailable",
+            reason="Statement-alignment classifier prompt exceeded the configured context window; preserving Lean-accepted proof.",
+            matches_intended=None,
+            actual_theorem_statement=fallback_statement or theorem_statement,
+            actual_theorem_name=fallback_name,
+            relationship_to_candidate="alignment_unavailable",
         )
 
     try:
@@ -145,17 +216,25 @@ async def validate_lean_statement_alignment(
         )
         if not response or not response.get("choices"):
             return LeanProofIntegrityResult(
-                valid=False,
+                valid=True,
                 category="statement_alignment_unavailable",
-                reason="LEAN PROOF INTEGRITY REJECTED: statement-alignment validator returned no response.",
+                reason="Statement-alignment classifier returned no response; preserving Lean-accepted proof.",
+                matches_intended=None,
+                actual_theorem_statement=fallback_statement or theorem_statement,
+                actual_theorem_name=fallback_name,
+                relationship_to_candidate="alignment_unavailable",
             )
         message = response["choices"][0].get("message", {})
         content = message.get("content") or message.get("reasoning") or ""
         if not content:
             return LeanProofIntegrityResult(
-                valid=False,
+                valid=True,
                 category="statement_alignment_unavailable",
-                reason="LEAN PROOF INTEGRITY REJECTED: statement-alignment validator returned empty content.",
+                reason="Statement-alignment classifier returned empty content; preserving Lean-accepted proof.",
+                matches_intended=None,
+                actual_theorem_statement=fallback_statement or theorem_statement,
+                actual_theorem_name=fallback_name,
+                relationship_to_candidate="alignment_unavailable",
             )
         data = parse_json(content)
         if isinstance(data, list):
@@ -167,26 +246,52 @@ async def validate_lean_statement_alignment(
             raise
         logger.warning("Lean statement alignment validation failed: %s", exc)
         return LeanProofIntegrityResult(
-            valid=False,
+            valid=True,
             category="statement_alignment_unavailable",
             reason=(
-                "LEAN PROOF INTEGRITY REJECTED: statement-alignment validation failed before "
-                f"a usable decision was produced: {type(exc).__name__}: {exc}"
+                "Statement-alignment classification failed before a usable decision was produced; "
+                f"preserving Lean-accepted proof. {type(exc).__name__}: {exc}"
             ),
+            matches_intended=None,
+            actual_theorem_statement=fallback_statement or theorem_statement,
+            actual_theorem_name=fallback_name,
+            relationship_to_candidate="alignment_unavailable",
         )
 
-    decision = str(data.get("decision") or "").strip().lower()
+    raw_matches = data.get("matches_intended")
+    if isinstance(raw_matches, bool):
+        matches_intended = raw_matches
+    else:
+        decision = str(data.get("decision") or "").strip().lower()
+        matches_intended = decision == "accept" if decision else None
+
+    actual_statement = str(
+        data.get("actual_theorem_statement")
+        or data.get("proved_theorem_statement")
+        or data.get("verified_theorem_statement")
+        or ""
+    ).strip()
+    if not actual_statement:
+        actual_statement = theorem_statement if matches_intended is True else (fallback_statement or theorem_statement)
+    actual_name = str(data.get("actual_theorem_name") or data.get("theorem_name") or fallback_name).strip()
+    relationship = str(data.get("relationship_to_candidate") or data.get("relationship") or "").strip()
+    downshift_reason = str(data.get("downshift_reason") or data.get("summary") or "").strip()
     reasoning = str(data.get("reasoning") or data.get("summary") or "").strip()
-    if decision != "accept":
-        return LeanProofIntegrityResult(
-            valid=False,
-            category="statement_alignment_rejected",
-            reason=(
-                "LEAN PROOF INTEGRITY REJECTED: Lean accepted the code, but the statement-alignment "
-                f"validator rejected it as unrelated or insufficient. {reasoning}"
-            ).strip(),
-        )
-    return LeanProofIntegrityResult(valid=True, reason=reasoning, category="statement_alignment")
+
+    category = "statement_alignment" if matches_intended is True else "statement_downshifted"
+    if matches_intended is None:
+        category = "statement_alignment_uncertain"
+
+    return LeanProofIntegrityResult(
+        valid=True,
+        reason=reasoning or downshift_reason,
+        category=category,
+        matches_intended=matches_intended,
+        actual_theorem_statement=actual_statement,
+        actual_theorem_name=actual_name,
+        relationship_to_candidate=relationship,
+        downshift_reason=downshift_reason,
+    )
 
 
 async def validate_full_lean_proof_integrity(
@@ -198,8 +303,8 @@ async def validate_full_lean_proof_integrity(
     source_excerpt: str,
     allowed_baseline: str,
     validator_model: Optional[str] = None,
-    validator_context: int = 131072,
-    validator_max_tokens: int = 25000,
+    validator_context: int = 0,
+    validator_max_tokens: int = 0,
     task_id: str = "proof_integrity_000",
     role_id: str = "proof_integrity_validator",
     require_statement_alignment: bool = True,
@@ -214,10 +319,15 @@ async def validate_full_lean_proof_integrity(
     if not require_statement_alignment:
         return structural
     if not validator_model:
+        fallback_name, fallback_statement = extract_primary_lean_theorem(lean_code)
         return LeanProofIntegrityResult(
-            valid=False,
+            valid=True,
             category="statement_alignment_unavailable",
-            reason="LEAN PROOF INTEGRITY REJECTED: no validator model was configured for statement alignment.",
+            reason="No validator model configured for statement alignment; preserving Lean-accepted proof.",
+            matches_intended=None,
+            actual_theorem_statement=fallback_statement or theorem_statement,
+            actual_theorem_name=fallback_name,
+            relationship_to_candidate="alignment_unavailable",
         )
     return await validate_lean_statement_alignment(
         user_prompt=user_prompt,

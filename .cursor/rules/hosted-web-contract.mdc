@@ -9,8 +9,8 @@ MOTO is ONE codebase serving TWO deployment targets. A single `generic_mode` boo
 
 ## Two Deployment Targets
 
-- **Default mode (`generic_mode=False`)**: GitHub open-source release. Desktop app with `.bat`/`.ps1` launcher. LM Studio + OpenRouter. User runs locally.
-- **Generic mode (`generic_mode=True`)**: Hosted web backend. API-only sandbox on Blaxel, fronted by the Intrafere website/control plane on AWS. FastEmbed embeddings, OpenRouter-only LLM inference, no LM Studio dependency.
+- **Default mode (`generic_mode=False`)**: GitHub open-source release. Desktop app with `.bat` / PowerShell launchers. LM Studio + OpenRouter + desktop OpenAI Codex OAuth. User runs locally.
+- **Generic mode (`generic_mode=True`)**: Hosted web backend. API-only sandbox on Blaxel, fronted by the Intrafere website/control plane on AWS. FastEmbed embeddings and OpenRouter-only LLM inference; hosted clients should not use LM Studio diagnostics even if legacy endpoints still exist for the shared route surface.
 
 ## Two-Team Boundary (Strict)
 
@@ -33,7 +33,7 @@ The Web Team consumes MOTO as a pre-built image. They never commit into the MOTO
 generic_mode: bool = False
 ```
 
-Toggled via `MOTO_GENERIC_MODE=true` env var (read explicitly in `main.py` lifespan, not via Pydantic auto-mapping, to avoid adding an env_prefix to SystemConfig).
+Canonical hosted launches toggle this with `MOTO_GENERIC_MODE=true`, read explicitly in `main.py` lifespan. `SystemConfig` may still receive direct pydantic-settings env values for its plain fields; launcher/control-plane configuration should use the `MOTO_*` contract names.
 
 When `False`: program behaves as the existing open-source desktop release. When `True`: activates conditional code paths. No existing default-mode behavior is modified.
 
@@ -42,18 +42,20 @@ When `False`: program behaves as the existing open-source desktop release. When 
 1. **`api_client_manager.get_embeddings()`** — generic mode early-returns to in-process `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain
 2. **`rag_manager.py`** — generic mode skips global RAG lock for embedding calls (FastEmbed is in-process/thread-safe); ChromaDB write locking remains in both modes; synchronous ChromaDB calls and CPU-heavy RAG scoring must run off the FastAPI event loop
 3. **`main.py` lifespan** — generic mode skips LM Studio connection test; auto-loads `OPENROUTER_API_KEY` from env if present
-4. **`openrouter.py` LM Studio availability** — generic mode returns `{available: false, generic_mode: true}` without pinging LM Studio
-5. **`download.py` PDF** — generic mode returns `501` (Playwright/Chromium not installed in hosted image)
-6. **Frontend** — calls `GET /api/features` on mount; when `generic_mode=True`, hides all LM Studio UI, defaults everything to OpenRouter
+4. **`openrouter.py` LM Studio availability** — generic mode returns `{available: false, generic_mode: true}` without pinging LM Studio; workflow inference paths are OpenRouter-only even if hidden legacy diagnostics still exist
+4b. **`cloud_access.py` OpenAI Codex OAuth** — desktop/default mode only; generic mode returns unavailable for Codex OAuth login/model routes until hosted callback/proxy login is explicitly designed. Default-mode Codex model listing normalizes Codex catalog context/output fields for UI auto-fill; Codex product limits are distinct from regular OpenAI API limits.
+5. **`download.py` PDF** — generic mode returns `501` (hosted Chromium browser runtime is not installed)
+6. **Frontend** — calls `GET /api/features` on mount; when `generic_mode=True`, hosted clients hide LM Studio UI and default everything to OpenRouter. The bundled desktop frontend may still surface backend capability errors for desktop-only features.
 7. **`middleware.py` + `websocket.py`** — generic mode validates internal proxy auth (`X-Moto-*` signed headers) on all non-allowlisted routes
 8. **Long-running workflow isolation** — research/proof/RAG/Lean jobs may run in background tasks, but must not block the FastAPI event loop that serves GUI/status/health/API-key routes
 
 ## Instance-Scoped Runtime Contract (Both Modes)
 
-One process pair = one MOTO instance (local or sandbox). Env inputs:
-- `MOTO_INSTANCE_ID`, `MOTO_BACKEND_HOST`/`HOST`, `MOTO_BACKEND_PORT`/`PORT`
-- `MOTO_DATA_ROOT`, optional `MOTO_LOG_ROOT`, optional `MOTO_SECRET_NAMESPACE`
-- optional `MOTO_FRONTEND_STORAGE_PREFIX`, optional `MOTO_CORS_ORIGINS`, optional `MOTO_LM_STUDIO_BASE_URL`
+One process pair = one MOTO instance (local or sandbox). Canonical env inputs/families:
+- Instance/runtime: `MOTO_INSTANCE_ID` / `INSTANCE_ID`, `MOTO_BACKEND_HOST` / `HOST`, `MOTO_BACKEND_PORT` / `PORT`, `MOTO_FRONTEND_PORT` / `FRONTEND_PORT`
+- Runtime roots/secrets/UI scope: `MOTO_DATA_ROOT` / `DATA_DIR`, optional `MOTO_LOG_ROOT` / `LOGS_DIR`, optional `MOTO_SECRET_NAMESPACE` / `SECRET_NAMESPACE`, optional `MOTO_FRONTEND_STORAGE_PREFIX` / `FRONTEND_STORAGE_PREFIX` for launch/control-plane config (browser code consumes the projected `VITE_MOTO_STORAGE_PREFIX`), optional `MOTO_CORS_ORIGINS` / `CORS_ORIGINS`, optional `MOTO_LM_STUDIO_BASE_URL`
+- Hosted auth/body caps: `MOTO_INTERNAL_PROXY_SECRET` / `INTERNAL_PROXY_SECRET`, optional `MOTO_GENERIC_MAX_REQUEST_BYTES` / `GENERIC_MAX_REQUEST_BYTES`
+- Desktop/debug caps: optional PDF request caps and `MOTO_API_LOG_STORE_FULL_PAYLOADS` / `API_LOG_STORE_FULL_PAYLOADS`
 - Default desktop launches bind backend and bundled Vite frontend to loopback and require `MOTO_DESKTOP_API_TOKEN` / `VITE_MOTO_DESKTOP_API_TOKEN` on protected HTTP routes, except read-only proof certificate exports (`/api/proofs/{id}/certificate[.lean]`) which may be direct local browser downloads. Desktop WebSockets use one-time tickets minted by authenticated `POST /api/ws-ticket`; hosted generic mode continues to use proxy HMAC auth instead.
 
 Hosted sandboxes reuse this exact contract (`MOTO_DATA_ROOT=/app/backend/data`). No separate hosted-only env model.
@@ -68,7 +70,7 @@ Browser reaches sandboxes only through the authenticated control-plane proxy, ne
 - Signature payload binds `{instance_id}`, `{timestamp}`, uppercase method, stripped path, raw query string, and the `X-Moto-Body-SHA256` value (empty hash for WebSockets/bodyless requests)
 - Sandbox validates instance ID match, timestamp skew ≤60s, HMAC digest, query string, that the signed body hash matches the actual received request body, and rejects replayed signatures inside the accepted skew window
 - Protected hosted HTTP requests with `Content-Length` above `MOTO_GENERIC_MAX_REQUEST_BYTES` / `GENERIC_MAX_REQUEST_BYTES` (default 16 MiB) are rejected before route handling; the control-plane proxy should enforce the same or stricter body-size cap before forwarding
-- If `generic_mode=True` and `MOTO_INSTANCE_ID` or `MOTO_INTERNAL_PROXY_SECRET` is missing: fail closed at startup
+- If `generic_mode=True` and neither `MOTO_INSTANCE_ID` nor `INSTANCE_ID`, or neither `MOTO_INTERNAL_PROXY_SECRET` nor `INTERNAL_PROXY_SECRET`, is present: fail closed at startup
 - Allowlisted without proxy auth: `GET /health`, `GET /api/health`, `GET /api/features`, `OPTIONS` preflight
 - `Authorization` header is NOT reused for sandbox auth (existing MOTO routes use it for OpenRouter key passthrough)
 
@@ -81,21 +83,24 @@ Build 0 lands the public identity subset first. Returns:
 {
     "version": str,
     "build_commit": str,  # authoritative update key
-    "update_channel": "main",
- "api_contract_version": "build5-v12",
+    "update_channel": str,  # defaults to "main" unless manifest/env overrides it
+    "api_contract_version": str,  # concrete value from build_info/manifest, e.g. "build5-v##"
     "generic_mode": bool,
     "lm_studio_enabled": bool,
     "pdf_download_available": bool,
+    "openai_codex_oauth_available": bool,
 }
 ```
 
-The current Build 5 runtime preserves the four identity fields while exposing the stable capability flags above. Build 5 v12 replaces compiler critique rewrite WebSocket events with `self_review_appended` and changes post-body critique output to a validated appended self-review section. Later hosted work may extend `/api/features` with additional capability flags such as `max_submitters` and `tier3_available`, but the existing fields above remain stable and `api_contract_version` must bump when that happens.
+The current Build 5 runtime preserves the four identity fields while exposing the stable capability flags above. `proof_downshifted` is a proof workflow event for Lean-accepted proofs preserved under a narrower actual theorem statement, not a `/api/features` field. Later hosted work may extend `/api/features` with additional capability flags such as `max_submitters` and `tier3_available`, but the existing fields above remain stable and `api_contract_version` must bump when that happens.
 
-Must remain capability-only. Must NOT expose per-user or per-instance state (e.g. whether an OpenRouter key is set).
+Build 5 v22 adds run-level `allow_mathematical_proofs` / `allow_research_papers` start fields to Autonomous Research and Single Paper Writer. At least one must be true. Generic mode still keeps proof tooling unavailable: proof-only starts must fail clearly, while both-enabled/papers-only hosted runs must not invoke Lean/Z3 even if a client sends proof output enabled.
+
+Must remain capability-only. Must NOT expose per-user or per-instance state (e.g. whether an OpenRouter key or Codex login is set).
 
 ## `/api/health` Endpoint
 
-Richer readiness alias of `/health`. Available in both modes. Hosted sandboxes use it for liveness/readiness probes.
+Richer readiness endpoint available in both modes. `/health` remains a minimal health check, while `/api/health` returns readiness plus slim instance/build metadata (`instance_id`, `generic_mode`, `version`, `build_commit`). `/api/features` is the full public build identity/capability contract.
 
 ## FastAPI Responsiveness Contract
 
@@ -103,15 +108,15 @@ GUI loads, hosted control-plane probes, and desktop status polling share the sam
 
 - Do not run synchronous ChromaDB operations, large in-memory RAG scoring, Lean temp-file writes/deletes, workspace repair deletes, subprocess waits, or `time.sleep()` on the event loop.
 - Use async subprocess APIs for external tools and `asyncio.to_thread()` for unavoidable synchronous filesystem, ChromaDB, or CPU-heavy scoring work.
-- Status/health/capability/key-status endpoints must be fast-lane routes: return cached/in-memory state only and must not trigger Lean, ChromaDB scans, OpenRouter model-list fetches, or large session-directory walks.
+- Status/health/capability/key-status endpoints must be fast-lane routes: return cached/in-memory state only and must not trigger ChromaDB scans, OpenRouter model-list fetches, or large session-directory walks. Cached build-identity resolution may perform a short git HEAD lookup, and `/api/proofs/status` is the explicit proof-runtime exception: when Lean/Z3 are enabled it may run short timeout-bounded version/readiness checks.
 - Do not paper over event-loop starvation with multiple Uvicorn workers unless coordinator state, WebSockets, and runtime memory have first been externalized; current singleton coordinators assume one backend process per instance.
 
 ## Embedding Strategy (Generic Mode)
 
-FastEmbed by Qdrant — in-process ONNX Runtime, `nomic-embed-text-v1.5` INT8, ~200 MB RAM, no PyTorch.
+FastEmbed by Qdrant — in-process ONNX Runtime using `nomic-ai/nomic-embed-text-v1.5` for hosted embeddings. The hosted image currently installs `requirements.txt` through `requirements-generic.txt`, so PyTorch-adjacent transitive dependencies from default-mode packages may still be present even though FastEmbed itself uses ONNX Runtime.
 
 - Dependency in `requirements-generic.txt` (additive, not in main `requirements.txt`)
-- `fastembed_provider.py` (~30 lines) wraps the library; lazy-imported so default installs are unaffected
+- `fastembed_provider.py` wraps the library; lazy-imported so default installs are unaffected
 - If `generic_mode=True` and `fastembed` is missing: fail fast with clear error
 - Batch query variant optimization: `_vector_search()` batches all query embeddings into one `get_embeddings()` call (benefits both modes)
 
@@ -123,7 +128,7 @@ FastEmbed by Qdrant — in-process ONNX Runtime, `nomic-embed-text-v1.5` INT8, ~
 fastembed>=0.3.6
 onnxruntime>=1.18.0,<2.0
 ```
-Hosted image installs both files but does NOT run `playwright install chromium`.
+Hosted image installs both files but does NOT run `playwright install chromium`; the Python Playwright package may be installed, but the hosted Chromium browser runtime is not.
 
 ## Frontend Serving (Generic Mode)
 
@@ -131,8 +136,8 @@ Sandbox is API-only. The MOTO React frontend is NOT served from the hosted sandb
 
 ## PDF Download
 
-- Default mode: `POST /api/download/pdf` works via Playwright, but submitted HTML is untrusted; server-side rendering must sanitize/allowlist content, enforce PDF-specific size caps, disable JavaScript, keep Chromium sandboxing enabled, and block external browser network requests
-- Generic mode: returns `501` ("PDF generation unavailable in web mode. Use raw text download.")
+- Default mode: `POST /api/download/pdf` works via Playwright, but submitted HTML is untrusted; server-side rendering must sanitize/allowlist content, enforce PDF-specific size caps, disable JavaScript, and block external browser network requests
+- Generic mode: backend returns `501` ("PDF generation unavailable in web mode. Use raw text download."); clients should prefer raw export or handle the backend unavailability response. `/api/features.pdf_download_available` reflects this backend capability, but the bundled desktop frontend may simply surface the `501` instead of hiding every PDF control.
 - Web Team may implement client-side PDF in their frontend independently
 
 ## Secret Handling (Generic Mode)
@@ -146,6 +151,7 @@ Sandbox is API-only. The MOTO React frontend is NOT served from the hosted sandb
 
 - `backend/data/` is the default desktop working set
 - Hosted: `MOTO_DATA_ROOT=/app/backend/data` so Blaxel storage mounts to one unambiguous path
+- Non-secret `runtime_settings.json` also lives under the active data root; it may persist runtime knobs, never provider keys or prompt/response payloads
 - ChromaDB SQLite files stay on Blaxel sandbox storage (local file semantics required)
 - Sandbox recall/resume returns the same filesystem state; redeploy/recreate advances to the newest image
 - Uploads: server-side enforcement of `.txt` only, 5 MB max, filename sanitization, path traversal rejection
@@ -153,8 +159,8 @@ Sandbox is API-only. The MOTO React frontend is NOT served from the hosted sandb
 ## Updater Policy
 
 - **Authoritative update source**: GitHub `main` branch (not GitHub Releases)
-- **Desktop**: launcher compares local build metadata against GitHub `main`. Remote update identity resolves from GitHub branch HEAD via the GitHub REST API, metadata uses the REST contents API instead of raw GitHub files, and ZIP overlays write the resolved manifest after apply to avoid stale committed-manifest loops. Auto-apply is only for clean `origin/main` git checkouts or ZIP/extracted installs with no launcher-managed instances still running. ZIP updates preserve active data/log roots, instance storage, launcher state, env files, and keyring-related namespaces.
-- **Hosted**: sandboxes do NOT self-mutate. Redeploy/recreate uses the latest approved `main`-derived image. Recall/resume keeps the existing image. Hosted `POST /api/update/pull` must return unavailable instead of attempting in-place update.
+- **Desktop**: launcher compares local build metadata against GitHub `main`. Remote update identity resolves from GitHub branch HEAD via the GitHub REST API, metadata uses the REST contents API instead of raw GitHub files, ZIP overlays write the resolved manifest after apply to avoid stale committed-manifest loops, and update notices are exposed via `GET /api/update-notice`; if no launcher notice exists, the running desktop backend may refresh the same notice at most every 4 hours while excluding only the current instance from active-instance auto-apply checks. Launcher auto-apply is only for clean `origin/main` git checkouts or ZIP/extracted installs with no launcher-managed instances still running. The backend `POST /api/update/pull` route has its own lighter git/ZIP update checks and should not be described as enforcing the full launcher preflight. ZIP updates preserve active data/log roots, instance storage, launcher state, env files, and keyring-related namespaces.
+- **Hosted**: sandboxes do NOT self-mutate. Redeploy/recreate uses the latest approved `main`-derived image. Recall/resume keeps the existing image. Hosted `POST /api/update/pull` must return unavailable instead of attempting in-place update; `GET /api/update/pull-status` may remain the generic pull-task status surface and does not need a separate hosted-unavailable marker.
 - **Build metadata**: `version`, `build_commit`, `update_channel`, and `api_contract_version` exposed via `/api/features`; git checkouts resolve `build_commit` from HEAD, ZIP installs use the stamped local manifest, and the committed `main`-branch manifest lives at `moto-update-manifest.json`
 
 ## Canonical Runtime Baselines
@@ -173,19 +179,18 @@ Any REST shape, auth contract, or WebSocket event change that affects the websit
 
 ## Proof Integration Contract (Builds 1-5, optional, gated off by default)
 
-All Lean 4 and SMT behavior is gated on three runtime flags (`lean4_enabled`, `lean4_lsp_enabled`, `smt_enabled`). All three default false and stay silent when disabled. Hosted sandboxes ship with them disabled.
+Lean 4 and SMT behavior is gated by runtime flags. `lean4_enabled` gates Lean proof execution/model proof work, `lean4_lsp_enabled` gates only the optional persistent LSP optimization, and `smt_enabled` gates Z3/SMT hint generation. All three default false; when disabled they must not invoke their corresponding proof toolchains, spend proof-model calls, or block workflows. Hosted sandboxes ship with them disabled.
 
 - **Hosted image stays Lean-free and Z3-free.** No Lean toolchain, no `z3` binary, and no Python wheel for either is permitted in `Dockerfile`, `docker/entrypoint.sh`, or `requirements-generic.txt`. Proof features are desktop-opt-in only for the current contract.
 - **Lean 4 remains authoritative** for every stored proof. The `Lean4Result` contract is unchanged by SMT; SMT (when enabled) produces tactic hints consumed by the formalization agent, never a standalone proof artifact.
 - **Subprocess fallback must keep working** when `lean4_lsp_enabled=False`. LSP is a latency optimization, not a replacement.
-- **Proof routes under `/api/proofs/*`** are additive to the hosted REST contract: `GET /api/proofs` (list), `GET /api/proofs/novel`, `GET /api/proofs/status`, `POST /api/proofs/settings`, `POST /api/proofs/check` (manual check), `GET /api/proofs/{id}`, `GET /api/proofs/{id}/certificate[.lean]`, `GET /api/proofs/{id}/dependencies`, `GET /api/proofs/graph`, `GET /api/proofs/mathlib/{lemma_name}/dependents` (Build 5).
-- **LeanOJ routes** are additive to the hosted REST contract in `build5-v6`: start/resume, stop, status, clear, skip-brainstorm, force-brainstorm, master-proof draft/edit summaries, current-run proofs, and cross-session proof library endpoints live under `/api/leanoj/*`.
-- **Pruned Stage 2 paper routes** are additive in `build5-v6`: pruned papers are removed from model context/RAG but remain downloadable under `/api/auto-research/paper-history/pruned*`; hard deletion is limited to explicit delete-all-pruned endpoints.
-- **LeanOJ live-activity WebSocket events** include model-call failure/retry progress, initial topic generation/validation, recursive brainstorm progress, brainstorm submitter/queue/batch-validation events, sufficiency/phase-limit events, master-proof edit validation/applied/rejected events, final semantic-review rejection, and final-attempt-cycle exhaustion.
-- **Compiler critique WebSocket events** include validated critique progress and `self_review_appended`; partial/total rewrite events are no longer emitted by the active critique flow.
-- **Proof WebSocket events** are part of the web-surface contract: `proof_framing_decided`, `proof_check_started`, `proof_check_complete`, `proof_check_no_candidates`, `proof_check_candidates_found`, `mathlib_lemmas_suggested`, `proof_attempt_started`, `proof_verified`, `proof_attempt_failed`, `proof_attempts_exhausted`, `proof_retry_started`, `proof_retry_scheduled`, `novel_proof_discovered`, `known_proof_verified`, `proof_dependency_added`, `smt_check_started`, `smt_check_complete`. `proof_verified` is emitted only after proof registration/reuse and includes `proof_id`.
+- **Proof routes under `/api/proofs/*`** are additive to the hosted REST contract. Stored proof listing/library/certificate routes remain readable without Lean enabled: `GET /api/proofs`, `/novel`, `/known`, `/status`, `/library*`, `/{id}`, and `/{id}/certificate[.lean]`. Lean-derived operations (`POST /api/proofs/check`, `GET /api/proofs/{id}/dependencies`, `/graph`, `/mathlib/{lemma_name}/dependents`) require `lean4_enabled`; `POST /api/proofs/settings` and `POST /api/proofs/cleanup-known-from-files` are unavailable in hosted generic mode.
+- **LeanOJ routes** are additive to the hosted REST contract: start (which resumes matching saved progress when available), stop, status, clear, skip-brainstorm, force-brainstorm, master-proof draft/edit summaries, current-run proofs, and cross-session proof library endpoints live under `/api/leanoj/*`.
+- **Creativity Emphasis Boost** is an optional developer-gated start-request field (`creativity_emphasis_boost_enabled`) for Aggregator, Autonomous Research, and LeanOJ; accepted/rejected brainstorm WebSocket payloads may include `creativity_emphasized`, and prompt-budget overflow falls back to the normal prompt for that slot.
+- **Pruned Stage 2 paper routes** are additive: pruned papers are removed from model context/RAG but remain downloadable under `/api/auto-research/paper-history/pruned*`; hard deletion is limited to explicit delete-all-pruned endpoints.
+- **WebSocket progress events** for LeanOJ, compiler critique, and proof workflows are part of the web-surface contract only when consumed by the hosted wrapper or frontend. Keep them descriptive and stable enough for UI state, but avoid treating every internal progress notification as a permanent rule-level invariant. `proof_verified` must only emit after proof registration/reuse and include `proof_id`; proof novelty and duplicate-registration events include `novelty_tier` and `novelty_reasoning` for live activity display.
 - **Proof certificate exports stay text-based** (`.lean` source + JSON metadata). No binary-only proof artifacts.
-- **Proof runtime config snapshot** (`ProofRuntimeConfigSnapshot`) is persisted via `research_metadata` so manual `POST /api/proofs/check` can run without an active autonomous session; required state is `lean4_enabled=True` AND a seeded snapshot.
+- **Proof runtime config snapshot** (`ProofRuntimeConfigSnapshot`) is persisted via `research_metadata` and may also be supplied directly on manual `POST /api/proofs/check`; required state is `lean4_enabled=True` AND either a stored or request-provided snapshot.
 - **`api_contract_version` bumps** apply the same way to proof additions as to the base contract: any new proof route or event added after Build 5 must bump the contract version in the same merge.
 
 ## Hosting Ownership

@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
-import { DEFAULT_MAX_OUTPUT_TOKENS } from '../../utils/openRouterSelection';
 import TextFileUploader from '../TextFileUploader';
 import '../settings-common.css';
 
@@ -105,6 +104,7 @@ export default function AggregatorInterface({
       await api.startAggregator({
         user_prompt: config.userPrompt,
         submitter_configs: formattedConfigs,
+        creativity_emphasis_boost_enabled: developerModeEnabled && Boolean(config.creativityEmphasisBoostEnabled),
         // Validator config with OpenRouter support
         validator_provider: lmStudioEnabled ? (config.validatorProvider || 'lm_studio') : 'openrouter',
         validator_model: config.validatorModel,
@@ -112,7 +112,7 @@ export default function AggregatorInterface({
         validator_openrouter_reasoning_effort: config.validatorOpenrouterReasoningEffort || 'auto',
         validator_lm_studio_fallback: lmStudioEnabled ? (config.validatorLmStudioFallback || null) : null,
         validator_context_size: config.validatorContextSize,
-        validator_max_output_tokens: config.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        validator_max_output_tokens: config.validatorMaxOutput,
         validator_supercharge_enabled: developerModeEnabled && Boolean(config.validatorSuperchargeEnabled),
         uploaded_files: config.uploadedFiles,
       });
@@ -188,6 +188,17 @@ export default function AggregatorInterface({
           </button>
         ) : (
           <button onClick={handleStop} className="danger">Stop Aggregator</button>
+        )}
+        {developerModeEnabled && (
+          <label className="settings-checkbox-label">
+            <input
+              type="checkbox"
+              checked={Boolean(config.creativityEmphasisBoostEnabled)}
+              onChange={(e) => setConfig({ ...config, creativityEmphasisBoostEnabled: e.target.checked })}
+              disabled={isRunning}
+            />
+            Creativity Emphasis Boost
+          </label>
         )}
       </div>
 

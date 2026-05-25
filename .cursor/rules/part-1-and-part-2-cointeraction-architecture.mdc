@@ -1,4 +1,5 @@
 ---
+description: Unified Aggregator-Compiler interaction model, workflow exclusivity, and shared controls
 alwaysApply: true
 ---
 
@@ -53,7 +54,8 @@ Parent workflow actions override child agents immediately. Manual paper writing,
 - Each submitter can have its own model, context window, and max output tokens
 - Enables multi-model exploration of different solution basins simultaneously
 - Parallel submitter generation uses the shared temperature ladder `[0.0, 0.1, ..., 0.9]` by submitter index; single-model sequential submitters and validators stay `0.0`.
-- If all submitters and the validator are configured with the same LM Studio model ID, the Aggregator normally uses single-model sequential mode. Exception: when LM Studio reports multiple loaded same-base numeric `:#` instances for that model, submitters may run in parallel and `lm_studio_client` routes independent calls to idle sibling instances while the validator remains ordered.
+- Developer-enabled Creativity Emphasis Boost adds an optional creativity prompt block every fifth valid submission slot per Aggregator submitter, including Autonomous topic/title mini-aggregators and Tier 1 brainstorm aggregators; it does not alter validators or scheduling, and it is skipped for that slot if the extra block would overflow the configured context budget.
+- If all submitters and the validator are configured with the same model ID, the Aggregator normally uses single-model sequential mode regardless of provider. Exception: when all roles are LM Studio and LM Studio reports multiple loaded same-base numeric `:#` instances for that model, submitters may run in parallel and `lm_studio_client` routes independent calls to idle sibling instances while the validator remains ordered.
 - Single validator maintains coherent Markov chain evolution for database alignment
 - UI labels: "Submitter 1 (Main Submitter)", "Submitter 2", "Submitter 3", etc.
 - "Copy Main to All" button for quick configuration
@@ -62,15 +64,17 @@ Parent workflow actions override child agents immediately. Manual paper writing,
 - Configurable 1-10 parallel submitters generate initial topics and brainstorm ideas
 - One validator batch-validates up to 3 completed topics or submissions at a time; initial topics must be broad locked foundation questions for the whole LeanOJ solution route, not narrow lemma/tactic/repair targets
 - Parallel topic/brainstorm submitters use the shared temperature ladder `[0.0, 0.1, ..., 0.9]` by submitter index; LeanOJ validators, final solver, semantic review, and retry/repair calls stay `0.0`.
+- Developer-enabled Creativity Emphasis Boost adds the same optional creativity prompt block every fifth valid queued initial-topic or brainstorm submission per LeanOJ submitter; accepted/rejected activity carries `creativity_emphasized`, and overflow falls back to the normal prompt for that slot.
 - No round-robin/serial submitter awaiting; a hung submitter must not block other submitters or validation
 
 ### Compiler Single-Submitter (Part 2)
-- Fixed 2-submitter architecture (NOT configurable):
+- Fixed sequential architecture (NOT multi-submitter configurable):
   - **High-Context Submitter**: Handles outline_create, outline_update, construction, review modes. During construction, may invoke the Wolfram Alpha tool up to 20 times per submission when `system_config.wolfram_alpha_enabled=true`.
-  - **High-Parameter Submitter**: Handles rigor mode. Rigor is the **Lean-4-verified-theorem flow**: user-prompt-relevant discovery (including explicit extension theorems from partial paper work / outline / supporting context / user prompt when helpful) → up to 5 Lean 4 formalization attempts (with error feedback) → novelty classification → placement routing. Existing-paper-claim theorems may go through inline placement (2 attempts, validator uses `rigor_lean_placement` mode forcing `rigor_check=True`); extension-derived theorems are forced to `placement_preference="appendix_only"` and appended directly to the Theorems Appendix (`placement_outcome="appendix_requested"`). Inline failures still use Theorems Appendix fallback. The compiler writes verified proofs directly into the shared `proof_database` (same database used by autonomous mode); novel proofs automatically enter the highest-priority direct-injection block on the next submitter instantiation.
+  - **High-Parameter Submitter**: Handles rigor mode. Rigor is the **Lean-4-verified-theorem flow**: novelty-first user-prompt-relevant discovery (with expected novelty/prompt-relevance/anti-known-result rationale, and explicit extension theorems from partial paper work / outline / source brainstorm or aggregator context / user prompt when helpful) → up to 5 Lean 4 formalization attempts (with error feedback) → novelty classification → placement routing. Discovery and formalization see the current paper plus available source brainstorm/aggregator context and verified-proof summaries; they must not build a general known-knowledge base. Existing-paper-claim theorems may go through inline placement (2 attempts, validator uses `rigor_lean_placement` mode forcing `rigor_check=True`); extension-derived theorems are forced to `placement_preference="appendix_only"` and appended directly to the Theorems Appendix (`placement_outcome="appendix_requested"`). Inline failures still use Theorems Appendix fallback. The compiler writes verified proofs directly into the shared `proof_database` (same database used by autonomous mode); novel proofs automatically enter the highest-priority direct-injection block on the next submitter instantiation.
+  - **Critique Submitter**: Handles the post-body critique/self-review phase with its own model/context/token settings.
 - Sequential Markov chain workflow (only one submission at a time)
-- Each compiler submitter has its own model, context, and max token settings (separate from aggregator)
-- UI shows these as separate "High-Context Submitter" and "High-Parameter Submitter" sections
+- Each compiler role has its own model, context, and max token settings (separate from aggregator)
+- UI shows separate High-Context, High-Parameter, Critique Submitter, and Validator settings
 
 **Why Single Validator?**: Multiple validators would cause divergent evolution of the database, breaking the coherent Markov chain required for solution alignment. The single validator ensures all submissions are evaluated against the same evolving database state.
 
@@ -81,10 +85,9 @@ Parent workflow actions override child agents immediately. Manual paper writing,
 
 ## API Call Output Notes (User-Configurable)
 - **All `max_tokens` limits are user-configurable via GUI settings** (like context window sizes). Users can adjust these per model role based on their specific models' capabilities.
-- **OpenRouter GUI auto-fill**: When an OpenRouter model is selected, the UI auto-fills context window from the model `context_length` and auto-fills max output tokens as `min(20% of model context_length, smallest available host max_completion_tokens)`. Choosing a specific OpenRouter host recalculates from that host's smallest available `max_completion_tokens`.
-- **Aggregator defaults**: submitter=25000 tokens, validator=25000 tokens (reasoning models need 15K-25K for internal reasoning + output)
-- **Compiler defaults**: validator=25000, high-context=25000 (for outline_create/outline_update/construction/review), high-param=25000 (for rigor mode)
-- **GUI tooltips** provide recommended minimums: Submitter "25000+ for reasoning models", Validator "25000+", High-context "25000+ (outline needs 15K+)", High-param "25000+"
+- **OpenRouter GUI auto-fill**: When an OpenRouter model is selected, the UI auto-fills context window from the model-level `context_length`. Max output tokens use `min(20% of model context_length, endpoint max_completion_tokens)`: auto provider mode filters weak/low-cap endpoints and uses the smallest remaining capable endpoint cap, while an explicit host selection uses that host's largest exposed endpoint cap.
+- Context windows and max output tokens must come from explicit user/provider settings for every role; runtime code must not inject hidden 131K/25K fallbacks.
+- GUI copy may recommend large values for reasoning models, but recommendations must not override user settings.
 - Settings are passed through API routes and stored in `rag_config` (aggregator) and `system_config` (compiler)
 - **CRITICAL**: `system_config.compiler_*` settings (context windows, max output tokens) are the single source of truth for all compiler modules. ANY code that creates a `CompilerCoordinator` MUST write its context/token settings to `system_config` BEFORE init. The manual `/api/compiler/start` route does this; autonomous mode (`autonomous_coordinator.py`) must do it explicitly before each `CompilerCoordinator()` creation.
 - Reasoning models (e.g., those with `<think>` tags or separate `reasoning` fields) may use significant tokens on internal reasoning before generating JSON output

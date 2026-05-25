@@ -267,7 +267,7 @@ class Lean4Client:
 
     async def warm_start(self) -> None:
         """Perform optional startup work during FastAPI lifespan."""
-        return
+        await self.ensure_workspace()
 
     async def close(self) -> None:
         """Release client resources during backend shutdown."""
@@ -468,8 +468,8 @@ class Lean4Client:
         try:
             os.chmod(path, stat.S_IWRITE)
             func(path)
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.debug("Failed to recover rmtree operation for %s: %s", path, exc)
 
     async def _repair_workspace_after_infrastructure_error(self, output: str) -> bool:
         logger.warning(
@@ -1242,13 +1242,13 @@ class Lean4LspClient(Lean4Client):
 
     async def warm_start(self) -> None:
         """Best-effort startup of the persistent Lean server."""
-        if not system_config.lean4_enabled or not system_config.lean4_lsp_enabled:
-            return
-        if not self._lsp_healthy:
+        if not system_config.lean4_enabled:
             return
         workspace_ready = await self.ensure_workspace()
         if not workspace_ready:
             logger.warning("Lean 4 LSP warm start skipped because the workspace is not ready.")
+            return
+        if not system_config.lean4_lsp_enabled or not self._lsp_healthy:
             return
         try:
             await self._ensure_server_started()
@@ -1317,8 +1317,7 @@ class Lean4LspClient(Lean4Client):
             task = getattr(self, task_name)
             if task is not None:
                 task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await task
+                await asyncio.gather(task, return_exceptions=True)
                 setattr(self, task_name, None)
 
         self._diagnostics_by_uri.clear()

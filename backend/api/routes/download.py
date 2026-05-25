@@ -452,8 +452,8 @@ def _generate_pdf_sync(html: str) -> bytes:
             if context is not None:
                 try:
                     context.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Playwright context close failed during PDF cleanup: %s", exc)
             browser.close()
 
 

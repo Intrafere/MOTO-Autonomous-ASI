@@ -16,6 +16,13 @@ LEANOJ_FORMALIZATION_GUARDRAILS = """LEANOJ FORMALIZATION GUARDRAILS:
 - Lean acceptance is necessary but not sufficient for final success. A Lean-verified file proves the formal statement it encodes; it does not automatically prove the user's informal problem statement if the template or chosen definitions exploit or mismatch the natural-language task.
 - If the template semantics and informal statement appear to conflict, make the mismatch explicit in reasoning and do not claim that a Lean-verified template proof settles the informal statement unless that correspondence has also been justified."""
 
+CREATIVITY_EMPHASIS_BOOST_PROMPT = """CREATIVITY EMPHASIS BOOST:
+This is the special creativity-emphasized submitter turn. Follow the same JSON schema and proof rigor requirements as normal.
+
+Only where it is apparent, appearing true, and potentially very helpful, you may use extreme creativity to propose a near-solution or adjacent solution that solves toward the user's prompt and could advance this brainstorm further in future submissions.
+
+Do not force creativity. If the creative route is not apparent or would weaken Lean-template rigor, submit the strongest normal direct-progress contribution instead."""
+
 
 def _format_items(items: Iterable[Any], *, empty: str = "[none]") -> str:
     values = [str(item).strip() for item in (items or []) if str(item).strip()]
@@ -281,7 +288,13 @@ def _format_context_blocks(context_blocks: dict[str, str] | None, fallback: str)
     return "\n\n".join(sections) if sections else fallback
 
 
-def build_topic_candidate_prompt(user_prompt: str, lean_template: str, prior_topics: list[str]) -> str:
+def build_topic_candidate_prompt(
+    user_prompt: str,
+    lean_template: str,
+    prior_topics: list[str],
+    creativity_emphasized: bool = False,
+) -> str:
+    creativity_section = f"\n{CREATIVITY_EMPHASIS_BOOST_PROMPT}\n" if creativity_emphasized else ""
     return f"""You are generating one candidate root foundation question for a LeanOJ proof-solving run.
 
 The system must solve the user's Lean 4 template completely. Propose a broad initial foundation question that can guide the entire session before recursive brainstorms add details. This is not a local sublemma target: it should set the durable direction for finding the complete solution.
@@ -305,6 +318,7 @@ LEANOJ TEMPLATE:
 
 PRIOR VALIDATED TOPICS:
 {_format_items(prior_topics)}
+{creativity_section}
 
 Return a new non-duplicative broad foundation topic. It should read like a general question that addresses the whole problem and can remain locked as the initial session foundation. If prior topics already cover the same root framing, choose a distinct foundation angle that still covers all obligations, such as exact-template semantics first, extremal-combinatorics first, or Lean-formalization architecture first.
 
@@ -459,6 +473,7 @@ def build_brainstorm_prompt(
     verified_subproofs: list[dict[str, Any]],
     failed_feedback: list[dict[str, Any]],
     context_blocks: dict[str, str] | None = None,
+    creativity_emphasized: bool = False,
 ) -> str:
     fallback_context = f"""ACCEPTED BRAINSTORM CONTEXT:
 {_format_brainstorm(accepted_ideas)}
@@ -468,11 +483,12 @@ VERIFIED SUBPROOFS:
 
 USEFUL FAILED PROOF FEEDBACK:
 {_format_failures(failed_feedback)}"""
+    creativity_section = f"\n{CREATIVITY_EMPHASIS_BOOST_PROMPT}\n" if creativity_emphasized else ""
     return f"""You are a LeanOJ proof brainstorm submitter. Generate one concrete idea that helps solve the user's Lean 4 template.
 
 Focus on exact Lean tactics, Mathlib lemmas, theorem-shaping, induction/cases structure, or mathematical transformations. If a current working proof attempt is provided, treat ACTIVE TOPIC as that exact proof-repair target. Brainstorm only information that directly helps complete or repair it; if a direct solution is unavailable, give the nearest concrete step that works toward solving that exact proof.
 
-If you can produce a complete Lean 4 proof for a useful sublemma or proof fragment, you may choose `submission_type: "lean_proof"`. The system will run Lean 4 first, give you up to 5 repair attempts with Lean feedback, and only then send the Lean-verified proof to the normal brainstorm validator. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
+If you can produce a complete Lean 4 proof for a useful sublemma or proof fragment, you may choose `submission_type: "lean_proof"`. Use that route only when the proved statement directly discharges, splits, or repairs a current obligation in the LeanOJ template. Do not use it to build a generic known-knowledge base of routine Mathlib facts, standard textbook lemmas, or proof-engineering glue. The system will require novelty/prompt-rationale fields, run Lean 4 first, give you up to 5 repair attempts with Lean feedback, and only then send the Lean-verified proof to the normal brainstorm validator. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
 
 Do not write a whole final proof unless the idea is directly useful as context. Final template solving still happens in the final loop.
 
@@ -489,13 +505,14 @@ ACTIVE TOPIC:
 
 ALLOCATED LEANOJ PROOF MEMORY:
 {_format_context_blocks(context_blocks, fallback_context)}
+{creativity_section}
 
 {JSON_RULES}
 JSON format for a normal idea:
 {{"submission_type": "idea", "submission": "one concrete proof-solving idea", "reasoning": "why it advances the LeanOJ solution"}}
 
 JSON format for a Lean proof candidate:
-{{"submission_type": "lean_proof", "theorem_statement": "natural-language statement proved", "formal_sketch": "why this proof fragment helps the LeanOJ template", "theorem_name": "optional Lean declaration name", "lean_code": "complete Lean 4 code", "reasoning": "why this verified proof would help"}}
+{{"submission_type": "lean_proof", "theorem_statement": "natural-language statement proved", "formal_sketch": "why this proof fragment helps the LeanOJ template", "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation", "prompt_relevance_rationale": "which exact LeanOJ template obligation this proof discharges, splits, or repairs", "novelty_rationale": "why this proof fragment is novel/useful progress for this proof route rather than a generic known fact", "why_not_standard_known_result": "why this is not merely a standard Mathlib/textbook/routine helper lemma", "theorem_name": "optional Lean declaration name", "lean_code": "complete Lean 4 code", "reasoning": "why this verified proof would help"}}
 """
 
 
@@ -511,7 +528,7 @@ def build_brainstorm_validation_prompt(
 
 Accept the submission only if it adds useful, non-redundant information for solving the exact Lean template. Reject vague encouragement, duplicate ideas, or claims unrelated to Lean verification.
 
-If the submission contains [LEAN 4 VERIFIED BRAINSTORM PROOF], Lean 4 and MOTO integrity checks already accepted the code. Your job is still to decide whether the verified proof is useful, relevant, and non-redundant for this LeanOJ brainstorm. Do not re-prove Lean correctness, and do not accept irrelevant/trivial proofs merely because Lean verified them.
+If the submission contains [LEAN 4 VERIFIED BRAINSTORM PROOF], Lean 4 and MOTO integrity checks already accepted the code. Your job is still to decide whether the verified proof is useful, relevant, and non-redundant for this LeanOJ brainstorm. Do not re-prove Lean correctness, and do not accept irrelevant, trivial, routine, or generic known-knowledge proofs merely because Lean verified them. Accept such a proof only when it directly discharges, splits, or repairs an exact LeanOJ template obligation.
 
 Classify accepted submissions for later final-proof context:
 - active_plan: a concrete current proof route, decomposition plan, or next obligation that should guide `master_proof.lean`.
@@ -557,7 +574,7 @@ def build_brainstorm_batch_validation_prompt(
 
 Evaluate EACH submission independently against the current accepted brainstorm context, then check accepted submissions for intra-batch redundancy. Accept only submissions that add useful, non-redundant information for solving the exact Lean template. Reject vague encouragement, duplicate ideas, or claims unrelated to Lean verification.
 
-If a submission contains [LEAN 4 VERIFIED BRAINSTORM PROOF], Lean 4 and MOTO integrity checks already accepted the code. Still decide whether that verified proof is useful, relevant, and non-redundant for this LeanOJ brainstorm.
+If a submission contains [LEAN 4 VERIFIED BRAINSTORM PROOF], Lean 4 and MOTO integrity checks already accepted the code. Still decide whether that verified proof is useful, relevant, and non-redundant for this LeanOJ brainstorm. Reject generic known-knowledge proofs, routine helpers, or standard Mathlib/textbook facts unless the submission explains how the verified statement directly discharges, splits, or repairs an exact LeanOJ template obligation.
 
 For each accepted submission, classify how it may be used later:
 - active_plan: a concrete current proof route, decomposition plan, or next obligation that should guide `master_proof.lean`.
@@ -840,7 +857,7 @@ Master proof route discipline:
 Correction priority:
 - Required corrections take priority over new additions. Treat recent final feedback, Lean errors, exact-string edit rejections, edit-validator feedback, and semantic-review continuation feedback as the next correction targets.
 - If any correction is pending, your next edit must address that correction before attempting unrelated new lemmas, fresh proof routes, or speculative additions.
-- New additions are allowed only when they directly implement the required correction or provide helper code needed for that correction.
+- New additions are allowed only when they directly implement the required correction or provide helper code needed for that correction. Do not expand `master_proof.lean` into a general known-knowledge base of routine helper lemmas or standard Mathlib facts; use standard facts inline when they solve the current obligation.
 - In your reasoning, name the correction you addressed. If no correction is pending, state which next unsolved proof obligation your edit advances.
 
 You must choose exactly one action: edit_proof.

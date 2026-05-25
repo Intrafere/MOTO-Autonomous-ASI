@@ -14,8 +14,6 @@ using only paper metadata summaries (titles/abstracts/outlines) and the certaint
 assessment. Full paper content is not needed to plan volume structure — that's a
 high-level organizational decision based on what each paper covers.
 """
-import asyncio
-import json
 import logging
 from typing import Optional, List, Dict, Any, Callable
 
@@ -23,11 +21,11 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.utils import count_tokens
+from backend.shared.config import rag_config
 from backend.shared.models import (
     CertaintyAssessment,
     VolumeOrganization,
-    VolumeChapter,
-    VolumeOrganizationSubmission
+    VolumeChapter
 )
 from backend.autonomous.prompts.final_answer_prompts import (
     build_volume_organization_prompt,
@@ -57,8 +55,8 @@ class VolumeOrganizer:
         self,
         submitter_model: str,
         validator_model: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 25000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.submitter_model = submitter_model
         self.validator_model = validator_model
@@ -80,7 +78,7 @@ class VolumeOrganizer:
     
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""
-        return self.context_window - self.max_output_tokens
+        return rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
     
     async def organize_volume(
         self,

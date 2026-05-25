@@ -10,10 +10,16 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
-import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import {
+  PDF_UNAVAILABLE_MESSAGE,
+  downloadRawText,
+  downloadPDFViaBackend,
+  isPDFDownloadAvailable,
+  sanitizeFilename,
+} from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 
-const LiveTier3Progress = ({ api, status }) => {
+const LiveTier3Progress = ({ api, status, capabilities }) => {
   const [paperData, setPaperData] = useState(null);
   const [volumeProgress, setVolumeProgress] = useState(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -21,6 +27,7 @@ const LiveTier3Progress = ({ api, status }) => {
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const containerRef = useRef(null);
+  const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
 
   // Check banner shimmer setting from localStorage
   const getBannerShimmerEnabled = () => {
@@ -108,6 +115,11 @@ const LiveTier3Progress = ({ api, status }) => {
   };
 
   const handleDownloadPdf = async () => {
+    if (!pdfDownloadAvailable) {
+      alert(PDF_UNAVAILABLE_MESSAGE);
+      return;
+    }
+
     if (!paperData?.content) return;
 
     const filename = sanitizeFilename(paperData.title || 'tier3_final_answer');
@@ -131,6 +143,7 @@ const LiveTier3Progress = ({ api, status }) => {
         alert('PDF generation failed: ' + error.message);
       },
       'paper',
+      { pdfDownloadAvailable },
     );
   };
 
@@ -304,8 +317,8 @@ const LiveTier3Progress = ({ api, status }) => {
                 <button
                   className="btn-download-pdf"
                   onClick={handleDownloadPdf}
-                  disabled={!paperData?.content || isDownloadingPdf}
-                  title="Download as PDF"
+                  disabled={!paperData?.content || isDownloadingPdf || !pdfDownloadAvailable}
+                  title={pdfDownloadAvailable ? 'Download as PDF' : PDF_UNAVAILABLE_MESSAGE}
                 >
                   {isDownloadingPdf ? 'Preparing PDF...' : 'Download PDF'}
                 </button>

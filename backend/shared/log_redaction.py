@@ -17,7 +17,7 @@ _SECRET_PATTERNS = (
 
 def redact_log_text(value: Any, max_chars: int | None = None) -> str:
     """Return text with common credential shapes redacted and optionally capped."""
-    text = str(value or "")
+    text = "" if value is None else str(value)
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(
             lambda match: f"{match.group(1) if match.lastindex else ''}[redacted]",

@@ -2,17 +2,21 @@ import asyncio
 import json
 from pathlib import Path
 import tempfile
-import unittest
-from unittest import mock
+from unittest import TestCase, mock
+
+from fastapi import HTTPException
 
 from backend.aggregator.core.coordinator import _resolve_uploaded_user_file
 from backend.aggregator.ingestion.pipeline import IngestionPipeline
+from backend.api.routes import autonomous as autonomous_route
+from backend.autonomous.memory.autonomous_rejection_logs import AutonomousRejectionLogs
+from backend.autonomous.memory.brainstorm_memory import BrainstormMemory
 from backend.autonomous.memory.paper_library import PaperLibrary
 from backend.shared.config import system_config
 from backend.shared.models import PaperMetadata
 
 
-class IngestionPathHardeningTests(unittest.TestCase):
+class IngestionPathHardeningTests(TestCase):
     def test_ingest_file_rejects_paths_outside_trusted_roots(self) -> None:
         async def run_case() -> None:
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -52,7 +56,7 @@ class IngestionPathHardeningTests(unittest.TestCase):
         asyncio.run(run_case())
 
 
-class UploadPathResolutionTests(unittest.TestCase):
+class UploadPathResolutionTests(TestCase):
     def test_uploaded_user_file_rejects_traversal_and_untrusted_absolute_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -95,7 +99,7 @@ class UploadPathResolutionTests(unittest.TestCase):
                     )
 
 
-class PaperLibraryPathHardeningTests(unittest.TestCase):
+class PaperLibraryPathHardeningTests(TestCase):
     def _library_for(self, base_dir: Path) -> PaperLibrary:
         library = PaperLibrary()
         library._base_dir = base_dir
@@ -134,3 +138,92 @@ class PaperLibraryPathHardeningTests(unittest.TestCase):
                 self.assertFalse((base_dir / "paper_paper_1.txt").exists())
 
         asyncio.run(run_case())
+
+
+class BrainstormMemoryPathHardeningTests(TestCase):
+    def _memory_for(self, base_dir: Path) -> BrainstormMemory:
+        memory = BrainstormMemory()
+        memory._base_dir = base_dir
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return memory
+
+    def test_delete_brainstorm_rejects_topic_id_glob_characters(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                base_dir = Path(temp_dir) / "brainstorms"
+                memory = self._memory_for(base_dir)
+
+                unrelated_rejection = base_dir / "brainstorm_topic_a_submitter_1_rejections.txt"
+                unrelated_rejection.write_text("unrelated", encoding="utf-8")
+
+                self.assertFalse(await memory.delete_brainstorm("topic_[ab]"))
+
+                self.assertTrue(unrelated_rejection.exists())
+
+        asyncio.run(run_case())
+
+    def test_public_brainstorm_routes_return_400_for_invalid_topic_ids(self) -> None:
+        async def run_case() -> None:
+            with self.assertRaises(HTTPException) as get_context:
+                await autonomous_route.get_brainstorm("topic_[ab]")
+            self.assertEqual(get_context.exception.status_code, 400)
+
+            with self.assertRaises(HTTPException) as delete_context:
+                await autonomous_route.delete_brainstorm("topic_[ab]", confirm=True)
+            self.assertEqual(delete_context.exception.status_code, 400)
+
+        asyncio.run(run_case())
+
+    def test_delete_brainstorm_removes_valid_topic_rejection_logs_only(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                base_dir = Path(temp_dir) / "brainstorms"
+                memory = self._memory_for(base_dir)
+
+                matching_rejection = base_dir / "brainstorm_topic_001_submitter_1_rejections.txt"
+                other_rejection = base_dir / "brainstorm_topic_002_submitter_1_rejections.txt"
+                malformed_rejection = base_dir / "brainstorm_topic_001_submitter_x_rejections.txt"
+                matching_rejection.write_text("matching", encoding="utf-8")
+                other_rejection.write_text("other", encoding="utf-8")
+                malformed_rejection.write_text("malformed", encoding="utf-8")
+
+                self.assertTrue(await memory.delete_brainstorm("topic_001"))
+
+                self.assertFalse(matching_rejection.exists())
+                self.assertTrue(other_rejection.exists())
+                self.assertTrue(malformed_rejection.exists())
+
+        asyncio.run(run_case())
+
+
+class AutonomousRejectionLogsPathHardeningTests(TestCase):
+    def _logs_for(self, base_dir: Path) -> AutonomousRejectionLogs:
+        logs = AutonomousRejectionLogs()
+        logs._brainstorms_dir = base_dir
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return logs
+
+    def test_rejection_log_paths_reject_invalid_topic_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs = self._logs_for(Path(temp_dir) / "brainstorms")
+
+            for topic_id in ("../evil", r"evil\path", "topic_[ab]"):
+                with self.subTest(topic_id=topic_id):
+                    with self.assertRaises(ValueError):
+                        logs._get_completion_feedback_path(topic_id)
+                    with self.assertRaises(ValueError):
+                        logs._get_submitter_rejections_path(topic_id, 1)
+
+    def test_rejection_log_paths_accept_generated_topic_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir) / "brainstorms"
+            logs = self._logs_for(base_dir)
+
+            self.assertEqual(
+                logs._get_completion_feedback_path("topic_001"),
+                base_dir / "completion_feedback_topic_001.txt",
+            )
+            self.assertEqual(
+                logs._get_submitter_rejections_path("topic_001", 3),
+                base_dir / "brainstorm_topic_001_submitter_3_rejections.txt",
+            )

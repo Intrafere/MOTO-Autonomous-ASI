@@ -6,12 +6,10 @@ NO RAG BY DESIGN: Redundancy is assessed at the abstract/title level — compari
 high-level paper topics to find overlap. Full paper content is not needed to detect
 whether two papers cover the same ground. All inputs are compact metadata summaries.
 """
-import asyncio
 import json
 import logging
 from typing import Optional, Dict, Any, List, Callable
 
-from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
@@ -32,8 +30,8 @@ class PaperRedundancyChecker:
     def __init__(
         self,
         model_id: str,
-        context_window: int = 131072,
-        max_output_tokens: int = 15000
+        context_window: int = 0,
+        max_output_tokens: int = 0
     ):
         self.model_id = model_id
         self.context_window = context_window

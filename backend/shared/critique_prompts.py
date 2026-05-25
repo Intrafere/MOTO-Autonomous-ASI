@@ -197,8 +197,8 @@ def _try_repair_json(content: str):
             result = json.loads(truncated)
             if isinstance(result, dict) and result.get("novelty_rating"):
                 return result
-        except (json.JSONDecodeError, ValueError):
-            pass
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.debug("Failed last-resort critique JSON extraction: %s", exc)
 
     return None
 

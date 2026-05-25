@@ -3,6 +3,8 @@ import { websocket } from '../../services/websocket';
 import { api } from '../../services/api';
 import '../settings-common.css';
 
+const MAX_EVENT_LOG_ENTRIES = 5000;
+
 export default function AggregatorLogs() {
   const [events, setEvents] = useState([]);
   const [status, setStatus] = useState(null);
@@ -29,6 +31,7 @@ export default function AggregatorLogs() {
       websocket.on('cleanup_submission_removed', handleSubmissionRemoved),
       websocket.on('cleanup_review_complete', handleCleanupComplete),
       websocket.on('cleanup_review_error', handleCleanupError),
+      websocket.on('hung_connection_alert', handleHungConnectionAlert),
     ];
 
     return () => {
@@ -92,15 +95,18 @@ export default function AggregatorLogs() {
   };
 
   const handleNewSubmission = (data) => {
-    addEvent('submission', `New submission from Submitter ${data.submitter_id}`);
+    const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
+    addEvent('submission', `${prefix}New submission from Submitter ${data.submitter_id}`);
   };
 
   const handleAcceptance = (data) => {
-    addEvent('accept', `✓ Submission from Submitter ${data.submitter_id} ACCEPTED`);
+    const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
+    addEvent('accept', `✓ ${prefix}Submission from Submitter ${data.submitter_id} ACCEPTED`);
   };
 
   const handleRejection = (data) => {
-    addEvent('reject', `✗ Submission from Submitter ${data.submitter_id} REJECTED: ${data.reasoning.substring(0, 100)}...`);
+    const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
+    addEvent('reject', `✗ ${prefix}Submission from Submitter ${data.submitter_id} REJECTED: ${data.reasoning.substring(0, 100)}...`);
   };
 
   const handleCorruptionDetected = (data) => {
@@ -145,6 +151,21 @@ export default function AggregatorLogs() {
     addEvent('cleanup-error', `Cleanup review #${data.review_number} error: ${data.error}`);
   };
 
+  const handleHungConnectionAlert = (data) => {
+    const roleId = String(data.role_id || '').toLowerCase();
+    if (!roleId.startsWith('aggregator_')) {
+      return;
+    }
+    addEvent('warning', formatHungConnectionMessage(data));
+  };
+
+  const formatHungConnectionMessage = (data = {}) => {
+    const model = data.model || 'model';
+    const provider = data.provider || 'provider';
+    const elapsed = data.elapsed_minutes || 15;
+    return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
+  };
+
   const addEvent = (type, message) => {
     const event = {
       id: Date.now(),
@@ -152,7 +173,7 @@ export default function AggregatorLogs() {
       message,
       timestamp: new Date().toLocaleTimeString(),
     };
-    setEvents(prev => [event, ...prev].slice(0, 100)); // Keep last 100 events
+    setEvents(prev => [event, ...prev].slice(0, MAX_EVENT_LOG_ENTRIES));
   };
 
   return (

@@ -12,8 +12,9 @@ from datetime import datetime
 import aiofiles
 
 from backend.shared.config import system_config
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BrainstormMetadata
-from backend.shared.path_safety import validate_single_path_component
+from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +55,17 @@ class BrainstormMemory:
     
     def _safe_topic_id(self, topic_id: str) -> str:
         """Validate topic_id as a single path component."""
-        return validate_single_path_component(topic_id, "topic ID")
+        safe_topic_id = validate_single_path_component(topic_id, "topic ID")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", safe_topic_id):
+            raise ValueError(f"Invalid topic ID: {topic_id}")
+        return safe_topic_id
 
     def _get_database_path(self, topic_id: str) -> Path:
         """Get path to brainstorm database file."""
-        return self._base_dir / f"brainstorm_{self._safe_topic_id(topic_id)}.txt"
+        return resolve_path_within_root(
+            self._base_dir,
+            f"brainstorm_{self._safe_topic_id(topic_id)}.txt",
+        )
     
     def get_database_path(self, topic_id: str) -> str:
         """
@@ -72,15 +79,38 @@ class BrainstormMemory:
     
     def _get_metadata_path(self, topic_id: str) -> Path:
         """Get path to brainstorm metadata JSON file."""
-        return self._base_dir / f"brainstorm_{self._safe_topic_id(topic_id)}_metadata.json"
+        return resolve_path_within_root(
+            self._base_dir,
+            f"brainstorm_{self._safe_topic_id(topic_id)}_metadata.json",
+        )
     
     def _get_submitter_rejections_path(self, topic_id: str, submitter_id: int) -> Path:
         """Get path to submitter rejection log file."""
-        return self._base_dir / f"brainstorm_{self._safe_topic_id(topic_id)}_submitter_{submitter_id}_rejections.txt"
+        return resolve_path_within_root(
+            self._base_dir,
+            f"brainstorm_{self._safe_topic_id(topic_id)}_submitter_{submitter_id}_rejections.txt",
+        )
     
     def _get_completion_feedback_path(self, topic_id: str) -> Path:
         """Get path to completion feedback file."""
-        return self._base_dir / f"completion_feedback_{self._safe_topic_id(topic_id)}.txt"
+        return resolve_path_within_root(
+            self._base_dir,
+            f"completion_feedback_{self._safe_topic_id(topic_id)}.txt",
+        )
+
+    def _iter_submitter_rejection_paths(self, topic_id: str) -> List[Path]:
+        """Return submitter rejection logs for the literal topic ID."""
+        safe_topic_id = self._safe_topic_id(topic_id)
+        pattern = re.compile(
+            rf"^brainstorm_{re.escape(safe_topic_id)}_submitter_\d+_rejections\.txt$"
+        )
+        if not self._base_dir.exists():
+            return []
+        return [
+            path
+            for path in self._base_dir.iterdir()
+            if path.is_file() and pattern.fullmatch(path.name)
+        ]
     
     # ========================================================================
     # METADATA OPERATIONS
@@ -126,7 +156,11 @@ class BrainstormMemory:
                 data = json.loads(content)
                 return BrainstormMetadata(**data)
         except Exception as e:
-            logger.error(f"Failed to load brainstorm metadata for {topic_id}: {e}")
+            logger.error(
+                "Failed to load brainstorm metadata for %s: %s",
+                redact_log_text(topic_id, 120),
+                redact_log_text(e, 240),
+            )
             return None
     
     async def _save_metadata(self, metadata: BrainstormMetadata) -> None:
@@ -277,7 +311,11 @@ class BrainstormMemory:
                     content = content[:idx].rstrip()
             return content
         except Exception as e:
-            logger.error(f"Failed to read brainstorm database {topic_id}: {e}")
+            logger.error(
+                "Failed to read brainstorm database %s: %s",
+                redact_log_text(topic_id, 120),
+                redact_log_text(e, 240),
+            )
             return ""
 
     async def append_proofs_section(self, topic_id: str, proofs_data: Any) -> bool:
@@ -334,7 +372,7 @@ class BrainstormMemory:
     
     async def get_submissions_list(self, topic_id: str) -> List[Dict[str, Any]]:
         """Get list of submissions from a brainstorm database."""
-        content = await self.get_database_content(topic_id)
+        content = await self.get_database_content(topic_id, strip_proofs=True)
         
         if not content:
             return []
@@ -345,8 +383,6 @@ class BrainstormMemory:
         # Parse header/content pairs
         # Format: [header] SEPARATOR [content] SEPARATOR [header] SEPARATOR [content] ...
         # After split: part[0]=file header, part[1]=submission header, part[2]=content, part[3]=submission header, part[4]=content...
-        import re
-        
         for i, part in enumerate(parts):
             if "SUBMISSION #" in part:
                 # This part has the submission header
@@ -480,7 +516,6 @@ class BrainstormMemory:
     
     async def _parse_submissions_unlocked(self, db_path: Path) -> List[Dict[str, Any]]:
         """Parse submissions from a brainstorm database file. Caller must hold lock."""
-        import re
         async with aiofiles.open(db_path, 'r', encoding='utf-8') as f:
             content = await f.read()
         
@@ -676,31 +711,37 @@ class BrainstormMemory:
                 db_path = self._get_database_path(topic_id)
                 if db_path.exists():
                     db_path.unlink()
-                    logger.info(f"Deleted brainstorm database: {db_path}")
+                    logger.info("Deleted brainstorm database: %s", redact_log_text(db_path, 240))
                 
                 # Delete metadata file
                 metadata_path = self._get_metadata_path(topic_id)
                 if metadata_path.exists():
                     metadata_path.unlink()
-                    logger.info(f"Deleted brainstorm metadata: {metadata_path}")
+                    logger.info("Deleted brainstorm metadata: %s", redact_log_text(metadata_path, 240))
                 
                 # Delete completion feedback file
                 feedback_path = self._get_completion_feedback_path(topic_id)
                 if feedback_path.exists():
                     feedback_path.unlink()
-                    logger.info(f"Deleted completion feedback: {feedback_path}")
+                    logger.info("Deleted completion feedback: %s", redact_log_text(feedback_path, 240))
                 
-                # Delete all submitter rejection files
-                # We don't know how many submitters were used, so scan for all
-                for path in self._base_dir.glob(f"brainstorm_{topic_id}_submitter_*_rejections.txt"):
+                # Delete all submitter rejection files for the literal topic ID.
+                for path in self._iter_submitter_rejection_paths(topic_id):
                     path.unlink()
-                    logger.info(f"Deleted submitter rejections: {path}")
+                    logger.info("Deleted submitter rejections: %s", redact_log_text(path, 240))
                 
-                logger.info(f"Successfully deleted brainstorm {topic_id} and all associated files")
+                logger.info(
+                    "Successfully deleted brainstorm %s and all associated files",
+                    redact_log_text(topic_id, 120),
+                )
                 return True
                 
             except Exception as e:
-                logger.error(f"Failed to delete brainstorm {topic_id}: {e}")
+                logger.error(
+                    "Failed to delete brainstorm %s: %s",
+                    redact_log_text(topic_id, 120),
+                    redact_log_text(e, 240),
+                )
                 return False
 
 

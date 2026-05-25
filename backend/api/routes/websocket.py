@@ -4,7 +4,6 @@ WebSocket route for real-time updates.
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
 from typing import List, Dict
 from datetime import datetime
-import asyncio
 import logging
 import json
 import secrets

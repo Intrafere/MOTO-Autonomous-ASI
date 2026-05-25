@@ -172,11 +172,7 @@ class PaperModelTracker:
         if len(prompt) > MAX_PROMPT_LENGTH:
             display_prompt = prompt[:MAX_PROMPT_LENGTH].rstrip() + "... [truncated]"
         
-        # Build the attribution section
-        lines = [
-            "=" * 80,
-            "AUTONOMOUS AI SOLUTION",
-            "",
+        disclaimer = (
             "Disclaimer: This content is provided for informational purposes only. "
             "This paper was autonomously generated with the novelty-seeking MOTO harness without "
             "peer review or user oversight beyond the original prompt. It may contain incorrect, "
@@ -184,7 +180,15 @@ class PaperModelTracker:
             "this content is at your own risk. You are solely responsible for reviewing and "
             "independently verifying any output before relying on it, and the developers, "
             "operators, and contributors are not responsible for errors, omissions, decisions made "
-            "from this content, or any resulting loss, damage, cost, or liability.",
+            "from this content, or any resulting loss, damage, cost, or liability."
+        )
+
+        # Build the attribution section
+        lines = [
+            "=" * 80,
+            "AUTONOMOUS AI SOLUTION",
+            "",
+            disclaimer,
             "",
             f"User's Research Prompt: {display_prompt}",
             "",

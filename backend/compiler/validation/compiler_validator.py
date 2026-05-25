@@ -1,12 +1,10 @@
 """
 Compiler validator - validates document edits for coherence, rigor, and placement.
 """
-import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
-from typing import Optional, Dict, Any, List, Callable, Tuple
+from typing import Optional, Dict, Any, Callable, Tuple
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
@@ -862,7 +860,6 @@ class CompilerValidator:
             return None
         
         old_len = len(old_string)
-        doc_len = len(document)
         
         # Calculate requirements
         min_consecutive = int(old_len * consecutive_threshold)  # 85% of length
@@ -1686,7 +1683,7 @@ I. Introduction
 "The outline comprehensively covers all required content. Optional: Consider adding a subsection on worked examples under Section IV to enhance clarity, though not required."
 
 ❌ BAD (Not Actionable):
-"Missing Abstract section" [Doesn't explain what's wrong or how to fix]
+"Missing required section" [Doesn't explain which section is missing or how to fix it]
 
 Your feedback should help the submitter produce the best possible outline for guiding paper construction.
 

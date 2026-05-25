@@ -1,4 +1,5 @@
 ---
+description: Aggregator architecture, submitter-validator workflow, RAG behavior, and validation rules
 alwaysApply: true
 ---
 
@@ -14,13 +15,13 @@ Configurable 1-10 submitters + exactly 1 validator (default 3 submitters). Each 
 
 **Single Validator Constraint**: Only one validator allowed — multiple validators would cause divergent database evolution, breaking coherent Markov chain alignment.
 
-Validator accepts a submission if adding it makes the training database more useful toward finding solutions. Validator-distributed accepted submissions database starts blank, grows as submissions are accepted. Distributor updates it to all submitters after each acceptance.
+Validator accepts a submission if adding it makes the training database more useful toward finding solutions. Submissions must first prefer avenues that aggressively attack the user's WHOLE question as stated, no partial solutions. If the true answer is that the user's question is impossible or has no valid solution as stated, that counts as directly answering the whole question. If a whole-question attack is absolutely not possible in one superintelligence brainstorm, they may choose the next best necessary piece whose resolution would visibly advance the original question. Broader exploratory/background-heavy avenues are allowed only when clearly required for that whole-question route, and easy/practical/broad/interesting detours must lose to a more direct rigorous route to the full prompt. On a fresh cleared run the accepted-submissions database starts blank; on normal desktop runs it reloads persisted accepted submissions and stats from the active data root. Distributor updates all submitters after each acceptance.
 
 ## Queue Submissions and Overflow Behavior
 
 Validator processes up to 3 submissions at once (batch validation). Takes whatever is available (1, 2, or 3) without waiting.
 
-**Queue Overflow Threshold**: ≥10 submissions in queue → submitters paused until queue drops below 10.
+**Queue Overflow Threshold**: ≥10 submissions in queue → submitters cooperatively pause once they observe the coordinator pause state; this is a backpressure threshold, not a strict enqueue cap.
 
 **Per-Submitter Fairness Cap**: When more than one submitter is configured, any individual submitter with >4 of its own submissions already waiting in the queue is paused; other submitters keep running. Skipped when only one submitter is configured. Defaults live in `SystemConfig.queue_overflow_threshold` and `SystemConfig.per_submitter_queue_threshold`.
 
@@ -40,27 +41,25 @@ Validator processes 1, 2, or 3 submissions simultaneously using batch-specific p
 
 **USER SHARED DATABASE** — User uploaded files + original prompt. Primary source for submitters.
 
-**Validator-Distributed Database** — Accepted submissions (built by validator only; submitters have read-only access). Starts blank; distributed to all submitters on each acceptance.
+**Validator-Distributed Database** — Accepted submissions (built by validator only; submitters have read-only access). Fresh cleared runs start blank; normal runs reload persisted accepted submissions. Distributed to all submitters on each acceptance.
 
-**Local Submitter Databases** — Per-submitter rejection log: last 5 rejections (validator summary ≤750 chars + submission preview ≤750 chars). File: `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{N}.txt`. Reset if submitter gets >15 consecutive rejections.
+**Local Submitter Databases** — Per-submitter rejection log: last 5 rejections (validator summary ≤750 chars + submission preview ≤750 chars). File: `Summary_Of_Last_5_Validator_Rejections_For_Submitter_{N}.txt`. Reset when a submitter reaches the configured consecutive-rejection threshold (default 15).
 
-**Submission context injection**: Direct inject if fits. If too large: RAG the submission as file, keep user prompt direct. If user prompt + RAG'd submission still too large: RAG all user-prompt files. If user prompt itself too large after all RAG: halt with error + diagnostic.
+**Submission context injection**: Submitter context direct-injects first and offloads existing context to RAG when needed. Validator submissions under review are mandatory direct context; if a single or batch validation prompt is still too large after normal allocation, reject that validation batch with diagnostic feedback rather than indexing the pending submission as RAG.
 
 **Upload/path enforcement**: Server-side validation of `.txt` only, 5 MB max, filename sanitization, path traversal rejection. Upload responses return logical filenames, not absolute host paths. Public Aggregator starts resolve `uploaded_files` only under `user_uploads`; internal autonomous reference-paper context may opt into trusted data-root file references via an explicit coordinator flag.
 
 ## Context Allocation
 
-User prompt ALWAYS direct injected. Use as much context as possible in every prompt.
+User prompt ALWAYS direct injected. Context allocation is direct-first and offloads to RAG only when needed; unused budget does not require extra supplemental RAG retrieval when the direct context already fits.
 
 ### CONTEXT DISTRIBUTION RULES
 
-Direct injection first; RAG only when doesn't fit. ~85% RAG retrieval, ~15% other direct injections (JSON, user files). Halt with error if user prompt exceeds (context_window - minimum_RAG_allocation).
+Direct injection first, with the allocator preserving the canonical RAG/evidence reserve documented in `rag-design-for-overall-program.mdc`. Halt with error if user prompt exceeds the mandatory direct-context budget.
 
 No context carryover between prompts (only system-intended DB/submission transfers).
 
-**RAG Offload Priority — Submitter:** Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files
-
-**RAG Offload Priority — Validator:** Shared Training DB → User Upload Files (submission under review is always direct injected)
+All Aggregator offload order and source-exclusion rules are centralized in `rag-design-for-overall-program.mdc`. Validator submissions under review remain mandatory direct context.
 
 ## Role Selection
 
@@ -69,6 +68,8 @@ User selects model per role. Multiple roles can share a model. Models load with 
 Per-role Supercharge is optional. When enabled for a submitter or validator, `api_client_manager.generate_completion()` runs 4 parallel full answer attempts for that role call, then a 5th same-model synthesis call and returns only the synthesis result. Supercharge candidate attempts intentionally use temperatures `[0.0, 0.2, 0.4, 0.8]` to diversify parallel outputs; synthesis remains `0.0`. Candidate attempts are sanitized to reusable visible answer text before synthesis; private thought/channel/control transcript text must never be fed back as feedback, brainstorm memory, or synthesis context. The synthesis prompt frames candidates as optional working material: the model may use one, combine several, ignore all, or write a stronger new answer, while preserving the original role output contract. If Boost applies to that role/task, all internal Supercharge calls use the Boost config first. Tool-call requests bypass Supercharge.
 
 Parallel brainstorm submitter lanes intentionally use temperatures `[0.0, 0.1, ..., 0.9]` by submitter index so every parallel set includes a deterministic lane and increasing exploration lanes. This applies only to parallel submitter generation. Validators, compiler roles, JSON retries, and single-model sequential submitters remain `0.0`.
+
+When developer-enabled `creativity_emphasis_boost_enabled` is true, every fifth valid submission slot per Aggregator submitter uses the normal submitter prompt plus a small Creativity Emphasis Boost block. This block may encourage extreme creativity, near-solutions, or adjacent solutions only when apparent, appearing true, and potentially very helpful; validators are unchanged, and accepted/rejected WebSocket payloads mark `creativity_emphasized`. The extra block must be budgeted before prompt assembly; if it would overflow the configured context, skip the block for that slot and run the normal prompt.
 
 ## Single-Model Mode
 When ALL submitters AND validator use the same model → single-model mode:
@@ -80,9 +81,9 @@ When ALL submitters AND validator use the same model → single-model mode:
 
 ## Multi-Submitter Configuration
 
-Per-submitter: provider (LM Studio / OpenRouter in default mode; OpenRouter only in generic mode), model, OpenRouter host provider, LM Studio fallback (default mode only), context window, max output tokens, and Supercharge checkbox. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
+Per-submitter: provider (LM Studio / OpenRouter / desktop-only OpenAI Codex OAuth in default mode; OpenRouter only in generic mode), model, OpenRouter host provider when applicable, LM Studio fallback for cloud providers (default mode only), context window, max output tokens, and Supercharge checkbox. UI: "Number of Submitters" selector (1-10), "Copy Main to All" button.
 
-OpenRouter auto-fill rule: selecting an OpenRouter model auto-fills from endpoint metadata only. Context window uses the smallest relevant host `context_length`; max output tokens use `min(20% of that host context, smallest relevant host max_completion_tokens)`. If `max_prompt_tokens` is available, shrink usable context to respect it. If endpoint caps are incomplete, preserve current values (no guessing).
+OpenRouter auto-fill rule: selecting an OpenRouter model auto-fills context from the model-level `context_length`. Max output tokens use `min(20% of model context_length, endpoint max_completion_tokens)`: auto provider mode filters weak/low-cap endpoints and uses the smallest remaining capable endpoint cap, while an explicit host selection uses that host's largest exposed endpoint cap. Endpoint `context_length` / `max_prompt_tokens` rows are diagnostics, not context shrink limits. If endpoint output caps are incomplete, preserve current values (no guessing).
 
 Embeddings for RAG: Default mode uses LM Studio first, falls back to OpenRouter (`openai/text-embedding-3-small`) if LM Studio unavailable. Generic mode uses in-process FastEmbed (see `rag-design-for-overall-program.mdc`).
 
@@ -92,7 +93,7 @@ Accepted submissions database: never truncated. Live preview shows exact non-tru
 
 ## Database Cleanup Review
 
-Every 7th acceptance (`total_acceptances % 7 == 0`, minimum 7 before first review):
+Every 7th tracked acceptance (`total_acceptances % 7 == 0`, minimum 7 before first review). Manual Part 1 normally reloads persisted stats, so its cleanup cadence is persisted across restarts; autonomous/mini-aggregator runs can use fresh run-local stats when initialized with stats loading skipped. Autonomous resume offsets used for hard caps/completion reviews do not shift this cleanup modulo.
 
 **Phase 1**: Validator reviews the accepted-submissions database and identifies AT MOST ONE for removal (redundant, contradicted, superseded, or provides no unique value). If the complete database fits, it is direct-injected in full. If it does not fit, cleanup must use the normal direct-first/RAG fallback path instead of skipping or truncating; the review is then evidence-bounded by retrieved context.
 
@@ -104,14 +105,18 @@ Every 7th acceptance (`total_acceptances % 7 == 0`, minimum 7 before first revie
 
 **Stats tracked**: `cleanup_reviews_performed`, `removals_proposed`, `removals_executed`
 
-**WebSocket events**: `cleanup_review_started`, `cleanup_removal_proposed`, `cleanup_submission_removed`, `cleanup_review_complete`, `cleanup_review_error`
+**WebSocket events**: Cleanup review should expose user-visible start/proposal/removal/completion/error progress; exact internal event names are not rule-level invariants unless consumed by the hosted wrapper or frontend contract.
 
 ## RAG Refresh
 
-New submission acceptance → immediately RAG'd and added incrementally to existing RAG (no full re-RAG). Submitters see fresh context on next API call.
+New submission acceptance → synchronously persists to accepted memory and asynchronously triggers incremental RAG refresh (no full re-RAG). Submitters see fresh direct memory on the next API call; RAG-only fallback freshness can lag briefly while the background refresh completes.
 
 ## Validation
 
 JSON formatting used for all submission/validation communication. Submissions must be rooted in sound mathematical reasoning with no unfounded claims or logical fallacies.
 
 JSON validation failure: reject submission, send reason + content to submitter's local failure feedback memory.
+
+## Optional Lean 4 Proof Submissions
+
+When `lean4_enabled`, submitters may use `submission_type="lean_proof"` for prompt-directed proof candidates. Once Lean accepts real proof code, preserve and register it for novelty/triviality ranking even if it proves a narrower supporting lemma than intended; downshift the stored statement instead of discarding it. Hard rejection remains only for non-Lean-verified attempts, malformed submissions, or fake proof devices such as new `axiom`/`constant`/`opaque` declarations.

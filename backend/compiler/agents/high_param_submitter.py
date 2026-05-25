@@ -52,6 +52,13 @@ from backend.shared.utils import count_tokens
 
 logger = logging.getLogger(__name__)
 
+_NOVEL_PROOF_TIERS = {
+    "major_mathematical_discovery",
+    "mathematical_discovery",
+    "novel_variant",
+    "novel_formulation",
+}
+
 
 def _normalize_string_field(value) -> str:
     """Normalize string field from LLM response (tolerates list-of-strings mistakes)."""
@@ -173,10 +180,22 @@ class HighParamSubmitter:
         self.raw_user_prompt = user_prompt
         self.websocket_broadcaster = websocket_broadcaster
         self.validator_model = validator_model or model_name
-        self.validator_context_window = validator_context_window or system_config.compiler_validator_context_window
-        self.validator_max_tokens = validator_max_tokens or system_config.compiler_validator_max_output_tokens
+        self.validator_context_window = (
+            validator_context_window
+            if validator_context_window is not None
+            else system_config.compiler_validator_context_window
+        )
+        self.validator_max_tokens = (
+            validator_max_tokens
+            if validator_max_tokens is not None
+            else system_config.compiler_validator_max_output_tokens
+        )
         self._initialized = False
         self._standalone_session_id = f"standalone_{uuid.uuid4().hex[:12]}"
+        self._source_material_context: str = ""
+        self._source_material_label: str = ""
+        self._rigor_proof_source_id: str = ""
+        self._rigor_proof_source_title: str = ""
 
         # Task tracking for workflow panel and boost integration
         self.task_sequence: int = 0
@@ -198,14 +217,50 @@ class HighParamSubmitter:
     def get_current_task_id(self) -> str:
         return f"comp_hp_{self.task_sequence:03d}"
 
+    def set_source_material_context(self, content: str, label: str = "") -> None:
+        """Set direct paper-source context used by rigor theorem discovery."""
+        self._source_material_context = (content or "").strip()
+        self._source_material_label = (label or "").strip()
+
+    def set_rigor_proof_source(self, source_id: str = "", source_title: str = "") -> None:
+        """Set the real paper source for rigor-created proof records."""
+        self._rigor_proof_source_id = (source_id or "").strip()
+        self._rigor_proof_source_title = (source_title or "").strip()
+
+    def _get_direct_source_material_context(self, max_chars: int = 50000) -> str:
+        """Return bounded direct source context; full content remains available via RAG."""
+        context = self._source_material_context.strip()
+        if not context:
+            return ""
+        if len(context) <= max_chars:
+            return context
+        head = max_chars // 2
+        tail = max_chars - head
+        return (
+            context[:head].rstrip()
+            + "\n\n[... direct source context truncated; full source remains available through RAG ...]\n\n"
+            + context[-tail:].lstrip()
+        )
+
+    def _get_paper_proof_source_content(self, current_paper: str) -> str:
+        """Combine current paper with direct source material for formal proof attempts."""
+        parts = [
+            "CURRENT PAPER UNDER CONSTRUCTION:\n" + (current_paper or "").strip(),
+        ]
+        source_context = self._get_direct_source_material_context(max_chars=30000)
+        if source_context:
+            label = self._source_material_label or "Source brainstorm / paper-writing database"
+            parts.append(f"{label.upper()}:\n{source_context}")
+        return "\n\n---\n\n".join(part for part in parts if part.strip())
+
     async def initialize(self) -> None:
         if self._initialized:
             return
 
         self.context_window = system_config.compiler_high_param_context_window
         self.max_output_tokens = system_config.compiler_high_param_max_output_tokens
-        self.validator_context_window = self.validator_context_window or system_config.compiler_validator_context_window
-        self.validator_max_tokens = self.validator_max_tokens or system_config.compiler_validator_max_output_tokens
+        if int(self.validator_context_window or 0) <= 0 or int(self.validator_max_tokens or 0) <= 0:
+            raise ValueError("High-param validator context and max output settings must be configured.")
         self.available_input_tokens = rag_config.get_available_input_tokens(
             self.context_window, self.max_output_tokens
         )
@@ -245,11 +300,15 @@ class HighParamSubmitter:
     def _compiler_source_id(self) -> str:
         """Source id used on ProofRecord / failed candidate storage.
 
-        Format: ``compiler_rigor:<session>``. The session suffix lets the
-        failure-hint log cleanly scope retries per session (same as how
-        brainstorm-driven proofs scope by brainstorm id).
+        Prefer the actual paper id supplied by the compiler coordinator. The
+        manual fallback stays filename-safe because failed-candidate storage
+        also keys off this id.
         """
-        return f"compiler_rigor:{self._resolve_session_id()}"
+        return self._rigor_proof_source_id or f"manual_compiler_{self._resolve_session_id()}"
+
+    def _compiler_source_title(self) -> str:
+        """Human-readable source title for rigor-created proof records."""
+        return self._rigor_proof_source_title or "Compiler Rigor Theorem"
 
     # ---------------------------------------------------- context assembly
 
@@ -271,7 +330,13 @@ class HighParamSubmitter:
         max_allowed = rag_config.get_available_input_tokens(
             self.context_window, self.max_output_tokens
         )
-        remaining = max(1000, max_allowed - reserved_tokens - 200)
+        remaining = max_allowed - reserved_tokens
+        if remaining <= 0:
+            logger.warning(
+                "Skipping rigor RAG retrieval because mandatory direct context uses the configured input budget "
+                f"(reserved={reserved_tokens}, max_input={max_allowed})."
+            )
+            return ""
 
         try:
             context_pack = await compiler_rag_manager.retrieve_for_mode(
@@ -314,9 +379,32 @@ class HighParamSubmitter:
         retry_failure_id = str(discovery.get("retry_existing_failure_id") or "").strip()
         theorem_origin = str(discovery.get("theorem_origin") or "").strip()
         placement_preference = str(discovery.get("placement_preference") or "").strip()
+        expected_novelty_tier = str(discovery.get("expected_novelty_tier") or "").strip().lower()
+        prompt_relevance_rationale = str(discovery.get("prompt_relevance_rationale") or "").strip()
+        novelty_rationale = str(discovery.get("novelty_rationale") or "").strip()
+        why_not_standard_known_result = str(
+            discovery.get("why_not_standard_known_result") or ""
+        ).strip()
 
         if not theorem_statement:
             logger.info("Rigor cycle: discovery returned empty theorem_statement; declining")
+            return None
+        if expected_novelty_tier == "not_novel":
+            logger.info("Rigor cycle: discovery marked theorem not_novel; declining before Lean cost")
+            return None
+        if expected_novelty_tier not in _NOVEL_PROOF_TIERS:
+            logger.info(
+                "Rigor cycle: discovery omitted a valid expected_novelty_tier; declining before Lean cost"
+            )
+            return None
+        if not (
+            prompt_relevance_rationale
+            and novelty_rationale
+            and why_not_standard_known_result
+        ):
+            logger.info(
+                "Rigor cycle: discovery omitted required novelty/relevance rationales; declining before Lean cost"
+            )
             return None
 
         if theorem_origin not in {
@@ -346,6 +434,10 @@ class HighParamSubmitter:
             theorem_id=retry_failure_id or f"compiler_rigor_{uuid.uuid4().hex[:12]}",
             statement=theorem_statement,
             formal_sketch=formal_sketch,
+            expected_novelty_tier=expected_novelty_tier,
+            prompt_relevance_rationale=prompt_relevance_rationale,
+            novelty_rationale=novelty_rationale,
+            why_not_standard_known_result=why_not_standard_known_result,
             source_excerpt=source_excerpt,
             origin_source_id=self._compiler_source_id() if retry_failure_id else "",
         )
@@ -354,19 +446,55 @@ class HighParamSubmitter:
         if formalizer_result is None:
             return None
 
-        theorem_name, lean_code, attempts = formalizer_result
+        theorem_name, lean_code, attempts, integrity = formalizer_result
+
+        stored_theorem_statement = (
+            integrity.actual_theorem_statement.strip()
+            or theorem_statement
+        )
+        stored_theorem_name = (
+            integrity.actual_theorem_name.strip()
+            or theorem_name
+        )
+        stored_formal_sketch = formal_sketch
+        verification_notes = "Produced by compiler rigor loop (HighParamSubmitter)."
+        if integrity.category in {"statement_downshifted", "statement_alignment_uncertain", "statement_alignment_unavailable"}:
+            stored_formal_sketch = (
+                f"{stored_formal_sketch}\n\n"
+                f"Original intended theorem candidate: {theorem_statement}\n"
+                f"Statement-alignment classification: {integrity.category}. "
+                f"{integrity.reason or integrity.downshift_reason}"
+            ).strip()
+            verification_notes = (
+                "Produced by compiler rigor loop (HighParamSubmitter). "
+                "Lean accepted the proof; MOTO preserved it under the actual "
+                "Lean-verified statement instead of discarding it for candidate mismatch."
+            )
+            await self._broadcast(
+                "proof_downshifted",
+                {
+                    "source_type": "compiler_rigor",
+                    "source_id": self._compiler_source_id(),
+                    "theorem_id": candidate.theorem_id,
+                    "intended_theorem_statement": theorem_statement,
+                    "theorem_statement": stored_theorem_statement,
+                    "category": integrity.category,
+                    "reason": integrity.reason or integrity.downshift_reason,
+                },
+            )
 
         logger.info("Rigor cycle: Stage 3 - novelty classification + persistence")
         novelty_result = await self._step_assess_novelty_and_store(
-            theorem_statement=theorem_statement,
-            theorem_name=theorem_name,
+            theorem_statement=stored_theorem_statement,
+            theorem_name=stored_theorem_name,
             lean_code=lean_code,
-            formal_sketch=formal_sketch,
+            formal_sketch=stored_formal_sketch,
             attempts=attempts,
+            verification_notes=verification_notes,
         )
         if novelty_result is None:
             return None
-        is_novel, novelty_reasoning, stored_record = novelty_result
+        is_novel, novelty_reasoning, stored_record, duplicate = novelty_result
 
         await self._broadcast(
             "proof_verified",
@@ -374,9 +502,32 @@ class HighParamSubmitter:
                 "source_type": "compiler_rigor",
                 "source_id": self._compiler_source_id(),
                 "theorem_id": candidate.theorem_id,
-                "theorem_statement": theorem_statement,
+                "theorem_statement": stored_theorem_statement,
+                "intended_theorem_statement": theorem_statement,
                 "proof_id": stored_record.proof_id,
                 "is_novel": is_novel,
+                "novelty_tier": stored_record.novelty_tier,
+                "novelty_reasoning": novelty_reasoning,
+            },
+        )
+        await self._broadcast(
+            "proof_check_complete",
+            {
+                "source_type": "compiler_rigor",
+                "source_id": self._compiler_source_id(),
+                "source_title": self._compiler_source_title(),
+                "trigger": "rigor_loop",
+                "verified_count": 1,
+                "novel_count": 1 if is_novel and not duplicate else 0,
+                "total_candidates": 1,
+                "proof_id": stored_record.proof_id,
+                "theorem_id": candidate.theorem_id,
+                "theorem_statement": stored_theorem_statement,
+                "is_novel": is_novel,
+                "novelty_tier": stored_record.novelty_tier,
+                "novelty_reasoning": novelty_reasoning,
+                "duplicate": duplicate,
+                "message": "Compiler rigor proof verified, ranked, and indexed.",
             },
         )
 
@@ -403,16 +554,16 @@ class HighParamSubmitter:
             logger.info("Rigor cycle: Stage 4 - initial placement proposal")
             initial_submission = await self._step_initial_placement(
                 proof_id=stored_record.proof_id,
-                theorem_statement=theorem_statement,
-                theorem_name=theorem_name,
+                theorem_statement=stored_theorem_statement,
+                theorem_name=stored_theorem_name,
                 lean_code=lean_code,
                 is_novel=is_novel,
             )
 
         return RigorTheoremResult(
             proof_id=stored_record.proof_id,
-            theorem_statement=theorem_statement,
-            theorem_name=theorem_name,
+            theorem_statement=stored_theorem_statement,
+            theorem_name=stored_theorem_name,
             lean_code=lean_code,
             is_novel=is_novel,
             novelty_tier=stored_record.novelty_tier,
@@ -420,7 +571,7 @@ class HighParamSubmitter:
             attempts=attempts,
             source_id=self._compiler_source_id(),
             initial_placement_submission=initial_submission,
-            formal_sketch=formal_sketch,
+            formal_sketch=stored_formal_sketch,
             source_excerpt=source_excerpt,
             theorem_origin=theorem_origin,
             placement_preference=placement_preference,
@@ -429,6 +580,9 @@ class HighParamSubmitter:
                 "attempt_count": len(attempts),
                 "theorem_origin": theorem_origin,
                 "placement_preference": placement_preference,
+                "intended_theorem_statement": theorem_statement,
+                "statement_alignment_category": integrity.category,
+                "duplicate": duplicate,
             },
         )
 
@@ -463,16 +617,29 @@ class HighParamSubmitter:
             logger.debug("proof_database.get_recent_failure_hints failed: %s", exc)
             failure_hints = []
 
-        # Build with empty RAG first to measure the mandatory footprint,
-        # then allocate the rest to RAG.
-        base_prompt = await build_rigor_theorem_discovery_prompt(
-            user_prompt=self.user_prompt,
-            current_outline=current_outline,
-            current_paper=current_paper,
-            rag_evidence="",
-            existing_verified_proofs=existing_proofs,
-            recent_failure_hints=failure_hints,
+        source_material_context = self._get_direct_source_material_context()
+        max_allowed = rag_config.get_available_input_tokens(
+            self.context_window, self.max_output_tokens
         )
+
+        # Build with empty RAG first to measure the mandatory footprint,
+        # then allocate the rest to RAG. If the direct source context itself
+        # is too large, shrink it before falling back to RAG.
+        while True:
+            base_prompt = await build_rigor_theorem_discovery_prompt(
+                user_prompt=self.user_prompt,
+                current_outline=current_outline,
+                current_paper=current_paper,
+                rag_evidence="",
+                existing_verified_proofs=existing_proofs,
+                recent_failure_hints=failure_hints,
+                source_material_context=source_material_context,
+                source_material_label=self._source_material_label,
+            )
+            if count_tokens(base_prompt) <= max_allowed or len(source_material_context) <= 4000:
+                break
+            source_material_context = source_material_context[: max(len(source_material_context) // 2, 4000)]
+
         mandatory_tokens = count_tokens(base_prompt)
         query_seed = (self.raw_user_prompt + " " + current_paper[-1500:]).strip()
         rag_evidence = await self._build_rigor_rag_context(
@@ -487,14 +654,19 @@ class HighParamSubmitter:
             rag_evidence=rag_evidence,
             existing_verified_proofs=existing_proofs,
             recent_failure_hints=failure_hints,
+            source_material_context=source_material_context,
+            source_material_label=self._source_material_label,
         )
 
-        max_allowed = rag_config.get_available_input_tokens(
-            self.context_window, self.max_output_tokens
-        )
         if count_tokens(prompt) > max_allowed:
             logger.warning("Rigor discovery prompt too large; retrying without RAG evidence")
             prompt = base_prompt
+        prompt_tokens = count_tokens(prompt)
+        if prompt_tokens > max_allowed:
+            raise ValueError(
+                "Rigor discovery prompt exceeds available input budget "
+                f"({prompt_tokens} tokens > {max_allowed} tokens) even without RAG evidence."
+            )
 
         data = await self._call_llm_and_parse(
             prompt=prompt,
@@ -519,12 +691,13 @@ class HighParamSubmitter:
     ) -> Optional[tuple]:
         """Run up to 5 Lean 4 attempts with feedback chaining.
 
-        Returns (theorem_name, lean_code, attempts) on success, None on
+        Returns (theorem_name, lean_code, attempts, integrity) on success, None on
         all-5-fail. On failure, records the candidate in proof_database so
         future rigor cycles can see it as an open lemma target.
         """
         current_paper_raw = await paper_memory.get_paper()
         current_paper = _strip_paper_markers_for_llm(current_paper_raw)
+        proof_source_content = self._get_paper_proof_source_content(current_paper)
 
         # Imported lazily to avoid a circular-import chain through the
         # autonomous agents package at module load time.
@@ -596,7 +769,7 @@ class HighParamSubmitter:
                 user_research_prompt=self.raw_user_prompt,
                 source_type="paper",  # ProofCandidate expects "paper" | "brainstorm"
                 theorem_candidate=candidate,
-                source_content=current_paper,
+                source_content=proof_source_content,
                 max_attempts=5,
                 attempt_callback=_on_attempt_feedback,
                 attempt_start_callback=_on_attempt_started,
@@ -643,7 +816,7 @@ class HighParamSubmitter:
             theorem_statement=theorem_statement,
             formal_sketch=candidate.formal_sketch,
             lean_code=lean_code,
-            source_excerpt=candidate.source_excerpt or current_paper,
+            source_excerpt=candidate.source_excerpt or proof_source_content,
             allowed_baseline="",
             validator_model=self.validator_model,
             validator_context=self.validator_context_window,
@@ -653,16 +826,6 @@ class HighParamSubmitter:
             require_statement_alignment=True,
         )
         if not integrity.valid:
-            integrity_feedback = ProofAttemptFeedback(
-                attempt=(attempts[-1].attempt + 1 if attempts else 1),
-                theorem_id=candidate.theorem_id,
-                reasoning="Post-Lean proof integrity check failed.",
-                lean_code=lean_code,
-                error_output=integrity.reason,
-                strategy="full_script",
-                success=False,
-            )
-            attempts = list(attempts) + [integrity_feedback]
             try:
                 await proof_database.record_failed_candidate(
                     source_brainstorm_id=self._compiler_source_id(),
@@ -693,7 +856,7 @@ class HighParamSubmitter:
             )
             return None
 
-        return theorem_name, lean_code, attempts
+        return theorem_name, lean_code, attempts, integrity
 
     # --------------------------------------------------------- stage 3
 
@@ -705,10 +868,11 @@ class HighParamSubmitter:
         lean_code: str,
         formal_sketch: str,
         attempts: List[ProofAttemptFeedback],
+        verification_notes: str,
     ) -> Optional[tuple]:
         """Classify the verified proof and persist it via proof_database.
 
-        Returns (is_novel, novelty_reasoning, stored_record).
+        Returns (is_novel, novelty_reasoning, stored_record, duplicate).
         """
         task_id = f"{self.get_current_task_id()}_novelty"
         self.task_sequence += 1
@@ -729,22 +893,23 @@ class HighParamSubmitter:
                 role_id="compiler_rigor_novelty",
                 source_type="paper",
                 source_id=self._compiler_source_id(),
-                source_title="Compiler Rigor Theorem",
+                source_title=self._compiler_source_title(),
                 theorem_name=theorem_name,
                 formal_sketch=formal_sketch,
                 solver="Lean 4",
-                verification_notes="Produced by compiler rigor loop (HighParamSubmitter).",
+                verification_notes=verification_notes,
                 attempt_count=len(attempts),
                 attempts=list(attempts),
                 broadcast_fn=self.websocket_broadcaster,
                 base_event={
                     "source_type": "compiler_rigor",
                     "source_id": self._compiler_source_id(),
+                    "source_title": self._compiler_source_title(),
                     "trigger": "rigor_loop",
                 },
             )
             stored = registration.record
-            return stored.novel, stored.novelty_reasoning, stored
+            return stored.novel, stored.novelty_reasoning, stored, registration.duplicate
         except Exception as exc:
             logger.warning("Novelty assessment failed; rigor proof will not be stored: %s", exc)
             await self._broadcast(
@@ -926,8 +1091,8 @@ class HighParamSubmitter:
                 self.model_name,
                 {"context_length": self.context_window, "model_path": self.model_name},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("LM Studio cache warmup skipped for high-param submitter: %s", exc)
 
         if self.task_tracking_callback:
             self.task_tracking_callback("started", task_id)

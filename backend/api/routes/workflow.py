@@ -81,32 +81,6 @@ async def get_workflow_predictions() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Failed to get predictions")
 
 
-@router.get("/api/workflow/history")
-async def get_workflow_history(limit: int = 50) -> Dict[str, Any]:
-    """
-    Get completed workflow tasks.
-    
-    Args:
-        limit: Maximum number of tasks to return
-        
-    Returns:
-        List of completed tasks
-    """
-    try:
-        # This would fetch from a persistent history log
-        # For now, return empty list
-        history = []
-        
-        return {
-            "success": True,
-            "history": history,
-            "total": len(history)
-        }
-    except Exception as e:
-        logger.error(f"Failed to get workflow history: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get history")
-
-
 @router.get("/api/token-stats")
 async def get_token_stats() -> Dict[str, Any]:
     """Return cumulative token usage stats and elapsed research time."""

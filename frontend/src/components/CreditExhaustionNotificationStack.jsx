@@ -131,6 +131,7 @@ function CreditExhaustionNotification({ notification, onDismiss }) {
     : 'Unknown Role';
 
   const isNoFallback = notification.reason === 'no_fallback_configured';
+  const isProviderPaused = notification.reason === 'provider_paused';
 
   return (
     <div
@@ -235,7 +236,9 @@ function CreditExhaustionNotification({ notification, onDismiss }) {
           WebkitBoxOrient: 'vertical',
         }}
       >
-        {isNoFallback
+        {isProviderPaused
+          ? 'This proof workflow is paused until OpenRouter credits are reset. Add credits, then press Retry OpenRouter to resume.'
+          : isNoFallback
           ? 'No LM Studio fallback configured. This role has stopped. Configure a fallback model or add credits.'
           : notification.fallback_model
             ? `Fell back to LM Studio model: ${notification.fallback_model}`

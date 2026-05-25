@@ -26,6 +26,7 @@ from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 from backend.shared.boost_logger import boost_logger
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.workflow_start_guard import workflow_start_guard
 
 logger = logging.getLogger(__name__)
@@ -301,14 +302,6 @@ async def _get_combined_api_logs(
         "stats": _build_combined_api_stats(all_combined_logs),
     }
 
-    if session_id == "legacy":
-        return
-
-    try:
-        validate_single_path_component(session_id, "session ID")
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid session ID: {session_id}")
-
 
 def _get_start_conflict() -> Optional[str]:
     """Return a user-facing conflict message if another workflow is active."""
@@ -463,8 +456,8 @@ def _resolve_validator_config(request: Optional[CritiqueRequest]) -> Dict[str, A
         validator_supercharge_enabled = bool(request.validator_supercharge_enabled)
         if request.validator_model:
             validator_model = request.validator_model
-            validator_context_window = request.validator_context_window or 131072
-            validator_max_tokens = request.validator_max_tokens or 25000
+            validator_context_window = request.validator_context_window
+            validator_max_tokens = request.validator_max_tokens
             validator_provider = request.validator_provider or "lm_studio"
             validator_openrouter_provider = request.validator_openrouter_provider
             validator_openrouter_reasoning_effort = request.validator_openrouter_reasoning_effort
@@ -484,6 +477,11 @@ def _resolve_validator_config(request: Optional[CritiqueRequest]) -> Dict[str, A
         raise HTTPException(
             status_code=400,
             detail="No validator model configured. Please configure a validator model in Autonomous Research Settings."
+        )
+    if int(validator_context_window or 0) <= 0 or int(validator_max_tokens or 0) <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Validator context window and max output tokens must be configured in Autonomous Research Settings."
         )
 
     return {
@@ -556,7 +554,11 @@ async def _generate_autonomous_paper_critique(
         )
     )
 
-    logger.info(f"Requesting critique for paper {paper_id} from validator model {config['validator_model']}")
+    logger.info(
+        "Requesting critique for paper %s from validator model %s",
+        redact_log_text(paper_id, 120),
+        redact_log_text(config["validator_model"], 160),
+    )
 
     response = await api_client_manager.generate_completion(
         task_id=f"paper_critique_{paper_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
@@ -672,18 +674,27 @@ async def _delete_autonomous_paper_from_scope(
             await scoped_brainstorm_memory.remove_paper_reference(topic_id, paper_id)
         except Exception as e:
             logger.warning(
-                f"Failed to remove paper {paper_id} from brainstorm metadata {topic_id}: {e}"
+                "Failed to remove paper %s from brainstorm metadata %s: %s",
+                redact_log_text(paper_id, 120),
+                redact_log_text(topic_id, 120),
+                redact_log_text(e, 240),
             )
 
     try:
         from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
         await autonomous_rag_manager.remove_paper_from_rag(paper_id)
     except Exception as e:
-        logger.warning(f"Failed to remove pruned paper {paper_id} from RAG: {e}")
+        logger.warning(
+            "Failed to remove pruned paper %s from RAG: %s",
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
 
     logger.info(
-        f"Pruned paper {paper_id} from session {session_id} "
-        f"(from brainstorms: {', '.join(source_brainstorms)})"
+        "Pruned paper %s from session %s (from brainstorms: %s)",
+        redact_log_text(paper_id, 120),
+        redact_log_text(session_id, 160),
+        redact_log_text(", ".join(source_brainstorms), 240),
     )
 
     return {
@@ -707,6 +718,24 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
             if conflict:
                 raise HTTPException(status_code=400, detail=conflict)
 
+            if not request.allow_mathematical_proofs and not request.allow_research_papers:
+                raise HTTPException(
+                    status_code=400,
+                    detail="At least one allowed output must be enabled.",
+                )
+            effective_allow_mathematical_proofs = bool(
+                request.allow_mathematical_proofs and not system_config.generic_mode
+            )
+            if request.allow_mathematical_proofs and not system_config.lean4_enabled:
+                if not (system_config.generic_mode and request.allow_research_papers):
+                    raise HTTPException(
+                        status_code=501,
+                        detail={
+                            "lean4_enabled": False,
+                            "message": "Mathematical proof output requires Lean 4 proof verification to be enabled.",
+                        },
+                    )
+
             # Validate submitter configs
             num_submitters = len(request.submitter_configs)
             if not (system_config.min_submitters <= num_submitters <= system_config.max_submitters):
@@ -719,12 +748,18 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
             for config in request.submitter_configs:
                 label = "(Main Submitter)" if config.submitter_id == 1 else ""
                 logger.info(
-                    f"Brainstorm Submitter {config.submitter_id} {label}: model={config.model_id}, "
-                    f"context={config.context_window}, max_tokens={config.max_output_tokens}"
+                    "Brainstorm Submitter %s %s: model=%s, context=%s, max_tokens=%s",
+                    config.submitter_id,
+                    label,
+                    redact_log_text(config.model_id, 160),
+                    redact_log_text(config.context_window, 40),
+                    redact_log_text(config.max_output_tokens, 40),
                 )
             logger.info(
-                f"Validator: model={request.validator_model}, "
-                f"context={request.validator_context_window}, max_tokens={request.validator_max_tokens}"
+                "Validator: model=%s, context=%s, max_tokens=%s",
+                redact_log_text(request.validator_model, 160),
+                redact_log_text(request.validator_context_window, 40),
+                redact_log_text(request.validator_max_tokens, 40),
             )
 
             # Initialize coordinator
@@ -761,6 +796,9 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                 critique_submitter_openrouter_reasoning_effort=request.critique_submitter_openrouter_reasoning_effort,
                 critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback,
                 tier3_enabled=request.tier3_enabled,
+                creativity_emphasis_boost_enabled=request.creativity_emphasis_boost_enabled,
+                allow_mathematical_proofs=effective_allow_mathematical_proofs,
+                allow_research_papers=request.allow_research_papers,
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
                 high_context_supercharge_enabled=request.high_context_supercharge_enabled,
                 high_param_supercharge_enabled=request.high_param_supercharge_enabled,
@@ -779,10 +817,13 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
         
     except HTTPException:
         raise
+    except ValueError as e:
+        logger.error("Autonomous research configuration error: %s", redact_log_text(e, 1000), exc_info=True)
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         import traceback
         error_details = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        logger.error(f"Failed to start autonomous research: {error_details}")
+        logger.error("Failed to start autonomous research: %s", redact_log_text(error_details, 1000))
         raise HTTPException(status_code=500, detail="Failed to start autonomous research")
 
 
@@ -904,8 +945,8 @@ async def get_autonomous_status():
                         from backend.aggregator.core.queue_manager import queue_manager
                         try:
                             queue_size = await queue_manager.size()
-                        except Exception:
-                            pass
+                        except Exception as queue_exc:
+                            logger.debug("Unable to read autonomous aggregator queue size fallback: %s", queue_exc)
                 
                 # Get counts from autonomous coordinator internal state
                 acceptance_count = max(
@@ -1071,8 +1112,14 @@ async def get_brainstorm(topic_id: str):
         
     except HTTPException:
         raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid brainstorm topic ID")
     except Exception as e:
-        logger.error(f"Failed to get brainstorm {topic_id}: {e}")
+        logger.error(
+            "Failed to get brainstorm %s: %s",
+            redact_log_text(topic_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1108,7 +1155,11 @@ async def get_paper(paper_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get paper {paper_id}: {e}")
+        logger.error(
+            "Failed to get paper %s: %s",
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1160,7 +1211,12 @@ async def get_pruned_history_paper(session_id: str, paper_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get pruned history paper {session_id}/{paper_id}: {e}")
+        logger.error(
+            "Failed to get pruned history paper %s/%s: %s",
+            redact_log_text(session_id, 160),
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1192,7 +1248,11 @@ async def delete_pruned_history_papers(session_id: str, confirm: bool = False):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete pruned history papers for {session_id}: {e}")
+        logger.error(
+            "Failed to delete pruned history papers for %s: %s",
+            redact_log_text(session_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1214,7 +1274,12 @@ async def get_history_paper(session_id: str, paper_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get history paper {session_id}/{paper_id}: {e}")
+        logger.error(
+            "Failed to get history paper %s/%s: %s",
+            redact_log_text(session_id, 160),
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1434,40 +1499,6 @@ async def force_paper_writing():
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.post("/skip-critique")
-async def skip_critique():
-    """Skip critique phase during autonomous paper writing (immediately or pre-emptively)."""
-    try:
-        state = autonomous_coordinator.get_state()
-        
-        if not state.is_running:
-            raise HTTPException(status_code=400, detail="Autonomous research is not running")
-        
-        if state.current_tier != "tier2_paper_writing":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Not in paper writing tier (current: {state.current_tier})"
-            )
-        
-        success = await autonomous_coordinator.skip_critique_phase()
-        
-        if not success:
-            raise HTTPException(
-                status_code=400,
-                detail="No active compiler found for paper writing"
-            )
-        
-        return {
-            "success": True,
-            "message": "Critique phase will be skipped (immediately or when reached)"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to skip critique: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
 @router.post("/reset-current-paper")
 async def reset_current_paper(confirm: bool = False):
     """
@@ -1564,8 +1595,8 @@ async def force_tier3(mode: str = "complete_current"):
                 from backend.compiler.core.compiler_coordinator import compiler_coordinator
                 compiler_state = await compiler_coordinator.get_status()
                 context_info["compiler_mode"] = compiler_state.current_mode or "unknown"
-            except Exception:
-                pass
+            except Exception as compiler_exc:
+                logger.debug("Unable to include compiler mode in force Tier 3 context: %s", compiler_exc)
         
         # Get count of completed papers
         all_papers = await paper_library.get_all_papers()
@@ -1712,7 +1743,10 @@ async def delete_brainstorm(topic_id: str, confirm: bool = False):
         active_topic_id = autonomous_coordinator._current_topic_id
         active_aggregator = autonomous_coordinator._brainstorm_aggregator
         aggregator_running = bool(active_aggregator and active_aggregator.is_running)
-        target_db_path = Path(brainstorm_memory.get_database_path(topic_id)).resolve()
+        try:
+            target_db_path = Path(brainstorm_memory.get_database_path(topic_id)).resolve()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         active_shared_path = Path(shared_training_memory.file_path).resolve()
         active_shared_path_matches = active_shared_path == target_db_path
         if (
@@ -1755,7 +1789,11 @@ async def delete_brainstorm(topic_id: str, confirm: bool = False):
             if stats.get("current_brainstorm_id") == topic_id:
                 await research_metadata.set_current_brainstorm(None)
         
-        logger.info(f"Deleted brainstorm {topic_id} (had {len(associated_papers)} associated papers)")
+        logger.info(
+            "Deleted brainstorm %s (had %s associated papers)",
+            redact_log_text(topic_id, 120),
+            len(associated_papers),
+        )
         
         return {
             "success": True,
@@ -1766,8 +1804,14 @@ async def delete_brainstorm(topic_id: str, confirm: bool = False):
         
     except HTTPException:
         raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid brainstorm topic ID")
     except Exception as e:
-        logger.error(f"Failed to delete brainstorm {topic_id}: {e}")
+        logger.error(
+            "Failed to delete brainstorm %s: %s",
+            redact_log_text(topic_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1796,7 +1840,11 @@ async def delete_paper(paper_id: str, confirm: bool = False):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete paper {paper_id}: {e}")
+        logger.error(
+            "Failed to delete paper %s: %s",
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1860,7 +1908,12 @@ async def delete_history_paper(session_id: str, paper_id: str, confirm: bool = F
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete history paper {session_id}/{paper_id}: {e}")
+        logger.error(
+            "Failed to delete history paper %s/%s: %s",
+            redact_log_text(session_id, 160),
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2201,7 +2254,11 @@ async def get_final_answer_by_id(answer_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get final answer {answer_id}: {e}")
+        logger.error(
+            "Failed to get final answer %s: %s",
+            redact_log_text(answer_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2229,7 +2286,11 @@ async def get_final_answer_archived_papers(answer_id: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Failed to get archived papers for {answer_id}: {e}")
+        logger.error(
+            "Failed to get archived papers for %s: %s",
+            redact_log_text(answer_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2257,7 +2318,12 @@ async def get_final_answer_archived_paper(answer_id: str, paper_id: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Failed to get archived paper {paper_id} for {answer_id}: {e}")
+        logger.error(
+            "Failed to get archived paper %s for %s: %s",
+            redact_log_text(paper_id, 120),
+            redact_log_text(answer_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2281,7 +2347,11 @@ async def get_final_answer_archived_brainstorms(answer_id: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Failed to get archived brainstorms for {answer_id}: {e}")
+        logger.error(
+            "Failed to get archived brainstorms for %s: %s",
+            redact_log_text(answer_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2309,7 +2379,12 @@ async def get_final_answer_archived_brainstorm(answer_id: str, topic_id: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Failed to get archived brainstorm {topic_id} for {answer_id}: {e}")
+        logger.error(
+            "Failed to get archived brainstorm %s for %s: %s",
+            redact_log_text(topic_id, 120),
+            redact_log_text(answer_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2358,7 +2433,11 @@ async def request_paper_critique(paper_id: str, request: CritiqueRequest = None)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to request paper critique for {paper_id}: {e}")
+        logger.error(
+            "Failed to request paper critique for %s: %s",
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2389,7 +2468,11 @@ async def get_paper_critiques(paper_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get critiques for paper {paper_id}: {e}")
+        logger.error(
+            "Failed to get critiques for paper %s: %s",
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2433,7 +2516,11 @@ async def delete_paper_critiques(paper_id: str, confirm: bool = False):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete critiques for paper {paper_id}: {e}")
+        logger.error(
+            "Failed to delete critiques for paper %s: %s",
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2475,7 +2562,12 @@ async def request_history_paper_critique(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to request history critique for {session_id}/{paper_id}: {e}")
+        logger.error(
+            "Failed to request history critique for %s/%s: %s",
+            redact_log_text(session_id, 160),
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2499,7 +2591,12 @@ async def get_history_paper_critiques(session_id: str, paper_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get history critiques for {session_id}/{paper_id}: {e}")
+        logger.error(
+            "Failed to get history critiques for %s/%s: %s",
+            redact_log_text(session_id, 160),
+            redact_log_text(paper_id, 120),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2567,8 +2664,8 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
             # Check if request provides validator config
             if request.validator_model:
                 validator_model = request.validator_model
-                validator_context_window = request.validator_context_window or 131072
-                validator_max_tokens = request.validator_max_tokens or 25000
+                validator_context_window = request.validator_context_window
+                validator_max_tokens = request.validator_max_tokens
                 validator_provider = request.validator_provider or "lm_studio"
                 validator_openrouter_provider = request.validator_openrouter_provider
                 validator_openrouter_reasoning_effort = request.validator_openrouter_reasoning_effort
@@ -2590,6 +2687,11 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
             raise HTTPException(
                 status_code=400,
                 detail="No validator model configured. Please configure a validator model in Autonomous Research Settings."
+            )
+        if int(validator_context_window or 0) <= 0 or int(validator_max_tokens or 0) <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Validator context window and max output tokens must be configured in Autonomous Research Settings."
             )
         
         # Build the critique prompt
@@ -2643,7 +2745,11 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         )
         
         # Make the API call
-        logger.info(f"Requesting critique for final answer {answer_id} from validator model {validator_model}")
+        logger.info(
+            "Requesting critique for final answer %s from validator model %s",
+            redact_log_text(answer_id, 160),
+            redact_log_text(validator_model, 160),
+        )
         
         response = await api_client_manager.generate_completion(
             task_id=f"final_answer_critique_{answer_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
@@ -2698,7 +2804,11 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to request final answer critique for {answer_id}: {e}")
+        logger.error(
+            "Failed to request final answer critique for %s: %s",
+            redact_log_text(answer_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2739,7 +2849,11 @@ async def get_final_answer_critiques(answer_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get critiques for final answer {answer_id}: {e}")
+        logger.error(
+            "Failed to get critiques for final answer %s: %s",
+            redact_log_text(answer_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2784,7 +2898,11 @@ async def delete_final_answer_critiques(answer_id: str, confirm: bool = False):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete critiques for final answer {answer_id}: {e}")
+        logger.error(
+            "Failed to delete critiques for final answer %s: %s",
+            redact_log_text(answer_id, 160),
+            redact_log_text(e, 240),
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

@@ -49,7 +49,7 @@ WRITE ANOTHER PAPER if:
 - The uncovered material is rich enough for a complete, distinct paper (not just leftover fragments)
 - Writing another paper from this brainstorm advances the user's goal MORE than starting a new topic
 - The existing paper(s) focused on specific aspects, leaving other important aspects unexplored
-- Another paper would provide a stronger direct partial answer, tighter impossibility result, or sharper constraint
+- Another paper would more directly answer the user's prompt or a necessary piece of it
 
 MOVE ON if:
 - The existing paper(s) adequately cover the brainstorm's valuable content

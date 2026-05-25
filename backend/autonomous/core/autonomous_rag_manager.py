@@ -7,11 +7,11 @@ CRITICAL: This manager follows the "DIRECT INJECTION FIRST, RAG SECOND" principl
 - Content that doesn't fit is retrieved via RAG semantic search
 - NO truncation is used as fallback
 """
-import asyncio
 import logging
 from typing import Optional, List, Dict, Any, Tuple
 
 from backend.shared.config import system_config, rag_config
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.utils import count_tokens
 from backend.aggregator.core.rag_manager import rag_manager
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
@@ -68,7 +68,7 @@ class AutonomousRAGManager:
     async def get_brainstorm_context(
         self,
         topic_id: str,
-        max_tokens: int = 50000,
+        max_tokens: int,
         query: str = "",
         exclude_sources: Optional[List[str]] = None
     ) -> Tuple[str, bool]:
@@ -92,6 +92,8 @@ class AutonomousRAGManager:
         
         if not content:
             return "", False
+        if int(max_tokens or 0) <= 0:
+            raise ValueError("Brainstorm context retrieval requires a positive context budget.")
         
         # Count actual tokens
         content_tokens = count_tokens(content)
@@ -191,7 +193,7 @@ class AutonomousRAGManager:
     async def get_reference_papers_context(
         self,
         paper_ids: List[str],
-        max_total_tokens: int = 60000,
+        max_total_tokens: int,
         query: str = "",
         include_outlines: bool = True,
         exclude_sources: Optional[List[str]] = None
@@ -214,6 +216,8 @@ class AutonomousRAGManager:
         """
         if not paper_ids:
             return "", False
+        if int(max_total_tokens or 0) <= 0:
+            raise ValueError("Reference paper context retrieval requires a positive context budget.")
         
         # First, collect all paper content
         papers_content = []
@@ -371,7 +375,7 @@ class AutonomousRAGManager:
         reference_paper_ids: List[str],
         current_outline: str,
         current_paper: str,
-        context_budget: int = 100000,
+        context_budget: int,
         query: str = ""
     ) -> Dict[str, Any]:
         """
@@ -396,6 +400,9 @@ class AutonomousRAGManager:
         Returns:
             Dictionary with context components and allocation info
         """
+        if int(context_budget or 0) <= 0:
+            raise ValueError("Compiler context preparation requires a positive context budget.")
+
         # Calculate available budget after outline (mandatory - NEVER RAGed)
         outline_tokens = count_tokens(current_outline)
         system_overhead = 5000  # Reserve for system prompts, JSON schema, etc.
@@ -537,9 +544,13 @@ class AutonomousRAGManager:
         ):
             try:
                 await rag_manager.remove_document(source_name)
-                logger.info(f"Removed pruned paper RAG source {source_name}")
+                logger.info("Removed pruned paper RAG source %s", redact_log_text(source_name, 160))
             except Exception as e:
-                logger.debug(f"Reference paper RAG source {source_name} not removed: {e}")
+                logger.debug(
+                    "Reference paper RAG source %s not removed: %s",
+                    redact_log_text(source_name, 160),
+                    redact_log_text(e, 240),
+                )
 
 
 # Global instance

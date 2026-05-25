@@ -13,7 +13,7 @@ CHANGELOG:
 """
 import json
 import re
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Tuple, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -328,7 +328,6 @@ class JSONValidator:
         
         # Multi-strategy JSON repair
         parsed = None
-        repair_strategy = "none"
         
         try:
             # Attempt repair (includes strict parsing as first step)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -21,12 +22,12 @@ from backend.leanoj.core.leanoj_context import (
     ARTIFACT_FINAL_ATTEMPTS,
     ARTIFACT_FINAL_CYCLE_PACKETS,
     ARTIFACT_PARTIAL_PROOFS,
-    ARTIFACT_RECURSIVE_TOPICS,
     ARTIFACT_VERIFIED_SUBPROOFS,
     _remove_attempt_count_language,
     leanoj_context_manager,
 )
 from backend.leanoj.prompts import (
+    CREATIVITY_EMPHASIS_BOOST_PROMPT,
     build_brainstorm_batch_validation_prompt,
     build_brainstorm_prompt,
     build_brainstorm_prune_review_prompt,
@@ -62,6 +63,11 @@ from backend.shared.models import (
     ProofAttemptFeedback,
     ProofRecord,
     WorkflowTask,
+)
+from backend.shared.provider_pause import (
+    is_provider_credit_pause_error,
+    mark_provider_paused,
+    wait_for_provider_resume,
 )
 from backend.shared.token_tracker import token_tracker
 from backend.shared.utils import count_tokens
@@ -120,7 +126,6 @@ _MASTER_PROOF_EDIT_LOG_COMPACT_RECORD_LIMIT = 500
 _MASTER_PROOF_EDIT_LOG_RECENT_RECORDS_TO_KEEP = 150
 _MASTER_PROOF_NO_PROGRESS_LIMIT = 8
 _MASTER_PROOF_STALE_EDIT_FAILURE_HANDOFF_COUNT = 3
-_MASTER_PROOF_EDIT_SUMMARY_LIMIT = 1000
 _MASTER_PROOF_SHORTENING_CHAR_THRESHOLD = 80
 _LEANOJ_CONTEXT_ROLES = {"active_plan", "verified_hint", "refuted_construction", "scratch"}
 _LEANOJ_FINAL_ACTIVE_CONTEXT_ROLES = {"active_plan"}
@@ -151,6 +156,7 @@ class LeanOJConfigurationError(RuntimeError):
 
 
 _BrainstormSubmission = tuple[int, str, dict[str, Any]]
+_TopicCandidate = tuple[int, str, dict[str, Any]]
 
 
 class _LeanOJBrainstormSubmissionQueue:
@@ -202,13 +208,13 @@ class _LeanOJBrainstormSubmissionQueue:
         self._decrement_submitter(first[0])
         deadline = time.monotonic() + collect_window
         while len(batch) < max_count:
-            try:
+            item = None
+            with contextlib.suppress(asyncio.QueueEmpty):
                 item = self.queue.get_nowait()
+            if item is not None:
                 batch.append(item)
                 self._decrement_submitter(item[0])
                 continue
-            except asyncio.QueueEmpty:
-                pass
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -267,7 +273,6 @@ class LeanOJCoordinator:
         self._task_sequences: dict[str, int] = {}
 
         self._validated_topics: list[str] = []
-        self._recursive_topics: list[str] = []
         self._accepted_ideas: list[str] = []
         self._accepted_idea_records: list[dict[str, Any]] = []
         self._failed_feedback: list[dict[str, Any]] = []
@@ -525,6 +530,23 @@ class LeanOJCoordinator:
         token_tracker.start_timer()
         self._enable_api_logging()
         await self._persist_and_broadcast("leanoj_started")
+        if self._state.provider_paused:
+            pause_payload = {
+                "reason": self._state.provider_pause_reason,
+                "role_id": self._state.provider_pause_role_id,
+                "message": self._state.provider_pause_message,
+                "phase": self._state.phase,
+            }
+            mark_provider_paused()
+            await self._persist_and_broadcast("leanoj_provider_paused", pause_payload)
+            await wait_for_provider_resume(self._should_stop)
+            if self._should_stop():
+                raise asyncio.CancelledError()
+            self._state.provider_paused = False
+            self._state.provider_pause_reason = ""
+            self._state.provider_pause_role_id = ""
+            self._state.provider_pause_message = ""
+            await self._persist_and_broadcast("leanoj_provider_resumed", pause_payload)
 
         try:
             await self._run_workflow(self._request)
@@ -644,10 +666,11 @@ class LeanOJCoordinator:
                 return
             self._state.selected_topic = selected_topic
 
-        if await self._consume_force_brainstorm():
-            pass
-        elif self._state.phase == "initial_brainstorm" or (
-            self._state.phase == "initial_topic_candidates" and self._state.selected_topic
+        force_brainstorm_consumed = await self._consume_force_brainstorm()
+        if not force_brainstorm_consumed and (
+            self._state.phase == "initial_brainstorm" or (
+                self._state.phase == "initial_topic_candidates" and self._state.selected_topic
+            )
         ):
             await self._initial_brainstorm_phase(request)
 
@@ -797,7 +820,7 @@ class LeanOJCoordinator:
             await self._persist_and_broadcast("leanoj_brainstorm_skip_deferred")
             return False
 
-        topic_queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue(
+        topic_queue: asyncio.Queue[_TopicCandidate] = asyncio.Queue(
             maxsize=max(3, len(request.brainstorm_submitters) * 2)
         )
         submitter_tasks = [
@@ -845,17 +868,17 @@ class LeanOJCoordinator:
                         return bool(self._validated_topics)
                     continue
 
-                topics = [topic for _, topic in batch]
+                topics = [topic for _, topic, _ in batch]
                 logger.info(
                     "LeanOJ topic batch validation started (batch_size=%s, submitters=%s)",
                     len(batch),
-                    [submitter_index for submitter_index, _ in batch],
+                    [submitter_index for submitter_index, _, _ in batch],
                 )
                 await self._broadcast(
                     "leanoj_topic_batch_validation_started",
                     {
                         "batch_size": len(batch),
-                        "submitters": [submitter_index for submitter_index, _ in batch],
+                        "submitters": [submitter_index for submitter_index, _, _ in batch],
                         "accepted_topics": len(self._validated_topics),
                         "target_topics": target_topics,
                     },
@@ -865,8 +888,9 @@ class LeanOJCoordinator:
                     topics,
                     accepted_topics=list(self._validated_topics),
                 )
-                for (submitter_index, topic), accepted in zip(batch, decisions):
+                for (submitter_index, topic, metadata), accepted in zip(batch, decisions):
                     submitter_config = request.brainstorm_submitters[submitter_index - 1]
+                    creativity_emphasized = bool((metadata or {}).get("creativity_emphasized"))
                     if accepted:
                         self._validated_topics.append(topic)
                         await self._persist_and_broadcast(
@@ -877,6 +901,7 @@ class LeanOJCoordinator:
                                 "submitter_id": submitter_index,
                                 "submitter_model": submitter_config.model_id,
                                 "submitter_provider": submitter_config.provider,
+                                "creativity_emphasized": creativity_emphasized,
                                 "accepted_topics": len(self._validated_topics),
                                 "target_topics": target_topics,
                             },
@@ -890,6 +915,7 @@ class LeanOJCoordinator:
                                 "submitter_id": submitter_index,
                                 "submitter_model": submitter_config.model_id,
                                 "submitter_provider": submitter_config.provider,
+                                "creativity_emphasized": creativity_emphasized,
                                 "accepted_topics": len(self._validated_topics),
                                 "target_topics": target_topics,
                             },
@@ -905,17 +931,40 @@ class LeanOJCoordinator:
         request: LeanOJStartRequest,
         submitter_index: int,
         submitter: LeanOJRoleConfig,
-        topic_queue: asyncio.Queue[tuple[int, str]],
+        topic_queue: asyncio.Queue[_TopicCandidate],
         *,
         target_topics: int,
     ) -> None:
         task_prefix = f"leanoj_topic_sub{submitter_index}"
         role_id = f"leanoj_topic_submitter_{submitter_index}"
         attempt = 0
+        queued_count = 0
         while not self._should_stop():
             try:
                 attempt += 1
+                creativity_emphasized = (
+                    request.creativity_emphasis_boost_enabled
+                    and (queued_count + 1) % 5 == 0
+                )
                 topic_index = min(target_topics, len(self._validated_topics) + topic_queue.qsize() + 1)
+                prompt = build_topic_candidate_prompt(
+                    request.user_prompt,
+                    request.lean_template,
+                    self._validated_topics,
+                    creativity_emphasized=creativity_emphasized,
+                )
+                if creativity_emphasized and not self._prompt_fits_role_budget(prompt, submitter):
+                    logger.warning(
+                        "LeanOJ topic submitter %s skipped creativity emphasis because prompt exceeded context budget.",
+                        submitter_index,
+                    )
+                    creativity_emphasized = False
+                    prompt = build_topic_candidate_prompt(
+                        request.user_prompt,
+                        request.lean_template,
+                        self._validated_topics,
+                        creativity_emphasized=False,
+                    )
                 await self._broadcast(
                     "leanoj_topic_generation_started",
                     {
@@ -927,17 +976,14 @@ class LeanOJCoordinator:
                         "submitter_id": submitter_index,
                         "submitter_model": submitter.model_id,
                         "submitter_provider": submitter.provider,
+                        "creativity_emphasized": creativity_emphasized,
                     },
                 )
                 raw = await self._call_json(
                     submitter,
                     task_prefix,
                     role_id,
-                    build_topic_candidate_prompt(
-                        request.user_prompt,
-                        request.lean_template,
-                        self._validated_topics,
-                    ),
+                    prompt,
                     temperature=api_client_manager.parallel_brainstorm_submitter_temperature(submitter_index),
                 )
 
@@ -953,7 +999,9 @@ class LeanOJCoordinator:
                     )
                     continue
 
-                await topic_queue.put((submitter_index, topic))
+                metadata = {"creativity_emphasized": creativity_emphasized}
+                queued_count += 1
+                await topic_queue.put((submitter_index, topic, metadata))
                 await self._broadcast(
                     "leanoj_topic_candidate_queued",
                     {
@@ -961,6 +1009,7 @@ class LeanOJCoordinator:
                         "submitter_id": submitter_index,
                         "submitter_model": submitter.model_id,
                         "submitter_provider": submitter.provider,
+                        "creativity_emphasized": creativity_emphasized,
                         "queue_size": topic_queue.qsize(),
                         "topic_preview": self._summarize_error(topic, limit=220),
                     },
@@ -1186,6 +1235,14 @@ class LeanOJCoordinator:
                     zip(batch, decisions)
                 ):
                     submitter_config = request.brainstorm_submitters[submitter_index - 1]
+                    creativity_emphasized = bool((metadata or {}).get("creativity_emphasized"))
+                    proof_payload = (metadata or {}).get("brainstorm_lean_proof")
+                    lean_verified_proof = (
+                        isinstance(proof_payload, dict)
+                        and bool(str(proof_payload.get("theorem_statement") or "").strip())
+                        and bool(str(proof_payload.get("lean_code") or "").strip())
+                    )
+                    accepted = accepted or lean_verified_proof
                     if accepted:
                         await self._record_accepted_brainstorm_proof(request, submitter_index, metadata)
                         validation_feedback = (
@@ -1198,6 +1255,7 @@ class LeanOJCoordinator:
                             submitter_index,
                             phase_key,
                             validation_feedback,
+                            metadata,
                         )
                         self._state.accepted_brainstorm_count = len(self._accepted_ideas)
                         submission_preview = self._summarize_error(submission, limit=220)
@@ -1217,6 +1275,7 @@ class LeanOJCoordinator:
                                 "submitter_id": submitter_index,
                                 "submitter_model": submitter_config.model_id,
                                 "submitter_provider": submitter_config.provider,
+                                "creativity_emphasized": creativity_emphasized,
                                 "submission": submission,
                                 "submission_preview": submission_preview,
                                 "phase": phase_key,
@@ -1280,6 +1339,7 @@ class LeanOJCoordinator:
                                 "submitter_id": submitter_index,
                                 "submitter_model": submitter_config.model_id,
                                 "submitter_provider": submitter_config.provider,
+                                "creativity_emphasized": creativity_emphasized,
                                 "submission": submission,
                                 "submission_preview": submission_preview,
                                 "validator_reasoning": validation_feedback.get("reasoning", ""),
@@ -1413,21 +1473,32 @@ class LeanOJCoordinator:
     ) -> None:
         task_prefix = f"leanoj_brainstorm_sub{submitter_index}"
         role_id = f"leanoj_brainstorm_submitter_{submitter_index}"
+        queued_count = 0
         while not self._should_stop():
             try:
                 await self._wait_for_brainstorm_queue_turn(submission_queue, submitter_index)
                 if self._should_stop():
                     break
+                creativity_emphasized = (
+                    request.creativity_emphasis_boost_enabled
+                    and (queued_count + 1) % 5 == 0
+                )
                 active_topic = self._active_brainstorm_topic()
                 prompt_failed_feedback = self._general_brainstorm_feedback_records()
+                task_request = (
+                    "Generate one concrete proof-solving brainstorm idea for the active LeanOJ topic: "
+                    f"{active_topic}"
+                )
+                allocation_task_request = (
+                    f"{task_request}\n\n{CREATIVITY_EMPHASIS_BOOST_PROMPT}"
+                    if creativity_emphasized
+                    else task_request
+                )
                 context_blocks = await self._build_context_blocks(
                     request,
                     submitter,
                     mode="brainstorm",
-                    task_request=(
-                        "Generate one concrete proof-solving brainstorm idea for the active LeanOJ topic: "
-                        f"{active_topic}"
-                    ),
+                    task_request=allocation_task_request,
                     include_current_final_cycle_packet=True,
                     capped_rejection_feedback=self._format_capped_rejection_feedback(
                         "RECENT FAILED / REJECTION FEEDBACK SUMMARIES",
@@ -1435,11 +1506,35 @@ class LeanOJCoordinator:
                         limit=10,
                     ),
                 )
-                raw = await self._call_json(
-                    submitter,
-                    task_prefix,
-                    role_id,
-                    build_brainstorm_prompt(
+                prompt = build_brainstorm_prompt(
+                    request.user_prompt,
+                    request.lean_template,
+                    active_topic,
+                    self._accepted_ideas,
+                    [item.model_dump(mode="json") for item in self._state.verified_subproofs],
+                    prompt_failed_feedback,
+                    context_blocks=context_blocks,
+                    creativity_emphasized=creativity_emphasized,
+                )
+                if creativity_emphasized and not self._prompt_fits_role_budget(prompt, submitter):
+                    logger.warning(
+                        "LeanOJ brainstorm submitter %s skipped creativity emphasis because prompt exceeded context budget.",
+                        submitter_index,
+                    )
+                    creativity_emphasized = False
+                    context_blocks = await self._build_context_blocks(
+                        request,
+                        submitter,
+                        mode="brainstorm",
+                        task_request=task_request,
+                        include_current_final_cycle_packet=True,
+                        capped_rejection_feedback=self._format_capped_rejection_feedback(
+                            "RECENT FAILED / REJECTION FEEDBACK SUMMARIES",
+                            prompt_failed_feedback,
+                            limit=10,
+                        ),
+                    )
+                    prompt = build_brainstorm_prompt(
                         request.user_prompt,
                         request.lean_template,
                         active_topic,
@@ -1447,10 +1542,16 @@ class LeanOJCoordinator:
                         [item.model_dump(mode="json") for item in self._state.verified_subproofs],
                         prompt_failed_feedback,
                         context_blocks=context_blocks,
-                    ),
+                        creativity_emphasized=False,
+                    )
+                raw = await self._call_json(
+                    submitter,
+                    task_prefix,
+                    role_id,
+                    prompt,
                     temperature=api_client_manager.parallel_brainstorm_submitter_temperature(submitter_index),
                 )
-                metadata: dict[str, Any] = {}
+                metadata: dict[str, Any] = {"creativity_emphasized": creativity_emphasized}
                 if is_lean_proof_submission(raw):
                     source_context = "\n\n".join(
                         part
@@ -1491,6 +1592,7 @@ class LeanOJCoordinator:
                                 "submitter_id": submitter_index,
                                 "submitter_model": submitter.model_id,
                                 "submitter_provider": submitter.provider,
+                                "creativity_emphasized": creativity_emphasized,
                                 "feedback": feedback,
                             },
                         )
@@ -1504,6 +1606,10 @@ class LeanOJCoordinator:
                         "theorem_statement": gate_result.theorem_statement,
                         "theorem_name": gate_result.theorem_name,
                         "formal_sketch": gate_result.formal_sketch,
+                        "expected_novelty_tier": gate_result.expected_novelty_tier,
+                        "prompt_relevance_rationale": gate_result.prompt_relevance_rationale,
+                        "novelty_rationale": gate_result.novelty_rationale,
+                        "why_not_standard_known_result": gate_result.why_not_standard_known_result,
                         "lean_code": gate_result.lean_code,
                         "lean_feedback": gate_result.lean_feedback,
                         "reasoning": gate_result.reasoning,
@@ -1518,6 +1624,7 @@ class LeanOJCoordinator:
                     await self._wait_for_brainstorm_queue_turn(submission_queue, submitter_index)
                     if self._should_stop():
                         break
+                    queued_count += 1
                     await submission_queue.put((submitter_index, submission, metadata))
                     await self._sync_brainstorm_queue_pause_state(
                         submission_queue,
@@ -1537,6 +1644,7 @@ class LeanOJCoordinator:
                             "submitter_id": submitter_index,
                             "submitter_model": submitter.model_id,
                             "submitter_provider": submitter.provider,
+                            "creativity_emphasized": creativity_emphasized,
                             "queue_size": submission_queue.qsize(),
                             "submission_preview": self._summarize_error(submission, limit=220),
                         },
@@ -1563,10 +1671,10 @@ class LeanOJCoordinator:
 
     async def _dequeue_topic_batch(
         self,
-        topic_queue: asyncio.Queue[tuple[int, str]],
+        topic_queue: asyncio.Queue[_TopicCandidate],
         *,
         max_count: int = 3,
-    ) -> list[tuple[int, str]]:
+    ) -> list[_TopicCandidate]:
         try:
             first = await asyncio.wait_for(topic_queue.get(), timeout=1.0)
         except asyncio.TimeoutError:
@@ -1575,11 +1683,12 @@ class LeanOJCoordinator:
         batch = [first]
         deadline = time.monotonic() + 0.25
         while len(batch) < max_count:
-            try:
-                batch.append(topic_queue.get_nowait())
+            item = None
+            with contextlib.suppress(asyncio.QueueEmpty):
+                item = topic_queue.get_nowait()
+            if item is not None:
+                batch.append(item)
                 continue
-            except asyncio.QueueEmpty:
-                pass
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1819,8 +1928,10 @@ class LeanOJCoordinator:
         submitter_index: int,
         phase_key: str,
         validation_feedback: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         validation_feedback = validation_feedback or {}
+        metadata = metadata or {}
         context_role = self._normalize_brainstorm_context_role(validation_feedback, submission)
         self._accepted_ideas.append(submission)
         self._state.brainstorm_acceptance_events += 1
@@ -1832,6 +1943,7 @@ class LeanOJCoordinator:
                 "phase": phase_key,
                 "validator_summary": str(validation_feedback.get("summary") or "").strip(),
                 "validator_reasoning": str(validation_feedback.get("reasoning") or "").strip(),
+                "creativity_emphasized": bool(metadata.get("creativity_emphasized")),
                 "created_at": datetime.now().isoformat(),
                 "acceptance_event": self._state.brainstorm_acceptance_events,
             }
@@ -2574,7 +2686,6 @@ class LeanOJCoordinator:
             context_window=role_config.context_window,
             max_output_tokens=role_config.max_output_tokens,
             accepted_ideas=accepted_context,
-            recursive_topics=self._recursive_topics,
             verified_subproofs=(
                 self._final_solver_verified_subproof_dicts()
                 if resolved_scope == "final_solver"
@@ -3431,6 +3542,25 @@ class LeanOJCoordinator:
                     lean_code,
                 )
                 if adequacy_error:
+                    await self._record_partial_proof(
+                        {
+                            "session_id": self._state.session_id,
+                            "attempt": attempt_number,
+                            "target": "final",
+                            "request": "final Proof Solver answer adequacy continuation",
+                            "theorem_or_lemma": "Lean-accepted final scaffold not yet final-ready",
+                            "placeholder_tokens": [],
+                            "lean_code": lean_code,
+                            "reasoning": reasoning,
+                            "high_value_scaffold": False,
+                            "master_seed_eligible": False,
+                            "created_at": datetime.now().isoformat(),
+                            "summary": (
+                                "Lean accepted this code, but MOTO classified it as not final-ready "
+                                f"for the LeanOJ answer obligation: {adequacy_error}"
+                            ),
+                        }
+                    )
                     lean_result.success = False
                     lean_result.error_output = adequacy_error
             if lean_result.success:
@@ -3441,6 +3571,25 @@ class LeanOJCoordinator:
                     lean_result=lean_result,
                 )
                 if not review_solved:
+                    await self._record_partial_proof(
+                        {
+                            "session_id": self._state.session_id,
+                            "attempt": attempt_number,
+                            "target": "final",
+                            "request": "final Proof Solver semantic-review continuation",
+                            "theorem_or_lemma": "Lean-accepted final code requiring semantic continuation",
+                            "placeholder_tokens": [],
+                            "lean_code": lean_code,
+                            "reasoning": reasoning,
+                            "high_value_scaffold": False,
+                            "master_seed_eligible": False,
+                            "created_at": datetime.now().isoformat(),
+                            "summary": (
+                                "Lean accepted this code, but final semantic review requested continuation: "
+                                f"{review_feedback}"
+                            ),
+                        }
+                    )
                     lean_result.success = False
                     lean_result.error_output = (
                         "PROOF SOLVER FINAL SOLUTION REVIEW REJECTED: Lean 4 accepted the code, but the "
@@ -3576,7 +3725,6 @@ class LeanOJCoordinator:
                 continue
 
             edit = self._normalize_final_solver_edit(raw)
-            action = str(edit.get("action") or "")
             reasoning = str(edit.get("reasoning") or "")
             updated_master_proof, edit_error = self._apply_master_proof_edit(current_master_proof, edit)
             if edit_error or updated_master_proof is None:
@@ -4461,6 +4609,38 @@ class LeanOJCoordinator:
         keys = ", ".join(sorted(str(key) for key in parsed.keys())[:8])
         return f"{role_id or task_id} returned JSON fields: {keys or 'none'}"
 
+    async def _pause_for_provider_credits(
+        self,
+        *,
+        role_id: str,
+        call_payload: dict[str, Any],
+        message: str,
+        duration_ms: int,
+    ) -> None:
+        mark_provider_paused()
+        pause_payload = {
+            **call_payload,
+            "duration_ms": duration_ms,
+            "retryable": True,
+            "reason": "openrouter_credit_exhaustion",
+            "message": message,
+        }
+        self._state.provider_paused = True
+        self._state.provider_pause_reason = "openrouter_credit_exhaustion"
+        self._state.provider_pause_role_id = role_id
+        self._state.provider_pause_message = message
+        await self._persist_and_broadcast("leanoj_provider_paused", pause_payload)
+
+        await wait_for_provider_resume(self._should_stop)
+        if self._should_stop():
+            raise asyncio.CancelledError()
+
+        self._state.provider_paused = False
+        self._state.provider_pause_reason = ""
+        self._state.provider_pause_role_id = ""
+        self._state.provider_pause_message = ""
+        await self._persist_and_broadcast("leanoj_provider_resumed", pause_payload)
+
     async def _call_json(
         self,
         config: LeanOJRoleConfig,
@@ -4564,6 +4744,34 @@ class LeanOJCoordinator:
                 raise
             except Exception as exc:
                 duration_ms = round((time.monotonic() - started) * 1000)
+                if is_provider_credit_pause_error(exc):
+                    message = self._summarize_error(str(exc), limit=700)
+                    logger.warning(
+                        "Proof Solver model call paused for provider credits (role=%s, task=%s, phase=%s, duration_ms=%s): %s",
+                        role_id,
+                        task_id,
+                        call_payload["phase"],
+                        duration_ms,
+                        message,
+                    )
+                    await self._broadcast(
+                        "leanoj_model_call_failed",
+                        {
+                            **call_payload,
+                            "duration_ms": duration_ms,
+                            "retryable": True,
+                            "reason": "openrouter_credit_exhaustion",
+                            "message": message,
+                        },
+                    )
+                    await self._pause_for_provider_credits(
+                        role_id=role_id,
+                        call_payload=call_payload,
+                        message=message,
+                        duration_ms=duration_ms,
+                    )
+                    current_prompt = prompt
+                    continue
                 if self._is_non_retryable_model_error(exc):
                     logger.error(
                         "Proof Solver model call failed with non-retryable error (role=%s, task=%s, phase=%s, duration_ms=%s): %s",
@@ -4642,6 +4850,14 @@ class LeanOJCoordinator:
                 self._refresh_workflow_tasks(task_prefix, role_id)
 
         raise asyncio.CancelledError()
+
+    @staticmethod
+    def _prompt_fits_role_budget(prompt: str, config: LeanOJRoleConfig) -> bool:
+        max_input_tokens = rag_config.get_available_input_tokens(
+            config.context_window,
+            config.max_output_tokens,
+        )
+        return count_tokens(prompt) <= max_input_tokens
 
     @staticmethod
     def _missing_model_roles(request: LeanOJStartRequest) -> list[str]:
@@ -4751,7 +4967,6 @@ class LeanOJCoordinator:
             session_id=self._state.session_id,
             accepted_ideas=self._accepted_ideas,
             accepted_idea_records=self._accepted_idea_records,
-            recursive_topics=self._recursive_topics,
             verified_subproofs=self._verified_subproof_dicts(),
             partial_proofs=self._partial_proofs,
             failed_subproofs=self._failed_context_dicts(),

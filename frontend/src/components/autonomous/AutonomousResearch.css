@@ -185,6 +185,80 @@
   gap: 0.5rem;
 }
 
+.autonomous-controls-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.35rem;
+}
+
+.autonomous-controls-stack .autonomous-controls {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.allowed-outputs-row {
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  width: fit-content;
+  max-width: none;
+  min-height: 32px;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid var(--border-subtle, #2f2f2f);
+  border-radius: 999px;
+  background: rgba(23, 23, 23, 0.85);
+  white-space: nowrap;
+}
+
+.allowed-outputs-label {
+  display: block;
+  color: var(--text-primary, #e0e0e0);
+  font-weight: 700;
+  font-size: 0.78rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.allowed-output-option {
+  display: inline-grid;
+  grid-template-columns: 13px max-content;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0;
+  color: var(--text-secondary, #b8b8b8);
+  font-size: 0.78rem;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.allowed-output-option input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  flex: 0 0 auto;
+  display: block;
+}
+
+.allowed-output-text {
+  display: block;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.allowed-output-option input:disabled {
+  cursor: not-allowed;
+}
+
+.allowed-output-option:has(input:disabled) {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .leanoj-header {
   align-items: flex-start;
   gap: 1.5rem;
@@ -603,6 +677,11 @@
 .activity-info {
   background: rgba(24, 204, 23, 0.1);
   color: #18cc17;
+}
+
+.activity-warning {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
 }
 
 .activity-neutral {
@@ -1702,6 +1781,11 @@
   background: rgba(24, 204, 23, 0.08);
 }
 
+.auto-log-entry.log-warning {
+  border-left-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+}
+
 .log-time {
   color: var(--text-secondary, #666);
   flex-shrink: 0;
@@ -1723,6 +1807,10 @@
 
 .auto-log-entry.log-reject .log-event {
   color: #e74c3c;
+}
+
+.auto-log-entry.log-warning .log-event {
+  color: #f59e0b;
 }
 
 .log-message {

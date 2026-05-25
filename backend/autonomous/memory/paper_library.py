@@ -409,7 +409,19 @@ class PaperLibrary:
             idx for header in terminal_headers if (idx := stripped.find(header)) > 0
         ]
         if header_positions:
-            stripped = stripped[:min(header_positions)]
+            proof_start = min(header_positions)
+            review_match = re.search(
+                r"(?:^|\n)\s*(?:#+\s*)?AI Self-Review and Limitations\s*\n",
+                stripped[proof_start:],
+                re.IGNORECASE,
+            )
+            if review_match:
+                review_start = proof_start + review_match.start()
+                if review_start > 0 and stripped[review_start] == "\n":
+                    review_start += 1
+                stripped = f"{stripped[:proof_start].rstrip()}\n\n{stripped[review_start:].lstrip()}"
+            else:
+                stripped = stripped[:proof_start]
 
         return stripped.rstrip()
 
@@ -837,7 +849,11 @@ class PaperLibrary:
             
             for marker in placeholder_markers:
                 if marker in content:
-                    logger.debug(f"Paper {paper_id} incomplete: Contains placeholder {marker}")
+                    logger.debug(
+                        "Paper %s incomplete: Contains placeholder %s",
+                        redact_log_text(paper_id, 120),
+                        redact_log_text(marker, 160),
+                    )
                     return False
             
             # Check for abstract section
@@ -857,7 +873,10 @@ class PaperLibrary:
                     break
             
             if not has_abstract:
-                logger.debug(f"Paper {paper_id} incomplete: No abstract section found")
+                logger.debug(
+                    "Paper %s incomplete: No abstract section found",
+                    redact_log_text(paper_id, 120),
+                )
                 return False
             
             # Check for introduction section
@@ -877,7 +896,10 @@ class PaperLibrary:
                     break
             
             if not has_intro:
-                logger.debug(f"Paper {paper_id} incomplete: No introduction section found")
+                logger.debug(
+                    "Paper %s incomplete: No introduction section found",
+                    redact_log_text(paper_id, 120),
+                )
                 return False
             
             # Check for conclusion section
@@ -897,13 +919,20 @@ class PaperLibrary:
                     break
             
             if not has_conclusion:
-                logger.debug(f"Paper {paper_id} incomplete: No conclusion section found")
+                logger.debug(
+                    "Paper %s incomplete: No conclusion section found",
+                    redact_log_text(paper_id, 120),
+                )
                 return False
             
             # Check for body content (between intro and conclusion)
             # Simple check: paper must be > 1000 chars (excluding placeholders)
             if len(content) < 1000:
-                logger.debug(f"Paper {paper_id} incomplete: Content too short ({len(content)} chars)")
+                logger.debug(
+                    "Paper %s incomplete: Content too short (%s chars)",
+                    redact_log_text(paper_id, 120),
+                    len(content),
+                )
                 return False
             
             return True

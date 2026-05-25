@@ -2,7 +2,13 @@ import React, { useEffect, useMemo, useState } from 'react';
 import LatexRenderer from '../LatexRenderer';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
-import { downloadRawText, downloadPDFViaBackend, sanitizeFilename } from '../../utils/downloadHelpers';
+import {
+  PDF_UNAVAILABLE_MESSAGE,
+  downloadRawText,
+  downloadPDFViaBackend,
+  isPDFDownloadAvailable,
+  sanitizeFilename,
+} from '../../utils/downloadHelpers';
 import { buildResearchRunGroups } from '../../utils/researchRunHistory';
 import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
 import { websocket } from '../../services/websocket';
@@ -28,7 +34,7 @@ function truncateAbstract(abstract, maxLength = 220) {
   return `${abstract.substring(0, maxLength)}...`;
 }
 
-export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
+export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabilities }) {
   const [papers, setPapers] = useState([]);
   const [prunedPapers, setPrunedPapers] = useState([]);
   const [finalAnswers, setFinalAnswers] = useState([]);
@@ -47,6 +53,7 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
   const [critiquePaper, setCritiquePaper] = useState(null);
   const [proofActionMessage, setProofActionMessage] = useState('');
+  const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   const {
     getSourceState,
     manualCheckEnabled,
@@ -237,6 +244,11 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
   const handleDownloadPDF = async (e, paper) => {
     e.stopPropagation();
 
+    if (!pdfDownloadAvailable) {
+      alert(PDF_UNAVAILABLE_MESSAGE);
+      return;
+    }
+
     if (expandedId !== paper.history_id || !expandedContent) {
       alert('Please expand the paper first.');
       return;
@@ -263,6 +275,8 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
         console.error('PDF generation error:', downloadError);
         alert(`PDF generation failed: ${downloadError.message}`);
       },
+      null,
+      { pdfDownloadAvailable },
     );
   };
 
@@ -560,8 +574,8 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged }) {
                             <button
                               className="btn-download"
                               onClick={(e) => handleDownloadPDF(e, paper)}
-                              disabled={generatingPdfId === paper.history_id || !expandedContent}
-                              title="Download as PDF"
+                              disabled={generatingPdfId === paper.history_id || !expandedContent || !pdfDownloadAvailable}
+                              title={pdfDownloadAvailable ? 'Download as PDF' : PDF_UNAVAILABLE_MESSAGE}
                             >
                               {generatingPdfId === paper.history_id ? 'Preparing PDF...' : 'Download PDF'}
                             </button>

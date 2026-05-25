@@ -8,7 +8,6 @@ import logging
 import re
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 
 ARTIFACT_ACCEPTED_IDEAS = "accepted_ideas"
-ARTIFACT_RECURSIVE_TOPICS = "recursive_topics"
 ARTIFACT_VERIFIED_SUBPROOFS = "verified_subproofs"
 ARTIFACT_PARTIAL_PROOFS = "partial_proofs"
 ARTIFACT_FINAL_ATTEMPTS = "final_attempts"
@@ -53,7 +51,6 @@ def _remove_attempt_count_language(value: Any) -> str:
 
 USEFUL_ARTIFACTS = (
     ARTIFACT_ACCEPTED_IDEAS,
-    ARTIFACT_RECURSIVE_TOPICS,
     ARTIFACT_VERIFIED_SUBPROOFS,
     ARTIFACT_PARTIAL_PROOFS,
     ARTIFACT_FINAL_ATTEMPTS,
@@ -130,7 +127,6 @@ class LeanOJContextManager:
         session_id: str,
         accepted_ideas: list[str],
         accepted_idea_records: list[dict[str, Any]] | None = None,
-        recursive_topics: list[str] | None = None,
         verified_subproofs: list[dict[str, Any]],
         partial_proofs: list[dict[str, Any]],
         failed_subproofs: list[dict[str, Any]],
@@ -157,7 +153,6 @@ class LeanOJContextManager:
         if not accepted_records:
             accepted_records = [{"content": item} for item in accepted_ideas]
         await self._sync_jsonl(base / f"{ARTIFACT_ACCEPTED_IDEAS}.jsonl", session_id, ARTIFACT_ACCEPTED_IDEAS, accepted_records)
-        await self._sync_jsonl(base / f"{ARTIFACT_RECURSIVE_TOPICS}.jsonl", session_id, ARTIFACT_RECURSIVE_TOPICS, [{"content": item} for item in (recursive_topics or [])])
         await self._sync_jsonl(base / f"{ARTIFACT_VERIFIED_SUBPROOFS}.jsonl", session_id, ARTIFACT_VERIFIED_SUBPROOFS, verified_subproofs)
         await self._sync_jsonl(base / f"{ARTIFACT_PARTIAL_PROOFS}.jsonl", session_id, ARTIFACT_PARTIAL_PROOFS, partial_proofs)
         await self._sync_jsonl(base / f"{ARTIFACT_FAILED_SUBPROOFS}.jsonl", session_id, ARTIFACT_FAILED_SUBPROOFS, failed_subproofs)
@@ -182,7 +177,6 @@ class LeanOJContextManager:
         return {
             ARTIFACT_ACCEPTED_IDEAS: self._records_to_strings(self._read_jsonl(base / f"{ARTIFACT_ACCEPTED_IDEAS}.jsonl")),
             "accepted_idea_records": self._read_jsonl(base / f"{ARTIFACT_ACCEPTED_IDEAS}.jsonl"),
-            ARTIFACT_RECURSIVE_TOPICS: self._records_to_strings(self._read_jsonl(base / f"{ARTIFACT_RECURSIVE_TOPICS}.jsonl")),
             ARTIFACT_VERIFIED_SUBPROOFS: self._read_jsonl(base / f"{ARTIFACT_VERIFIED_SUBPROOFS}.jsonl"),
             ARTIFACT_PARTIAL_PROOFS: self._read_jsonl(base / f"{ARTIFACT_PARTIAL_PROOFS}.jsonl"),
             ARTIFACT_FAILED_SUBPROOFS: self._read_jsonl(base / f"{ARTIFACT_FAILED_SUBPROOFS}.jsonl"),
@@ -201,7 +195,6 @@ class LeanOJContextManager:
         context_window: int,
         max_output_tokens: int,
         accepted_ideas: list[str],
-        recursive_topics: list[str] | None = None,
         verified_subproofs: list[dict[str, Any]],
         partial_proofs: list[dict[str, Any]],
         failed_subproofs: list[dict[str, Any]],
@@ -250,7 +243,6 @@ class LeanOJContextManager:
             session_id=session_id,
             mode=normalized_mode,
             accepted_ideas=accepted_ideas,
-            recursive_topics=recursive_topics or [],
             verified_subproofs=verified_subproofs,
             partial_proofs=partial_proofs,
             failed_subproofs=failed_subproofs,
@@ -444,7 +436,6 @@ class LeanOJContextManager:
         session_id: str,
         mode: str,
         accepted_ideas: list[str],
-        recursive_topics: list[str] | None = None,
         verified_subproofs: list[dict[str, Any]],
         partial_proofs: list[dict[str, Any]],
         failed_subproofs: list[dict[str, Any]],
@@ -476,12 +467,6 @@ class LeanOJContextManager:
                 self._format_strings_for_final(accepted_ideas)
                 if mode == "final_solver"
                 else self._format_strings(accepted_ideas),
-            ),
-            ARTIFACT_RECURSIVE_TOPICS: (
-                "RECURSIVE PROOF-REPAIR TOPICS",
-                self._format_strings_for_final(recursive_topics)
-                if mode == "final_solver"
-                else self._format_strings(recursive_topics),
             ),
             ARTIFACT_FAILED_SUBPROOFS: (
                 "FAILED SUBPROOF FEEDBACK",

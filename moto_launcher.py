@@ -4,6 +4,7 @@ This is an internal script. Use "Click To Launch MOTO.bat" on Windows or "linux-
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -29,7 +30,6 @@ import zipfile
 from moto_updater import (
     apply_update,
     build_update_prompt,
-    build_warning_message,
     check_for_updates,
     classify_install_state,
     cleanup_launcher_state,
@@ -88,7 +88,7 @@ def _enable_ansi_on_windows() -> None:
 
         kernel32 = ctypes.windll.kernel32
         kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
-    except Exception:
+    except (AttributeError, OSError, ValueError):
         return
 
 
@@ -99,10 +99,8 @@ def cprint(message: str, colour: str = RESET) -> None:
 def exit_with_pause(code: int = 0) -> None:
     print()
     cprint("Press Enter to close...", YELLOW)
-    try:
+    with contextlib.suppress(EOFError):
         input()
-    except EOFError:
-        pass
     sys.exit(code)
 
 
@@ -918,10 +916,8 @@ def _download_file(url: str, destination: Path) -> None:
                 handle.write(chunk)
         tmp.replace(destination)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 
@@ -1124,7 +1120,6 @@ def install_lean4(
 
     elan_bin_dir = Path.home() / ".elan" / "bin"
     lean_cmd = get_lean_command()
-    lake_cmd = get_lake_command()
 
     if lean_cmd and elan_bin_dir.exists():
         _prepend_path_entry(str(elan_bin_dir), env)
@@ -1274,8 +1269,8 @@ def install_lean4(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        except Exception:
-            pass
+        except OSError as exc:
+            cprint(f"WARNING: Could not enable Git long paths automatically: {exc}", YELLOW)
 
     workspace_dir = Path(runtime.data_root) / "lean4_workspace"
     try:
@@ -1491,7 +1486,7 @@ def check_lm_studio() -> None:
         urlopen("http://127.0.0.1:1234/v1/models", timeout=3)
         lm_available = True
     except (URLError, OSError):
-        pass
+        lm_available = False
 
     if lm_available:
         cprint("LM Studio is running and responding!", GREEN)

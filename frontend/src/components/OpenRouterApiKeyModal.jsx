@@ -1,20 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { openRouterAPI } from '../services/api';
+import { cloudAccessAPI, openRouterAPI } from '../services/api';
 import './settings-common.css';
 
 /**
- * Modal for configuring the global OpenRouter API key.
- * This key is used for per-role OpenRouter model selection and can also be reused by boost.
+ * Modal for configuring cloud provider access.
  * 
  * Shows when:
- * 1. User clicks "Use OpenRouter" on any role but no API key is configured
- * 2. LM Studio is unavailable and user needs OpenRouter as primary provider
- * 3. User explicitly wants to manage their API key
+ * 1. User clicks the Cloud Access & Keys header chip
+ * 2. User clicks "Use OpenRouter" on any role but no API key is configured
+ * 3. LM Studio is unavailable and user needs cloud access as primary provider
  */
 export default function OpenRouterApiKeyModal({
   isOpen,
   onClose,
   onKeySet,
+  onCloudAccessChanged,
   reason = 'setup',
   capabilities,
 }) {
@@ -24,6 +24,12 @@ export default function OpenRouterApiKeyModal({
   const [testResult, setTestResult] = useState(null);
   const [error, setError] = useState('');
   const [hasStoredKey, setHasStoredKey] = useState(false);
+  const [codexStatus, setCodexStatus] = useState({ configured: false });
+  const [codexLoading, setCodexLoading] = useState(false);
+  const [codexState, setCodexState] = useState('');
+  const [codexRedirectUri, setCodexRedirectUri] = useState('');
+  const [codexCallbackInput, setCodexCallbackInput] = useState('');
+  const [codexMessage, setCodexMessage] = useState('');
   const genericMode = Boolean(capabilities?.genericMode);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
 
@@ -33,6 +39,7 @@ export default function OpenRouterApiKeyModal({
       setApiKey('');
       setTestResult(null);
       setError('');
+      setCodexMessage('');
       let isCancelled = false;
 
       const loadKeyStatus = async () => {
@@ -47,8 +54,21 @@ export default function OpenRouterApiKeyModal({
           }
         }
       };
+      const loadCloudStatus = async () => {
+        try {
+          const status = await cloudAccessAPI.getOpenAICodexStatus();
+          if (!isCancelled) {
+            setCodexStatus(status.status || { configured: false });
+          }
+        } catch {
+          if (!isCancelled) {
+            setCodexStatus({ configured: false });
+          }
+        }
+      };
 
       loadKeyStatus();
+      loadCloudStatus();
 
       return () => {
         isCancelled = true;
@@ -57,6 +77,28 @@ export default function OpenRouterApiKeyModal({
     setHasStoredKey(false);
     return undefined;
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || !codexState) return undefined;
+    const interval = window.setInterval(async () => {
+      try {
+        const status = await cloudAccessAPI.getOpenAICodexStatus();
+        const nextStatus = status.status || { configured: false };
+        setCodexStatus(nextStatus);
+        if (nextStatus.configured) {
+          setCodexState('');
+          setCodexCallbackInput('');
+          setCodexMessage('OpenAI Codex login saved.');
+          if (onCloudAccessChanged) {
+            onCloudAccessChanged(true);
+          }
+        }
+      } catch {
+        // Keep waiting; manual paste remains available.
+      }
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [isOpen, codexState, onCloudAccessChanged]);
 
   const handleTestConnection = async () => {
     if (!apiKey.trim()) {
@@ -95,12 +137,12 @@ export default function OpenRouterApiKeyModal({
       // Save to backend
       await openRouterAPI.setApiKey(apiKey.trim());
       setHasStoredKey(true);
-      
+
       // Notify parent
       if (onKeySet) {
         await onKeySet(apiKey.trim());
       }
-      
+
       onClose();
     } catch (err) {
       setError(err.message || 'Failed to save API key');
@@ -121,14 +163,83 @@ export default function OpenRouterApiKeyModal({
     }
   };
 
+  const handleStartCodexLogin = async () => {
+    setCodexLoading(true);
+    setCodexMessage('');
+    setError('');
+    try {
+      const result = await cloudAccessAPI.startOpenAICodexLogin();
+      setCodexState(result.state || '');
+      setCodexRedirectUri(result.redirect_uri || '');
+      if (result.authorization_url) {
+        window.open(result.authorization_url, '_blank', 'noopener,noreferrer');
+      }
+      setCodexMessage(result.callback_available
+        ? 'OpenAI login opened. MOTO will capture the callback automatically; paste the callback URL or code below if the browser cannot return to MOTO.'
+        : 'OpenAI login opened. The local callback port is unavailable, so paste the full callback URL or authorization code below after sign-in.'
+      );
+    } catch (err) {
+      setError(err.message || 'Failed to start OpenAI Codex login');
+    } finally {
+      setCodexLoading(false);
+    }
+  };
+
+  const handleCompleteCodexLogin = async () => {
+    if (!codexCallbackInput.trim()) {
+      setError('Paste the OpenAI callback URL or authorization code first');
+      return;
+    }
+    setCodexLoading(true);
+    setCodexMessage('');
+    setError('');
+    try {
+      const isUrl = /^https?:\/\//i.test(codexCallbackInput.trim());
+      const result = await cloudAccessAPI.exchangeOpenAICodexCode({
+        code: isUrl ? '' : codexCallbackInput.trim(),
+        redirectUrl: isUrl ? codexCallbackInput.trim() : '',
+        state: codexState,
+        redirectUri: codexRedirectUri || null,
+      });
+      setCodexStatus(result.status || { configured: true });
+      setCodexCallbackInput('');
+      setCodexState('');
+      setCodexMessage('OpenAI Codex login saved.');
+      if (onCloudAccessChanged) {
+        onCloudAccessChanged(true);
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to complete OpenAI Codex login');
+    } finally {
+      setCodexLoading(false);
+    }
+  };
+
+  const handleClearCodexLogin = async () => {
+    setCodexLoading(true);
+    setCodexMessage('');
+    setError('');
+    try {
+      await cloudAccessAPI.clearOpenAICodexLogin();
+      setCodexStatus({ configured: false });
+      setCodexCallbackInput('');
+      setCodexState('');
+      setCodexMessage('OpenAI Codex login cleared.');
+    } catch (err) {
+      setError(err.message || 'Failed to clear OpenAI Codex login');
+    } finally {
+      setCodexLoading(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   const reasonMessages = {
-    setup: 'Configure your OpenRouter API key to use OpenRouter models for any role.',
-    startup_setup: 'Save your OpenRouter API key to unlock cloud models. MOTO will apply the recommended default profile immediately, and you can switch to your team profile or another default profile later in Settings.',
+    setup: 'Configure cloud model access for MOTO roles.',
+    startup_setup: 'Save cloud access credentials to unlock cloud models. MOTO will apply the recommended default profile immediately, and you can switch profiles later in Settings.',
     lm_studio_unavailable: lmStudioEnabled
-      ? 'LM Studio is not available. Configure OpenRouter to continue.'
-      : 'This deployment disables LM Studio. Configure OpenRouter to continue.',
+      ? 'LM Studio is not available. Configure cloud access to continue.'
+      : 'This deployment disables LM Studio. Configure cloud access to continue.',
     no_key: 'An OpenRouter API key is required to use OpenRouter models.',
   };
   const storedKeyCopy = genericMode
@@ -149,7 +260,7 @@ export default function OpenRouterApiKeyModal({
       <div 
         className="inline-modal-content"
         style={{
-          width: '500px',
+          width: '640px',
           maxWidth: '90vw',
           backgroundColor: '#1a1a2e',
           borderRadius: '12px',
@@ -157,7 +268,7 @@ export default function OpenRouterApiKeyModal({
       >
         <div className="settings-header-row" style={{ marginBottom: '1.5rem' }}>
           <h2 style={{ margin: 0, color: '#fff', fontSize: '1.4rem' }}>
-            OpenRouter API Key
+            Cloud Access & Keys
           </h2>
           <button
             onClick={onClose}
@@ -178,32 +289,197 @@ export default function OpenRouterApiKeyModal({
           {reasonMessages[reason] || reasonMessages.setup}
         </p>
 
-        {/* API Key Input */}
-        <div style={{ marginBottom: '1rem' }}>
-          <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
-            API Key
-          </label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="sk-or-v1-..."
-            className="input-dark"
-            style={{
-              fontSize: '0.95rem',
-            }}
-          />
-          <small className="hint-text hint-text--dim">
-            Get your API key at{' '}
-            <a 
-              href="https://openrouter.ai/keys" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              style={{ color: '#18cc17' }}
+        <div className="submitter-config-section" style={{ marginBottom: '1rem' }}>
+          <h3 style={{ marginTop: 0, color: '#fff', fontSize: '1rem' }}>OpenRouter API Key</h3>
+          <p className="settings-hint">
+            Use OpenRouter models across MOTO roles. This is the existing cloud-provider path and can still be reused by API Boost.
+          </p>
+          <div style={{ marginBottom: '1rem' }}>
+            <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+              API Key
+            </label>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-or-v1-..."
+              className="input-dark"
+              style={{
+                fontSize: '0.95rem',
+              }}
+            />
+            <small className="hint-text hint-text--dim">
+              Get your API key at{' '}
+              <a
+                href="https://openrouter.ai/keys"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: '#18cc17' }}
+              >
+                openrouter.ai/keys
+              </a>
+            </small>
+          </div>
+
+          {testResult && testResult.connected && (
+            <div className="test-result-banner test-result-banner--success" style={{
+              marginBottom: '1rem',
+            }}>
+              Connection successful! {testResult.model_count} models available.
+            </div>
+          )}
+
+          {hasStoredKey && !apiKey.trim() && (
+            <div className="test-result-banner test-result-banner--success" style={{
+              marginBottom: '1rem',
+            }}>
+              {storedKeyCopy}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
+            <button
+              onClick={handleTestConnection}
+              disabled={testing || !apiKey.trim()}
+              style={{
+                flex: 1,
+                padding: '0.75rem 1rem',
+                backgroundColor: '#333',
+                border: '1px solid #444',
+                borderRadius: '6px',
+                color: '#fff',
+                cursor: testing || !apiKey.trim() ? 'not-allowed' : 'pointer',
+                opacity: testing || !apiKey.trim() ? 0.6 : 1,
+                fontSize: '0.95rem',
+              }}
             >
-              openrouter.ai/keys
-            </a>
-          </small>
+              {testing ? 'Testing...' : 'Test Connection'}
+            </button>
+
+            <button
+              onClick={handleSaveKey}
+              disabled={saving || !apiKey.trim()}
+              style={{
+                flex: 1,
+                padding: '0.75rem 1rem',
+                backgroundColor: '#18cc17',
+                border: 'none',
+                borderRadius: '6px',
+                color: '#fff',
+                cursor: saving || !apiKey.trim() ? 'not-allowed' : 'pointer',
+                opacity: saving || !apiKey.trim() ? 0.6 : 1,
+                fontSize: '0.95rem',
+                fontWeight: '500',
+              }}
+            >
+              {saving ? 'Saving...' : 'Save API Key'}
+            </button>
+          </div>
+
+          {(apiKey || hasStoredKey) && (
+            <button
+              onClick={handleClearKey}
+              className="btn-ghost"
+              style={{
+                width: '100%',
+                marginTop: '1rem',
+                fontSize: '0.85rem',
+              }}
+            >
+              Clear Stored API Key
+            </button>
+          )}
+        </div>
+
+        <div className="submitter-config-section" style={{ marginBottom: '1rem' }}>
+          <h3 style={{ marginTop: 0, color: '#fff', fontSize: '1rem' }}>OpenAI Codex Login (ChatGPT Subscription)</h3>
+          <p className="settings-hint">
+            Sign in with OpenAI Codex OAuth for subscription-backed Codex models. This is separate from regular OpenAI API-key billing.
+          </p>
+          {genericMode ? (
+            <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+              OpenAI Codex login is desktop-only until hosted callback/proxy support is designed.
+            </div>
+          ) : codexStatus?.configured ? (
+            <div className="test-result-banner test-result-banner--success" style={{ marginBottom: '1rem' }}>
+              OpenAI Codex login configured{codexStatus.email ? ` for ${codexStatus.email}` : ''}.
+            </div>
+          ) : (
+            <div className="test-result-banner" style={{ marginBottom: '1rem' }}>
+              OpenAI Codex login is not configured.
+            </div>
+          )}
+
+          {codexMessage && (
+            <div className="test-result-banner test-result-banner--success" style={{ marginBottom: '1rem' }}>
+              {codexMessage}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+            <button
+              onClick={handleStartCodexLogin}
+              disabled={codexLoading || genericMode}
+              style={{
+                flex: 1,
+                padding: '0.75rem 1rem',
+                backgroundColor: '#333',
+                border: '1px solid #444',
+                borderRadius: '6px',
+                color: '#fff',
+                cursor: codexLoading || genericMode ? 'not-allowed' : 'pointer',
+                opacity: codexLoading || genericMode ? 0.6 : 1,
+                fontSize: '0.95rem',
+              }}
+            >
+              {codexLoading ? 'Working...' : 'Start OpenAI Login'}
+            </button>
+            {codexStatus?.configured && (
+              <button
+                onClick={handleClearCodexLogin}
+                disabled={codexLoading}
+                className="btn-ghost"
+                style={{ flex: 1 }}
+              >
+                Clear Codex Login
+              </button>
+            )}
+          </div>
+
+          {codexState && (
+            <div style={{ marginTop: '1rem' }}>
+              <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+                Callback URL or Authorization Code
+              </label>
+              <input
+                type="password"
+                value={codexCallbackInput}
+                onChange={(e) => setCodexCallbackInput(e.target.value)}
+                placeholder="Paste callback URL or code from OpenAI login"
+                className="input-dark"
+                style={{ fontSize: '0.95rem' }}
+              />
+              <button
+                onClick={handleCompleteCodexLogin}
+                disabled={codexLoading || !codexCallbackInput.trim()}
+                style={{
+                  width: '100%',
+                  marginTop: '0.75rem',
+                  padding: '0.75rem 1rem',
+                  backgroundColor: '#18cc17',
+                  border: 'none',
+                  borderRadius: '6px',
+                  color: '#fff',
+                  cursor: codexLoading || !codexCallbackInput.trim() ? 'not-allowed' : 'pointer',
+                  opacity: codexLoading || !codexCallbackInput.trim() ? 0.6 : 1,
+                  fontSize: '0.95rem',
+                  fontWeight: '500',
+                }}
+              >
+                Complete OpenAI Login
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Error Message */}
@@ -213,78 +489,6 @@ export default function OpenRouterApiKeyModal({
           }}>
             {error}
           </div>
-        )}
-
-        {/* Test Result */}
-        {testResult && testResult.connected && (
-          <div className="test-result-banner test-result-banner--success" style={{
-            marginBottom: '1rem',
-          }}>
-            Connection successful! {testResult.model_count} models available.
-          </div>
-        )}
-
-        {hasStoredKey && !apiKey.trim() && (
-          <div className="test-result-banner test-result-banner--success" style={{
-            marginBottom: '1rem',
-          }}>
-            {storedKeyCopy}
-          </div>
-        )}
-
-        {/* Action Buttons */}
-        <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
-          <button
-            onClick={handleTestConnection}
-            disabled={testing || !apiKey.trim()}
-            style={{
-              flex: 1,
-              padding: '0.75rem 1rem',
-              backgroundColor: '#333',
-              border: '1px solid #444',
-              borderRadius: '6px',
-              color: '#fff',
-              cursor: testing || !apiKey.trim() ? 'not-allowed' : 'pointer',
-              opacity: testing || !apiKey.trim() ? 0.6 : 1,
-              fontSize: '0.95rem',
-            }}
-          >
-            {testing ? 'Testing...' : 'Test Connection'}
-          </button>
-          
-          <button
-            onClick={handleSaveKey}
-            disabled={saving || !apiKey.trim()}
-            style={{
-              flex: 1,
-              padding: '0.75rem 1rem',
-              backgroundColor: '#18cc17',
-              border: 'none',
-              borderRadius: '6px',
-              color: '#fff',
-              cursor: saving || !apiKey.trim() ? 'not-allowed' : 'pointer',
-              opacity: saving || !apiKey.trim() ? 0.6 : 1,
-              fontSize: '0.95rem',
-              fontWeight: '500',
-            }}
-          >
-            {saving ? 'Saving...' : 'Save API Key'}
-          </button>
-        </div>
-
-        {/* Clear Key Button */}
-        {(apiKey || hasStoredKey) && (
-          <button
-            onClick={handleClearKey}
-            className="btn-ghost"
-            style={{
-              width: '100%',
-              marginTop: '1rem',
-              fontSize: '0.85rem',
-            }}
-          >
-            Clear Stored API Key
-          </button>
         )}
 
         {/* Info Note */}

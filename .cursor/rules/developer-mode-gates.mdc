@@ -1,0 +1,17 @@
+---
+description: Developer mode gating for hidden frontend controls
+alwaysApply: false
+---
+
+# Developer Mode Gates
+
+Developer mode is a hidden frontend switch toggled by pressing `Shift + Z + X`. The state is stored in localStorage as `developerModeSettingsEnabled` and should stay centralized through `developerModeEnabled` props or the same storage key.
+
+Known gated surfaces:
+- `LeanOJ Proof Solver` appears in the mode selector only while developer mode is enabled. If developer mode is turned off while `appMode === 'leanoj'`, the app should return to autonomous mode.
+- Supercharge checkboxes in Aggregator, Compiler, Autonomous, LeanOJ, and related role settings are developer-only. Start/request payloads must force `supercharge_enabled` false unless developer mode is currently enabled.
+- Creativity Emphasis Boost checkboxes beside Aggregator, Autonomous, and LeanOJ start controls are developer-only for now. Start/request payloads must force `creativity_emphasis_boost_enabled=false` unless developer mode is currently enabled; keep this gate isolated so the feature can later move to standard mode cleanly.
+- Raw JSON settings editors and developer-only model/settings toggles are developer-only and should close or hide when developer mode is disabled.
+- Boost copy may mention Supercharge only when developer mode is enabled.
+
+When adding a new hidden or experimental frontend control, gate both the visible UI and any request/runtime payload field behind developer mode. Do not rely on hiding the checkbox alone.

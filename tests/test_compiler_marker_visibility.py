@@ -95,6 +95,25 @@ class CompilerMarkerVisibilityTests(unittest.TestCase):
         self.assertIn("PROTECTED_MARKER_BOUNDARY", result.reasoning)
 
 
+class CompilerRigorLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rigor_loop_caps_consecutive_cycles(self) -> None:
+        coordinator = CompilerCoordinator()
+        coordinator.is_running = True
+        calls = 0
+
+        async def fake_submit_and_validate_rigor():
+            nonlocal calls
+            calls += 1
+            return True
+
+        coordinator._submit_and_validate_rigor = fake_submit_and_validate_rigor
+
+        await coordinator._rigor_loop()
+
+        self.assertEqual(calls, coordinator_module.MAX_RIGOR_CYCLES_PER_LOOP)
+        self.assertFalse(coordinator.rigor_cycle_active)
+
+
 class CompilerCoordinatorMarkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_conclusion_phase_without_placeholder_applies_validated_edit(self) -> None:
         old_path = paper_memory.file_path

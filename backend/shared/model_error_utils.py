@@ -23,6 +23,17 @@ _NON_RETRYABLE_MODEL_ERROR_MARKERS = (
     "openrouter privacy settings are blocking",
 )
 
+_RETRYABLE_OUTPUT_FAILURE_MARKERS = (
+    ("response.incomplete", "max_output_tokens"),
+    ("response.incomplete", "max output tokens"),
+)
+
+
+def is_retryable_model_output_error(exc: Exception) -> bool:
+    """Return true when the provider returned a usable request with unusable output."""
+    message = str(exc or "").lower()
+    return any(all(marker in message for marker in markers) for markers in _RETRYABLE_OUTPUT_FAILURE_MARKERS)
+
 
 def is_non_retryable_model_error(exc: Exception) -> bool:
     """Return true when a model/API failure should halt workflow progress."""
@@ -36,4 +47,6 @@ def is_non_retryable_model_error(exc: Exception) -> bool:
     ):
         return True
     message = str(exc).lower()
+    if is_retryable_model_output_error(exc):
+        return False
     return any(marker in message for marker in _NON_RETRYABLE_MODEL_ERROR_MARKERS)

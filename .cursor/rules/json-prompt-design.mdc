@@ -1,4 +1,5 @@
 ---
+description: JSON prompt schemas and formatting guidance for MOTO role interactions
 alwaysApply: false
 ---
 
@@ -15,8 +16,8 @@ This plan shows the complete prompt structure sent to each LLM for the **Math Va
 
 These principles prevent rejection loops and ensure models learn from feedback:
 
-### 1. CONCRETE FORMAT EXAMPLES (REQUIRED)
-Every prompt with format requirements MUST include:
+### 1. CONCRETE FORMAT EXAMPLES
+Prompts that are prone to rejection loops or have complex structural requirements should include:
 - ✅ **CORRECT format examples** with visual indicators (✓ checkmarks, green indicators)
 - ❌ **WRONG format examples** with explanations of why they're invalid
 - 🔧 **FIX instructions** showing how to correct common errors
@@ -33,8 +34,8 @@ Every prompt with format requirements MUST include:
 2. [Wrong example 2] ❌ NO - [Why it's wrong]
 ```
 
-### 2. STRUCTURED REJECTION FEEDBACK (REQUIRED)
-All validator prompts MUST specify this feedback format:
+### 2. STRUCTURED REJECTION FEEDBACK
+Validator prompts should use this detailed feedback format for complex writing/editing flows; compact validators may use shorter `summary` / `feedback_to_submitter` fields when that is what the code parses:
 
 ```
 REJECTION REASON: [Specific Category]
@@ -60,7 +61,7 @@ This format ensures:
 ### 3. PRE-VALIDATION CHECKS (RECOMMENDED)
 For critical structural requirements (e.g., section headers, required fields), implement **regex-based pre-validation** before LLM validator:
 
-**Example**: `_pre_validate_outline_structure()` in `compiler_coordinator.py` checks for Abstract/Introduction/Conclusion headers using regex patterns before calling the LLM validator.
+**Example**: `_pre_validate_outline_structure()` in `compiler_coordinator.py` checks required outline headers (Introduction, Body, Conclusion; optional Abstract when present) using regex patterns before calling the LLM validator.
 
 **Placeholder Stripping**: Instead of rejecting submissions containing placeholder text, the compiler validator silently strips placeholder markers before validation proceeds. This simplifies the workflow by eliminating rejection feedback loops.
 
@@ -83,8 +84,8 @@ This approach is more robust than rejection because it handles both intentional 
 
 This ensures models learn from mistakes across iterations within the same construction cycle.
 
-### 4. EXPLICIT VALIDATION CRITERIA (REQUIRED)
-Validator prompts MUST include explicit criteria with ✓ VALID / ❌ INVALID examples:
+### 4. EXPLICIT VALIDATION CRITERIA
+High-risk validator prompts should include explicit criteria with ✓ VALID / ❌ INVALID examples:
 
 ```
 SECTION NAME VALIDATION:
@@ -163,8 +164,9 @@ CORRECT RESPONSE:
 - Add "YOUR TASK:" sections with detailed evaluation criteria
 - Improve validator rigor (currently lacks evaluation depth)
 - Maintain existing prompt assembly order: System → JSON Schema → User Prompt → Context → RAG → Final Instruction
-- **MATH VARIANT**: Citation requirements REMOVED. Focus on mathematical rigor, logical correctness, and established mathematical principles. Models with web search capabilities are encouraged to use them for verification. Validation is purely AI-driven.
-- **Proof Prompt Relevance Boundary**: Every automated proof JSON prompt must treat the USER RESEARCH PROMPT as the primary filter. Candidate identification returns every prompt-relevant, non-trivial theorem worth attempting, ordered by usefulness to the user prompt first and novelty/formalization value second. Never impose an artificial theorem-count cap unless explicitly requested.
+- **MATH VARIANT**: Mathematical theorem/exposition validation focuses on rigor, logical correctness, and established mathematical principles rather than mandatory citation format. Empirical, artifact, and literature claims still require explicit support/citations or conservative wording where compiler validators enforce claim provenance. Models with web search capabilities are encouraged to use them for verification.
+- **Proof Candidate JSON Contract**: Automated proof identification is novelty-first, not a known-knowledge-base builder. Candidate JSON must use `{"has_provable_theorems": bool, "theorems": [{"theorem_id": str, "statement": str, "formal_sketch": str, "expected_novelty_tier": "major_mathematical_discovery|mathematical_discovery|novel_variant|novel_formulation", "prompt_relevance_rationale": str, "novelty_rationale": str, "why_not_standard_known_result": str}]}`. Every automated proof JSON prompt must treat the USER RESEARCH PROMPT as the primary filter; bounded source-title/brainstorm-topic metadata is context only. Order candidates by novelty-first prompt-solving value: major discoveries, mathematical discoveries, novel variants, prompt-critical novel formalizations, then only necessary supporting lemmas for those novel targets. Reject routine helpers, standard/textbook/Mathlib restatements, single-tactic/routine proof goals, and general verified background-library entries. Never impose an artificial theorem-count cap unless explicitly requested; user-configurable proof concurrency batching limits simultaneous attempts only and must not truncate identified candidates.
+- **Optional `lean_proof` Submission Contract**: Aggregator and LeanOJ brainstorm submitters that choose `submission_type="lean_proof"` should include the same novelty fields (`expected_novelty_tier`, `prompt_relevance_rationale`, `novelty_rationale`, `why_not_standard_known_result`) as ranking context. The shared Lean proof gate may reject malformed submissions, failed Lean attempts, placeholders, or fake proof devices, but once Lean accepts real proof code it must preserve/register the artifact and let novelty/triviality ranking decide context retention, even for not-novel or downshifted supporting lemmas. In LeanOJ brainstorm flow, a proof-gated `lean_proof` submission is preserved/accepted once Lean and integrity checks pass; validator feedback can classify usefulness/context role but does not veto the verified artifact. LeanOJ final master-proof editing is template-solution-first and may use standard facts inline when they directly solve current obligations, but it must not accumulate a general known-knowledge library in `master_proof.lean`.
 - **Compiler Outline Injection**: The compiler outline is always fully injected (never truncated, never RAGed) for all modes because it provides the structural framework for document construction and validation.
 - **TEMPERATURE POLICY**: Default all prompts to `temperature=0.0`. Only two exceptions are allowed: Supercharge candidate attempts and parallel brainstorm submitter lanes. Validators, compiler roles, proof/final roles, and JSON retries must stay deterministic.
 - **Supercharge Schema Preservation**: Per-role Supercharge calls generate 4 full answer attempts plus a 5th synthesis answer. Candidate attempts must be sanitized to reusable visible answer text before the 5th call; private thought/channel/control transcript text must never be fed into synthesis, retries, feedback memory, accepted memory, or RAG. The synthesis prompt must place the final instruction after the candidate block, treat candidates as optional working material, and preserve the original task's exact output contract; if the original role expects JSON, the 5th answer must output only valid JSON in that same schema and must not mention Supercharge or candidate attempts.
@@ -174,24 +176,24 @@ CORRECT RESPONSE:
 - **No Startup Compatibility Testing**: Models trusted to work. JSON sanitizer handles all quirks automatically. Model configs cached on first success.
 - **Reasoning Field Extraction**: Agent code checks BOTH `content` and `reasoning` fields for model compatibility.
 - **Centralized JSON Parsing**: All agents use `parse_json()` from `backend/shared/json_parser.py`. Exceptions: memory modules loading system-written files use direct `json.loads()`.
-- **LeanOJ JSON Retry**: LeanOJ proof-solver roles also use centralized `parse_json()` and must retry malformed/non-object JSON before treating a role call as failed. During each configured final-attempt cycle, malformed model output is recorded as failed proof feedback and the loop continues until Lean verifies, the cycle is exhausted, or the operator stops; provider credit exhaustion/no-fallback configuration errors are non-retryable resumable pauses, not proof feedback.
+- **LeanOJ JSON Retry**: LeanOJ proof-solver roles also use centralized `parse_json()` and must retry malformed/non-object JSON inside the role call before treating the call as failed. Malformed JSON retries do not consume final-attempt cycle counts. Recoverable provider-credit exhaustion is a resumable pause; hard provider/config/privacy/missing-key errors fail visibly with a user-repair path instead of becoming proof feedback.
 - **LeanOJ Batch Validation JSON**: LeanOJ brainstorm validation may receive 2-3 submissions and must return `{"decisions": [...]}` with one ordered binary accept/reject decision per submission. Accepted brainstorm decisions should classify `context_role` as `active_plan`, `verified_hint`, `refuted_construction`, or `scratch`; topic validation may receive 2-3 topics and must return ordered `{"decisions": [...]}` entries keyed by `topic_number`. Initial topic validation accepts only broad locked foundation questions that cover `answer n`, lower construction, upper proof, exact LeanOJ semantics, and Lean formalization; reject narrow lemma/tactic/bound/repair topics.
-- **LeanOJ Brainstorm Prune JSON**: LeanOJ prune-review prompts must ask whether any accepted brainstorm memory should be removed or updated because it is `outdated`, `redundant`, wrong, harmful, or superseded. Do not pressure the reviewer to remove content: keep the conservative `"none"` default, allow at most one operation, and preserve any idea with unique proof-solving value. Prune validation should accept deletes/edits only when the operation clearly improves the proof-solving database under those criteria.
+- **LeanOJ Brainstorm Prune JSON**: LeanOJ prune-review prompts must ask whether any accepted brainstorm memory should be removed, updated, or supplemented with one compact corrective idea because it is `outdated`, `redundant`, wrong, harmful, superseded, or missing a needed correction. Do not pressure the reviewer to remove content: keep the conservative `"none"` default, allow at most one operation, and preserve any idea with unique proof-solving value. Prune validation should accept delete/edit/add only when the operation clearly improves the proof-solving database under those criteria.
 - **LeanOJ Final Context Routing**: Final-solver direct proof context is limited to verified standalone subproofs plus accepted notes explicitly classified as `active_plan`. Ordinary accepted brainstorm notes default to `scratch`, and accepted idea artifact records must persist `context_role` metadata across resume/reload. Lean-accepted partial scaffolds with `sorry`/`admit` and failed final attempts cannot seed `master_proof.lean` unless explicitly marked high-value/master-seed eligible. The final solver may receive the most recent 5 final attempts only as compact execution feedback to avoid repeating failed edits; this feedback is not proof evidence. Failed/refuted constructions are not proof evidence: pass them only through the compact `refuted_construction_warnings` / “DO NOT USE” channel.
 - **LeanOJ Master-Proof Editing JSON**: The final solver edits durable `master_proof.lean` with `{"action":"edit_proof","needs_more_time":true|false,"operation":"full_content|replace|insert_after|delete","old_string":"exact unique proof text","new_string":"Lean code","reasoning":"..."}`. `master_proof.lean` must contain the current chosen proof route only, not accumulated competing/refuted constructions. Final solver prompts must not expose path-transition choices, raw `need_more_brainstorming`, final-cycle failed-attempt counts, or any `stuck_needs_brainstorm` action. They may expose compact recent execution feedback such as Lean errors, stale `old_string` rejections, JSON truncation, and watchdog/no-progress notices. Required corrections from recent feedback must take priority over unrelated new additions, fresh routes, or speculative helpers; new additions are allowed only when they directly implement the required correction or helper code needed for that correction. Phase transitions are selected only by the discrete path-decision mode. Legacy `{"lean_code":...}` is compatibility only.
 - **LeanOJ Master-Proof Lean Gate**: A master proof edit must never be persisted merely because the string edit applies. After structural edit application and any required shortening validation, the updated proof is checked in memory first. `needs_more_time=true` edits run Lean with placeholders allowed but still must parse/typecheck, preserve the original template/declarations, and pass forbidden-device integrity checks. `needs_more_time=false` edits run Lean with no placeholders, then final template integrity, answer adequacy, semantic review, and registration. Lean/template failure rejects the edit, preserves the prior master proof and shortening-backup metadata, and feeds the Lean diagnostics (`error_output`, diagnostic output, goal states, raw stderr when present) back to the final solver.
 - **LeanOJ Master-Proof Shortening Validation JSON**: Material-shortening edits to `master_proof.lean` must be reviewed before the Lean gate by `leanoj_master_proof_edit_validator` using `{"decision":"accept","reasoning":"...","feedback_to_submitter":""}` or `{"decision":"reject","reasoning":"...","feedback_to_submitter":"precise correction"}`. Rejection preserves the prior proof and becomes direct final-solver feedback. Validator acceptance is not proof acceptance: shortening backup/redo state and `master_proof.lean` persistence happen only after the accepted edit also passes the Lean/template gate. The edit validator must reject changes that ignore required corrections in favor of unrelated new additions, and rejection feedback must instruct the submitter to fix the required corrections before new addition attempts.
 - **LeanOJ Final Semantic Review JSON**: After Lean accepts final code and deterministic integrity checks pass, the Final Proof Solver must review the Lean-accepted code against the full LeanOJ problem prompt/template using `{"solved":true,"reasoning":"..."}` or `{"solved":false,"continuation_feedback":"...","reasoning":"..."}`. Rejection is continuation feedback, not verified success.
 - **LeanOJ Formalization Semantics Guardrail**: LeanOJ planning, proof-editing, validation, and final-review prompts must state that the Lean template is the formal source of truth, template operations must not be silently reinterpreted to match informal olympiad intuition (e.g. `Nat` subtraction truncates), proposed formulas/constructions should be sanity-checked against the exact Lean predicate on small cases when feasible, and Lean acceptance alone must not be claimed as solving the informal problem unless the formal/informal correspondence is justified.
-- **Shared Post-Lean Proof Integrity Gate**: Lean 4 is authoritative for proof checking, but proof outputs still pass `backend/shared/lean_proof_integrity.py` before storage/placement. This shared gate rejects newly introduced `axiom`/`constant`/`opaque` proof devices and uses statement-alignment validation so a Lean-accepted proof cannot be stored for an unrelated or user-prompt-irrelevant `ProofCandidate.statement`.
+- **Shared Post-Lean Proof Integrity Gate**: Lean 4 is authoritative for proof checking, but proof outputs still pass `backend/shared/lean_proof_integrity.py` before storage/placement. This shared gate rejects newly introduced `axiom`/`constant`/`opaque` proof devices. Statement-alignment validation classifies mismatches and downshifts storage to the actual Lean-verified theorem instead of discarding real proof artifacts.
 - **LeanOJ Proof Validation Boundary**: Lean 4 is authoritative formal checking for LeanOJ success, but LLM validators still gate planning decisions, Lean-accepted subproof relevance, and final semantic review. A compiled subproof must not be stored as verified run context unless it matches the requested subproof/role; a compiled final solution must not stop the run unless it preserves the template and the Final Proof Solver confirms it solves the actual prompt rather than a formal loophole.
-- **Specialized Retry for Pure Reasoning Text**: When "No JSON found" error, aggregator submitter uses specialized retry: (1) Don't think step-by-step, (2) Start with `{` immediately, (3) Raw JSON only. See `backend/aggregator/agents/submitter.py`.
+- **Aggregator Submitter JSON Retry**: Aggregator submitter retries malformed/non-JSON responses through its standard conversational JSON/LaTeX escaping repair path. The retry preserves sanitized visible failed-output context when useful, but parser exception text inserted into prompts must not replay raw provider output.
 - **Standard LaTeX-Focused Retry**: Retry prompts explain HOW to escape LaTeX properly. **LaTeX IS allowed** - just escape backslashes once (`\mathbb` → `\\mathbb`). DO NOT double-escape. For `old_string`: copy EXACTLY from document, just escape backslashes.
 - **Retry Context Overflow Prevention (CRITICAL)**: Sanitize failed output, then truncate to ~2000 chars before retry. Parser exception messages that are inserted into retry prompts must report failure type/structure only and must not include raw output excerpts. Calculate if retry fits context window. Fall back to simple re-prompt if too large. Set `max_tokens` explicitly (never `None`). NEVER auto-increase beyond user limits. Applies to: `submitter.py`, `validator.py`, `high_context_submitter.py`, `high_param_submitter.py`, `compiler_validator.py`.
 
-## Internal Content Warning (Required in All Prompts)
+## Internal Content Warning (Required in Most Research/Writing Prompts)
 
-Every system prompt in this codebase includes a standardized skepticism warning block. This prompt engineering feature prevents AI "echo chambers" where models compound flawed AI-generated content.
+Most research/writing system prompts include a standardized skepticism warning block. Proof-only helpers such as `proof_prompts.py` and LeanOJ prompts use narrower proof/template guardrails instead of this exact block. This prompt engineering feature prevents AI "echo chambers" where models compound flawed AI-generated content.
 
 **Why This Exists:**
 - All context provided to AI agents (brainstorm databases, accepted submissions, papers, outlines, etc.) is AI-GENERATED within this research system
@@ -241,9 +243,8 @@ WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified inte
 - `backend/autonomous/prompts/paper_redundancy_prompts.py`
 - `backend/autonomous/prompts/paper_continuation_prompts.py`
 - `backend/autonomous/prompts/final_answer_prompts.py`
-- `backend/autonomous/prompts/proof_prompts.py`
 
-**Note:** The prompt structure examples in the sections below show the core task-specific content. The INTERNAL CONTENT WARNING block is ALWAYS inserted between the role description and the "YOUR TASK:" section in the actual code.
+**Note:** The prompt structure examples in the sections below show the core task-specific content. Where used, the INTERNAL CONTENT WARNING block is inserted between the role description and the "YOUR TASK:" section in the actual code.
 
 ---
 
@@ -260,11 +261,11 @@ def get_validator_system_prompt() -> str:
     return """You are a validation agent in an AI cluster. Your role is to evaluate mathematical submissions and decide whether they should be added to the shared knowledge base.
 
 YOUR TASK:
-Decide whether the submission provides the strongest rigorous progress currently justified toward solving the user's problem, with highest priority given to direct solutions, direct partial solutions, impossibility results, exact reductions, or sharp constraints.
+Decide whether the submission provides the strongest rigorous progress currently justified toward solving the user's problem. First prefer avenues that aggressively attack the user's WHOLE question as stated, no partial solutions.
 
 Essentially, you are evaluating whether the training database becomes more useful toward directly answering the user's mathematical prompt with this submission added than it was without it.
 
-Note: You are not generating solutions yourself. You are judging whether this submission directly solves, partially solves, refutes, or materially enables the user's problem better than the current knowledge base does.
+Note: You are not generating solutions yourself. If the true answer is that the user's question is impossible or has no valid solution as stated, that counts as directly answering the whole question. If a whole-question attack is absolutely not possible in one superintelligence brainstorm, judge whether the submission attacks the next best necessary piece whose resolution would visibly advance the original question. Broader exploratory/background-heavy avenues are valid only when clearly required for that whole-question route.
 
 META-PHASE EXCEPTION:
 If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLORATION PHASE, evaluate the submission as the requested candidate artifact, not as a direct solution:
@@ -273,7 +274,7 @@ If the USER PROMPT explicitly says TOPIC EXPLORATION PHASE or PAPER TITLE EXPLOR
 - Do NOT reject these meta-phase submissions merely because they are questions or titles rather than mathematical solutions
 
 EVALUATION CRITERIA - Consider:
-- Does the submission directly answer, partially answer, refute, or sharply constrain the user's problem or a necessary subproblem?
+- Does the submission aggressively attack the user's WHOLE question as stated, no partial solutions, or where that is absolutely not possible in one superintelligence brainstorm, the next best necessary piece?
 - Does the submission add genuinely new information or perspectives beyond what is already accepted?
 - Does the submission connect existing mathematical concepts in novel ways?
 - Does the submission provide concrete methods, theorems, proofs, or mathematical techniques?
@@ -285,8 +286,8 @@ EVALUATION CRITERIA - Consider:
 
 VALIDATION DECISION RULES:
 A submission should be ACCEPTED if it:
-1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
-2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+1. Aggressively attacks the user's WHOLE question as stated, no partial solutions, OR
+2. Addresses the next best necessary piece when a whole-question attack is absolutely not possible in one superintelligence brainstorm, OR
 3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
@@ -315,7 +316,7 @@ Output your decision ONLY as JSON in this exact format:
 
 **File:** `backend/aggregator/prompts/validator_prompts.py`
 
-**Purpose:** Every 7 accepted submissions, the validator performs a cleanup review of the existing database to identify if any previously accepted submission should be removed (due to redundancy, contradictions, or other validation rule violations). Maximum 1 removal per cycle.
+**Purpose:** Every 7 coordinator-run-local accepted submissions, the validator performs a cleanup review of the existing database to identify if any previously accepted submission should be removed (due to redundancy, contradictions, or other validation rule violations). Maximum 1 removal per cycle.
 
 ### Complete Prompt Structure
 
@@ -494,8 +495,8 @@ EVALUATION CRITERIA (Apply to EACH submission independently):
 
 VALIDATION DECISION RULES (for each submission):
 A submission should be ACCEPTED if it:
-1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
-2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+1. Aggressively attacks the user's WHOLE question as stated, no partial solutions, OR
+2. Addresses the next best necessary piece when a whole-question attack is absolutely not possible in one superintelligence brainstorm, OR
 3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
@@ -648,8 +649,8 @@ EVALUATION CRITERIA (Apply to EACH submission independently):
 
 VALIDATION DECISION RULES (for each submission):
 A submission should be ACCEPTED if it:
-1. Directly solves, partially solves, or proves a meaningful impossibility/limitation result for the user's problem or a necessary subproblem, OR
-2. Provides valuable solution space constraints that sharply narrow where a direct answer can lie, OR
+1. Aggressively attacks the user's WHOLE question as stated, no partial solutions, OR
+2. Addresses the next best necessary piece when a whole-question attack is absolutely not possible in one superintelligence brainstorm, OR
 3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
 4. Presents rigorous mathematical arguments based on established principles
 
@@ -865,14 +866,14 @@ Output your response ONLY as JSON in this exact format:
 - Line 1: `[BRACKETED DESIGNATION THAT SHOWS END-OF-PAPER DESIGNATION MARK]` (references document's end marker)
 - Line 2: `[HARD CODED END-OF-OUTLINE MARK -- ALL OUTLINE CONTENT SHOULD BE ABOVE THIS LINE]` (outline's own end marker)
 
-**Required Section Structure**: Every outline MUST include these exact sections:
+**Required Section Structure**: Every final paper must include these sections. Outlines must include Introduction, Body, and Conclusion; an Abstract heading is allowed but not required because the abstract is written last.
 
 | Section | Exact Name | Required | Position |
 |---------|-----------|----------|----------|
-| Abstract | "Abstract" | YES | First in outline/paper |
+| Abstract | "Abstract" | YES in final paper; optional in outline | First |
 | Introduction | "Introduction" or "I. Introduction" | YES | After Abstract |
 | Body | Flexible (II., III., etc.) | YES (at least 1) | Between Intro and Conclusion |
-| Conclusion | "Conclusion" or "N. Conclusion" | YES | Last content section |
+| Conclusion | "Conclusion" or "N. Conclusion" | YES | Last required core section; optional appendix/self-review material may follow |
 
 **Base prompt for OUTLINE modes:**
 
@@ -880,9 +881,9 @@ Output your response ONLY as JSON in this exact format:
 base_prompt = """You are validating a mathematical document outline submission. Your role is to decide if this submission should be ACCEPTED or REJECTED.
 
 REQUIRED SECTION STRUCTURE (MANDATORY):
-Every outline MUST include these exact sections with these exact names in this exact order:
-1. **Abstract** - Must be named exactly "Abstract" (appears first)
-2. **Introduction** - Must be named exactly "Introduction" or "I. Introduction" (after Abstract)
+Every final paper must include these sections; outlines must include the non-abstract sections in this order:
+1. **Abstract** - Optional in outlines, named exactly "Abstract" when present; required in the final paper
+2. **Introduction** - Must be named exactly "Introduction" or "I. Introduction" (after Abstract if present)
 3. **Body Sections** - At least one body section (II, III, IV, etc.) between Introduction and Conclusion
 4. **Conclusion** - Must be named exactly "Conclusion" or "N. Conclusion" (always LAST content section)
 
@@ -935,13 +936,13 @@ Section Name Validation:
 - Outline is comprehensive enough to guide entire exposition
 
 ACCEPT if: All required sections present with correct names + all other criteria met
-REJECT if: Missing Abstract/Introduction/Conclusion, incorrect section names, or any other criterion fails"""
+REJECT if: Missing Introduction/Conclusion, missing body section, incorrect required section names, or any other criterion fails. Abstract is optional in outlines."""
 ```
 
 **outline_update mode:**
 ```python
 """MODE-SPECIFIC CRITERIA (Outline Update):
-- Update MUST NOT remove or rename Abstract, Introduction, or Conclusion sections
+- Update MUST NOT remove or rename Introduction or Conclusion sections; if an Abstract heading is present, it must not be renamed
 - Update is necessary (missing content or better structure needed)
 - Update follows the existing document's already-constructed format and section ordering
 - Update is STRICTLY ADDITIVE ONLY - only adds new sections, never modifies or removes existing structure
@@ -954,7 +955,7 @@ REJECT if: Missing Abstract/Introduction/Conclusion, incorrect section names, or
 - Update does NOT add a References or Citations section
 
 Additivity Check:
-- Reject if update would rename Abstract, Introduction, or Conclusion
+- Reject if update would rename Introduction or Conclusion, or rename an existing Abstract heading
 - Reject if update would insert content after Conclusion (except appendix)
 - Reject if update would require editing/moving/renaming already-written document sections
 - Reject if update disrupts the flow of existing document content
@@ -1373,7 +1374,7 @@ When `section_phase` is not specified, the generic prompt is used which follows 
 The coordinator tracks the current phase via `autonomous_section_phase`:
 - Starts at "body" when paper construction begins
 - Advances phases based on `section_complete` signal from submissions
-- Phase order: body → conclusion → introduction → abstract
+- Phase order: body → conclusion → introduction → pre-abstract empirical red-team review → abstract
 - Paper is complete when abstract phase receives `section_complete: true`
 
 **Phase Transition Method:** `_check_phase_transition(section_complete: bool)`
@@ -1432,14 +1433,14 @@ During autonomous paper compilation, the construction JSON includes an optional 
 
 ### Required Section Structure (MANDATORY)
 
-All outlines MUST include these exact sections with these exact names in this exact order:
+Final papers must include these sections. Outlines must include Introduction, Body, and Conclusion; an Abstract heading is allowed but not required because the abstract is written last.
 
 | Section | Exact Name | Required | Position |
 |---------|-----------|----------|----------|
-| Abstract | "Abstract" | YES | First in outline/paper |
+| Abstract | "Abstract" | YES in final paper; optional in outline | First |
 | Introduction | "Introduction" or "I. Introduction" | YES | After Abstract |
 | Body | Flexible (II., III., etc.) | YES (at least 1) | Between Intro and Conclusion |
-| Conclusion | "Conclusion" or "N. Conclusion" | YES | Last content section |
+| Conclusion | "Conclusion" or "N. Conclusion" | YES | Last required core section; optional appendix/self-review material may follow |
 
 ### JSON Schema - Phase 1 (Outline Create)
 
@@ -1452,7 +1453,7 @@ All outlines MUST include these exact sections with these exact names in this ex
 ```
 
 **⚠️ CRITICAL - OUTLINE CREATE MODE USES ONLY THESE 3 FIELDS:**
-- `content` - Your complete outline text (FIRST LINE MUST BE "Abstract")
+- `content` - Your complete outline text; it must include Introduction, at least one Body section, and Conclusion. Abstract may be included first but is not required.
 - `outline_complete` - true or false
 - `reasoning` - Your explanation
 
@@ -1473,7 +1474,7 @@ All outlines MUST include these exact sections with these exact names in this ex
 }
 ```
 
-**Note:** The `content` field starts with "Abstract" - this is MANDATORY.
+**Note:** The example includes an optional Abstract heading; this is allowed but not mandatory for outlines.
 
 **❌ WRONG - DO NOT DO THIS:**
 ```json
@@ -1488,7 +1489,7 @@ All outlines MUST include these exact sections with these exact names in this ex
 **This is WRONG because:**
 1. Uses `operation` field (only for outline_update mode, NOT outline_create)
 2. Uses `new_string` field (only for outline_update mode, NOT outline_create)
-3. `content` field doesn't start with "Abstract" as first line
+3. `content` field omits the required Introduction/Body/Conclusion outline structure
 
 **Iteration 7 (Lock Outline):**
 ```json
@@ -1700,7 +1701,7 @@ After the body section is complete (before conclusion), the system enters a **Cr
    - Single critique submitter generates peer review feedback on body section
    - **Decline Mechanism**: Submitter can assess "no critique needed" when body is academically acceptable (counts toward 3 total attempts)
    - Validator validates critiques/declines (accept/reject with feedback loop)
-   - Pruning occurs every 7 acceptances (same as aggregator cleanup review)
+   - Pruning occurs on the child Aggregator's run-local 7-acceptance cleanup cadence
    - Target: 3 total attempts (accepted + rejected + declined attempts)
    - Uses aggregator workflow with critique-specific prompts
 
@@ -1858,7 +1859,7 @@ Output as JSON:
 
 **File:** `backend/compiler/prompts/rigor_prompts.py`
 
-**BODY-ONLY MODE**: The rigor loop runs only during body construction. Once body is complete (Conclusion exists in paper, or autonomous mode `autonomous_section_phase != "body"`), rigor mode is skipped. Gated by `_is_body_complete()` in the coordinator.
+**BODY-ONLY MODE**: The rigor loop runs only during body construction and is capped at 5 consecutive rigor cycles before yielding back to construction/review. Once body is complete (Conclusion exists in paper, or autonomous mode `autonomous_section_phase != "body"`), rigor mode is skipped. Gated by `_is_body_complete()` in the coordinator.
 
 **CONFIG GATE**: When `system_config.lean4_enabled = false`, every rigor cycle declines immediately (no Lean calls, no theorem proposals). The Lean 4 toolchain + Mathlib workspace is a hard prerequisite.
 
@@ -1874,16 +1875,16 @@ The rigor loop no longer edits paper text directly during discovery/formalizatio
 - Discovery is explicitly allowed to construct extension theorems from partial paper work, the current outline, supporting context, or the user prompt when helpful to paper construction and/or the user's goal. It is not limited to exact claims already present in the current paper.
 - Discovery must classify `theorem_origin` as `existing_paper_claim`, `extension_from_partial_work`, or `extension_from_user_prompt`, and must set `placement_preference` to `inline` or `appendix_only`. Extension-derived theorems must use `appendix_only`.
 
-**Stage 2: Lean 4 formalization** — reuses `ProofFormalizationAgent.prove_candidate(max_attempts=5)` from autonomous mode
+**Stage 2: Lean 4 formalization** — compiler rigor uses the serial `ProofFormalizationAgent.prove_candidate(max_attempts=5)` path; autonomous proof verification has its own parallel Phase-A pipeline with full-script plus tactic-script attempts
 - Up to 5 Lean 4 attempts with error-feedback chaining (failing tactic + goal states + raw Lean diagnostics fed back into each retry).
-- Broadcasts `proof_attempt_started` / `proof_verified` / `proof_attempt_failed` / `proof_check_complete` events with `source_type="compiler_rigor"` so the existing autonomous-mode proof UI lights up for free.
+- Emits proof progress events with `source_type="compiler_rigor"` so the existing autonomous-mode proof UI can display the flow. Keep frontend-consumed event names stable; `proof_verified` is reserved for the registered/stored proof event.
 - All-5-fail: candidate is recorded via `proof_database.record_failed_candidate` (becomes a future open lemma target) and the cycle ends as a decline.
 
 **Stage 3: Post-Lean integrity + novelty classification + persistence** — shared `validate_full_lean_proof_integrity` helper from `backend/shared/lean_proof_integrity.py`, then shared `assess_proof_novelty` helper from `backend/autonomous/core/proof_novelty.py`
 - Rejects Lean-accepted proofs that introduce new fake proof devices (`axiom`, `constant`, `opaque`) not present in the source context.
-- Rejects Lean-accepted proofs that do not align with the intended theorem statement.
+- Statement mismatch is not a hard reject by itself; preserve the real Lean-accepted theorem under the actual proved statement and downshift/rank it during novelty/storage.
 - Classifies the verified proof as novel or known.
-- `proof_database.add_proof(record)` stores it with `source_type="paper"`, `source_id=f"compiler_rigor:{session}"`.
+- `register_verified_lean_proof()` stores it with `source_type="paper"`, `source_id=f"compiler_rigor:{session}"`, and duplicate detection before appending/broadcasting stored proof state.
 - Novel proofs automatically enter the highest-priority direct-injection block on the next submitter instantiation (via `proof_database.inject_into_prompt`).
 - Non-novel proofs stay in the database, visible through `/api/proofs/*` for future reference-selection UI flows.
 
@@ -1973,14 +1974,7 @@ Lean 4 proof:
 
 ### Websocket events surfaced by the rigor flow
 
-Autonomous-mode proof UI already handles these; the compiler rigor flow broadcasts them with `source_type="compiler_rigor"`:
-
-- `proof_check_started` - at the start of stage 2 (before the first Lean 4 call).
-- `proof_attempt_started` - one per Lean 4 attempt.
-- `proof_attempt_failed` - per failing attempt.
-- `proof_verified` - per successful attempt + a final one once the proof is stored.
-- `proof_check_complete` - on all-5-fail (as a decline).
-- `compiler_submission` / `compiler_acceptance` / `compiler_rejection` / `compiler_decline` - standard compiler stream for placement and the overall rigor cycle.
+Compiler rigor progress should be visible through the standard proof/compiler WebSocket stream with `source_type="compiler_rigor"` where applicable. Keep frontend-consumed event names stable, especially the registered-proof `proof_verified` event and standard compiler submission/acceptance/rejection/decline events, but avoid treating every intermediate proof progress notification as a permanent prompt-design invariant.
 
 ---
 
@@ -2019,15 +2013,15 @@ WOLFRAM_TOOL_SCHEMA = {
 
 ### Audit Trail
 
-The full list of Wolfram calls is attached to the `CompilerSubmission.metadata["wolfram_calls"]` field as:
+The Wolfram call audit trail attached to `CompilerSubmission.metadata["wolfram_calls"]` is redacted by default and stores metadata such as lengths, hashes, and redaction flags instead of raw query/result text:
 ```json
 [
-  {"query": "integral of x^2 from 0 to 1", "purpose": "verifying closed form for section 3", "result": "1/3"},
+  {"query_redacted": true, "purpose_redacted": true, "result_redacted": true, "query_hash": "...", "result_length": 1234},
   ...
 ]
 ```
 
-The validator sees the audit trail but does NOT re-query Wolfram. Its job is unchanged — it simply has more confidence in factual claims the writer made after a Wolfram check.
+The validator may see that Wolfram checks occurred, but does NOT receive raw Wolfram query/result text or re-query Wolfram. Logs/WebSocket events expose only redacted metadata.
 
 ### Websocket Event
 
@@ -2037,9 +2031,11 @@ Per Wolfram call, the submitter broadcasts:
   "type": "compiler_wolfram_call",
   "data": {
     "task_id": "comp_hc_007",
-    "query": "...",
-    "purpose": "...",
-    "result_preview": "first 200 chars of result",
+    "query_redacted": true,
+    "purpose_redacted": true,
+    "result_redacted": true,
+    "query_hash": "...",
+    "result_length": 1234,
     "calls_used": 3,
     "calls_remaining": 17,
     "max_calls": 20
@@ -2047,7 +2043,7 @@ Per Wolfram call, the submitter broadcasts:
 }
 ```
 
-The frontend's `CompilerLogs.jsx` renders this as `[Wolfram 3/20] <query> - <preview>`.
+The frontend's `CompilerLogs.jsx` renders redacted Wolfram metadata, not raw query or result previews.
 
 ### Backend Tool-Call Plumbing
 
@@ -2202,7 +2198,7 @@ Part 3 introduces autonomous topic selection, brainstorm-to-paper workflows, and
 
 **File:** `backend/autonomous/prompts/topic_exploration_prompts.py`
 
-**Purpose:** Before topic selection, collect 5 validated candidate brainstorm questions using the full Part 1 aggregator infrastructure (parallel submitters, batch validation up to 3). Uses `build_exploration_user_prompt()` to frame the standard aggregator as a candidate question generator, with a preference for candidate questions that maximize the chance of a rigorous direct answer rather than merely broad exploration.
+**Purpose:** Before topic selection, collect 5 validated candidate brainstorm questions using the full Part 1 aggregator infrastructure (parallel submitters, batch validation up to 3). Uses `build_exploration_user_prompt()` to frame the standard aggregator as a candidate question generator. Candidate questions must first prefer avenues that aggressively attack the user's WHOLE question as stated, no partial solutions; a true impossible/no-valid-solution answer counts as directly answering the whole question; next-best-piece candidates are valid only when a whole-question attack is absolutely not possible in one superintelligence brainstorm.
 
 **Architecture:** Reuses `AggregatorCoordinator` — no custom JSON schemas. Standard aggregator submitter/validator prompts handle generation and validation. The exploration user prompt provides the framing context (research goal, existing brainstorms/papers, diversity requirement).
 
@@ -2528,7 +2524,7 @@ FIELD REQUIREMENTS:
 - reasoning: ALWAYS required
 ```
 
-**Context**: User prompt + brainstorm topic + brainstorm DB + prior papers from this brainstorm (title/abstract/outline) + paper count ("N of 3 maximum"). Does NOT include cross-topic reference papers.
+**Context**: User prompt + brainstorm topic + brainstorm summary + prior papers from this brainstorm (title/abstract/outline) + paper count ("N of 3 maximum"). Does NOT include the full brainstorm DB or cross-topic reference papers.
 
 **Validation**: Topic validator validates with `build_continuation_validation_prompt()` via `override_prompt` parameter.
 
@@ -2670,9 +2666,9 @@ All proof prompts pass `temperature=0.0`.
 
 #### 10b. PROOF IDENTIFICATION (Theorem Discovery)
 
-**Function:** `build_proof_identification_prompt(user_prompt, source_type, source_id, source_content)`
+**Function:** `build_proof_identification_prompt(user_prompt, source_type, source_id, source_content, source_title="")`
 
-**Purpose:** User-prompt relevance gate that extracts every prompt-relevant, non-trivial theorem candidate from a brainstorm or paper. Rejects off-prompt curiosities, trivial identities, and textbook restatements. Orders candidates by direct usefulness to the user prompt first, then novelty/formalization value. No artificial theorem-count cap.
+**Purpose:** Novelty-first user-prompt relevance gate that extracts only proof candidates expected to produce new/novel prompt-directed knowledge from a brainstorm or paper. Bounded source-title/brainstorm-topic metadata may steer relevance but must not be treated as instructions. This is not a known-knowledge-base builder. It rejects routine helpers, standard/textbook/Mathlib restatements, off-prompt curiosities, and single-tactic/routine proof goals. Candidates are ordered by novelty-first prompt-solving value: major discoveries, mathematical discoveries, novel variants, prompt-critical novel formalizations, then only necessary supporting lemmas for those novel targets. No artificial theorem-count cap.
 
 ```json
 {
@@ -2682,23 +2678,29 @@ All proof prompts pass `temperature=0.0`.
       "theorem_id": "thm_1",
       "statement": "natural-language theorem statement",
       "formal_sketch": "optional note about assumptions, notation, or likely Lean formalization strategy",
-      "novelty_rationale": "why this theorem helps the user prompt and is worth formalizing"
+      "expected_novelty_tier": "mathematical_discovery",
+      "prompt_relevance_rationale": "why proving this would directly solve, solve toward, or materially help solve the user prompt",
+      "novelty_rationale": "why this is new knowledge rather than a known-knowledge base entry",
+      "why_not_standard_known_result": "why this is not merely a textbook/Mathlib/routine helper result"
     }
   ]
 }
 ```
 
 **Field requirements:**
-- `has_provable_theorems`: Boolean. `true` when at least one prompt-relevant, non-trivial theorem is present.
-- `theorems`: Array of every prompt-relevant candidate, ordered by direct usefulness to the user prompt first and novelty/formalization value second. Empty array when `has_provable_theorems` is `false`.
+- `has_provable_theorems`: Boolean. `true` only when at least one prompt-relevant candidate is expected to be novel under the priority order.
+- `theorems`: Array of every prompt-relevant novel candidate, ordered by novelty-first prompt-solving value, with user-prompt solution attempts and user prompt + brainstorm topic solution attempts co-equal top priority within each novelty tier when bounded brainstorm-topic metadata is present. Empty array when `has_provable_theorems` is `false`.
 - `theorem_id`: Stable string identifier such as `"thm_1"`, `"thm_2"`, etc.
 - `statement`: Natural-language theorem statement. Required.
 - `formal_sketch`: Optional Lean formalization hints, assumptions, or notation notes.
-- `novelty_rationale`: Brief explanation of why this theorem helps the USER RESEARCH PROMPT and is worth the cost of Lean verification. Required for each candidate.
+- `expected_novelty_tier`: Required. One of `major_mathematical_discovery`, `mathematical_discovery`, `novel_variant`, or `novel_formulation`; `not_novel` candidates are skipped before Lean cost.
+- `prompt_relevance_rationale`: Required. Explains how the proof directly solves, solves toward, or materially helps solve the USER RESEARCH PROMPT or USER PROMPT + BRAINSTORM TOPIC.
+- `novelty_rationale`: Required. Explains why this is new/novel knowledge rather than a background fact.
+- `why_not_standard_known_result`: Required. Explains why this is not merely a textbook, Mathlib, routine helper, or known-knowledge-base entry.
 
-**What to extract:** Theorems, supporting lemmas, sharpened conjectures, non-obvious bounds, and structural results that materially help answer, support, or advance the USER RESEARCH PROMPT.
+**What to extract:** Major discoveries, new mathematical discoveries, novel variants/reformulations, and prompt-critical novel formalizations that materially help answer, support, or advance the USER RESEARCH PROMPT. Supporting lemmas are extracted only when necessary stepping stones toward one of those higher-priority novel targets.
 
-**What to reject:** Off-prompt mathematical curiosities, trivial identities (e.g. `n + 0 = n`), standard Mathlib restatements, results closable by a single tactic (`simp`, `omega`, `norm_num`, `decide`, `rfl`), tautologies, definitional equalities.
+**What to reject:** Off-prompt mathematical curiosities, routine helper lemmas, local bookkeeping facts, algebra cleanup, coercion/monotonicity facts, standard Mathlib/textbook restatements, general verified background-library entries, results closable by routine proof search or a single tactic (`simp`, `omega`, `norm_num`, `decide`, `aesop`, `rfl`), tautologies, and definitional equalities.
 
 ---
 
@@ -2747,9 +2749,9 @@ All proof prompts pass `temperature=0.0`.
 
 #### 10e. PROOF FORMALIZATION (Full Script)
 
-**Function:** `build_proof_formalization_prompt(user_prompt, source_type, theorem_statement, formal_sketch, source_excerpt, prior_attempts, relevant_lemmas, smt_hint)`
+**Function:** `build_proof_formalization_prompt(user_prompt, source_type, theorem_statement, formal_sketch, full_source_content, source_excerpt, prior_attempts, relevant_lemmas, smt_hint)`
 
-**Purpose:** Primary formalization path — generates complete Lean 4 source ready to compile. Up to 3 attempts per candidate, with the full error-feedback chain from prior attempts injected on each retry. Preserves the theorem's non-trivial content; never weakens the statement just to compile.
+**Purpose:** Primary formalization path — generates complete Lean 4 source ready to compile. Up to 3 attempts per candidate, with the complete source brainstorm/paper as mandatory direct context, focused excerpt as a navigation aid only, and the full error-feedback chain from prior attempts injected on each retry. Preserves the theorem's non-trivial content; never weakens the statement just to compile.
 
 ```json
 {
@@ -2767,6 +2769,7 @@ All proof prompts pass `temperature=0.0`.
 **Critical constraints:**
 - `sorry` / `admit` anywhere → proof rejected, counts as a failed attempt.
 - Axiomatizing the theorem's own concepts to make the goal trivial → rejected.
+- Complete source brainstorm/paper is mandatory direct context; do not silently truncate it or replace it with the focused excerpt.
 - If the full claim cannot be proved, return a narrower concrete lemma rather than a `sorry`-closed stub.
 - PRESERVE the theorem's non-trivial content — do not simplify into a trivial identity to make it compile.
 
@@ -2774,9 +2777,9 @@ All proof prompts pass `temperature=0.0`.
 
 #### 10f. PROOF FORMALIZATION (Tactic Script)
 
-**Function:** `build_proof_tactic_script_prompt(user_prompt, source_type, theorem_statement, formal_sketch, source_excerpt, prior_attempts, relevant_lemmas, smt_hint)`
+**Function:** `build_proof_tactic_script_prompt(user_prompt, source_type, theorem_statement, formal_sketch, full_source_content, source_excerpt, prior_attempts, relevant_lemmas, smt_hint)`
 
-**Purpose:** Fallback formalization path after full-script attempts fail — returns a theorem header plus a decomposed tactic list. Up to 2 attempts. Prior attempts from the full-script phase are passed in so the tactic path sees the full failure history.
+**Purpose:** Fallback formalization path after full-script attempts fail — returns a theorem header plus a decomposed tactic list. Up to 2 attempts. It receives the complete source brainstorm/paper as mandatory direct context, the focused excerpt as supplemental navigation context, and prior attempts from the full-script phase so the tactic path sees the full failure history.
 
 ```json
 {
@@ -2836,15 +2839,15 @@ These core requirements apply across all prompt types:
 1. **Internal Content Warning**: All system prompts include the standardized skepticism warning block
 2. **Concrete Format Examples**: Every prompt includes correct/wrong format examples with visual indicators
 3. **Structured Rejection Feedback**: Validators use the standardized rejection format (Reason/Issue/What I Saw/Expected/Fix)
-4. **Direct-Solution Preference**: Prompts should prefer the strongest rigorous direct progress toward the user's goal (direct solutions, direct partial solutions, impossibility results, exact reductions, or sharp constraints) and use indirect support only when no stronger direct step is currently justified. Meta-phases such as topic exploration and paper title exploration still output candidates, but those candidates are judged by direct-answer potential instead of being rejected for not being solutions themselves.
+4. **Direct-Solution Preference**: Prompts should first prefer avenues that aggressively attack the user's WHOLE question as stated, no partial solutions. If the true answer is that the user's question is impossible or has no valid solution as stated, that counts as directly answering the whole question. If a whole-question attack is absolutely not possible in one superintelligence brainstorm, prompts may choose the next best necessary piece whose resolution would visibly advance the original question. Meta-phases such as topic exploration and paper title exploration still output candidates, but those candidates are judged by this whole-question-first policy instead of being rejected for not being solutions themselves.
 5. **Compiler Outline Injection**: The compiler outline is always fully injected (never RAGed) for structural framework
 6. **Temperature Policy**: Default `temperature=0.0`; only Supercharge candidates and parallel brainstorm submitter lanes may use explicit diversity temperatures. Validators, compiler roles, proof/final roles, and JSON retries stay `0.0`.
 7. **JSON Preprocessing**: All LLM responses preprocessed by `sanitize_json_response()`
 8. **Exact String Matching**: Document edits use exact verbatim matches with conservative consecutive fuzzy matching fallback for model escaping quirks (85% consecutive + tail anchor + uniqueness required)
-9. **Phase-Based Construction**: Papers written in order: Body → Conclusion → Introduction → Abstract
+9. **Phase-Based Construction**: Papers written in order: Body → post-body critique/self-review → Conclusion → Introduction → pre-abstract empirical red-team review → Abstract
 10. **Required Sections**:
    - **OUTLINE**: Must include Introduction, Body, Conclusion (Abstract is optional - can be "Abstract", "I. Abstract", or "0. Abstract")
-   - **PAPER CONSTRUCTION**: Always writes Abstract → Introduction → Body → Conclusion (Abstract is always written during construction phase regardless of outline)
+   - **PAPER CONSTRUCTION**: Final document order is Abstract → Introduction → Body → Conclusion plus optional appendix/self-review material, while writing order is Body → critique/self-review → Conclusion → Introduction → pre-abstract empirical red-team review → Abstract
 11. **No Placeholder Output**: Submissions must never contain placeholder markers
 12. **Placeholder Resume Repair**: When resuming from existing paper, missing placeholders are automatically added via `paper_memory.ensure_placeholders_exist()` to prevent "old_string not found" failures
 13. **Fake Placeholder Detection**: System distinguishes real section content from model-inserted fake placeholder text (FULL content >300 chars = real; <300 chars with keywords = fake) to prevent confusion during marker repair

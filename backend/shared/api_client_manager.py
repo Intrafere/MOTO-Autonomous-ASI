@@ -22,12 +22,14 @@ from backend.shared.openrouter_client import (
     RateLimitError,
     FreeModelExhaustedError
 )
+from backend.shared.openai_codex_client import OpenAICodexError, openai_codex_client
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
 from backend.shared.config import rag_config, system_config
 from backend.shared.fastembed_provider import FASTEMBED_MODEL_NAME, FastEmbedProvider
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import sanitize_model_output_for_retry_context
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import ModelConfig
 from backend.shared.token_tracker import token_tracker
 
@@ -134,8 +136,11 @@ class APIClientManager:
             await asyncio.sleep(timeout_seconds)
             minutes = timeout_seconds // 60
             logger.warning(
-                f"API call for role '{role_id}' using {model} via {provider} "
-                f"has been running for {minutes}+ minutes — possible hung connection"
+                "API call for role '%s' using %s via %s has been running for %s+ minutes - possible hung connection",
+                redact_log_text(role_id, 120),
+                redact_log_text(model, 160),
+                redact_log_text(provider, 120),
+                minutes,
             )
             await self._broadcast("hung_connection_alert", {
                 "role_id": role_id,
@@ -143,8 +148,8 @@ class APIClientManager:
                 "provider": provider,
                 "elapsed_minutes": minutes,
                 "message": (
-                    f"API call to {model} via {provider} has been running for {minutes}+ minutes. "
-                    f"The connection may be hung. Consider stopping and trying a different host/provider."
+                    "The model may still be thinking; you can keep waiting or lower reasoning effort "
+                    "in Settings if this repeats."
                 )
             })
 
@@ -153,10 +158,7 @@ class APIClientManager:
             return await coro
         finally:
             watchdog_task.cancel()
-            try:
-                await watchdog_task
-            except asyncio.CancelledError:
-                pass
+            await asyncio.gather(watchdog_task, return_exceptions=True)
 
     def set_model_tracking_callback(self, callback: Optional[Callable]) -> None:
         """
@@ -329,6 +331,27 @@ class APIClientManager:
         if isinstance(metadata, dict):
             return metadata.copy()
         return {}
+
+    @staticmethod
+    def _effective_max_tokens(explicit_max_tokens: Optional[int], configured_max_tokens: Optional[int], role_id: str) -> int:
+        """Use the configured role budget as the ceiling for every provider call."""
+        try:
+            configured = int(configured_max_tokens)
+        except (TypeError, ValueError):
+            configured = 0
+        if configured <= 0:
+            raise ValueError(f"Role '{role_id}' requires a positive max output token setting.")
+
+        if explicit_max_tokens is None:
+            return configured
+
+        try:
+            explicit = int(explicit_max_tokens)
+        except (TypeError, ValueError):
+            explicit = 0
+        if explicit <= 0:
+            raise ValueError(f"Role '{role_id}' received a non-positive max output token override.")
+        return min(explicit, configured)
     
     def set_openrouter_api_key(self, api_key: str) -> None:
         """
@@ -361,6 +384,15 @@ class APIClientManager:
             config: Model configuration (includes provider, model_id, openrouter_model_id, 
                     lm_studio_fallback_id, and optionally openrouter_provider)
         """
+        if int(config.context_window or 0) <= 0 or int(config.max_output_tokens or 0) <= 0:
+            raise ValueError(
+                f"Role '{role_id}' requires explicit positive context_window and max_output_tokens settings."
+            )
+        if int(config.max_output_tokens) >= int(config.context_window):
+            raise ValueError(
+                f"Role '{role_id}' max_output_tokens must be smaller than context_window."
+            )
+
         if system_config.generic_mode:
             if config.provider != "openrouter":
                 logger.warning(
@@ -385,8 +417,8 @@ class APIClientManager:
         self._role_model_configs[role_id] = config
         
         # Set initial fallback state based on provider
-        if config.provider == "openrouter":
-            self._role_fallback_state[role_id] = "openrouter"
+        if config.provider in {"openrouter", "openai_codex_oauth"}:
+            self._role_fallback_state[role_id] = config.provider
         else:
             self._role_fallback_state[role_id] = "lm_studio"
         
@@ -396,6 +428,9 @@ class APIClientManager:
             provider_str = f" via {config.openrouter_provider}" if config.openrouter_provider else ""
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
             logger.info(f"Configured role '{role_id}': provider=openrouter, model={or_model}{provider_str}{fallback_str}")
+        elif config.provider == "openai_codex_oauth":
+            fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
+            logger.info(f"Configured role '{role_id}': provider=openai_codex_oauth, model={config.model_id}{fallback_str}")
         else:
             logger.info(f"Configured role '{role_id}': provider=lm_studio, model={config.model_id}")
     
@@ -689,7 +724,11 @@ class APIClientManager:
                             model=boost_model,
                             messages=messages,
                             temperature=temperature,
-                            max_tokens=max_tokens or boost_manager.boost_config.boost_max_output_tokens,
+                            max_tokens=self._effective_max_tokens(
+                                max_tokens,
+                                boost_manager.boost_config.boost_max_output_tokens,
+                                role_id,
+                            ),
                             response_format=response_format,
                             provider=boost_provider,
                             reasoning_effort=boost_manager.boost_config.boost_reasoning_effort,
@@ -1054,7 +1093,7 @@ class APIClientManager:
                             model=openrouter_model,
                             messages=messages,
                             temperature=temperature,
-                            max_tokens=max_tokens or role_config.max_output_tokens,
+                            max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
                             response_format=response_format,
                             provider=openrouter_provider,
                             reasoning_effort=role_config.openrouter_reasoning_effort,
@@ -1167,7 +1206,7 @@ class APIClientManager:
                         configured_provider=role_config.provider if role_config else configured_provider or "openrouter",
                         messages=messages,
                         temperature=temperature,
-                        max_tokens=max_tokens or role_config.max_output_tokens,
+                        max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
                         response_format=response_format,
                         reasoning_effort=role_config.openrouter_reasoning_effort,
                         tools=tools,
@@ -1355,6 +1394,140 @@ class APIClientManager:
                         )
                         raise
         
+        if fallback_state == "openai_codex_oauth" and role_config:
+            codex_model = role_config.model_id
+            start_time = time.time()
+            try:
+                logger.debug("Role %s using OpenAI Codex OAuth: %s", role_id, codex_model)
+                result = await self._with_hung_connection_watchdog(
+                    openai_codex_client.generate_completion(
+                        model=codex_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
+                        response_format=response_format,
+                        reasoning_effort=role_config.openrouter_reasoning_effort,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    ),
+                    role_id=role_id,
+                    model=codex_model,
+                    provider="OpenAI Codex",
+                )
+                duration_ms = (time.time() - start_time) * 1000
+                if not result.get("choices"):
+                    logger.error(
+                        "OpenAI Codex response missing 'choices' after %.0fms - %s",
+                        duration_ms,
+                        _response_shape_for_logging(result),
+                    )
+                    raise ValueError(f"OpenAI Codex response missing 'choices' after {duration_ms:.0f}ms")
+
+                response_content = ""
+                tokens_used = None
+                if result.get("choices"):
+                    message = result["choices"][0].get("message", {})
+                    response_content = message.get("content") or message.get("reasoning") or ""
+                if result.get("usage"):
+                    tokens_used = result["usage"].get("total_tokens")
+                    _pt = result["usage"].get("prompt_tokens")
+                    _ct = result["usage"].get("completion_tokens")
+                    if _pt is not None and _ct is not None:
+                        token_tracker.track(codex_model, _pt, _ct)
+                        await self._broadcast("token_usage_updated", token_tracker.get_stats())
+
+                result = self._annotate_response_with_call_metadata(
+                    result,
+                    task_id=task_id,
+                    role_id=role_id,
+                    configured_model=requested_model,
+                    actual_model=codex_model,
+                    configured_provider=role_config.provider,
+                    actual_provider="openai_codex_oauth",
+                    boosted=False,
+                    boost_mode=None,
+                    openrouter_reasoning_effort=role_config.openrouter_reasoning_effort,
+                )
+
+                if self._autonomous_logger_callback:
+                    full_prompt = self._prompt_for_logging(messages)
+                    await self._autonomous_logger_callback(
+                        task_id=task_id,
+                        role_id=role_id,
+                        model=codex_model,
+                        provider="openai_codex_oauth",
+                        prompt=full_prompt,
+                        response=response_content,
+                        tokens_used=tokens_used,
+                        duration_ms=duration_ms,
+                        success=True,
+                        error=None,
+                        phase=self._current_autonomous_phase,
+                    )
+
+                await self._track_model_usage(codex_model)
+                return result
+
+            except OpenAICodexError as e:
+                duration_ms = (time.time() - start_time) * 1000
+                if self._autonomous_logger_callback:
+                    full_prompt = self._prompt_for_logging(messages)
+                    await self._autonomous_logger_callback(
+                        task_id=task_id,
+                        role_id=role_id,
+                        model=codex_model,
+                        provider="openai_codex_oauth",
+                        prompt=full_prompt,
+                        response="",
+                        tokens_used=None,
+                        duration_ms=duration_ms,
+                        success=False,
+                        error=str(e),
+                        phase=self._current_autonomous_phase,
+                    )
+                if role_config.lm_studio_fallback_id:
+                    async with self._state_lock:
+                        self._role_fallback_state[role_id] = "lm_studio"
+                    logger.warning(
+                        "OpenAI Codex failed for role '%s'; falling back to LM Studio model %s",
+                        role_id,
+                        role_config.lm_studio_fallback_id,
+                    )
+                    model = role_config.lm_studio_fallback_id
+                else:
+                    raise RuntimeError(
+                        f"OpenAI Codex failed for role '{role_id}' and no LM Studio fallback is configured: {e}"
+                    ) from e
+            except Exception as e:
+                duration_ms = (time.time() - start_time) * 1000
+                if self._autonomous_logger_callback:
+                    full_prompt = self._prompt_for_logging(messages)
+                    await self._autonomous_logger_callback(
+                        task_id=task_id,
+                        role_id=role_id,
+                        model=codex_model,
+                        provider="openai_codex_oauth",
+                        prompt=full_prompt,
+                        response="",
+                        tokens_used=None,
+                        duration_ms=duration_ms,
+                        success=False,
+                        error=str(e),
+                        phase=self._current_autonomous_phase,
+                    )
+                if role_config.lm_studio_fallback_id:
+                    async with self._state_lock:
+                        self._role_fallback_state[role_id] = "lm_studio"
+                    logger.warning(
+                        "OpenAI Codex error for role '%s': %s; falling back to LM Studio model %s",
+                        role_id,
+                        e,
+                        role_config.lm_studio_fallback_id,
+                    )
+                    model = role_config.lm_studio_fallback_id
+                else:
+                    raise
+
         if system_config.generic_mode:
             raise RuntimeError(
                 f"Generic mode is OpenRouter-only; role '{role_id}' cannot use LM Studio. "
@@ -1362,7 +1535,11 @@ class APIClientManager:
             )
 
         # Use LM Studio (either configured as primary or fallen back)
-        logger.debug(f"Role {role_id} using LM Studio: {model}")
+        logger.debug(
+            "Role %s using LM Studio: %s",
+            redact_log_text(role_id, 120),
+            redact_log_text(model, 160),
+        )
         start_time = time.time()
         
         try:

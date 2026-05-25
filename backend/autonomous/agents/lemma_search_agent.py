@@ -17,6 +17,7 @@ from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.models import MathlibLemmaHint, ProofCandidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.utils import count_tokens
+from backend.shared.config import rag_config
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,7 @@ class MathlibLemmaSearchAgent:
         theorem_candidate: ProofCandidate,
         source_content: str,
         *,
+        source_title: str = "",
         max_candidates: int = 8,
     ) -> List[MathlibLemmaHint]:
         """Return locally confirmed Mathlib hints for the target theorem."""
@@ -232,9 +234,10 @@ class MathlibLemmaSearchAgent:
             theorem_statement=theorem_candidate.statement,
             formal_sketch=theorem_candidate.formal_sketch,
             source_excerpt=source_excerpt,
+            source_title=source_title,
         )
 
-        max_input_tokens = self.context_window - self.max_output_tokens
+        max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
         prompt_tokens = count_tokens(prompt)
         while prompt_tokens > max_input_tokens and len(source_excerpt) > 1200:
             source_excerpt = source_excerpt[: max(len(source_excerpt) // 2, 1200)]
@@ -244,6 +247,7 @@ class MathlibLemmaSearchAgent:
                 theorem_statement=theorem_candidate.statement,
                 formal_sketch=theorem_candidate.formal_sketch,
                 source_excerpt=source_excerpt,
+                source_title=source_title,
             )
             prompt_tokens = count_tokens(prompt)
 

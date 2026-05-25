@@ -120,6 +120,7 @@ function CompilerLogs() {
     websocket.on('model_recovery_initiated', handleRecoveryInitiated);
     websocket.on('model_recovery_success', handleRecoverySuccess);
     websocket.on('model_recovery_failed', handleRecoveryFailed);
+    websocket.on('hung_connection_alert', handleHungConnectionAlert);
 
     // Critique phase events
     websocket.on('critique_phase_started', handleCritiquePhaseStarted);
@@ -130,7 +131,6 @@ function CompilerLogs() {
     websocket.on('critique_decline_rejected', handleCompilerEvent);
     websocket.on('critique_removed', handleCompilerEvent);
     websocket.on('critique_phase_ended', handleCritiquePhaseEnded);
-    websocket.on('critique_phase_skipped', handleCompilerEvent);
     websocket.on('self_review_appended', handleCompilerEvent);
 
     // Phase transition events
@@ -155,6 +155,7 @@ function CompilerLogs() {
       websocket.off('model_recovery_initiated', handleRecoveryInitiated);
       websocket.off('model_recovery_success', handleRecoverySuccess);
       websocket.off('model_recovery_failed', handleRecoveryFailed);
+      websocket.off('hung_connection_alert', handleHungConnectionAlert);
 
       // Critique phase events cleanup
       websocket.off('critique_phase_started', handleCritiquePhaseStarted);
@@ -165,7 +166,6 @@ function CompilerLogs() {
       websocket.off('critique_decline_rejected', handleCompilerEvent);
       websocket.off('critique_removed', handleCompilerEvent);
       websocket.off('critique_phase_ended', handleCritiquePhaseEnded);
-      websocket.off('critique_phase_skipped', handleCompilerEvent);
       websocket.off('self_review_appended', handleCompilerEvent);
 
       // Phase transition events cleanup
@@ -230,6 +230,14 @@ function CompilerLogs() {
     });
   };
 
+  const handleHungConnectionAlert = (data) => {
+    const roleId = String(data.role_id || '').toLowerCase();
+    if (!roleId.startsWith('compiler_')) {
+      return;
+    }
+    addEvent({ type: 'hung_connection_alert', data });
+  };
+
   // Load events from localStorage on mount
   useEffect(() => {
     try {
@@ -281,9 +289,6 @@ function CompilerLogs() {
     if (type === 'critique_phase_ended') {
       return `Critique phase ended (self-review appended: ${data.self_review_appended ? 'YES' : 'NO'})`;
     }
-    if (type === 'critique_phase_skipped') {
-      return `Critique phase skipped: ${data.reason || 'no critiques accepted'}`;
-    }
     if (type === 'self_review_appended') {
       return `AI self-review appended (${data.critique_count || 0} accepted critique${data.critique_count === 1 ? '' : 's'})`;
     }
@@ -325,32 +330,15 @@ function CompilerLogs() {
       const previewSuffix = preview ? ` - ${preview}` : '';
       return `[Wolfram ${n}/${cap}] ${query}${previewSuffix}`;
     }
+    if (type === 'hung_connection_alert') {
+      const model = data.model || 'model';
+      const provider = data.provider || 'provider';
+      const elapsed = data.elapsed_minutes || 15;
+      return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
+    }
 
     // Default: show raw JSON
     return JSON.stringify(data, null, 2);
-  };
-
-  // Get CSS class for event styling
-  const getEventClass = (type) => {
-    if (type?.includes('accepted') || type?.includes('acceptance') || type === 'paper_updated') {
-      return 'event-success';
-    }
-    if (type?.includes('rejected') || type?.includes('rejection') || type === 'compiler_error') {
-      return 'event-error';
-    }
-    if (type?.includes('critique') || type?.includes('phase') || type?.includes('self_review')) {
-      return 'event-info';
-    }
-    if (type === 'compiler_wolfram_call') {
-      return 'event-info';
-    }
-    if (type === 'compiler_wolfram_call') {
-      return 'event-info';
-    }
-    if (type?.includes('decline') || type?.includes('skipped')) {
-      return 'event-warning';
-    }
-    return '';
   };
 
   const chronologicalEvents = events.slice().reverse();

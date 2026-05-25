@@ -1,10 +1,11 @@
 ---
+description: Project directory map, runtime roots, and purpose summaries for major source files
 alwaysApply: true
 ---
 
 ## LM Studio Server Information (Default Mode Only)
 LM Studio and its pre-loaded models can be reached at "http://127.0.0.1:1234" (overridable via `MOTO_LM_STUDIO_BASE_URL`).
-**NOTE:** The system works without LM Studio. If LM Studio is unavailable, users can configure OpenRouter for all roles. In generic mode (`generic_mode=True`), LM Studio is entirely bypassed — embeddings use FastEmbed and all LLM inference routes through OpenRouter.
+**NOTE:** The system works without LM Studio. If LM Studio is unavailable, users can configure OpenRouter for all roles. In generic mode (`generic_mode=True`), workflow inference paths bypass LM Studio — embeddings use FastEmbed and configured roles normalize to OpenRouter, while hidden legacy diagnostics should not be used by hosted UI.
 
 ## Runtime Root Note
 
@@ -12,14 +13,18 @@ LM Studio and its pre-loaded models can be reached at "http://127.0.0.1:1234" (o
 
 - The active backend instance may override mutable roots with `MOTO_DATA_ROOT` and `MOTO_LOG_ROOT`
 - Secret persistence may be isolated per instance with `MOTO_SECRET_NAMESPACE`
-- Frontend browser persistence may be isolated on shared origins with `MOTO_FRONTEND_STORAGE_PREFIX` / `VITE_MOTO_STORAGE_PREFIX`
+- Frontend browser persistence may be isolated on shared origins with `VITE_MOTO_STORAGE_PREFIX`; launch/control-plane config may supply `MOTO_FRONTEND_STORAGE_PREFIX` and project it into the frontend env
 - Hosted protected request size may be capped with `MOTO_GENERIC_MAX_REQUEST_BYTES` / `GENERIC_MAX_REQUEST_BYTES` (default 16 MiB)
 - Additional local launches may create generated instance folders such as `.moto_instances/{instance_id}/data` and `.moto_instances/{instance_id}/logs`
 
-## Complete Project Directory Structure and File Descriptions
+## Current High-Level Project Directory Structure and File Descriptions
+
+This is a maintained source-map for important directories and files, not a strict exhaustive inventory of every generated artifact or test helper.
 project-root/
 ├── .github/                            # GitHub community health files
 │   ├── ISSUE_TEMPLATE/                 # Public issue forms + security contact routing
+│   ├── codeql/                         # CodeQL analysis configuration
+│   ├── workflows/                      # GitHub Actions workflows, including CodeQL
 │   └── pull_request_template.md        # Default pull request template
 ├── .moto_instances/                    # Generated local multi-instance runtime roots (not source-controlled)
 │   └── {instance_id}/
@@ -32,13 +37,15 @@ project-root/
 │   │   ├── models.py                    # Pydantic models (includes ModelConfig with per-role supercharge_enabled, BoostConfig, WorkflowTask)
 │   │   ├── lm_studio_client.py          # LM Studio HTTP API client + same-base numeric :# instance sharing
 │   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion detection + model/endpoint metadata)
-│   │   ├── api_client_manager.py        # Unified API router (Supercharge wrapper + OpenRouter/LM Studio fallback + boost)
+│   │   ├── openai_codex_client.py       # Desktop-only OpenAI Codex/ChatGPT OAuth client, Codex backend adapter, and Codex model metadata normalizer
+│   │   ├── api_client_manager.py        # Unified API router (Supercharge wrapper + OpenRouter/OpenAI Codex/LM Studio fallback + boost)
 │   │   ├── boost_manager.py             # Singleton boost manager (tracks boost modes: next-count, always-prefer, category; aliases absorbed LeanOJ path-decision tasks into Final Solver boost category)
 │   │   ├── boost_logger.py              # Boost API call logger (persists redacted/default-safe entries to boost_api_log.txt)
-│   │   ├── workflow_predictor.py        # Predicts next 20 API calls (mode-specific algorithms)
+│   │   ├── workflow_predictor.py        # Legacy/shared workflow prediction helper; active coordinators maintain their own workflow_tasks
 │   │   ├── workflow_start_guard.py       # Process-wide async guard for atomic mutually-exclusive workflow starts
 │   │   ├── free_model_manager.py        # Free model rotation/cooldown singleton (looping + auto-selector backup)
-│   │   ├── model_error_utils.py         # Shared helpers for non-retryable provider/config failures that should pause workflows
+│   │   ├── model_error_utils.py         # Shared helpers for non-retryable provider/config failures; only recoverable credit exhaustion should pause workflows
+│   │   ├── provider_pause.py            # Process-local provider-credit pause/resume signal used by proof workflows and OpenRouter reset
 │   │   ├── rag_lock.py                  # Global RAG operation lock (prevents Aggregator/Compiler collision)
 │   │   ├── token_tracker.py             # Cumulative input/output token tracker singleton with per-model breakdown and research timer
 │   │   ├── wolfram_alpha_client.py      # Wolfram Alpha API client (logs redacted metadata, not raw query/result text)
@@ -46,13 +53,14 @@ project-root/
 │   │   ├── json_parser.py               # JSON parsing with sanitization for LLM quirks
 │   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
 │   │   ├── critique_prompts.py          # Default critique prompt and builder function for validator critiques
-│   │   ├── secret_store.py              # Secure API key persistence via OS keyring (OpenRouter, Wolfram Alpha); bypassed in generic mode (env-injected/in-memory)
+│   │   ├── secret_store.py              # Secure credential persistence via OS keyring (OpenRouter, OpenAI Codex OAuth, Wolfram Alpha); bypassed in generic mode
+│   │   ├── runtime_settings.py          # Non-secret runtime setting persistence under the active data root (free-model knobs plus desktop/default proof knobs)
 │   │   ├── build_info.py                # Build identity resolver (manifest + git HEAD/ZIP stamp + env overrides)
 │   │   ├── path_safety.py               # Safe path resolution helpers (realpath/normpath containment checks)
-│   │   ├── fastembed_provider.py         # FastEmbed embedding wrapper (generic mode only, lazy-imported; ~30 lines)
-│   │   ├── lean4_client.py              # Lean 4 proof checker client (subprocess + optional LSP persistent mode; gated on `lean4_enabled` / `lean4_lsp_enabled`; offloads temp/workspace filesystem operations from the FastAPI event loop)
+│   │   ├── fastembed_provider.py         # FastEmbed embedding wrapper (generic mode only, lazy-imported)
+│   │   ├── lean4_client.py              # Lean 4 proof checker client (subprocess gated on `lean4_enabled`, optional LSP persistent mode gated on `lean4_lsp_enabled`; offloads temp/workspace filesystem operations from the FastAPI event loop)
 │   │   ├── lean_proof_integrity.py       # Shared post-Lean integrity gate (rejects fake axiom/constant/opaque devices and validates theorem-statement alignment)
-│   │   ├── brainstorm_proof_gate.py      # Shared Lean 4 gate for optional brainstorm proof candidates before normal validation
+│   │   ├── brainstorm_proof_gate.py      # Shared Lean 4 gate for optional brainstorm proof candidates before normal validation; Lean-accepted real proofs are preserved even when ranked non-novel
 │   │   └── smt_client.py                # Z3/SMT launcher-managed subprocess wrapper (gated on `smt_enabled`; never authoritative on its own)
 │   ├── aggregator/                      # AGGREGATOR 
 │   │   ├── __init__.py
@@ -60,7 +68,7 @@ project-root/
 │   │   │   ├── __init__.py
 │   │   │   ├── rag_manager.py           # 4-stage RAG pipeline orchestrator (ChromaDB calls and heavy retrieval scoring are offloaded/snapshot-based to keep GUI/API routes responsive)
 │   │   │   ├── coordinator.py           # Manages 1-10 submitters + 1 validator (default 3, configurable per-submitter)
-│   │   │   ├── queue_manager.py         # Submission queue. Monitors queue size to trigger submitter pause when ≥10 submissions.
+│   │   │   ├── queue_manager.py         # Submission queue FIFO/batch/count/clear helper; coordinator owns submitter pause decisions
 │   │   │   └── context_allocator.py     # Direct injection vs RAG routing (tries direct first, offloads to RAG only when doesn't fit). Includes allocate_cleanup_review_context() which NEVER skips due to size - uses RAG when database too large.
 │   │   ├── ingestion/
 │   │   │   ├── __init__.py
@@ -118,9 +126,10 @@ project-root/
 │   │   ├── __init__.py                  # Package initialization
 │   │   ├── core/
 │   │   │   ├── __init__.py              # Package initialization
-│   │   │   ├── autonomous_coordinator.py # Orchestrates the Tier 1 → Tier 2 → Tier 3 autonomous workflow (invokes proof verification checkpoint after brainstorm/paper completion when `lean4_enabled`)
+│   │   │   ├── autonomous_coordinator.py # Orchestrates the Tier 1 → Tier 2 → Tier 3 autonomous workflow (invokes proof verification checkpoints after brainstorm/Tier 2 paper completion when `lean4_enabled`)
 │   │   │   ├── autonomous_rag_manager.py # Autonomous-specific RAG wrapper
-│   │   │   ├── proof_verification_stage.py # Orchestrates proof identification → Lean 4 attempts (5-try loop) → shared integrity gate → novelty check → proof storage; optional SMT early-exit + Mathlib lemma search; per-source reservation lock
+│   │   │   ├── proof_verification_stage.py # Orchestrates novelty-first proof identification → Lean 4 attempts (3 full + 2 tactic) → shared integrity/downshift gate → novelty check → proof storage; optional SMT hints + Mathlib lemma search; per-source reservation lock
+│   │   │   ├── proof_novelty.py       # Shared proof novelty assessment helper used by autonomous proof verification and compiler rigor
 │   │   │   ├── proof_registration.py     # Shared registration helper for verified Lean proofs from autonomous, compiler, aggregator, and LeanOJ flows
 │   │   │   └── proof_dependency_extractor.py # Parses verified Lean 4 code to extract `ProofDependency` records (imports, Mathlib lemmas, MOTO-origin refs)
 │   │   ├── agents/
@@ -130,8 +139,8 @@ project-root/
 │   │   │   ├── completion_reviewer.py   # Brainstorm completion review (SPECIAL SELF-VALIDATION)
 │   │   │   ├── reference_selector.py    # Reference paper selection workflow
 │   │   │   ├── paper_title_selector.py  # Paper title selection
-│   │   │   ├── proof_identification_agent.py # Extracts theorem/lemma candidates from brainstorms and papers
-│   │   │   ├── proof_formalization_agent.py  # Generates Lean 4 proof scripts for candidates (consumes Mathlib hints + SMT hints when enabled)
+│   │   │   ├── proof_identification_agent.py # Extracts novelty-first theorem candidates with expected novelty/prompt-relevance/anti-known-result rationale; skips not_novel or missing-tier candidates before Lean cost
+│   │   │   ├── proof_formalization_agent.py  # Generates Lean 4 proof scripts for candidates with mandatory full source context plus novelty metadata, Mathlib hints, and SMT hints when enabled
 │   │   │   ├── lemma_search_agent.py    # Mathlib lemma search agent (Build 2) — surfaces relevant existing lemmas for formalization prompts
 │   │   │   └── final_answer/            # TIER 3 - Final Answer Generation Agents
 │   │   │       ├── __init__.py          # Package initialization
@@ -168,14 +177,15 @@ project-root/
 │   │
 │   ├── leanoj/                          # LEANOJ PROOF SOLVER (proof-only top-level mode; no paper writing)
 │   │   ├── __init__.py
-│   │   ├── prompts.py                   # LeanOJ topic/batched-topic/brainstorm/prune/path/subproof/final-solver JSON prompts; brainstorm validation assigns final-context roles; prune review conservatively asks whether outdated/redundant memory should be removed or updated; final solver edits single-route durable master proofs and reviews Lean-accepted final code before stop
+│   │   ├── prompts.py                   # LeanOJ topic/batched-topic/brainstorm/prune/path/final-solver JSON prompts; brainstorm validation assigns final-context roles; prune review conservatively asks whether outdated/redundant memory should be removed, updated, or supplemented with one compact corrective idea; final solver edits single-route durable master proofs and reviews Lean-accepted final code before stop
 │   │   └── core/
 │   │       ├── __init__.py
 │   │       ├── leanoj_context.py         # LeanOJ full artifact persistence, direct-first allocation, final-context routing (verified helpers + active plans direct; refuted constructions separated as compact warnings), session-scoped RAG indexing/retrieval, final-cycle packets, and clear/resume cleanup
 │   │       └── leanoj_coordinator.py     # Parallel topic + brainstorm submitters, batch validators, resumable persistence, partial proof capture, context-role classification, single-route durable master_proof.lean editing, watchdog, final Lean verification, and semantic final-solver review
 │   │
-│   ├── scripts/                         # Temporary utility scripts
-│   │   └── cache_openrouter_models.py   # (Auto-deleted after use) Caches OpenRouter models with mapping display_name -> api_id
+│   ├── scripts/                         # Utility scripts
+│   │   ├── cache_openrouter_models.py   # Caches OpenRouter models with mapping display_name -> api_id
+│   │   └── startup/                     # Legacy/internal startup helper scripts kept out of repo root
 │   │
 │   ├── api/
 │   │   ├── __init__.py
@@ -187,16 +197,17 @@ project-root/
 │   │       ├── aggregator.py            # Aggregator API endpoints (includes /events)
 │   │       ├── compiler.py              # Compiler API endpoints
 │   │       ├── autonomous.py            # Autonomous Research API endpoints
-│   │       ├── leanoj.py                # LeanOJ Proof Solver API endpoints (`/api/leanoj/*`: start/resume, stop, status, master-proof draft/edit summaries, proofs/library, skip-brainstorm, force-brainstorm, clear)
+│   │       ├── leanoj.py                # LeanOJ Proof Solver API endpoints (`/api/leanoj/*`: start with matching-progress resume, stop, status, master-proof draft/edit summaries, current-run proofs, cross-session library, skip-brainstorm, force-brainstorm, clear)
 │   │       ├── boost.py                 # Boost API endpoints (enable/disable/toggle/status + OpenRouter provider endpoint metadata)
 │   │       ├── workflow.py              # Workflow API endpoints (predictions/history)
-│   │       ├── update.py                # Update/check endpoints for launcher/updater state
+│   │       ├── update.py                # Update/check endpoints for launcher/updater state (`POST /api/update/pull`, `GET /api/update/pull-status`)
 │   │       ├── download.py              # PDF generation endpoint via Playwright (desktop only; sanitize/block external requests; returns 501 in generic mode)
 │   │       ├── openrouter.py            # OpenRouter API endpoints (global key, models/providers via header/body keys only, LM Studio availability, model cache, reset exhaustion)
+│   │       ├── cloud_access.py          # Cloud Access & Keys endpoints including desktop OpenAI Codex OAuth login/model listing
 │   │       ├── websocket.py             # WebSocket for real-time updates (generic proxy auth or desktop one-time tickets before accept)
-│   │       ├── features.py              # GET /api/features — shared build identity plus stable capability flags (`generic_mode`, `lm_studio_enabled`, `pdf_download_available`)
+│   │       ├── features.py              # GET /api/features — shared build identity plus stable capability flags; GET /api/update-notice — launcher/runtime-refreshed update notice
 │   │       ├── proofs.py                # Proof database + Lean 4/SMT runtime + manual proof-check + certificate export + dependency graph routes; listing proofs (`GET /`, `/novel`, `/known`, `/library*`) and certificate/lean downloads (`/{id}/certificate`, `/{id}/certificate.lean`) are always available regardless of `lean4_enabled`; dependency/graph routes and `/check` are gated on `lean4_enabled`; `/status` uses short timeouts so it never blocks the UI
-│   │       └── health.py                # GET /api/health — readiness/liveness probe with instance/build metadata
+│   │       └── health.py                # GET /api/health — readiness/liveness probe with slim instance/build metadata
 │   │
 │   ├── data/                            # Persistent data storage
 │   │   ├── user_uploads/                # User-uploaded files
@@ -243,8 +254,9 @@ project-root/
 │   │   │       ├── session_stats.json                     # Session statistics
 │   │   │       └── workflow_state.json                    # Workflow state for crash recovery
 │   │   ├── proofs/                      # Legacy (non-session) Lean 4 proof storage (mirrors per-session proofs/ layout)
-│   │   ├── leanoj_sessions/             # LeanOJ run state (state.json, master_proof.lean, master_proof_edits.jsonl, master_proof_snapshots.jsonl, phase counters, subproofs, attempts, verified final Lean code; stop/crash resumes unless cleared)
-│   │   ├── leanoj_artifacts/            # LeanOJ full-memory artifact logs (accepted ideas with context_role metadata, recursive topics, verified/partial/failed subproofs, final attempts, final-cycle packets) used for direct-first RAG allocation
+│   │   ├── leanoj_sessions/             # LeanOJ run state (state.json, master_proof.lean, master_proof_edits.jsonl, master_proof_snapshots.jsonl, phase counters, proof fragments, attempts, verified final Lean code; stop/crash resumes unless cleared)
+│   │   ├── leanoj_partial_proofs/        # LeanOJ partial/supporting proof scaffold JSONL store, keyed by session
+│   │   ├── leanoj_artifacts/            # LeanOJ full-memory artifact logs (accepted ideas with context_role metadata, verified/partial/failed proof fragments, final attempts, final-cycle packets) used for direct-first RAG allocation
 │   │   ├── auto_research_metadata.json  # Autonomous Research metadata (LEGACY - now in session folders)
 │   │   ├── auto_research_stats.json     # Autonomous Research statistics (LEGACY - now in session folders)
 │   │   ├── auto_workflow_state.json     # Autonomous Research workflow state (LEGACY - now in session folders)
@@ -257,24 +269,24 @@ project-root/
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── aggregator/              # AGGREGATOR
-│   │   │   │   ├── AggregatorInterface.jsx  # User prompt, file upload, start/stop
+│   │   │   │   ├── AggregatorInterface.jsx  # User prompt, file upload, start/stop, developer-gated Creativity Emphasis Boost
 │   │   │   │   ├── AggregatorSettings.jsx   # Model selection, context sizes, capability-gated LM/OpenRouter UI
 │   │   │   │   ├── AggregatorLogs.jsx       # Metrics, acceptance rates, queue; loads persisted events on mount
 │   │   │   │   └── LiveResults.jsx          # Real-time accepted submissions view
 │   │   │   │
 │   │   │   ├── compiler/                # COMPILER
 │   │   │   │   ├── CompilerInterface.jsx    # Replace placeholder: prompt input, start/stop, status
-│   │   │   │   ├── CompilerSettings.jsx     # 3 model selections (validator, high-context, high-param), capability-gated LM/OpenRouter UI
+│   │   │   │   ├── CompilerSettings.jsx     # Compiler role selections (validator, high-context, high-param, critique), capability-gated LM/OpenRouter UI
 │   │   │   │   ├── CompilerLogs.jsx         # Metrics: construction vs rigor, miniscule edits
 │   │   │   │   └── LivePaper.jsx            # Real-time paper viewing, save draft, word count
 │   │   │   │
 │   │   │   ├── autonomous/              # AUTONOMOUS RESEARCH
-│   │   │       ├── AutonomousResearchInterface.jsx  # Main control: research prompt, start/stop, current tier
+│   │   │       ├── AutonomousResearchInterface.jsx  # Main control: research prompt, start/stop, current tier, developer-gated Creativity Emphasis Boost
 │   │   │       ├── AutonomousResearch.css     # Autonomous research styles
 │   │   │       ├── BrainstormList.jsx       # List all brainstorm topics with status
 │   │   │       ├── PaperLibrary.jsx         # Grid view of completed papers (title + abstract)
-│   │   │       ├── AutonomousResearchSettings.jsx  # Model configs for all roles, capability-gated LM/OpenRouter UI
-│   │   │       ├── AutonomousResearchLogs.jsx      # Metrics, graphs, event log, combined API call logs
+│   │   │       ├── AutonomousResearchSettings.jsx  # Autonomous settings: models/providers/profiles, free-model controls, Tier 3 toggle, Wolfram, Lean/SMT proof runtime, developer-only raw/Supercharge UI
+│   │   │       ├── AutonomousResearchLogs.jsx      # Metrics/per-submitter stats, event log, combined API call logs
 │   │   │       ├── LivePaperProgress.jsx    # Real-time Tier 2 paper display (embedded in interface)
 │   │   │       ├── LiveTier3Progress.jsx    # Real-time Tier 3 final answer display (embedded in interface)
 │   │   │       ├── FinalAnswerView.jsx      # TIER 3 - Final answer tab (separate tab for completed answers)
@@ -282,33 +294,32 @@ project-root/
 │   │   │       ├── FinalAnswerLibrary.css   # Final answer library styles
 │   │   │       ├── ArchiveViewerModal.jsx   # Research lineage archive viewer (papers + brainstorms)
 │   │   │       ├── ArchiveViewerModal.css   # Archive viewer styles
-│   │   │       ├── MathematicalProofs.jsx   # Live-session proof tab (lists verified novel/non-novel proofs from current session via `/api/proofs`)
+│   │   │       ├── MathematicalProofs.jsx   # Live-session proof tab (proof lists/status, manual checks, dependency graph, certificate/Lean exports via `/api/proofs`)
 │   │   │       ├── MathematicalProofs.css   # Proof library styles
 │   │   │       ├── ProofGraph.jsx           # Proof dependency graph view (hand-rolled SVG; Build 4, may escalate to reactflow in Build 5 if needed)
 │   │   │       ├── ProofGraph.css           # Proof graph styles
 │   │   │       ├── ProofNotificationStack.jsx # Persistent popup notifications for novel proof discoveries
-│   │   │       ├── ProofLibrary.jsx         # Cross-session novel proof library viewer (all sessions, grouped by research run; sub-tab inside CompletedWorksLibrary; fetches via `/api/proofs/library`)
+│   │   │       ├── ProofLibrary.jsx         # Cross-session proof library viewer with novelty filter (all sessions, grouped by research run; sub-tab inside CompletedWorksLibrary; fetches via `/api/proofs/library`)
 │   │   │       ├── ProofLibrary.css         # Proof library viewer styles
 │   │   │       ├── Stage2PaperHistory.jsx   # Tier 2 paper history list (grouped per research run; sub-tab inside CompletedWorksLibrary)
 │   │   │       └── Stage2PaperHistory.css   # Tier 2 paper history styles
 │   │   │
 │   │   │   └── leanoj/                  # LEANOJ PROOF SOLVER UI
-│   │   │       ├── LeanOJInterface.jsx  # Prompt/template input, start/resume, stop, skip/force brainstorm, clear progress, live status, verified Lean output
-│   │   │       ├── LeanOJSettings.jsx   # LeanOJ-specific model profiles/settings; grouped UI controls map to underlying role keys (Submitter 1 also sets topic_generator, Validator sets both validators, Brainstorm Proof Solver sets subproof identifier+solver, Final Proof Solver also owns path/final-readiness decisions)
+│   │   │       ├── LeanOJInterface.jsx  # Prompt/template input, start/resume, stop, skip/force brainstorm, clear progress, live status, developer-gated Creativity Emphasis Boost, verified Lean output
+│   │   │       ├── LeanOJSettings.jsx   # LeanOJ-specific model profiles/settings; grouped UI controls map user-facing roles to the underlying LeanOJ request role keys
 │   │   │       ├── LeanOJBrainstorms.jsx # LeanOJ accepted ideas/recursive brainstorm memory viewer
-│   │   │       ├── LeanOJLogs.jsx       # LeanOJ topics, subproofs, failed feedback, event stream
+│   │   │       ├── LeanOJLogs.jsx       # LeanOJ API-call log wrapper; live event stream and proof fragments are shown in the interface/proof tabs
 │   │   │       ├── LeanOJMasterProof.jsx # Master proof draft tab (on-demand draft, metadata, edit history, download)
 │   │   │       ├── LeanOJMasterProof.css # Master proof draft tab styles
-│   │   │       ├── LeanOJMathematicalProofs.jsx # Current-run verified LeanOJ proof/subproof viewer
+│   │   │       ├── LeanOJMathematicalProofs.jsx # Current-run verified LeanOJ proof/proof-fragment viewer
 │   │   │       ├── LeanOJProofLibrary.jsx # Cross-session completed LeanOJ proof-work library
 │   │   │       └── index.js             # LeanOJ component exports
 │   │   │
-│   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for OpenRouter vs LM Studio setup (OpenRouter-only in generic mode)
-│   │   ├── OpenRouterApiKeyModal.jsx    # Modal for global OpenRouter API key configuration with mode-aware persistence messaging
+│   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for Cloud Access vs LM Studio setup (OpenRouter-only in generic mode)
+│   │   ├── OpenRouterApiKeyModal.jsx    # Cloud Access & Keys modal for OpenRouter API key and desktop OpenAI Codex OAuth login
 │   │   ├── PaperCritiqueModal.jsx       # Modal for displaying validator paper critiques (ratings, feedback, history)
-│   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥7.0 avg)
+│   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥6.25 avg)
 │   │   ├── CreditExhaustionNotificationStack.jsx # Persistent red notifications for OpenRouter credit exhaustion with "Retry OpenRouter" reset button
-│   │   ├── HungConnectionNotificationStack.jsx # Persistent amber notifications for API calls exceeding 15 minutes (possible hung connections)
 │   │   ├── BoostControlModal.jsx        # Modal for boost configuration (next-X, category, always-prefer) with mode-aware copy
 │   │   ├── BoostControlModal.css        # Boost control modal styles
 │   │   ├── WorkflowPanel.jsx            # Boost controls panel (Boost Next X, Always Prefer, Category Boost, token stats, research timer)
@@ -345,6 +356,9 @@ project-root/
 │   ├── package.json
 │   └── vite.config.js
 │
+├── tests/                                # Regression/security tests for launcher, update, API hardening, proof/compiler behavior, and orchestration helpers
+│   └── test_*.py                         # Pytest modules; keep focused on behavior and path/security regressions
+│
 ├── requirements.txt                     # Python dependencies (default mode)
 ├── requirements-generic.txt             # Additive deps for generic mode (-r requirements.txt + fastembed + onnxruntime)
 ├── Dockerfile                           # Canonical hosted generic-mode container contract (`python:3.12-slim`, API-only backend image)
@@ -380,15 +394,17 @@ project-root/
 
 - `config.py`: RAGConfig, SystemConfig (context windows, chunk sizes, max output tokens, `generic_mode` flag)
 - `models.py`: Pydantic models (ModelConfig with per-role `supercharge_enabled`, BoostConfig, WorkflowTask, ModelUsageTracker, FinalAnswerState)
-- `lm_studio_client.py`: LM Studio HTTP client (completions, embeddings, model listing, same-base numeric `:#` instance sharing for independent calls); unused in generic mode
+- `lm_studio_client.py`: LM Studio HTTP client (completions, embeddings, model listing, same-base numeric `:#` instance sharing for independent calls); generic-mode inference and embeddings bypass it, though shared legacy diagnostics may still exist
 - `openrouter_client.py`: OpenRouter HTTP client (credit exhaustion detection, fallback, model/provider endpoint metadata)
-- `api_client_manager.py`: Unified API router (optional per-role Supercharge wrapper, OpenRouter/LM Studio fallback, boost, and model tracking); generic mode early-returns FastEmbed for embeddings
+- `openai_codex_client.py`: Desktop-only OpenAI Codex/ChatGPT OAuth token lifecycle, Codex backend Responses adapter (`stream=true`, strips unsupported output-limit/temperature knobs, local event aggregation), and Codex model context/output metadata normalizer; not the regular OpenAI API-key billing path
+- `api_client_manager.py`: Unified API router (optional per-role Supercharge wrapper, OpenRouter/OpenAI Codex/LM Studio fallback, boost, and model tracking); generic mode early-returns FastEmbed for embeddings
 - `boost_manager.py`: Singleton boost manager (next-count, always-prefer, category, and per-task boost routing; broadcasts events)
 - `boost_logger.py`: Boost API call logger (persists boost-routed calls for the combined API log view)
-- `workflow_predictor.py`: Predicts next 20 API calls for internal boost routing (not displayed in UI)
+- `workflow_predictor.py`: Legacy/shared prediction helper; active coordinators expose their own `workflow_tasks` for internal boost/workflow routing
 - `free_model_manager.py`: Free model rotation/cooldown singleton (looping, auto-selector `openrouter/free`, account exhaustion detection)
-- `model_error_utils.py`: Shared non-retryable provider/config error detection; callers must pause/resume rather than convert those errors into proof or validation failures.
-- `brainstorm_proof_gate.py`: Shared Lean 4 gate for optional proof-candidate brainstorm submissions before normal brainstorm validation.
+- `model_error_utils.py`: Shared non-retryable provider/config error detection; callers pause recoverable credit exhaustion, while hard config/privacy/missing-key errors fail visibly with a user-repair path instead of becoming proof or validation failures.
+- `provider_pause.py`: Process-local provider-credit pause/resume event. LeanOJ and autonomous proof checkpoints preserve durable workflow state separately; `/api/openrouter/reset-exhaustion` wakes currently waiting in-process proof workflows.
+- `brainstorm_proof_gate.py`: Shared Lean 4 gate for optional proof-candidate brainstorm submissions before normal brainstorm validation; preserves Lean-accepted real proof artifacts even when novelty is low.
 - `wolfram_alpha_client.py`: Wolfram Alpha API client. Exposed to the HighContextSubmitter.submit_construction loop as the `wolfram_alpha_query` tool (up to 20 calls per construction submission); logs/broadcasts must redact raw query/result text.
 - `rag_lock.py`: Global RAG operation lock (prevents collision, retry logic for reads); embedding lock skip in generic mode (FastEmbed is in-process/thread-safe)
 - `token_tracker.py`: Cumulative input/output token tracker singleton with per-model breakdown and research timer. Reset on session start, timer start/stop tied to coordinator lifecycle. Stats broadcast via `token_usage_updated` WebSocket event after each successful LLM call.
@@ -396,11 +412,12 @@ project-root/
 - `json_parser.py`: JSON parsing with sanitization for LLM responses; sanitizes reasoning tokens, markdown blocks, control tokens, LaTeX escapes, control characters; **rejects truncated JSON** (raises ValueError with diagnostics) to prevent corrupted content from passing validation; also provides `sanitize_model_output_for_retry_context()` so retries/memory/RAG can preserve visible failed-output excerpts without replaying known private thought/channel/control tokens or corrupting visible Lean/math syntax such as `<|`; retry-facing parser exceptions must not include raw response excerpts
 - `critique_memory.py`: Paper critique persistence (ratings, feedback, history, session-aware)
 - `critique_prompts.py`: Default critique prompt and builder function
-- `secret_store.py`: Secure API key persistence via OS keyring; bypassed in generic mode (keys are env-injected/in-memory only)
+- `secret_store.py`: Secure credential persistence via OS keyring; bypassed in generic mode (keys are env-injected/in-memory only)
+- `runtime_settings.py`: Persists non-secret process settings such as free-model looping and desktop/default-mode proof runtime flags/timeouts under the active data root
 - `build_info.py`: Build identity helper that reads the committed manifest contract, resolves git HEAD or ZIP-stamped build commits, and applies optional env overrides for runtime version/build stamping
 - `fastembed_provider.py`: FastEmbed embedding wrapper (generic mode only); lazy-imported so default installs are unaffected
-- `lean4_client.py`: Lean 4 proof checker client. Subprocess mode by default; optional persistent LSP mode when `lean4_lsp_enabled`. Silent no-op when `lean4_enabled=False`. Never bundled into the hosted image.
-- `smt_client.py`: Optional Z3/SMT launcher-managed subprocess wrapper. Silent no-op when `smt_enabled=False`. SMT results are hint-only; Lean 4 remains authoritative. Never bundled into the hosted image.
+- `lean4_client.py`: Lean 4 proof checker client. Subprocess mode by default; optional persistent LSP mode when `lean4_lsp_enabled`. When `lean4_enabled=False`, proof checks return explicit disabled/error results rather than invoking Lean. Never bundled into the hosted image.
+- `smt_client.py`: Optional Z3/SMT launcher-managed subprocess wrapper. When `smt_enabled=False`, SMT checks return explicit disabled/error results rather than invoking Z3. SMT results are hint-only; Lean 4 remains authoritative. Never bundled into the hosted image.
 
 ### Compiler Components
 
@@ -415,9 +432,10 @@ project-root/
 
 ### Autonomous Research Components
 
-- `autonomous_coordinator.py`: Three-tier workflow orchestrator (Tier 1→2→3, triggers, crash recovery, invokes `ProofVerificationStage` after brainstorm/paper completion when `lean4_enabled`)
+- `autonomous_coordinator.py`: Three-tier workflow orchestrator (Tier 1→2→3, triggers, crash recovery, invokes `ProofVerificationStage` after brainstorm/Tier 2 paper completion when `lean4_enabled`)
 - `autonomous_rag_manager.py`: Autonomous RAG wrapper
-- `proof_verification_stage.py`: Proof pipeline orchestrator — prompt-relevant candidate identification → per-candidate Phase A (Mathlib lemma search → optional SMT early-exit → Lean 4 formalization attempts, 5 retries per candidate) runs concurrently across all identified candidates bounded by `proof_max_parallel_candidates` (default 6) → Phase B (novelty check → `add_proof` → `ProofDependency` extraction → brainstorm/paper `append_proofs_section`) remains strictly serialized in Phase-A completion order. Per-source reservation lock prevents duplicate concurrent checks for the same `{source_type}:{source_id}`; `FreeModelExhaustedError` (or any Phase-A exception) cancels sibling tasks before the coordinator's recovery path runs.
+- `proof_verification_stage.py`: Proof pipeline orchestrator — prompt-relevant candidate identification with bounded source-title/brainstorm-topic metadata → per-candidate Phase A (Mathlib lemma search → optional SMT early-exit → Lean 4 formalization attempts, currently 3 full-script plus 2 tactic-script attempts per candidate) runs across all identified candidates with `proof_max_parallel_candidates` batching (default `6`; `0` = unlimited; positive values = strict batch size) → Phase B (novelty check → `add_proof` → `ProofDependency` extraction → brainstorm/paper `append_proofs_section`) remains strictly serialized in Phase-A completion order. Per-source reservation lock prevents duplicate concurrent checks for the same `{source_type}:{source_id}`; account-credit exhaustion cancels sibling tasks and preserves checkpointed progress for provider pause/retry at the coordinator boundary. Compiler rigor mode remains serial, separate from this parallel proof pipeline, and capped at 5 consecutive rigor cycles.
+- `proof_novelty.py`: Shared novelty classifier for Lean-verified proofs, used by autonomous proof verification and compiler rigor persistence.
 - `proof_registration.py`: Shared verified-proof registration helper used by autonomous, compiler, aggregator, and LeanOJ proof flows.
 - `proof_dependency_extractor.py`: Parses verified Lean 4 code into `ProofDependency` records (imports, Mathlib lemmas, MOTO-origin proof ancestry).
 - Agents: `topic_selector.py`, `topic_validator.py`, `completion_reviewer.py`, `reference_selector.py`, `paper_title_selector.py`, `proof_identification_agent.py`, `proof_formalization_agent.py`, `lemma_search_agent.py`
@@ -429,23 +447,24 @@ project-root/
 ### LeanOJ Components
 
 - `leanoj_coordinator.py`: Runs the proof-only LeanOJ state machine. It uses parallel submitters plus batch validators for broad initial foundation topics and brainstorms; classifies accepted brainstorm context as `active_plan`, `verified_hint`, `refuted_construction`, or `scratch`; keeps ordinary partial `sorry` scaffolds and failed final attempts out of master-proof seeding unless explicitly elevated; persists accepted-idea `context_role` and chronological occurrence metadata; stores full proof memory independently from trimmed UI/status lists; rejects fake proof devices; persists final-cycle failure packets; emits LeanOJ progress events; routes prompt memory through allocated context blocks; passes the most recent 5 final attempts as compact final-solver execution feedback; and requires Final Proof Solver semantic review before a Lean-passing final proof stops as verified.
-- `leanoj_context.py`: Owns LeanOJ artifact JSONL persistence under the active data root, direct-first allocation, final-solver context routing (verified subproofs + `active_plan` notes direct, refuted constructions only as compact warnings, ordinary partial scaffolds excluded from final direct proof context), source-name generation, RAG indexing, session-scoped retrieval with `include_source_prefixes`, direct-source exclusion, resume reload support, and Clear Progress cleanup for LeanOJ RAG sources.
-- `prompts.py`: LeanOJ prompt builders for topic, brainstorm, prune review, path, subproof, final-solver editing, and final semantic review roles. These consume prepared context blocks (`direct_proof_context`, `rag_evidence_context`, `refuted_construction_warnings`, `capped_rejection_feedback`, `current_final_cycle_packet`) instead of owning persistence or truncation policy; prune prompts must conservatively ask whether any outdated/redundant memory should be removed or updated without forcing deletion; final-solver prompts must keep `master_proof.lean` to the current chosen proof route, include only compact recent-attempt execution feedback, and avoid accumulating explored/refuted routes.
+- `leanoj_context.py`: Owns LeanOJ artifact JSONL persistence under the active data root, direct-first allocation, final-solver context routing (verified proof fragments + `active_plan` notes direct, refuted constructions only as compact warnings, ordinary partial scaffolds excluded from final direct proof context), source-name generation, RAG indexing, session-scoped retrieval with `include_source_prefixes`, direct-source exclusion, resume reload support, and Clear Progress cleanup for LeanOJ RAG sources.
+- `prompts.py`: LeanOJ prompt builders for topic, brainstorm, prune review, path/final-solver editing, and final semantic review roles. These consume prepared context blocks (`direct_proof_context`, `rag_evidence_context`, `refuted_construction_warnings`, `capped_rejection_feedback`, `current_final_cycle_packet`) instead of owning persistence or truncation policy; prune prompts may conservatively remove, update, or add one compact corrective memory item without forcing deletion; final-solver prompts must keep `master_proof.lean` to the current chosen proof route, include only compact recent-attempt execution feedback, and avoid accumulating explored/refuted routes.
 
 ### API Routes
 
 - `compiler.py`: Compiler control (start/stop/status), paper/outline access, critique management
-- `autonomous.py`: Autonomous research control (start/stop/clear/status), brainstorm/paper access, Tier 3 endpoints
+- `autonomous.py`: Autonomous research control (start/stop/clear/status), brainstorm/paper access, pruned/history paper routes, Tier 3/final-answer library routes, critique/API-log helpers, and current-paper recovery actions
 - `proofs.py`: Proof database listing (`GET /`, `/novel`, `/known`) and `/status` runtime readiness — always available, never gated. `/{id}/certificate` and `/{id}/certificate.lean` — always available (data is stored on disk; Lean version info populated only when Lean is enabled). `/status` uses `asyncio.wait_for` timeouts (5s Lean, 3s Z3) so the endpoint never hangs. `POST /settings` runtime flag updates. `POST /check` manual proof check, `/{id}/dependencies`, `/graph`, `/mathlib/{lemma}/dependents` graph/lineage queries — gated on `lean4_enabled`. `GET /library` + `GET /library/{session_id}/{proof_id}` cross-session proof library endpoints — always available.
-- `leanoj.py`: LeanOJ proof-solver routes for start/resume, stop, status, clear, skip-brainstorm, force-brainstorm, current proof listing/library, plus read-only `GET /api/leanoj/master-proof` and `/api/leanoj/master-proof/edits` for the durable master proof draft and compact edit-history summaries.
+- `leanoj.py`: LeanOJ proof-solver routes for start (including matching saved-progress resume), stop, status, clear, skip-brainstorm, force-brainstorm, current proof listing via `/api/leanoj/proofs`, cross-session library via `/api/leanoj/library*`, plus read-only `GET /api/leanoj/master-proof` and `/api/leanoj/master-proof/edits` for the durable master proof draft and compact edit-history summaries.
 
 ### Frontend Components
 
-- `App.jsx`: Top-level GUI shell. Default mode is `Autonomous ASI S.T.E.M.` for Part 3 screens; `Advanced Manual ASI S.T.E.M.` contains the manual Part 1 Aggregator + Part 2 Compiler workspace; `LeanOJ Proof Solver` is a developer-mode-only proof mode. Shared utility controls (Boost, OpenRouter, WorkflowPanel) remain global, and Build 3C bootstraps `/api/features` here so hosted mode can hide LM Studio-only UI and copy. Shift + Z + X toggles persisted developer-mode settings, LeanOJ mode, raw JSON editors, and Supercharge controls. Supercharge request payloads must be forced off unless developer mode is active. **Tab persistence**: `autonomousActiveTab` → `localStorage['autonomousActiveTab']`; `completedWorksSubTab` → `localStorage['completedWorksSubTab']`; `manualActiveTab` → `localStorage['manualActiveTab']`; `leanojActiveTab` → `localStorage['leanojActiveTab']`. **Autonomous tab groups**: main tabs (interface, brainstorms, papers, proofs, optional final-answer) + settings group (Your Completed Works Library, API Call Logs, Settings). The "Your Completed Works Library" tab hosts three sub-tabs rendered inside its content area: Stage 2 Papers History, Stage 3 Final Answers History, and Proof Library.
+- `App.jsx`: Top-level GUI shell. Default mode is `Autonomous S.T.E.M. ASI` for Part 3 screens; `Advanced Manual S.T.E.M. ASI` contains the manual Part 1 Aggregator + Part 2 Compiler workspace; `LeanOJ Proof Solver` is a developer-mode-only proof mode. Shared utility controls (Boost, Cloud Access & Keys, WorkflowPanel) remain global, and Build 3C bootstraps `/api/features` here so hosted mode can hide LM Studio/Codex-only UI and copy. Shift + Z + X toggles persisted developer-mode settings, LeanOJ mode, raw JSON editors, and Supercharge controls. Supercharge request payloads must be forced off unless developer mode is active. Active app mode and tab state are in-memory only; a fresh frontend mount starts on the autonomous main interface. **Autonomous tab groups**: main tabs (interface, brainstorms, papers, proofs, optional final-answer) + settings group (Your Completed Works Library, API Call Logs, Settings). The "Your Completed Works Library" tab hosts three sub-tabs rendered inside its content area: Stage 2 Papers History, Stage 3 Final Answers History, and Proof Library.
+- Live activity feeds keep long bounded histories (thousands of entries) so active workflow context is not lost quickly while still preventing unbounded UI growth.
 - **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
 - **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`
-- **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx` (Stage 3 history sub-tab), `ArchiveViewerModal.jsx`, `MathematicalProofs.jsx` (live-session proof tab), `ProofGraph.jsx` (dependency graph), `ProofNotificationStack.jsx` (novel-proof popups), `ProofLibrary.jsx` (cross-session proof library sub-tab), `Stage2PaperHistory.jsx` (Stage 2 history sub-tab)
+- **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx` (Stage 3 history sub-tab), `ArchiveViewerModal.jsx`, `MathematicalProofs.jsx` (live proof/status/manual-check/certificate tab), `ProofGraph.jsx` (dependency graph), `ProofNotificationStack.jsx` (novel-proof popups), `ProofLibrary.jsx` (cross-session proof library sub-tab), `Stage2PaperHistory.jsx` (Stage 2 history sub-tab)
 - **LeanOJ**: `LeanOJInterface.jsx`, `LeanOJBrainstorms.jsx`, `LeanOJLogs.jsx`, `LeanOJMasterProof.jsx`, `LeanOJMathematicalProofs.jsx`, `LeanOJProofLibrary.jsx`, `LeanOJSettings.jsx`
-- **Shared**: `StartupProviderSetupModal.jsx`, `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `HungConnectionNotificationStack.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
+- **Shared**: `StartupProviderSetupModal.jsx`, `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `UpdateNotificationBanner.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
 - **Hooks**: `useProofCheckRuntime.js` (reads `/api/proofs/status` + runtime config so UI can enable/disable manual proof-check controls)
 - **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `openRouterSelection.js` (shared OpenRouter selector auto-fill helpers using model context and provider endpoint caps), `autonomousProfiles.js` (shared recommended-profile definitions + persistence helpers; when editing a preset, anchor to the exact profile block and exact nested role such as `validator` or `highContext`, never to a shared literal alone, then verify the diff only touched that intended profile/role), `disclaimerHelper.js` (frontend-only disclaimer injection), `api.js`, `websocket.js`

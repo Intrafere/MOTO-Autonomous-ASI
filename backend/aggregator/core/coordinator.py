@@ -3,19 +3,16 @@ Coordinator - orchestrates submitters, validator, queue, and RAG system.
 Manages the overall aggregator workflow.
 """
 import asyncio
-import time
 import json
 from typing import List, Optional, Dict, Callable, Any
 import logging
 from pathlib import Path
-from datetime import datetime
 import aiofiles
 
 from backend.shared.config import system_config, rag_config
 from backend.shared.models import SystemStatus, Submission, ValidationResult, SubmitterConfig, WorkflowTask, ModelConfig, ProofAttemptFeedback
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.rag_lock import rag_operation_lock
-from backend.shared.workflow_predictor import workflow_predictor
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
@@ -29,6 +26,16 @@ from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.event_log import event_log
 
 logger = logging.getLogger(__name__)
+
+
+async def _cancel_and_drain_task(task: asyncio.Task) -> None:
+    """Cancel a task, suppressing only cancellation while preserving real failures."""
+    task.cancel()
+    for result in await asyncio.gather(task, return_exceptions=True):
+        if isinstance(result, asyncio.CancelledError):
+            continue
+        if isinstance(result, BaseException):
+            raise result
 
 
 def _resolve_uploaded_user_file(file_ref: str, *, allow_trusted_context_files: bool = False) -> Optional[Path]:
@@ -117,6 +124,7 @@ class Coordinator:
         
         # Cleanup review toggle (disabled for short-lived mini-brainstorm phases)
         self.enable_cleanup_review = True
+        self.creativity_emphasis_boost_enabled = False
 
         # Optional source-level hard cap used by autonomous brainstorm mode.
         self.max_total_acceptances: Optional[int] = None
@@ -190,7 +198,7 @@ class Coordinator:
             logger.info(
                 "Single configured LM Studio model '%s' has %s loaded same-base instances; "
                 "using parallel submitter workflow with instance sharing.",
-                validator_model,
+                redact_log_text(validator_model, 160),
                 sibling_count,
             )
             return False
@@ -211,11 +219,13 @@ class Coordinator:
         validator_openrouter_reasoning_effort: str = "auto",
         validator_lm_studio_fallback: Optional[str] = None,
         validator_supercharge_enabled: bool = False,
+        creativity_emphasis_boost_enabled: bool = False,
         enable_cleanup_review: bool = True,
         max_total_acceptances: Optional[int] = None,
         acceptance_count_offset: int = 0,
         acceptance_cap_callback: Optional[Callable[[int], Any]] = None,
         allow_trusted_context_files: bool = False,
+        trusted_context_texts: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Initialize the coordinator with configuration.
@@ -233,15 +243,19 @@ class Coordinator:
             validator_openrouter_reasoning_effort: OpenRouter reasoning effort for validator
             validator_lm_studio_fallback: LM Studio fallback model for validator when using OpenRouter
             validator_supercharge_enabled: Whether validator answers should use Supercharge
+            creativity_emphasis_boost_enabled: Whether every fifth submitter turn gets the creativity emphasis prompt
             max_total_acceptances: Optional hard cap for accepted submissions, including offset
             acceptance_count_offset: Existing acceptances before this coordinator run
             acceptance_cap_callback: Async callback fired when the cap is reached
             allow_trusted_context_files: Allow internal callers to pass data-root files as context
+            trusted_context_texts: Internal caller-provided context blocks that
+                have already been sanitized and do not need file reads
         """
         logger.info("Initializing coordinator...")
         
         # Store cleanup review toggle
         self.enable_cleanup_review = enable_cleanup_review
+        self.creativity_emphasis_boost_enabled = creativity_emphasis_boost_enabled
         self.max_total_acceptances = max_total_acceptances
         self.acceptance_count_offset = max(0, acceptance_count_offset)
         self.acceptance_cap_callback = acceptance_cap_callback
@@ -299,34 +313,40 @@ class Coordinator:
         
         if self.single_model_mode:
             logger.info(
-                f"Single-model mode ENABLED: All {num_submitters} submitters and validator use '{validator_model}'. "
-                f"Submitters will run sequentially then validator processes all."
+                "Single-model mode ENABLED: All %s submitters and validator use '%s'. "
+                "Submitters will run sequentially then validator processes all.",
+                num_submitters,
+                redact_log_text(validator_model, 160),
             )
         else:
+            submitter_models = [redact_log_text(sc.model_id, 160) for sc in submitter_configs]
             logger.info(
-                f"Multi-model mode: {num_submitters} submitters with models "
-                f"{[sc.model_id for sc in submitter_configs]} run in parallel, "
-                f"validator ({validator_model}) runs independently."
+                "Multi-model mode: %s submitters with models %s run in parallel, validator (%s) runs independently.",
+                num_submitters,
+                submitter_models,
+                redact_log_text(validator_model, 160),
             )
         
         # Log boost status if enabled (for transparency)
         from backend.shared.boost_manager import boost_manager
         if boost_manager.boost_config and boost_manager.boost_config.enabled:
             logger.info(
-                f"Boost mode ACTIVE: Will route selected tasks to {boost_manager.boost_config.boost_model_id}. "
-                f"This does NOT affect parallel execution mode."
+                "Boost mode ACTIVE: Will route selected tasks to %s. "
+                "This does NOT affect parallel execution mode.",
+                redact_log_text(boost_manager.boost_config.boost_model_id, 160),
             )
         
         # CRITICAL: Warn user about potential context mismatches
         # LM Studio may not load models with requested context - this causes silent failures
         context_info = "\n".join([
-            f"  - Submitter {sc.submitter_id}: {sc.context_window} tokens (model: {sc.model_id})"
+            f"  - Submitter {sc.submitter_id}: {redact_log_text(sc.context_window, 40)} tokens (model: {redact_log_text(sc.model_id, 160)})"
             for sc in submitter_configs
         ])
         logger.info(
-            f"Context window configuration:\n"
-            f"{context_info}\n"
-            f"  - Validator: {final_validator_context} tokens (model: {validator_model})"
+            "Context window configuration:\n%s\n  - Validator: %s tokens (model: %s)",
+            context_info,
+            redact_log_text(final_validator_context, 40),
+            redact_log_text(validator_model, 160),
         )
         
         # Initialize shared training memory
@@ -375,6 +395,22 @@ class Coordinator:
                 async with aiofiles.open(path, 'r', encoding='utf-8') as f:
                     user_files_content[path.name] = await f.read()
                 logger.info("Loaded user file: %s", redact_log_text(path.name, 120))
+
+        for source_name, content in (trusted_context_texts or {}).items():
+            safe_source_name = str(source_name or "").strip()
+            if not safe_source_name:
+                continue
+            text_content = str(content or "").strip()
+            if not text_content:
+                continue
+            user_files_content[safe_source_name] = text_content
+            await rag_manager.add_text(
+                text_content,
+                safe_source_name,
+                chunk_sizes=rag_config.submitter_chunk_intervals,
+                is_permanent=False,
+            )
+            logger.info("Loaded trusted context text (%d characters)", len(text_content))
         
         # Create submitter agents from configs (1-10 submitters with individual settings)
         self.submitters = []
@@ -387,7 +423,8 @@ class Coordinator:
                 websocket_broadcaster=self.websocket_broadcaster,
                 context_window=config.context_window,
                 max_output_tokens=config.max_output_tokens,
-                coordinator=self
+                coordinator=self,
+                creativity_emphasis_boost_enabled=self.creativity_emphasis_boost_enabled
             )
             await submitter.initialize()
             # Set callback to add submissions to queue
@@ -410,7 +447,13 @@ class Coordinator:
                     supercharge_enabled=config.supercharge_enabled
                 )
             )
-            logger.info(f"Created Submitter {config.submitter_id}: model={config.model_id}, provider={config.provider}, context={config.context_window}")
+            logger.info(
+                "Created Submitter %s: model=%s, provider=%s, context=%s",
+                config.submitter_id,
+                redact_log_text(config.model_id, 160),
+                redact_log_text(config.provider, 80),
+                config.context_window,
+            )
         
         # Create validator agent
         self.validator = ValidatorAgent(
@@ -437,7 +480,11 @@ class Coordinator:
                 supercharge_enabled=validator_supercharge_enabled
             )
         )
-        logger.info(f"Created Validator: model={validator_model}, provider={validator_provider}")
+        logger.info(
+            "Created Validator: model=%s, provider=%s",
+            redact_log_text(validator_model, 160),
+            redact_log_text(validator_provider, 80),
+        )
         
         # Set up re-chunking callback
         if not self._rechunk_callback_set:
@@ -544,8 +591,6 @@ class Coordinator:
             event_type: "started" or "completed"
             task_id: The task ID (e.g., "agg_sub1_001", "agg_val_002")
         """
-        import asyncio
-        
         if event_type == "started":
             try:
                 loop = asyncio.get_event_loop()
@@ -662,31 +707,23 @@ class Coordinator:
         if self.single_model_mode:
             # Single-model mode: Cancel main task
             if self._main_task:
-                self._main_task.cancel()
-                try:
-                    await self._main_task
-                except asyncio.CancelledError:
-                    pass
+                await _cancel_and_drain_task(self._main_task)
         else:
             # Multi-model mode: Stop submitters and validator task
             for submitter in self.submitters:
                 await submitter.stop()
             
             if self._validator_task:
-                self._validator_task.cancel()
-                try:
-                    await self._validator_task
-                except asyncio.CancelledError:
-                    pass
+                await _cancel_and_drain_task(self._validator_task)
         
         # Cancel re-chunking task if running
         if self._rechunk_task and not self._rechunk_task.done():
             logger.info("Cancelling background re-chunking task...")
-            self._rechunk_task.cancel()
-            try:
-                await self._rechunk_task
-            except asyncio.CancelledError:
-                pass
+            await _cancel_and_drain_task(self._rechunk_task)
+
+        # The queue manager is process-global. Clear it on stop so submissions
+        # from a stopped mini-aggregator cannot be validated under a later phase.
+        await queue_manager.clear()
         
         await self._broadcast("system_stopped", {"message": "Aggregator system stopped"})
         logger.info("Coordinator stopped")
@@ -695,9 +732,11 @@ class Coordinator:
         """Add a submission to the queue (called by submitters)."""
         await queue_manager.enqueue(submission)
         self.total_submissions += 1
+        creativity_emphasized = bool((submission.metadata or {}).get("creativity_emphasized"))
         await self._broadcast("new_submission", {
             "submission_id": submission.submission_id,
             "submitter_id": submission.submitter_id,
+            "creativity_emphasized": creativity_emphasized,
             "queue_size": await queue_manager.size()
         })
     
@@ -731,7 +770,7 @@ class Coordinator:
                 
                 # Process results
                 for submission, result in zip(submissions, results):
-                    if result.decision == "accept":
+                    if result.decision == "accept" or self._is_verified_brainstorm_proof_submission(submission):
                         await self._handle_acceptance(submission, result)
                         if self._acceptance_cap_reached:
                             break
@@ -827,7 +866,7 @@ class Coordinator:
                     validations_done += len(submissions)
                     
                     for submission, result in zip(submissions, results):
-                        if result.decision == "accept":
+                        if result.decision == "accept" or self._is_verified_brainstorm_proof_submission(submission):
                             await self._handle_acceptance(submission, result)
                             if self._acceptance_cap_reached:
                                 break
@@ -897,11 +936,13 @@ class Coordinator:
         actual_submitter_provider = submitter_call.get("provider") or configured_submitter_provider
         actual_validator_model = validator_call.get("effective_model") or self.validator_model
         actual_validator_provider = validator_call.get("provider") or self.validator_provider
+        creativity_emphasized = bool((submission.metadata or {}).get("creativity_emphasized"))
         
         # Broadcast
         await self._broadcast("submission_accepted", {
             "submission_id": submission.submission_id,
             "submitter_id": submission.submitter_id,
+            "creativity_emphasized": creativity_emphasized,
             "submitter_model": actual_submitter_model,
             "submitter_provider": actual_submitter_provider,
             "submitter_configured_model": configured_submitter_model,
@@ -922,10 +963,15 @@ class Coordinator:
         logger.info(f"Accepted submission from submitter {submission.submitter_id} (total: {self.total_acceptances})")
         
         # Log key event to persistent log
+        creativity_prefix = "(Creativity Emphasized) " if creativity_emphasized else ""
         await event_log.add_event(
             "submission_accepted",
-            f"Submission from Submitter {submission.submitter_id} ACCEPTED (#{self.total_acceptances})",
-            {"submitter_id": submission.submitter_id, "total_acceptances": self.total_acceptances}
+            f"{creativity_prefix}Submission from Submitter {submission.submitter_id} ACCEPTED (#{self.total_acceptances})",
+            {
+                "submitter_id": submission.submitter_id,
+                "total_acceptances": self.total_acceptances,
+                "creativity_emphasized": creativity_emphasized,
+            }
         )
         
         # Save stats
@@ -975,6 +1021,15 @@ class Coordinator:
         if self._main_task and self._main_task is not current_task and not self._main_task.done():
             self._main_task.cancel()
 
+    @staticmethod
+    def _is_verified_brainstorm_proof_submission(submission: Submission) -> bool:
+        proof_payload = (submission.metadata or {}).get("brainstorm_lean_proof")
+        return (
+            isinstance(proof_payload, dict)
+            and bool(str(proof_payload.get("theorem_statement") or "").strip())
+            and bool(str(proof_payload.get("lean_code") or "").strip())
+        )
+
     def _brainstorm_proof_source_id(self) -> str:
         """Derive a stable proof source id from the active brainstorm database path."""
         try:
@@ -986,7 +1041,7 @@ class Coordinator:
             return "manual_aggregator"
 
     async def _register_accepted_brainstorm_proof(self, submission: Submission) -> None:
-        """Store validator-accepted Lean-verified brainstorm proofs in the proof database."""
+        """Store Lean-verified brainstorm proofs in the proof database."""
         proof_payload = (submission.metadata or {}).get("brainstorm_lean_proof")
         if not isinstance(proof_payload, dict):
             return
@@ -1063,11 +1118,13 @@ class Coordinator:
         actual_submitter_provider = submitter_call.get("provider") or configured_submitter_provider
         actual_validator_model = validator_call.get("effective_model") or self.validator_model
         actual_validator_provider = validator_call.get("provider") or self.validator_provider
+        creativity_emphasized = bool((submission.metadata or {}).get("creativity_emphasized"))
         
         # Broadcast
         await self._broadcast("submission_rejected", {
             "submission_id": submission.submission_id,
             "submitter_id": submission.submitter_id,
+            "creativity_emphasized": creativity_emphasized,
             "submitter_model": actual_submitter_model,
             "submitter_provider": actual_submitter_provider,
             "submitter_configured_model": configured_submitter_model,
@@ -1088,10 +1145,15 @@ class Coordinator:
         
         # Log key event to persistent log
         rejection_reason = result.summary[:200] if result.summary else result.reasoning[:200]
+        creativity_prefix = "(Creativity Emphasized) " if creativity_emphasized else ""
         await event_log.add_event(
             "submission_rejected",
-            f"Submission from Submitter {submission.submitter_id} REJECTED: {rejection_reason}",
-            {"submitter_id": submission.submitter_id, "total_rejections": self.total_rejections}
+            f"{creativity_prefix}Submission from Submitter {submission.submitter_id} REJECTED: {rejection_reason}",
+            {
+                "submitter_id": submission.submitter_id,
+                "total_rejections": self.total_rejections,
+                "creativity_emphasized": creativity_emphasized,
+            }
         )
         
         # Save stats

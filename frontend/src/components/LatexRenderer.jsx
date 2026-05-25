@@ -11,7 +11,7 @@
  * 
  * Uses KaTeX for fast client-side rendering with extensive error recovery.
  */
-import React, { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react';
+import React, { useState, useMemo, useRef, useEffect, memo } from 'react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import './LatexRenderer.css';
@@ -251,68 +251,6 @@ const findMatchingBrace = (text, startPos) => {
     i++;
   }
   return braceCount === 0 ? i - 1 : -1;
-};
-
-/**
- * Find extent of math expression starting at position
- * Returns the end position of the math expression
- */
-const findMathExtent = (text, startPos) => {
-  let i = startPos;
-  let braceDepth = 0;
-  let parenDepth = 0;
-  
-  while (i < text.length) {
-    const char = text[i];
-    const prevChar = i > 0 ? text[i - 1] : '';
-    
-    // Skip escaped characters
-    if (prevChar === '\\') {
-      i++;
-      continue;
-    }
-    
-    // Track braces and parentheses
-    if (char === '{') braceDepth++;
-    if (char === '}') {
-      braceDepth--;
-      if (braceDepth < 0) break; // Unmatched brace
-    }
-    if (char === '(') parenDepth++;
-    if (char === ')') {
-      parenDepth--;
-      if (parenDepth < 0 && braceDepth === 0) {
-        // Include the closing paren if it's part of function notation
-        i++;
-        break;
-      }
-    }
-    
-    // Check for natural breaks (end of math expression)
-    if (braceDepth === 0 && parenDepth === 0) {
-      // Break on sentence-ending punctuation followed by space
-      if ((char === '.' || char === ',' || char === ';' || char === ':') && 
-          (i + 1 >= text.length || /\s/.test(text[i + 1]))) {
-        break;
-      }
-      // Break on double newline
-      if (char === '\n' && i + 1 < text.length && text[i + 1] === '\n') {
-        break;
-      }
-      // Break if we hit a word character after whitespace (new sentence)
-      if (/\s/.test(char) && i + 1 < text.length && /[A-Z]/.test(text[i + 1])) {
-        // Check if it's actually a new sentence vs math continuation
-        const ahead = text.substring(i + 1, Math.min(i + 20, text.length));
-        if (!/^[A-Z]\s*[=<>]/.test(ahead) && !/^[A-Z]_/.test(ahead)) {
-          break;
-        }
-      }
-    }
-    
-    i++;
-  }
-  
-  return i;
 };
 
 /**
@@ -652,7 +590,7 @@ const processTheoremEnvironments = (text) => {
     /\\begin\{align\*?\}([\s\S]*?)\\end\{align\*?\}/gi,
     (match, content) => {
       // Convert align to gathered for KaTeX compatibility
-      const processed = content.replace(/&/g, '').replace(/\\\\/g, '\\\\');
+      const processed = content.replace(/&/g, '');
       return `$$\\begin{gathered}${processed}\\end{gathered}$$`;
     }
   );
@@ -672,7 +610,7 @@ const processTheoremEnvironments = (text) => {
   // Handle multline environment
   result = result.replace(
     /\\begin\{multline\*?\}([\s\S]*?)\\end\{multline\*?\}/gi,
-    (match, content) => `$$\\begin{gathered}${content.replace(/\\\\/g, '\\\\')}\\end{gathered}$$`
+    (match, content) => `$$\\begin{gathered}${content}\\end{gathered}$$`
   );
   
   return result;
