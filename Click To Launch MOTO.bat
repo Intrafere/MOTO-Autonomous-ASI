@@ -7,12 +7,25 @@ set "PYTHON_CMD="
 
 call :find_python
 if not defined PYTHON_CMD (
+    if defined MOTO_PYTHON_BOOTSTRAP_ATTEMPTED goto python_missing
     echo.
     echo Python 3.10+ was not found. MOTO will try to install Python 3.12 with winget.
     echo.
     call :install_python
     if errorlevel 1 goto python_missing
+    set "MOTO_PYTHON_BOOTSTRAP_ATTEMPTED=1"
+    echo.
+    echo Python installation completed. Refreshing launcher environment...
+    call :refresh_environment
+    timeout /t 2 /nobreak >nul
     call :find_python
+    if not defined PYTHON_CMD (
+        echo.
+        echo Python installed successfully, but this launcher window still cannot see it.
+        echo Restarting MOTO launcher in a fresh window...
+        start "" "%ComSpec%" /d /c call "%~f0" %*
+        exit /b 0
+    )
 )
 
 if not defined PYTHON_CMD goto python_missing
@@ -77,6 +90,15 @@ echo.
 echo User-scope Python install did not complete. Trying the default winget install scope...
 winget install --id Python.Python.3.12 -e --source winget --accept-package-agreements --accept-source-agreements
 exit /b %ERRORLEVEL%
+
+:refresh_environment
+set "MOTO_USER_PATH="
+set "MOTO_MACHINE_PATH="
+for /f "tokens=1,2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul') do if /i "%%A"=="Path" set "MOTO_USER_PATH=%%C"
+for /f "tokens=1,2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') do if /i "%%A"=="Path" set "MOTO_MACHINE_PATH=%%C"
+if defined MOTO_MACHINE_PATH call set "PATH=%%MOTO_MACHINE_PATH%%;%PATH%"
+if defined MOTO_USER_PATH call set "PATH=%%MOTO_USER_PATH%%;%PATH%"
+exit /b 0
 
 :python_missing
 echo.
