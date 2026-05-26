@@ -224,6 +224,26 @@ class WindowsLauncherStrategyTests(TestCase):
         self.assertEqual(popen.call_args.args[0], [tool_path, "run", "dev"])
 
 
+class LauncherDependencyVersionTests(TestCase):
+    def test_node_version_support_matches_vite_engine_floor(self) -> None:
+        self.assertFalse(moto_launcher.node_version_is_supported((20, 18, 1)))
+        self.assertTrue(moto_launcher.node_version_is_supported((20, 19, 0)))
+        self.assertFalse(moto_launcher.node_version_is_supported((21, 7, 0)))
+        self.assertFalse(moto_launcher.node_version_is_supported((22, 11, 0)))
+        self.assertTrue(moto_launcher.node_version_is_supported((22, 12, 0)))
+        self.assertTrue(moto_launcher.node_version_is_supported((24, 0, 0)))
+
+    def test_check_node_installation_uses_winget_when_missing_on_windows(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "get_node_command", side_effect=[None, r"C:\Program Files\nodejs\node.exe"]):
+                with mock.patch.object(moto_launcher, "get_npm_command", return_value=r"C:\Program Files\nodejs\npm.cmd"):
+                    with mock.patch.object(moto_launcher, "install_windows_nodejs", return_value=True) as installer:
+                        with mock.patch.object(moto_launcher.subprocess, "check_output", side_effect=["v22.12.0", "10.9.0"]):
+                            moto_launcher.check_node_installation()
+
+        installer.assert_called_once()
+
+
 class LinuxLauncherStrategyTests(TestCase):
     def test_using_repo_local_venv_detects_repo_scoped_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -60,8 +60,10 @@ MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward (novelty seeki
 Before installation, you need:
 
 1. **Python 3.10+** - [Download here](https://www.python.org/downloads/)
-   - ⚠️ **IMPORTANT**: Check "Add Python to PATH" during installation
-2. **Node.js 20.19+** - [Download here](https://nodejs.org/)
+   - Windows one-click launches try to install Python 3.12 automatically with `winget` if Python is missing.
+   - ⚠️ **IMPORTANT**: If installing manually, check "Add Python to PATH" during installation.
+2. **Node.js 20.19+ or 22.12+** - [Download here](https://nodejs.org/)
+   - Windows one-click launches try to install Node.js LTS automatically with `winget` if Node.js is missing or too old.
 3. **LM Studio** (optional but HIGHLY recommended - otherwise your system will need to pay OpenRouter for RAG embedding calls, which is very slow compared to LM Studio's local embeddings) - [Download here](https://lmstudio.ai/)
    - If using OpenRouter, then download and load at least one model (e.g., DeepSeek, Llama, Qwen - older models and some models below 12 billion parameters may struggle; however, it is always worth a try!)
    - **Load the LM Studio RAG agent [optional but HIGHLY recommended for much faster outputs/answers]**: Load the embedding model `nomic-ai/nomic-embed-text-v1.5` in your LM Studio "Developer" tab (server tab) (search for "nomic-ai/nomic-embed-text-v1.5" to download it in the LM Studio downloads center). Please note: you may need to enable "Power User" or "Developer" to see this developer tab - this server will let you load the amount and capacity of simultaneous models that your PC will support. In this developer tab is where you load both your nomic-ai embedding agent and any optional local hosted agents you want to use in the program (e.g., GPT OSS 20b, DeepSeek 32B, etc.). **If you do not download LM Studio and enable the Nomic agent the system will run much slower and cost slightly more due to having to use the paid service OpenRouter for RAG calls.**
@@ -95,7 +97,8 @@ Lean 4 proof verification is optional. The launcher prepares it when available, 
    - Then open Settings to keep the recommended profile or switch to your saved team profile / another default profile
 5. The launcher will:
    - Check all prerequisites
-   - Install Python and Node.js dependencies automatically
+   - Install missing Windows Python/Node.js runtimes with `winget` when available
+   - Install Python and Node.js package dependencies automatically
    - Create necessary directories
    - Check the official GitHub `main` build manifest before startup
    - Offer a prompted update flow for supported installs when `main` is ahead
@@ -273,11 +276,13 @@ All configurable per role:
 ### Installation Issues
 
 **"Python not recognized"**
-- Reinstall Python and check "Add Python to PATH"
+- Double-click `Click To Launch MOTO.bat` again so it can try the `winget` Python install path
+- If automatic install is unavailable, reinstall Python and check "Add Python to PATH"
 - Verify: `python --version` in terminal
 
 **"Node not recognized"**
-- Install Node.js from nodejs.org
+- Double-click `Click To Launch MOTO.bat` again so it can try the `winget` Node.js LTS install path
+- If automatic install is unavailable, install Node.js LTS from nodejs.org
 - Verify: `node --version` in terminal
 
 **"pip install failed"**
