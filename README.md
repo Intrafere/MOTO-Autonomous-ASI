@@ -61,6 +61,7 @@ Before installation, you need:
 
 1. **Python 3.10+** - [Download here](https://www.python.org/downloads/)
    - Windows one-click launches try to install Python 3.12 automatically with `winget` if Python is missing.
+   - If Windows does not expose the new Python runtime to the current console immediately, the launcher refreshes its environment and relaunches itself once.
    - ⚠️ **IMPORTANT**: If installing manually, check "Add Python to PATH" during installation.
 2. **Node.js 20.19+ or 22.12+** - [Download here](https://nodejs.org/)
    - Windows one-click launches try to install Node.js LTS automatically with `winget` if Node.js is missing or too old.
