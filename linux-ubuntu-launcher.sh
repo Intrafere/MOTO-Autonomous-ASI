@@ -7,20 +7,30 @@ PYTHON_BIN="$VENV_DIR/bin/python"
 
 resolve_bootstrap_python() {
     if command -v python3 >/dev/null 2>&1; then
-        command -v python3
-        return 0
+        local candidate
+        candidate="$(command -v python3)"
+        if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
     fi
     if command -v python >/dev/null 2>&1; then
-        command -v python
-        return 0
+        local candidate
+        candidate="$(command -v python)"
+        if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
     fi
     return 1
 }
 
-if [[ ! -x "$PYTHON_BIN" ]]; then
-    BOOTSTRAP_PYTHON="$(resolve_bootstrap_python || true)"
+create_repo_venv() {
     if [[ -z "${BOOTSTRAP_PYTHON:-}" ]]; then
-        echo "ERROR: Python 3.8+ is required to launch MOTO on Ubuntu 24.04."
+        BOOTSTRAP_PYTHON="$(resolve_bootstrap_python || true)"
+    fi
+    if [[ -z "${BOOTSTRAP_PYTHON:-}" ]]; then
+        echo "ERROR: Python 3.10+ is required to launch MOTO on Ubuntu 24.04."
         echo "Install Python 3 and python3-venv, then run this launcher again."
         echo "Example: sudo apt install python3 python3-venv"
         exit 1
@@ -33,6 +43,21 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
         echo "  sudo apt install python3-venv"
         exit 1
     fi
+}
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    create_repo_venv
+elif ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+    BOOTSTRAP_PYTHON="$(resolve_bootstrap_python || true)"
+    if [[ -z "${BOOTSTRAP_PYTHON:-}" ]]; then
+        echo "ERROR: Existing repo-local .venv uses Python older than 3.10, and no replacement Python 3.10+ was found."
+        echo "Install Python 3 and python3-venv, then run this launcher again."
+        echo "Example: sudo apt install python3 python3-venv"
+        exit 1
+    fi
+    echo "Existing repo-local .venv uses Python older than 3.10. Recreating it ..."
+    rm -rf "$VENV_DIR"
+    create_repo_venv
 fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then

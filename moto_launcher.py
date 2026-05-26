@@ -51,6 +51,10 @@ RED = "\033[91m"
 WHITE = "\033[97m"
 RESET = "\033[0m"
 
+MIN_PYTHON_VERSION = (3, 10)
+MIN_NODE_VERSION = (20, 19, 0)
+MIN_NODE_ALT_VERSION = (22, 12, 0)
+
 
 @dataclass(frozen=True)
 class InstanceRuntime:
@@ -112,12 +116,39 @@ def resolve_command(*names: str) -> str | None:
     return None
 
 
+def resolve_existing_file(*paths: str | Path) -> str | None:
+    for path in paths:
+        try:
+            candidate = Path(path).expanduser()
+            if candidate.is_file():
+                return str(candidate)
+        except (OSError, RuntimeError):
+            continue
+    return None
+
+
 def command_exists(name: str) -> bool:
     return resolve_command(name) is not None
 
 
 def get_python_command() -> str:
     return sys.executable or resolve_command("python3", "python") or "python"
+
+
+def parse_version_tuple(raw: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", raw)
+    if not match:
+        return None
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch or 0)
+
+
+def format_version_tuple(version: tuple[int, ...]) -> str:
+    return ".".join(str(part) for part in version)
+
+
+def node_version_is_supported(version: tuple[int, int, int]) -> bool:
+    return (version[0] == 20 and version >= MIN_NODE_VERSION) or version >= MIN_NODE_ALT_VERSION
 
 
 def _path_is_within(root: Path, candidate: str | Path) -> bool:
@@ -150,15 +181,29 @@ def shell_join(args: Sequence[str]) -> str:
     return " ".join(shlex.quote(part) for part in args)
 
 
+def get_standard_windows_node_file(filename: str) -> str | None:
+    local_app_data = os.environ.get("LocalAppData")
+    local_node_path = (
+        Path(local_app_data) / "Programs" / "nodejs" / filename
+        if local_app_data
+        else Path.home() / "AppData" / "Local" / "Programs" / "nodejs" / filename
+    )
+    return resolve_existing_file(
+        local_node_path,
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "nodejs" / filename,
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "nodejs" / filename,
+    )
+
+
 def get_node_command() -> str | None:
     if sys.platform == "win32":
-        return resolve_command("node.exe", "node")
+        return resolve_command("node.exe", "node") or get_standard_windows_node_file("node.exe")
     return resolve_command("node")
 
 
 def get_npm_command() -> str | None:
     if sys.platform == "win32":
-        return resolve_command("npm.cmd", "npm.exe", "npm")
+        return resolve_command("npm.cmd", "npm.exe", "npm") or get_standard_windows_node_file("npm.cmd")
     return resolve_command("npm")
 
 
@@ -653,20 +698,33 @@ def check_python_installation() -> None:
     if not python_cmd:
         print()
         cprint("============================================================", RED)
-        cprint("ERROR: Python 3.8+ is required to run the launcher", RED)
+        cprint(f"ERROR: Python {format_version_tuple(MIN_PYTHON_VERSION)}+ is required to run the launcher", RED)
         cprint("============================================================", RED)
         print()
         if is_linux():
             cprint("Install Python 3 and python3-venv, then launch via `bash linux-ubuntu-launcher.sh`.", YELLOW)
             cprint("Example: sudo apt install python3 python3-venv", YELLOW)
         else:
-            cprint("Please install Python 3.8+ from:", YELLOW)
+            cprint(f"Please install Python {format_version_tuple(MIN_PYTHON_VERSION)}+ from:", YELLOW)
             cprint("https://www.python.org/downloads/", YELLOW)
             print()
             cprint("IMPORTANT: Check 'Add Python to PATH' during installation", YELLOW)
         exit_with_pause(1)
 
     version = subprocess.check_output([python_cmd, "--version"], text=True).strip()
+    if sys.version_info < MIN_PYTHON_VERSION:
+        print()
+        cprint("============================================================", RED)
+        cprint(f"ERROR: Python {format_version_tuple(MIN_PYTHON_VERSION)}+ is required", RED)
+        cprint("============================================================", RED)
+        print()
+        cprint(f"Current interpreter: {version} ({python_cmd})", YELLOW)
+        if is_linux():
+            cprint("Install a newer Python and relaunch via `bash linux-ubuntu-launcher.sh`.", YELLOW)
+        else:
+            cprint("The Windows one-click launcher can install Python 3.12 automatically when Python is missing.", YELLOW)
+            cprint("If you launched this script directly, install Python 3.12 or double-click `Click To Launch MOTO.bat`.", YELLOW)
+        exit_with_pause(1)
     cprint(version, GREEN)
     cprint(f"Interpreter: {python_cmd}", WHITE)
     if is_linux():
@@ -677,21 +735,48 @@ def check_python_installation() -> None:
     print()
 
 
+def install_windows_nodejs() -> bool:
+    if sys.platform != "win32":
+        return False
+
+    winget_cmd = resolve_command("winget.exe", "winget")
+    if not winget_cmd:
+        return False
+
+    cprint("Attempting to install Node.js LTS with winget...", YELLOW)
+    command = [
+        winget_cmd,
+        "install",
+        "--id",
+        "OpenJS.NodeJS.LTS",
+        "-e",
+        "--source",
+        "winget",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+    ]
+    return run_visible(command, cwd=str(SCRIPT_DIR), check=False) == 0
+
+
 def check_node_installation() -> None:
     cprint("[2/8] Checking Node.js installation...", YELLOW)
     node_cmd = get_node_command()
     if not node_cmd:
-        print()
-        cprint("============================================================", RED)
-        cprint("ERROR: Node.js is not installed or not in PATH", RED)
-        cprint("============================================================", RED)
-        print()
-        if is_linux():
-            cprint("Install Node.js 16+ from nodejs.org or your Ubuntu package source, then retry.", YELLOW)
-        else:
-            cprint("Please install Node.js 16+ from:", YELLOW)
-            cprint("https://nodejs.org/", YELLOW)
-        exit_with_pause(1)
+        if sys.platform == "win32" and install_windows_nodejs():
+            node_cmd = get_node_command()
+        if not node_cmd:
+            print()
+            cprint("============================================================", RED)
+            cprint("ERROR: Node.js is not installed or not in PATH", RED)
+            cprint("============================================================", RED)
+            print()
+            if is_linux():
+                cprint("Install Node.js 20.19+ or 22.12+ from nodejs.org or your Ubuntu package source, then retry.", YELLOW)
+            else:
+                cprint("Please install Node.js 20.19+ or 22.12+ from:", YELLOW)
+                cprint("https://nodejs.org/", YELLOW)
+                cprint("The Windows launcher tried `winget install OpenJS.NodeJS.LTS`, but it was unavailable or failed.", YELLOW)
+            exit_with_pause(1)
 
     npm_cmd = get_npm_command()
     if not npm_cmd:
@@ -708,6 +793,27 @@ def check_node_installation() -> None:
         exit_with_pause(1)
 
     node_version = subprocess.check_output([node_cmd, "--version"], text=True).strip()
+    parsed_node_version = parse_version_tuple(node_version)
+    if not parsed_node_version or not node_version_is_supported(parsed_node_version):
+        if sys.platform == "win32" and install_windows_nodejs():
+            node_cmd = get_standard_windows_node_file("node.exe") or get_node_command() or node_cmd
+            npm_cmd = get_standard_windows_node_file("npm.cmd") or get_npm_command() or npm_cmd
+            node_version = subprocess.check_output([node_cmd, "--version"], text=True).strip()
+            parsed_node_version = parse_version_tuple(node_version)
+
+    if not parsed_node_version or not node_version_is_supported(parsed_node_version):
+        print()
+        cprint("============================================================", RED)
+        cprint("ERROR: Node.js 20.19+ or 22.12+ is required", RED)
+        cprint("============================================================", RED)
+        print()
+        cprint(f"Current Node.js version: {node_version}", YELLOW)
+        if is_linux():
+            cprint("Install Node.js 20.19+ or 22.12+ from nodejs.org or your Ubuntu package source, then retry.", YELLOW)
+        else:
+            cprint("Install Node.js LTS from https://nodejs.org/ or rerun the launcher after winget is available.", YELLOW)
+        exit_with_pause(1)
+
     npm_version = subprocess.check_output([npm_cmd, "--version"], text=True).strip()
     cprint(f"Node: {node_version}", GREEN)
     cprint(f"npm: {npm_version}", GREEN)
