@@ -195,6 +195,78 @@ def get_standard_windows_node_file(filename: str) -> str | None:
     )
 
 
+def refresh_windows_path_from_registry() -> None:
+    """Refresh PATH after installers update Windows environment variables."""
+    if sys.platform != "win32":
+        return
+
+    try:
+        import winreg
+    except ImportError:
+        return
+
+    registry_paths: list[str] = []
+    keys = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        (winreg.HKEY_CURRENT_USER, "Environment"),
+    ]
+    for hive, subkey in keys:
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                value, _ = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            continue
+        if isinstance(value, str) and value.strip():
+            registry_paths.extend(
+                os.path.expandvars(part.strip())
+                for part in value.split(os.pathsep)
+                if part.strip()
+            )
+
+    for path_entry in reversed(registry_paths):
+        prepend_process_path_entry(path_entry)
+
+
+def prepend_process_path_entry(path_entry: str | Path | None) -> None:
+    """Prepend a directory to this launcher's PATH if it is not already present."""
+    if not path_entry:
+        return
+
+    try:
+        normalized_entry = str(Path(path_entry).resolve())
+    except OSError:
+        normalized_entry = str(path_entry)
+
+    current_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
+    normalized_parts = set()
+    for part in current_parts:
+        try:
+            normalized_parts.add(str(Path(part).resolve()))
+        except OSError:
+            normalized_parts.add(part)
+
+    if normalized_entry not in normalized_parts:
+        os.environ["PATH"] = normalized_entry + os.pathsep + os.environ.get("PATH", "")
+
+
+def ensure_windows_node_on_path(*commands: str | None) -> None:
+    """Ensure npm child scripts can resolve plain `node` after a fresh install."""
+    if sys.platform != "win32":
+        return
+
+    for filename in ("node.exe", "npm.cmd"):
+        standard_path = get_standard_windows_node_file(filename)
+        if standard_path:
+            prepend_process_path_entry(Path(standard_path).parent)
+
+    for command in commands:
+        if not command:
+            continue
+        candidate = Path(command)
+        if candidate.is_absolute() and candidate.parent.is_dir():
+            prepend_process_path_entry(candidate.parent)
+
+
 def get_node_command() -> str | None:
     if sys.platform == "win32":
         return resolve_command("node.exe", "node") or get_standard_windows_node_file("node.exe")
@@ -763,6 +835,7 @@ def check_node_installation() -> None:
     node_cmd = get_node_command()
     if not node_cmd:
         if sys.platform == "win32" and install_windows_nodejs():
+            refresh_windows_path_from_registry()
             node_cmd = get_node_command()
         if not node_cmd:
             print()
@@ -780,6 +853,10 @@ def check_node_installation() -> None:
 
     npm_cmd = get_npm_command()
     if not npm_cmd:
+        if sys.platform == "win32":
+            refresh_windows_path_from_registry()
+            npm_cmd = get_npm_command()
+    if not npm_cmd:
         print()
         cprint("============================================================", RED)
         cprint("ERROR: npm is not available in PATH", RED)
@@ -796,6 +873,7 @@ def check_node_installation() -> None:
     parsed_node_version = parse_version_tuple(node_version)
     if not parsed_node_version or not node_version_is_supported(parsed_node_version):
         if sys.platform == "win32" and install_windows_nodejs():
+            refresh_windows_path_from_registry()
             node_cmd = get_standard_windows_node_file("node.exe") or get_node_command() or node_cmd
             npm_cmd = get_standard_windows_node_file("npm.cmd") or get_npm_command() or npm_cmd
             node_version = subprocess.check_output([node_cmd, "--version"], text=True).strip()
@@ -815,6 +893,7 @@ def check_node_installation() -> None:
         exit_with_pause(1)
 
     npm_version = subprocess.check_output([npm_cmd, "--version"], text=True).strip()
+    ensure_windows_node_on_path(node_cmd, npm_cmd)
     cprint(f"Node: {node_version}", GREEN)
     cprint(f"npm: {npm_version}", GREEN)
     print()
@@ -956,19 +1035,7 @@ def _prepend_path_entry(path_entry: str, env: dict[str, str]) -> None:
     """Prepend a directory to PATH for the current process and child services."""
     if not path_entry:
         return
-    current_parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part]
-    try:
-        normalized_entry = str(Path(path_entry).resolve())
-    except OSError:
-        normalized_entry = path_entry
-    normalized_parts = set()
-    for part in current_parts:
-        try:
-            normalized_parts.add(str(Path(part).resolve()))
-        except OSError:
-            normalized_parts.add(part)
-    if normalized_entry not in normalized_parts:
-        os.environ["PATH"] = normalized_entry + os.pathsep + os.environ.get("PATH", "")
+    prepend_process_path_entry(path_entry)
     env["PATH"] = os.environ.get("PATH", "")
 
 

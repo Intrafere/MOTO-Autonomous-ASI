@@ -243,6 +243,24 @@ class LauncherDependencyVersionTests(TestCase):
 
         installer.assert_called_once()
 
+    def test_check_node_installation_prepends_detected_node_dir_for_npm_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            node_dir = Path(temp_dir) / "nodejs"
+            node_dir.mkdir()
+            node_path = str(node_dir / "node.exe")
+            npm_path = str(node_dir / "npm.cmd")
+            Path(node_path).write_text("", encoding="utf-8")
+            Path(npm_path).write_text("", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"PATH": r"C:\Windows\System32"}, clear=False):
+                with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+                    with mock.patch.object(moto_launcher, "get_node_command", return_value=node_path):
+                        with mock.patch.object(moto_launcher, "get_npm_command", return_value=npm_path):
+                            with mock.patch.object(moto_launcher.subprocess, "check_output", side_effect=["v24.16.0", "11.13.0"]):
+                                moto_launcher.check_node_installation()
+
+                self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(node_dir.resolve()))
+
 
 class LinuxLauncherStrategyTests(TestCase):
     def test_using_repo_local_venv_detects_repo_scoped_interpreter(self) -> None:
