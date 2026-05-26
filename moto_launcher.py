@@ -1177,7 +1177,7 @@ def install_lean4(
                     [
                         "sh",
                         "-c",
-                        "curl https://elan.lean-lang.org/install.sh -sSf | sh -s -- -y --default-toolchain leanprover/lean4:stable",
+                        "curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:stable",
                     ],
                     cwd=str(SCRIPT_DIR),
                     check=False,
