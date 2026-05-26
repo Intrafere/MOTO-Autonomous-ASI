@@ -368,7 +368,7 @@ project-root/
 ├── package.json                         # Root scripts
 ├── moto-update-manifest.json            # Build 0 updater/build identity manifest committed on main
 ├── SECURITY.md                          # Security policy and private vulnerability reporting
-├── Click To Launch MOTO.bat             # The authoritative Windows launcher entrypoint (bootstraps Python 3.10+ via winget when missing, then delegates to moto_launcher.py)
+├── Click To Launch MOTO.bat             # The authoritative Windows launcher entrypoint (bootstraps Python 3.10+ via winget when missing, refreshes/relaunches if needed, then delegates to moto_launcher.py)
 ├── linux-ubuntu-launcher.sh             # Linux/Ubuntu launcher entrypoint (thin bash wrapper that delegates to moto_launcher.py)
 ├── moto_launcher.py                     # Internal Python launcher orchestration (update check, runtime resolution, dependency install, service startup)
 ├── moto_updater.py                      # Build 1 updater helper (manifest fetch, install classification, ZIP/git apply flow, launcher state tracking)
@@ -378,9 +378,9 @@ project-root/
 
 ### Launcher and Updater
 
-- `Click To Launch MOTO.bat`: The only Windows consumer entrypoint. It bootstraps a usable Python 3.10+ interpreter on fresh Windows installs when `winget` is available, then delegates to the Python launcher.
+- `Click To Launch MOTO.bat`: The only Windows consumer entrypoint. It bootstraps a usable Python 3.10+ interpreter on fresh Windows installs when `winget` is available, refreshes/relaunches once if the current console cannot see the new runtime, then delegates to the Python launcher.
 - `linux-ubuntu-launcher.sh`: The Linux/Ubuntu consumer entrypoint. Same thin-wrapper contract as the `.bat`; delegates to `moto_launcher.py`.
-- `moto_launcher.py`: Orchestrates the launcher flow in order: update check, runtime resolution, dependency install, LM Studio detection, detached backend/frontend startup, and browser launch.
+- `moto_launcher.py`: Orchestrates the launcher flow in order: update check, runtime resolution, dependency install, LM Studio detection, detached backend/frontend startup, and browser launch. After fresh Windows Node.js installs, it refreshes/prepends Node paths so npm child scripts can resolve `node` immediately.
 - `moto_updater.py`: Owns Build 1 updater behavior, including GitHub REST contents metadata + branch-HEAD resolution, install-state classification, clean-git fast-forward apply, ZIP overlay apply with post-apply manifest stamping, rollback-aware relaunch, and launcher-managed instance safety checks.
 - `.moto_launcher_state.json`: Local-only state written by the launcher so future launches can detect still-open backend/frontend windows from the same install and skip update-apply until those windows are closed.
 
