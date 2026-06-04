@@ -12,6 +12,7 @@ from typing import Dict, List
 from backend.autonomous.prompts.proof_prompts import build_lemma_search_prompt
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import get_lean4_client
 from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.models import MathlibLemmaHint, ProofCandidate
@@ -270,7 +271,7 @@ class MathlibLemmaSearchAgent:
                 return []
 
             message = response["choices"][0].get("message", {})
-            content = message.get("content") or message.get("reasoning") or ""
+            content = extract_message_text(message)
             if not content:
                 return []
 

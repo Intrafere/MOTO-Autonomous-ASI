@@ -16,7 +16,7 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
-from backend.autonomous.memory.proof_database import proof_database
+from backend.shared.response_extraction import extract_message_text
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
@@ -45,11 +45,19 @@ class SubmitterAgent:
         context_window: Optional[int] = None,
         max_output_tokens: Optional[int] = None,
         coordinator: Optional[Any] = None,
-        creativity_emphasis_boost_enabled: bool = False
+        creativity_emphasis_boost_enabled: bool = False,
+        proof_database_store: Optional[Any] = None,
+        local_rejection_log_dir: Optional[Any] = None,
+        local_rejection_log_template: Optional[str] = None,
+        reset_local_rejection_log_on_initialize: bool = False,
     ):
         self.submitter_id = submitter_id
         self.model_name = model_name
-        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
+        self.user_prompt = (
+            proof_database_store.inject_into_prompt(user_prompt)
+            if proof_database_store is not None
+            else user_prompt
+        )
         self.user_files_content = user_files_content
         self.websocket_broadcaster = websocket_broadcaster
         self.coordinator = coordinator
@@ -65,7 +73,12 @@ class SubmitterAgent:
         self.current_chunk_index = 0
         
         # Memory
-        self.local_memory = LocalTrainingMemory(submitter_id)
+        self.local_memory = LocalTrainingMemory(
+            submitter_id,
+            base_dir=local_rejection_log_dir,
+            file_name_template=local_rejection_log_template,
+            reset_on_initialize=reset_local_rejection_log_on_initialize,
+        )
         
         # Control
         self.is_running = False
@@ -223,7 +236,8 @@ class SubmitterAgent:
                 self.user_prompt,
                 allocation["direct"],
                 rag_evidence,
-                creativity_emphasized=creativity_emphasized
+                creativity_emphasized=creativity_emphasized,
+                lean4_enabled=system_config.lean4_enabled,
             )
             
             # CRITICAL: Verify actual prompt size fits in context window
@@ -259,7 +273,8 @@ class SubmitterAgent:
                     self.user_prompt,
                     allocation["direct"],
                     rag_evidence,
-                    creativity_emphasized=False
+                    creativity_emphasized=False,
+                    lean4_enabled=system_config.lean4_enabled,
                 )
                 actual_prompt_tokens = count_tokens(prompt)
             
@@ -354,7 +369,7 @@ class SubmitterAgent:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             
             # Cache model config on first successful API call (only relevant for LM Studio)
             try:
@@ -712,12 +727,12 @@ class SubmitterAgent:
     def _get_system_prompt(self) -> str:
         """Get system prompt."""
         from backend.aggregator.prompts.submitter_prompts import get_submitter_system_prompt
-        return get_submitter_system_prompt()
+        return get_submitter_system_prompt(lean4_enabled=system_config.lean4_enabled)
     
     def _get_json_schema(self) -> str:
         """Get JSON schema."""
         from backend.aggregator.prompts.submitter_prompts import get_submitter_json_schema
-        return get_submitter_json_schema()
+        return get_submitter_json_schema(lean4_enabled=system_config.lean4_enabled)
     
     async def handle_acceptance(self) -> None:
         """Handle submission acceptance."""

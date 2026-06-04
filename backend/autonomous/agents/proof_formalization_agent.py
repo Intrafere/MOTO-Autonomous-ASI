@@ -9,10 +9,12 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import get_lean4_client
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_retryable_model_output_error,
+    is_transient_model_call_error,
 )
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
@@ -42,6 +44,7 @@ _JSON_PARSE_ERROR_MARKERS = (
     "no content in tactic formalization model response",
     "no json found",
     "openrouter connection failed",
+    "codex connection failed",
     "openrouter response missing 'choices'",
     "openrouter returned non-json body",
     "response too short",
@@ -52,6 +55,10 @@ _MALFORMED_MODEL_OUTPUT_REASON = "Model returned malformed output (not valid JSO
 _INCOMPLETE_MODEL_OUTPUT_ERROR = (
     "MODEL OUTPUT INCOMPLETE: provider stopped before returning usable proof output "
     "(max_output_tokens). Preserve the proof checkpoint and retry with adjusted output budget or prompt size."
+)
+_TRANSIENT_PROVIDER_ERROR = (
+    "TRANSIENT PROVIDER ERROR: provider connection failed before usable proof output. "
+    "Preserve the proof checkpoint and retry later."
 )
 _LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
 _MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX = "MANDATORY FULL SOURCE CONTEXT OVERFLOW"
@@ -266,7 +273,7 @@ class ProofFormalizationAgent:
                 raise ValueError("Empty response from formalization model.")
 
             message = response["choices"][0].get("message", {})
-            content = message.get("content") or message.get("reasoning") or ""
+            content = extract_message_text(message)
             if not content:
                 raise ValueError("No content in formalization model response.")
 
@@ -304,6 +311,8 @@ class ProofFormalizationAgent:
                 raise
             if is_retryable_model_output_error(exc):
                 raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
+            if is_transient_model_call_error(exc):
+                raise RuntimeError(_TRANSIENT_PROVIDER_ERROR) from exc
             is_parse_error = _is_json_parse_error(exc)
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
@@ -519,7 +528,7 @@ class ProofFormalizationAgent:
                     raise ValueError("Empty response from tactic formalization model.")
 
                 message = response["choices"][0].get("message", {})
-                content = message.get("content") or message.get("reasoning") or ""
+                content = extract_message_text(message)
                 if not content:
                     raise ValueError("No content in tactic formalization model response.")
 
@@ -620,6 +629,8 @@ class ProofFormalizationAgent:
                     raise
                 if is_retryable_model_output_error(exc):
                     raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
+                if is_transient_model_call_error(exc):
+                    raise RuntimeError(_TRANSIENT_PROVIDER_ERROR) from exc
                 is_parse_error = _is_json_parse_error(exc)
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,

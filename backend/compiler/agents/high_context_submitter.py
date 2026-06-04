@@ -14,7 +14,7 @@ from backend.shared.models import CompilerSubmission, ContextPack
 from backend.shared.config import system_config, rag_config
 from backend.shared.utils import count_tokens
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
-from backend.autonomous.memory.proof_database import proof_database
+from backend.shared.response_extraction import extract_message_text
 from backend.compiler.prompts.outline_prompts import (
     build_outline_create_prompt,
     build_outline_update_prompt
@@ -186,9 +186,19 @@ class HighContextSubmitter:
     - review: Review paper for errors/improvements (no aggregator DB)
     """
     
-    def __init__(self, model_name: str, user_prompt: str, websocket_broadcaster: Optional[Callable] = None):
+    def __init__(
+        self,
+        model_name: str,
+        user_prompt: str,
+        websocket_broadcaster: Optional[Callable] = None,
+        proof_database_store=None,
+    ):
         self.model_name = model_name
-        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
+        self.user_prompt = (
+            proof_database_store.inject_into_prompt(user_prompt)
+            if proof_database_store is not None
+            else user_prompt
+        )
         self.websocket_broadcaster = websocket_broadcaster
         self._initialized = False
         
@@ -292,7 +302,7 @@ class HighContextSubmitter:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             logger.info(f"LLM completion received: {len(llm_output)} chars")
             
             # Check for empty content
@@ -440,7 +450,7 @@ class HighContextSubmitter:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             logger.info(f"LLM completion received: {len(llm_output)} chars")
             
             # Check for empty content
@@ -695,7 +705,7 @@ class HighContextSubmitter:
                     logger.error("construction: LLM returned empty response structure")
                     raise ValueError("LLM returned empty response")
                 fallback_msg = fallback["choices"][0]["message"]
-                llm_output = fallback_msg.get("content") or fallback_msg.get("reasoning") or ""
+                llm_output = extract_message_text(fallback_msg)
                 wolfram_calls = []
             logger.info(
                 f"LLM completion received: {len(llm_output)} chars "
@@ -906,7 +916,7 @@ class HighContextSubmitter:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             logger.info(f"LLM completion received: {len(llm_output)} chars")
             
             # Parse response with retry
@@ -1062,7 +1072,7 @@ class HighContextSubmitter:
 
             if not tool_calls:
                 # Final turn - extract content and return
-                content = message.get("content") or message.get("reasoning") or ""
+                content = extract_message_text(message)
                 return content, wolfram_calls, message
 
             # Append assistant turn verbatim so tool-role replies have the
@@ -1269,7 +1279,7 @@ class HighContextSubmitter:
             
             if retry_response.get("choices"):
                 message = retry_response["choices"][0]["message"]
-                retry_output = message.get("content") or message.get("reasoning") or ""
+                retry_output = extract_message_text(message)
                 
                 try:
                     parsed = parse_json(retry_output)

@@ -28,11 +28,38 @@ _RETRYABLE_OUTPUT_FAILURE_MARKERS = (
     ("response.incomplete", "max output tokens"),
 )
 
+_TRANSIENT_MODEL_CALL_MARKERS = (
+    "bad gateway",
+    "codex connection failed",
+    "connecterror",
+    "connection timeout",
+    "disconnect/reset before headers",
+    "gateway timeout",
+    "incomplete chunked read",
+    "openai codex connection failed",
+    "openai codex transient",
+    "peer closed connection",
+    "readerror",
+    "remoteprotocolerror",
+    "service unavailable",
+    "temporarily unavailable",
+    "upstream connect error",
+    "upstream provider timeout",
+)
+
 
 def is_retryable_model_output_error(exc: Exception) -> bool:
     """Return true when the provider returned a usable request with unusable output."""
     message = str(exc or "").lower()
     return any(all(marker in message for marker in markers) for markers in _RETRYABLE_OUTPUT_FAILURE_MARKERS)
+
+
+def is_transient_model_call_error(exc: Exception) -> bool:
+    """Return true for provider/network failures that should not be treated as config errors."""
+    message = str(exc or "").lower()
+    if "codex" not in message:
+        return False
+    return any(marker in message for marker in _TRANSIENT_MODEL_CALL_MARKERS)
 
 
 def is_non_retryable_model_error(exc: Exception) -> bool:
@@ -48,5 +75,7 @@ def is_non_retryable_model_error(exc: Exception) -> bool:
         return True
     message = str(exc).lower()
     if is_retryable_model_output_error(exc):
+        return False
+    if is_transient_model_call_error(exc):
         return False
     return any(marker in message for marker in _NON_RETRYABLE_MODEL_ERROR_MARKERS)

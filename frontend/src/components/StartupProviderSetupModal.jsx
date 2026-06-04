@@ -11,11 +11,13 @@ export default function StartupProviderSetupModal({
   statusMessage = '',
   isCheckingLmStudio = false,
   onChooseOpenRouter,
+  onChooseCodexOAuth,
   onConfirmLmStudio,
 }) {
   if (!isOpen) return null;
 
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const codexOAuthAvailable = Boolean(capabilities?.openAICodexOauthAvailable);
 
   return (
     <div
@@ -41,8 +43,8 @@ export default function StartupProviderSetupModal({
         <p style={{ color: '#ddd', lineHeight: '1.6', marginBottom: '0.9rem' }}>
           {lmStudioEnabled ? (
             <>
-              MOTO needs <strong>an OpenRouter API key or a running LM Studio server</strong> before you start.
-              The best experience is to use both: OpenRouter for cloud models and LM Studio for free, faster local RAG and embeddings.
+              MOTO needs <strong>OpenRouter, OpenAI Codex OAuth, or a running LM Studio server</strong> before you start.
+              The best experience is to pair a cloud provider with LM Studio for free, faster local RAG and embeddings.
             </>
           ) : (
             <>
@@ -65,7 +67,7 @@ export default function StartupProviderSetupModal({
         >
           {lmStudioEnabled ? (
             <>
-              <strong>Highly recommended:</strong> install LM Studio even if you plan to use OpenRouter. LM Studio
+              <strong>Highly recommended:</strong> install LM Studio even if you plan to use cloud models. LM Studio
               gives MOTO free local embedding/RAG calls and noticeably faster retrieval than OpenRouter embeddings.
             </>
           ) : (
@@ -76,7 +78,7 @@ export default function StartupProviderSetupModal({
           )}
         </div>
 
-        <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
+        <div style={{ display: 'grid', gap: '1rem', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
           <div
             style={{
               padding: '1rem',
@@ -109,6 +111,41 @@ export default function StartupProviderSetupModal({
               Enter OpenRouter Key
             </button>
           </div>
+
+          {codexOAuthAvailable && (
+            <div
+              style={{
+                padding: '1rem',
+                borderRadius: '10px',
+                backgroundColor: '#1c1c33',
+                border: '1px solid #c56d2d',
+              }}
+            >
+              <h3 style={{ marginTop: 0, color: '#ff9f4a' }}>OpenAI Codex OAuth</h3>
+              <ol style={{ margin: '0 0 1rem 1.1rem', padding: 0, color: '#d7d7e8', lineHeight: '1.55' }}>
+                <li>Use your ChatGPT subscription through MOTO's desktop Codex OAuth flow.</li>
+                <li>Sign in with OpenAI in the browser window MOTO opens.</li>
+                <li>MOTO will save the login securely and configure Codex-backed model defaults.</li>
+              </ol>
+              <button
+                type="button"
+                onClick={onChooseCodexOAuth}
+                style={{
+                  width: '100%',
+                  padding: '0.8rem 1rem',
+                  backgroundColor: '#c56d2d',
+                  border: 'none',
+                  borderRadius: '8px',
+                  color: '#fff',
+                  fontSize: '0.95rem',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                }}
+              >
+                Sign In with OpenAI Codex
+              </button>
+            </div>
+          )}
 
           {lmStudioEnabled && (
             <div

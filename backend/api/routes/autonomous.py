@@ -28,6 +28,7 @@ from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 from backend.shared.boost_logger import boost_logger
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.workflow_start_guard import workflow_start_guard
+from backend.shared.response_extraction import extract_message_text
 
 logger = logging.getLogger(__name__)
 
@@ -572,7 +573,7 @@ async def _generate_autonomous_paper_critique(
     response_content = ""
     if response.get("choices"):
         message = response["choices"][0].get("message", {})
-        response_content = message.get("content") or message.get("reasoning") or ""
+        response_content = extract_message_text(message)
 
     if not response_content:
         raise HTTPException(status_code=500, detail="Empty response from validator model")
@@ -2764,7 +2765,7 @@ async def request_final_answer_critique(answer_id: str, request: CritiqueRequest
         response_content = ""
         if response.get("choices"):
             message = response["choices"][0].get("message", {})
-            response_content = message.get("content") or message.get("reasoning") or ""
+            response_content = extract_message_text(message)
         
         if not response_content:
             raise HTTPException(status_code=500, detail="Empty response from validator model")

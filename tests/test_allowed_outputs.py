@@ -95,6 +95,15 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "started")
         self.assertFalse(initialize.await_args.kwargs["allow_mathematical_proofs"])
 
+    async def test_compiler_model_diagnostics_unavailable_in_generic_mode(self) -> None:
+        system_config.generic_mode = True
+
+        with self.assertRaises(HTTPException) as exc:
+            await compiler_route.test_models(self._compiler_request())
+
+        self.assertEqual(exc.exception.status_code, 501)
+        self.assertTrue(exc.exception.detail["generic_mode"])
+
     async def test_autonomous_rejects_proof_requested_when_lean_disabled_in_desktop_mode(self) -> None:
         system_config.generic_mode = False
         system_config.lean4_enabled = False

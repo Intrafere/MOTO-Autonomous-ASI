@@ -1255,7 +1255,7 @@ def _set_lean_env_flags(
     env["MOTO_LEAN4_ENABLED"] = "1" if enabled else "0"
     env["MOTO_LEAN4_PATH"] = lean_path
     env["MOTO_LEAN4_WORKSPACE_DIR"] = workspace_dir
-    env["MOTO_LEAN4_PROOF_TIMEOUT"] = env.get("MOTO_LEAN4_PROOF_TIMEOUT", "").strip() or "120"
+    env["MOTO_LEAN4_PROOF_TIMEOUT"] = env.get("MOTO_LEAN4_PROOF_TIMEOUT", "").strip() or "600"
     env["MOTO_LEAN4_LSP_ENABLED"] = (
         env.get("MOTO_LEAN4_LSP_ENABLED", "").strip()
         if enabled and env.get("MOTO_LEAN4_LSP_ENABLED", "").strip()

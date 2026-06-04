@@ -2,10 +2,12 @@
 Shared Lean-4 proof novelty assessment.
 
 The autonomous research `ProofVerificationStage` and the compiler's rigor
-submitter both need to classify a freshly verified Lean 4 proof as novel
-(first time this system has produced it) or known (duplicates a result
-already in the proof database). Both call sites share a single helper
-here so the prompt + context-budget behaviour stays identical.
+submitter both need to classify a freshly verified Lean 4 proof against the
+shared novelty tiers. Duplicate detection is local to the stored proof
+database, while tier assignment asks whether the verified theorem is novel
+relative to standard references, Mathlib, and the user's prompt. Both call
+sites share a single helper here so the prompt + context-budget behaviour
+stays identical.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from backend.autonomous.prompts.proof_prompts import build_proof_novelty_prompt
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -100,7 +103,7 @@ async def assess_proof_novelty(
         return "not_novel", "Novelty validator returned no response."
 
     message = response["choices"][0].get("message", {})
-    content = message.get("content") or message.get("reasoning") or ""
+    content = extract_message_text(message)
     if not content:
         return "not_novel", "Novelty validator returned empty content."
 

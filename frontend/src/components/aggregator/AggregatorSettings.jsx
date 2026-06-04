@@ -71,6 +71,7 @@ export default function AggregatorSettings({
   // OpenRouter API key status
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
+  const [openAICodexModelError, setOpenAICodexModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -249,10 +250,13 @@ export default function AggregatorSettings({
       setHasOpenAICodexLogin(configured);
       if (configured) {
         fetchOpenAICodexModels();
+      } else {
+        setOpenAICodexModelError('');
       }
     } catch (err) {
       console.error('Failed to check OpenAI Codex login status:', err);
       setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
     }
   };
 
@@ -271,10 +275,18 @@ export default function AggregatorSettings({
   const fetchOpenAICodexModels = async () => {
     try {
       const result = await cloudAccessAPI.getOpenAICodexModels();
-      setOpenAICodexModels(result.models || []);
+      const models = result.models || [];
+      setOpenAICodexModels(models);
+      setHasOpenAICodexLogin(models.length > 0);
+      setOpenAICodexModelError(models.length > 0
+        ? ''
+        : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
+      );
     } catch (err) {
       console.error('Failed to fetch OpenAI Codex models:', err);
       setOpenAICodexModels([]);
+      setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError(`OpenAI Codex OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
 
@@ -878,6 +890,11 @@ export default function AggregatorSettings({
               </div>
             )}
           </div>
+          {openAICodexModelError && (
+            <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+              {openAICodexModelError}
+            </div>
+          )}
 
       {/* OpenRouter Status Banner */}
       {!hasOpenRouterKey && (

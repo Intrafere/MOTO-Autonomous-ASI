@@ -49,7 +49,11 @@ function getCardClass(proof) {
   return 'proof-card--known';
 }
 
-export default function ProofLibrary() {
+export default function ProofLibrary({
+  proofScope = 'autonomous',
+  title = 'Proof Library',
+  description = 'All verified mathematical proofs generated across research sessions.',
+}) {
   const [proofs, setProofs] = useState([]);
   const [sessionsResponse, setSessionsResponse] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -60,10 +64,6 @@ export default function ProofLibrary() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterNovelty, setFilterNovelty] = useState('novel');
 
-  useEffect(() => {
-    loadProofLibrary();
-  }, [filterNovelty]);
-
   const loadProofLibrary = async () => {
     try {
       setLoading(true);
@@ -71,8 +71,8 @@ export default function ProofLibrary() {
 
       const novelOnly = filterNovelty === 'novel';
       const [proofsResult, sessionsResult] = await Promise.allSettled([
-        autonomousAPI.getProofLibrary(novelOnly),
-        autonomousAPI.getSessions(),
+        autonomousAPI.getProofLibrary(novelOnly, proofScope),
+        proofScope === 'manual' ? Promise.resolve(null) : autonomousAPI.getSessions(),
       ]);
 
       if (proofsResult.status !== 'fulfilled') {
@@ -95,7 +95,7 @@ export default function ProofLibrary() {
 
   useEffect(() => {
     loadProofLibrary();
-  }, [filterNovelty]);
+  }, [filterNovelty, proofScope]);
 
   const filteredProofs = useMemo(() => {
     if (!searchTerm.trim()) return proofs;
@@ -147,7 +147,7 @@ export default function ProofLibrary() {
     setLoadingContentId(id);
 
     try {
-      const fullProof = await autonomousAPI.getLibraryProof(proof.session_id, proof.proof_id);
+      const fullProof = await autonomousAPI.getLibraryProof(proof.session_id, proof.proof_id, proofScope);
       setExpandedProof(fullProof);
     } catch {
       setExpandedProof(proof);
@@ -163,7 +163,7 @@ export default function ProofLibrary() {
     let leanCode = proof.lean_code || '';
     if (!leanCode && proof.session_id && proof.proof_id) {
       try {
-        proofForDownload = await autonomousAPI.getLibraryProof(proof.session_id, proof.proof_id);
+        proofForDownload = await autonomousAPI.getLibraryProof(proof.session_id, proof.proof_id, proofScope);
         leanCode = proofForDownload.lean_code || '';
       } catch {
         return;
@@ -206,10 +206,8 @@ export default function ProofLibrary() {
   return (
     <div className="final-answer-library proof-library">
       <div className="library-header">
-        <h2>Proof Library</h2>
-        <p>
-          All verified mathematical proofs generated across research sessions.
-        </p>
+        <h2>{title}</h2>
+        <p>{description}</p>
         <div className="library-stats">
           {filterNovelty === 'novel' ? (
             <span className="stat-badge">{novelCount} Novel Proof{novelCount !== 1 ? 's' : ''}</span>
@@ -253,7 +251,9 @@ export default function ProofLibrary() {
           <h3>No Proofs Found</h3>
           <p>
             {proofs.length === 0
-              ? 'No verified proofs have been generated yet. Run autonomous research with Lean 4 enabled to generate proofs.'
+              ? (proofScope === 'manual'
+                  ? 'No archived manual proof runs yet. Clear a manual run after generating proofs to move them into history.'
+                  : 'No verified proofs have been generated yet. Run autonomous research with Lean 4 enabled to generate proofs.')
               : 'No proofs match your search criteria.'}
           </p>
         </div>

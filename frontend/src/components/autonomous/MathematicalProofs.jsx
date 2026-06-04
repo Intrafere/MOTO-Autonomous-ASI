@@ -3,7 +3,10 @@ import './MathematicalProofs.css';
 import ProofGraph from './ProofGraph';
 import {
   buildCurrentProofRuntimeConfig,
+  buildProofRuntimeConfigForSource,
   isProofRuntimeConfigComplete,
+  MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
+  MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
 } from '../../hooks/useProofCheckRuntime';
 import { downloadTextFile } from '../../utils/downloadHelpers';
 
@@ -72,7 +75,27 @@ function getTierBadge(proof) {
   return { cardClass: 'known', badgeClass: 'known', label: 'Known Proof' };
 }
 
-function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, latestDependencyEvent = null }) {
+function isManualProofEvent(data = {}) {
+  const sourceId = String(data.source_id || '');
+  const trigger = String(data.trigger || '');
+  return sourceId === MANUAL_AGGREGATOR_PROOF_SOURCE_ID
+    || sourceId === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID
+    || sourceId.startsWith('manual_compiler_')
+    || sourceId.startsWith('compiler_manual_')
+    || sourceId.startsWith('compiler_aggregator_')
+    || trigger.startsWith('manual_compiler');
+}
+
+function MathematicalProofs({
+  api,
+  refreshToken = 0,
+  selectedProofId = null,
+  latestDependencyEvent = null,
+  proofScope = 'autonomous',
+  title = 'Mathematical Proofs',
+  description = 'Lean 4 verification runs automatically after brainstorm and paper completion.',
+  defaultSourceType = 'brainstorm',
+}) {
   const [proofs, setProofs] = useState([]);
   const [proofStatus, setProofStatus] = useState(null);
   const [brainstorms, setBrainstorms] = useState([]);
@@ -81,7 +104,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [expandedProofId, setExpandedProofId] = useState(null);
-  const [manualSourceType, setManualSourceType] = useState('brainstorm');
+  const [manualSourceType, setManualSourceType] = useState(defaultSourceType);
   const [manualSourceId, setManualSourceId] = useState('');
   const [manualCheckPending, setManualCheckPending] = useState(false);
   const [manualCheckMessage, setManualCheckMessage] = useState('');
@@ -96,10 +119,10 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
       setProofGraphState(createEmptyGraphState());
 
       const [proofsResult, statusResult, brainstormsResult, papersResult] = await Promise.allSettled([
-        api.getProofs(),
+        api.getProofs(proofScope),
         api.getProofStatus(),
-        api.getBrainstorms(),
-        api.getPapers(),
+        proofScope === 'manual' ? Promise.resolve({ brainstorms: [] }) : api.getBrainstorms(),
+        proofScope === 'manual' ? Promise.resolve({ papers: [] }) : api.getPapers(),
       ]);
 
       if (proofsResult.status === 'fulfilled') {
@@ -128,7 +151,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
 
   useEffect(() => {
     loadProofs();
-  }, [refreshToken]);
+  }, [refreshToken, proofScope]);
 
   useEffect(() => {
     if (!selectedProofId) {
@@ -161,7 +184,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
       },
     }));
 
-    api.getProofDependencies(expandedProofId)
+    api.getProofDependencies(expandedProofId, proofScope)
       .then((response) => {
         if (cancelled) {
           return;
@@ -196,10 +219,13 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
     return () => {
       cancelled = true;
     };
-  }, [api, expandedDependencyState, expandedProofId, proofStatus?.lean4_enabled]);
+  }, [api, expandedDependencyState, expandedProofId, proofScope, proofStatus?.lean4_enabled]);
 
   useEffect(() => {
     if (!latestDependencyEvent || viewMode !== 'graph' || !proofGraphState.loaded) {
+      return;
+    }
+    if ((proofScope === 'manual') !== isManualProofEvent(latestDependencyEvent)) {
       return;
     }
 
@@ -256,7 +282,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
         edgesMathlib,
       };
     });
-  }, [latestDependencyEvent, proofGraphState.loaded, viewMode]);
+  }, [latestDependencyEvent, proofGraphState.loaded, proofScope, viewMode]);
 
   useEffect(() => {
     if (viewMode !== 'graph' || !proofStatus?.lean4_enabled) {
@@ -273,7 +299,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
       error: '',
     }));
 
-    api.getProofGraph()
+    api.getProofGraph(proofScope)
       .then((response) => {
         if (cancelled) {
           return;
@@ -304,16 +330,27 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
     return () => {
       cancelled = true;
     };
-  }, [api, proofGraphState.loaded, proofGraphState.loading, proofStatus?.lean4_enabled, viewMode]);
+  }, [api, proofGraphState.loaded, proofGraphState.loading, proofScope, proofStatus?.lean4_enabled, viewMode]);
 
   const availableBrainstorms = useMemo(
-    () => brainstorms,
-    [brainstorms]
+    () => (proofScope === 'manual'
+      ? [{
+          topic_id: MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
+          topic_prompt: 'Manual Aggregator database',
+        }]
+      : brainstorms),
+    [brainstorms, proofScope]
   );
 
   const availablePapers = useMemo(
-    () => papers.filter((paper) => paper.status === 'complete'),
-    [papers]
+    () => (proofScope === 'manual'
+      ? [{
+          paper_id: MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
+          title: 'Current Manual Compiler paper',
+          status: 'current',
+        }]
+      : papers.filter((paper) => paper.status === 'complete')),
+    [papers, proofScope]
   );
 
   const availableSources = useMemo(
@@ -376,7 +413,9 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
     [visibleProofs]
   );
   const showManualPanel = Boolean(proofStatus?.lean4_path);
-  const currentProofRuntimeConfig = buildCurrentProofRuntimeConfig();
+  const currentProofRuntimeConfig = proofScope === 'manual'
+    ? buildProofRuntimeConfigForSource(manualSourceType, manualSourceId)
+    : buildCurrentProofRuntimeConfig();
   const hasCurrentProofRuntimeConfig = isProofRuntimeConfigComplete(currentProofRuntimeConfig);
   const manualChecksDisabled = (
     !proofStatus?.lean4_enabled ||
@@ -406,7 +445,9 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
     try {
       setManualCheckPending(true);
       setManualCheckMessage('');
-      const proofRuntimeConfig = buildCurrentProofRuntimeConfig();
+      const proofRuntimeConfig = proofScope === 'manual'
+        ? buildProofRuntimeConfigForSource(manualSourceType, manualSourceId)
+        : buildCurrentProofRuntimeConfig();
       await api.runProofCheck({
         sourceType: manualSourceType,
         sourceId: manualSourceId,
@@ -422,7 +463,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
 
   const handleDownloadLeanProof = async (proof) => {
     try {
-      const leanCode = await api.getProofLeanSource(proof.proof_id);
+      const leanCode = await api.getProofLeanSource(proof.proof_id, proofScope);
       if (!leanCode) {
         throw new Error('Lean source is unavailable for this proof.');
       }
@@ -434,7 +475,7 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
 
   const handleDownloadCertificate = async (proof) => {
     try {
-      const certificate = await api.getProofCertificate(proof.proof_id);
+      const certificate = await api.getProofCertificate(proof.proof_id, proofScope);
       downloadTextFile(
         JSON.stringify(certificate, null, 2),
         `${proof.proof_id}_certificate.json`,
@@ -449,10 +490,8 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
     <div className="math-proofs-view">
       <div className="math-proofs-header">
         <div>
-          <h2>Mathematical Proofs</h2>
-          <p>
-            Lean 4 verification runs automatically after brainstorm and paper completion.
-          </p>
+          <h2>{title}</h2>
+          <p>{description}</p>
         </div>
 
         <div className="math-proofs-status-group">
@@ -548,7 +587,11 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
         <div className="math-proofs-manual-panel">
           <div className="math-proofs-manual-copy">
             <strong>Manual proof check</strong>
-            <span>Queue a Lean 4 proof pass for any brainstorm or completed paper.</span>
+            <span>
+              {proofScope === 'manual'
+                ? 'Queue a Lean 4 proof pass for the manual Aggregator database or current Compiler paper.'
+                : 'Queue a Lean 4 proof pass for any brainstorm or completed paper.'}
+            </span>
           </div>
           <div className="math-proofs-manual-controls">
             <select
@@ -605,7 +648,9 @@ function MathematicalProofs({ api, refreshToken = 0, selectedProofId = null, lat
 
       {!loading && !error && visibleProofs.length === 0 && (
         <div className="math-proofs-empty">
-          No proofs verified yet. Proofs are automatically checked at brainstorm and paper completion.
+          {proofScope === 'manual'
+            ? 'No manual proofs verified yet. Use Try to Prove This or run a manual proof check here.'
+            : 'No proofs verified yet. Proofs are automatically checked at brainstorm and paper completion.'}
         </div>
       )}
 

@@ -22,9 +22,36 @@ Only where it is apparent, appearing true, and potentially very helpful, you may
 Do not force creativity. If the creative route is not apparent or would weaken rigor, submit the strongest normal direct-progress contribution instead."""
 
 
-def get_submitter_system_prompt() -> str:
+def get_submitter_system_prompt(lean4_enabled: bool = False) -> str:
     """Get system prompt for submitter agents."""
-    return """You are a mathematical submitter in an AI cluster working to solve complex mathematical problems. Your role is to:
+    lean_proof_route = (
+        """OPTIONAL LEAN 4 PROOF ROUTE:
+If Lean 4 proof verification is enabled and you can produce a complete Lean 4 proof that would be useful public/citable novelty-bearing brainstorm progress, you may choose the `lean_proof` submission type. Novelty means the proved theorem, formulation, or Lean mechanization is absent from standard references or Mathlib and materially helps the user prompt; do not submit program-local firsts. A Lean proof candidate is NOT added directly to the knowledge base: the system first checks that it declares a valid novelty tier and anti-known-result rationale, then runs Lean 4, gives you up to 5 repair attempts with Lean/integrity feedback, and only then sends the Lean-verified proof to the normal brainstorm validator for usefulness and redundancy review.
+
+Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to accept. Do not use this route for routine helper lemmas, standard Mathlib/textbook facts, general known-knowledge-base entries, or proofs that are only new to this program. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
+"""
+        if lean4_enabled
+        else ""
+    )
+    lean_proof_schema = (
+        """Lean proof candidate:
+{
+  "submission_type": "lean_proof",
+  "theorem_statement": "Natural-language statement of the theorem or lemma proved by the Lean code.",
+  "formal_sketch": "Brief note about assumptions, formalization choices, and why this proof helps the brainstorm.",
+  "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation",
+  "prompt_relevance_rationale": "Why this proof directly solves, solves toward, or materially helps solve the user prompt.",
+  "novelty_rationale": "Why this proof is absent from standard references or Mathlib and would be public/citable novelty rather than background knowledge or a program-local first.",
+  "why_not_standard_known_result": "Why this is not merely a textbook/Mathlib/routine helper result.",
+  "theorem_name": "Optional Lean declaration name",
+  "lean_code": "Complete Lean 4 code expected to verify.",
+  "reasoning": "Why this verified proof would be a useful brainstorm addition"
+}
+"""
+        if lean4_enabled
+        else ""
+    )
+    return ("""You are a mathematical submitter in an AI cluster working to solve complex mathematical problems. Your role is to:
 
 1. Analyze the user's prompt and provided context carefully
 2. Build upon the shared training database (accepted submissions from other agents)
@@ -51,6 +78,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 ---
 
 YOUR TASK:
+Generate a novel mathematical insight that advances the user's goal.
 Generate the strongest rigorous mathematical contribution you can toward the user's goal. Any submission should aggressively address the user's WHOLE question as stated where possible, no partial solutions.
 
 PROGRESSIVE SYSTEM: You will be called MANY times throughout this brainstorming process. Each call should produce ONE deep, well-developed mathematical insight. Do not try to cover everything at once — focus on thoroughly developing a single avenue per submission with full rigor. You will have many more opportunities to explore other avenues in future submissions.
@@ -97,10 +125,7 @@ Your submission will be validated against these criteria:
 - Is it non-redundant with existing knowledge?
 - Is it mathematically rigorous?
 
-OPTIONAL LEAN 4 PROOF ROUTE:
-If Lean 4 proof verification is enabled and you can produce a complete Lean 4 proof that would be useful novelty-bearing brainstorm progress, you may choose the `lean_proof` submission type. A Lean proof candidate is NOT added directly to the knowledge base: the system first checks that it declares a valid novelty tier and anti-known-result rationale, then runs Lean 4, gives you up to 5 repair attempts with Lean/integrity feedback, and only then sends the Lean-verified proof to the normal brainstorm validator for usefulness and redundancy review.
-
-Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to accept. Do not use this route for routine helper lemmas, standard Mathlib/textbook facts, or general known-knowledge-base entries. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
+{lean_proof_route}
 
 Output your response ONLY as JSON in one of these exact formats:
 
@@ -111,32 +136,14 @@ Normal brainstorm idea:
   "reasoning": "Brief explanation of why this submission is valuable"
 }
 
-Lean proof candidate:
-{
-  "submission_type": "lean_proof",
-  "theorem_statement": "Natural-language statement of the theorem or lemma proved by the Lean code.",
-  "formal_sketch": "Brief note about assumptions, formalization choices, and why this proof helps the brainstorm.",
-  "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation",
-  "prompt_relevance_rationale": "Why this proof directly solves, solves toward, or materially helps solve the user prompt.",
-  "novelty_rationale": "Why this proof is new/novel knowledge rather than background knowledge.",
-  "why_not_standard_known_result": "Why this is not merely a textbook/Mathlib/routine helper result.",
-  "theorem_name": "Optional Lean declaration name",
-  "lean_code": "Complete Lean 4 code expected to verify.",
-  "reasoning": "Why this verified proof would be a useful brainstorm addition"
-}
-"""
+{lean_proof_schema}
+""").replace("{lean_proof_route}", lean_proof_route).replace("{lean_proof_schema}", lean_proof_schema)
 
 
-def get_submitter_json_schema() -> str:
+def get_submitter_json_schema(lean4_enabled: bool = False) -> str:
     """Get JSON schema specification for submitter."""
-    return """
-REQUIRED JSON FORMAT:
-Normal brainstorm idea:
-{
-  "submission_type": "idea",
-  "submission": "string - your detailed mathematical submission with theorems, proofs, and techniques",
-  "reasoning": "string - explanation of submission value"
-}
+    lean_proof_schema = (
+        """
 
 Lean proof candidate, only when Lean 4 is enabled and you can provide complete code:
 {
@@ -145,12 +152,29 @@ Lean proof candidate, only when Lean 4 is enabled and you can provide complete c
   "formal_sketch": "string - formalization notes",
   "expected_novelty_tier": "string - one of major_mathematical_discovery, mathematical_discovery, novel_variant, novel_formulation",
   "prompt_relevance_rationale": "string - how this directly serves the prompt",
-  "novelty_rationale": "string - why this is new/novel knowledge",
+  "novelty_rationale": "string - why this is absent from standard references or Mathlib and public/citable, not program-local novelty",
   "why_not_standard_known_result": "string - why this is not merely textbook/Mathlib/routine helper knowledge",
   "theorem_name": "string - optional Lean declaration name",
   "lean_code": "string - complete Lean 4 source code",
   "reasoning": "string - why the verified proof would help the brainstorm"
+}"""
+        if lean4_enabled
+        else ""
+    )
+    lean_proof_note = (
+        "Lean proof candidates must follow the schema above, but should not be copied from a generic example: only use that route when you can provide complete Lean 4 code for a prompt-specific public/citable novelty-bearing theorem."
+        if lean4_enabled
+        else ""
+    )
+    return """
+REQUIRED JSON FORMAT:
+Normal brainstorm idea:
+{
+  "submission_type": "idea",
+  "submission": "string - your detailed mathematical submission with theorems, proofs, and techniques",
+  "reasoning": "string - explanation of submission value"
 }
+{lean_proof_schema}
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -177,15 +201,16 @@ GOOD Example (technique application):
   "reasoning": "Leverages established number theory techniques for understanding irrational approximations relevant to the mathematical problem."
 }
 
-Lean proof candidates must follow the schema above, but should not be copied from a generic example: only use that route when you can provide complete Lean 4 code for a prompt-specific novelty-bearing theorem.
-"""
+{lean_proof_note}
+""".replace("{lean_proof_schema}", lean_proof_schema).replace("{lean_proof_note}", lean_proof_note)
 
 
 def build_submitter_prompt(
     user_prompt: str,
     context: str,
     rag_evidence: str = "",
-    creativity_emphasized: bool = False
+    creativity_emphasized: bool = False,
+    lean4_enabled: bool = False,
 ) -> str:
     """
     Build complete prompt for submitter.
@@ -199,9 +224,9 @@ def build_submitter_prompt(
         Complete prompt string
     """
     parts = [
-        get_submitter_system_prompt(),
+        get_submitter_system_prompt(lean4_enabled=lean4_enabled),
         "\n---\n",
-        get_submitter_json_schema(),
+        get_submitter_json_schema(lean4_enabled=lean4_enabled),
         "\n---\n",
         f"USER PROMPT:\n{user_prompt}",
         "\n---\n",

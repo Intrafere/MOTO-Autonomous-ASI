@@ -340,6 +340,7 @@ const AutonomousResearchSettings = ({
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
+  const [openAICodexModelError, setOpenAICodexModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -365,7 +366,7 @@ const AutonomousResearchSettings = ({
   const [testingWolfram, setTestingWolfram] = useState(false);
   const [proofStatus, setProofStatus] = useState(null);
   const [proofSettingsEnabled, setProofSettingsEnabled] = useState(false);
-  const [proofSettingsTimeout, setProofSettingsTimeout] = useState('120');
+  const [proofSettingsTimeout, setProofSettingsTimeout] = useState('600');
   const [proofSettingsLspEnabled, setProofSettingsLspEnabled] = useState(false);
   const [proofSettingsLspIdleTimeout, setProofSettingsLspIdleTimeout] = useState('600');
   const [proofSettingsMaxParallelCandidates, setProofSettingsMaxParallelCandidates] = useState('6');
@@ -567,10 +568,13 @@ const AutonomousResearchSettings = ({
         setHasOpenAICodexLogin(configured);
         if (configured) {
           fetchOpenAICodexModels();
+        } else {
+          setOpenAICodexModelError('');
         }
       } catch (err) {
         console.error('Failed to check OpenAI Codex login:', err);
         setHasOpenAICodexLogin(false);
+        setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
       }
       
       try {
@@ -611,7 +615,7 @@ const AutonomousResearchSettings = ({
         const status = await autonomousAPI.getProofStatus();
         setProofStatus(status);
         setProofSettingsEnabled(Boolean(status.lean4_enabled));
-        setProofSettingsTimeout(String(status.lean4_proof_timeout ?? 120));
+        setProofSettingsTimeout(String(status.lean4_proof_timeout ?? 600));
         setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
         setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? 600));
         setProofSettingsMaxParallelCandidates(String(status.proof_max_parallel_candidates ?? 6));
@@ -798,10 +802,18 @@ const AutonomousResearchSettings = ({
   const fetchOpenAICodexModels = async () => {
     try {
       const result = await cloudAccessAPI.getOpenAICodexModels();
-      setOpenAICodexModels(result.models || []);
+      const models = result.models || [];
+      setOpenAICodexModels(models);
+      setHasOpenAICodexLogin(models.length > 0);
+      setOpenAICodexModelError(models.length > 0
+        ? ''
+        : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
+      );
     } catch (err) {
       console.error('Failed to fetch OpenAI Codex models:', err);
       setOpenAICodexModels([]);
+      setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError(`OpenAI Codex OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
 
@@ -1278,7 +1290,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
   const handleSaveProofSettings = async () => {
     const parsedTimeout = parseInt(proofSettingsTimeout, 10);
-    const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 120;
+    const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 600;
     const parsedLspIdleTimeout = parseInt(proofSettingsLspIdleTimeout, 10);
     const lspIdleTimeout = Number.isFinite(parsedLspIdleTimeout) ? parsedLspIdleTimeout : 600;
     const parsedMaxParallelCandidates = parseInt(proofSettingsMaxParallelCandidates, 10);
@@ -1661,6 +1673,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           <p className="openrouter-banner__text">
             <strong>💡 OpenRouter Available:</strong> Set your OpenRouter API key in the header to enable cloud model selection for any role.
           </p>
+        </div>
+      )}
+      {openAICodexModelError && (
+        <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+          {openAICodexModelError}
         </div>
       )}
 

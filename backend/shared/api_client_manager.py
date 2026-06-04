@@ -31,6 +31,7 @@ from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import sanitize_model_output_for_retry_context
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import ModelConfig
+from backend.shared.response_extraction import extract_response_text
 from backend.shared.token_tracker import token_tracker
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,28 @@ class APIClientManager:
         """Broadcast an event through WebSocket."""
         if self._broadcast_callback:
             await self._broadcast_callback(event, data or {})
+
+    async def _broadcast_unrecoverable_codex_error(
+        self,
+        *,
+        role_id: str,
+        model: str,
+        error: Exception,
+    ) -> None:
+        """Notify the UI when a Codex role cannot recover through fallback."""
+        await self._broadcast("openai_codex_oauth_error", {
+            "role_id": role_id,
+            "model": model,
+            "provider": "openai_codex_oauth",
+            "reason": "unrecoverable_codex_error",
+            "recoverable": False,
+            "message": (
+                "OpenAI Codex failed and no LM Studio fallback is configured. "
+                "Please check your OpenAI Codex OAuth connection in Cloud Access & Keys, "
+                "sign in again, and retry."
+            ),
+            "error_summary": redact_log_text(str(error), 700),
+        })
     
     async def _with_hung_connection_watchdog(
         self,
@@ -510,10 +533,7 @@ class APIClientManager:
     @staticmethod
     def _response_text(response: Dict[str, Any]) -> str:
         """Extract assistant text from an OpenAI-compatible completion response."""
-        if not response.get("choices"):
-            return ""
-        message = response["choices"][0].get("message", {})
-        return message.get("content") or message.get("reasoning") or ""
+        return extract_response_text(response, context="api_client_manager")
 
     @classmethod
     def _sanitize_supercharge_candidate(cls, attempt: str) -> str:
@@ -773,8 +793,7 @@ class APIClientManager:
                     tokens_used = None
                     
                     if result.get("choices"):
-                        message = result["choices"][0].get("message", {})
-                        response_content = message.get("content") or message.get("reasoning") or ""
+                        response_content = extract_response_text(result, context=task_id)
                     if result.get("usage"):
                         tokens_used = result["usage"].get("total_tokens")
                         _pt = result["usage"].get("prompt_tokens")
@@ -1120,8 +1139,7 @@ class APIClientManager:
                     response_content = ""
                     tokens_used = None
                     if result.get("choices"):
-                        message = result["choices"][0].get("message", {})
-                        response_content = message.get("content") or message.get("reasoning") or ""
+                        response_content = extract_response_text(result, context=task_id)
                     if result.get("usage"):
                         tokens_used = result["usage"].get("total_tokens")
                         _pt = result["usage"].get("prompt_tokens")
@@ -1426,8 +1444,7 @@ class APIClientManager:
                 response_content = ""
                 tokens_used = None
                 if result.get("choices"):
-                    message = result["choices"][0].get("message", {})
-                    response_content = message.get("content") or message.get("reasoning") or ""
+                    response_content = extract_response_text(result, context=task_id)
                 if result.get("usage"):
                     tokens_used = result["usage"].get("total_tokens")
                     _pt = result["usage"].get("prompt_tokens")
@@ -1495,6 +1512,11 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
+                    await self._broadcast_unrecoverable_codex_error(
+                        role_id=role_id,
+                        model=codex_model,
+                        error=e,
+                    )
                     raise RuntimeError(
                         f"OpenAI Codex failed for role '{role_id}' and no LM Studio fallback is configured: {e}"
                     ) from e
@@ -1526,6 +1548,11 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
+                    await self._broadcast_unrecoverable_codex_error(
+                        role_id=role_id,
+                        model=codex_model,
+                        error=e,
+                    )
                     raise
 
         if system_config.generic_mode:
@@ -1576,8 +1603,7 @@ class APIClientManager:
             lm_routing_metadata = lm_studio_client.extract_routing_metadata(result)
             actual_lm_studio_model = lm_routing_metadata.get("actual_model") or model
             if result.get("choices"):
-                message = result["choices"][0].get("message", {})
-                response_content = message.get("content") or message.get("reasoning") or ""
+                response_content = extract_response_text(result, context=task_id)
             if result.get("usage"):
                 tokens_used = result["usage"].get("total_tokens")
                 _pt = result["usage"].get("prompt_tokens")

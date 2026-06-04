@@ -5,6 +5,14 @@ export const getActivityIcon = (event = '') => {
     case 'compiler_acceptance':
     case 'outline_locked':
       return '✓';
+    case 'system_started':
+      return '▶';
+    case 'system_stopped':
+      return '■';
+    case 'system_reset':
+      return '↻';
+    case 'new_submission':
+      return '+';
     case 'brainstorm_submission_rejected':
     case 'submission_rejected':
     case 'compiler_rejection':
@@ -276,6 +284,9 @@ export const getActivityClass = (event = '', item = {}) => {
     event.includes('resumed') ||
     event.includes('progress') ||
     event.includes('transition') ||
+    event === 'new_submission' ||
+    event === 'system_stopped' ||
+    event === 'system_reset' ||
     event === 'manual_paper_writing_triggered' ||
     event === 'brainstorm_hard_limit_reached' ||
     event === 'tier3_forced' ||

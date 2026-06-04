@@ -671,7 +671,7 @@ class ProofSettingsUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool
-    timeout: int = Field(default=120, ge=10, le=3600)
+    timeout: int = Field(default=600, ge=10, le=3600)
     lean4_lsp_enabled: Optional[bool] = None
     lean4_lsp_idle_timeout: Optional[int] = Field(default=None, ge=60, le=7200)
     max_parallel_candidates: Optional[int] = Field(default=None, ge=0, le=1000)

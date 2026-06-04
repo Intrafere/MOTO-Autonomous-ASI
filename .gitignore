@@ -78,6 +78,9 @@ backend/data/leanoj_artifacts/
 # Proof verification artifacts (Lean 4 / Z3 hybrid mode)
 backend/data/proofs/*
 !backend/data/proofs/.gitkeep
+backend/data/manual_proofs/*
+!backend/data/manual_proofs/.gitkeep
+backend/data/manual_proof_runs/
 backend/data/lean4_workspace/
 backend/data/z3/
 
@@ -90,6 +93,7 @@ backend/data/auto_workflow_state.json
 backend/data/auto_research_topic_rejections.txt
 backend/data/auto_api_log.txt
 backend/data/aggregator_results.txt
+backend/data/manual_aggregator_prompt.txt
 backend/data/runtime_settings.json
 
 backend/data/chroma_db/*
@@ -132,6 +136,7 @@ randomlog.txt
 randomlog*.txt
 leanoj_master_proof_*.lean.txt
 commits_pending.txt
+recovered_manual_aggregator_prompt.txt
 PicksTheorem_FinalSkeleton.lean
 CLASSICALPICKS.LEAN
 

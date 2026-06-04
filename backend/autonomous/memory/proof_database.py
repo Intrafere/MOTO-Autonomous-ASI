@@ -52,6 +52,13 @@ class ProofDatabase:
         self._index_data = None
         logger.info("Proof database using path: %s", self._base_dir)
 
+    def set_base_dir(self, base_dir: Path) -> None:
+        """Use a fixed proof-storage directory independent of autonomous sessions."""
+        self._session_manager = None
+        self._base_dir = Path(base_dir)
+        self._index_data = None
+        logger.info("Proof database using fixed path: %s", self._base_dir)
+
     def _safe_proof_id(self, proof_id: str) -> str:
         return validate_single_path_component(proof_id, "proof ID")
 
@@ -689,7 +696,7 @@ class ProofDatabase:
         lines = [
             "=== VERIFIED NOVEL MATHEMATICAL PROOFS (Lean 4 Verified) ===",
             "[These proofs have been formally verified. They represent proven mathematical truths.",
-            "Novelty tiers: Major Mathematical Discovery (highest — possible prize-level discovery), Mathematical Discovery (new result), Novel Reformulation (novel reformulation of known proof), Novel Formalization (first Lean 4 formalization of known result).]",
+            "Novelty tiers: Major Mathematical Discovery (highest — possible prize-level discovery), Mathematical Discovery (new result), Novel Reformulation (novel reformulation of known proof), Novel Formalization (citable formulation/formalization absent from standard references or Mathlib).]",
             "",
         ]
         for index, proof in enumerate(novel_proofs, start=1):
@@ -772,6 +779,97 @@ class ProofDatabase:
         all_proofs.sort(key=lambda p: p.get("created_at") or "", reverse=True)
         return all_proofs
 
+    async def archive_current_run(
+        self,
+        history_root: Path,
+        *,
+        user_prompt: str = "",
+        reason: str = "manual_run_cleared",
+    ) -> Optional[Dict[str, Any]]:
+        """Archive the active fixed proof directory, then reset it to an empty run.
+
+        This is used by manual mode: archived proofs remain browsable/downloadable,
+        but the active proof database becomes empty so future manual prompts cannot
+        inherit proofs from a cleared run.
+        """
+        async with self._lock:
+            self._ensure_index_loaded_sync()
+            proof_count = len(self._index_data.get("proofs", []) if self._index_data else [])
+            has_files = self._base_dir.exists() and any(self._base_dir.iterdir())
+            if not has_files or proof_count == 0:
+                if self._base_dir.exists():
+                    await asyncio.to_thread(shutil.rmtree, self._base_dir, True)
+                self._index_data = self._default_index()
+                self._base_dir.mkdir(parents=True, exist_ok=True)
+                self._get_failed_dir().mkdir(parents=True, exist_ok=True)
+                self._rebuild_reverse_indexes()
+                await self._save_index()
+                return None
+
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            history_root = Path(history_root)
+            history_root.mkdir(parents=True, exist_ok=True)
+
+            base_run_id = f"manual_proofs_{timestamp}"
+            run_id = base_run_id
+            suffix = 2
+            while (history_root / run_id).exists():
+                run_id = f"{base_run_id}_{suffix}"
+                suffix += 1
+
+            run_dir = history_root / run_id
+            target_proofs_dir = run_dir / "proofs"
+
+            def _copy_active_run() -> None:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(self._base_dir, target_proofs_dir)
+
+            await asyncio.to_thread(_copy_active_run)
+
+            metadata = {
+                "session_id": run_id,
+                "run_type": "manual",
+                "status": "cleared",
+                "reason": reason,
+                "user_prompt": (user_prompt or "").strip(),
+                "created_at": timestamp,
+                "archived_at": datetime.utcnow().isoformat(),
+                "proof_count": proof_count,
+            }
+            metadata_path = run_dir / "session_metadata.json"
+            await asyncio.to_thread(
+                metadata_path.write_text,
+                json.dumps(metadata, indent=2),
+                "utf-8",
+            )
+
+            await asyncio.to_thread(shutil.rmtree, self._base_dir, True)
+            self._base_dir.mkdir(parents=True, exist_ok=True)
+            self._get_failed_dir().mkdir(parents=True, exist_ok=True)
+            self._index_data = self._default_index()
+            self._rebuild_reverse_indexes()
+            await self._save_index()
+            return metadata
+
+    async def list_proof_library_from_history(
+        self,
+        history_root: Path,
+        novel_only: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """List archived manual proof runs without including the active DB."""
+        history_root = Path(history_root)
+        all_proofs: List[Dict[str, Any]] = []
+        if history_root.exists():
+            for run_dir in sorted((p for p in history_root.iterdir() if p.is_dir()), reverse=True):
+                proofs_dir = run_dir / "proofs"
+                if not proofs_dir.exists():
+                    continue
+                all_proofs.extend(
+                    await self._list_proofs_from_directory(proofs_dir, run_dir.name, novel_only)
+                )
+        all_proofs.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+        return all_proofs
+
     async def _list_proofs_from_directory(
         self, proofs_dir: Path, session_id: str, novel_only: bool
     ) -> List[Dict[str, Any]]:
@@ -839,6 +937,28 @@ class ProofDatabase:
         if not proofs_dir.exists():
             return None
 
+        return await self.get_library_proof_from_directory(proofs_dir, session_id, proof_id)
+
+    async def get_library_proof_from_history(
+        self,
+        history_root: Path,
+        session_id: str,
+        proof_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get one archived manual proof by run id and proof id."""
+        safe_session = validate_single_path_component(session_id, "manual proof run ID")
+        proofs_dir = resolve_path_within_root(Path(history_root), safe_session, "proofs")
+        if not proofs_dir.exists():
+            return None
+        return await self.get_library_proof_from_directory(proofs_dir, safe_session, proof_id)
+
+    async def get_library_proof_from_directory(
+        self,
+        proofs_dir: Path,
+        session_id: str,
+        proof_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Read a proof record from an explicit proofs directory."""
         safe_id = validate_single_path_component(proof_id, "proof ID")
         record_path = resolve_path_within_root(proofs_dir, f"proof_{safe_id}.json")
         lean_path = resolve_path_within_root(proofs_dir, f"proof_{safe_id}_lean.lean")
@@ -888,3 +1008,5 @@ class ProofDatabase:
 
 
 proof_database = ProofDatabase()
+manual_proof_database = ProofDatabase()
+manual_proof_database.set_base_dir(Path(system_config.data_dir) / "manual_proofs")

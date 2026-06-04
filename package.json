@@ -1,6 +1,6 @@
 {
   "name": "moto-math-variant",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "MOTO S.T.E.M. Mathematics Variant - Autonomous ASI Research System for Novel S.T.E.M. Mathematical Paper Generation",
   "scripts": {
     "dev:backend": "python -c \"import os, uvicorn; uvicorn.run('backend.api.main:app', host=os.getenv('MOTO_BACKEND_HOST', os.getenv('HOST', '0.0.0.0')), port=int(os.getenv('MOTO_BACKEND_PORT', os.getenv('PORT', '8000'))), reload=True, access_log=False)\"",

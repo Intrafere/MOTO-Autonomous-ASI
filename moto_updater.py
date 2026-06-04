@@ -22,6 +22,7 @@ import zipfile
 REPO_ROOT = Path(__file__).resolve().parent
 PACKAGE_JSON_PATH = REPO_ROOT / "package.json"
 LOCAL_MANIFEST_PATH = REPO_ROOT / "moto-update-manifest.json"
+ARCHIVAL_METADATA_PATH = REPO_ROOT / ".git_archival.txt"
 LAUNCHER_STATE_PATH = REPO_ROOT / ".moto_launcher_state.json"
 LAUNCHER_LAST_INSTANCE_PATH = REPO_ROOT / ".moto_last_instance.json"
 LAUNCHER_ENTRYPOINT_ENV = "MOTO_LAUNCHER_ENTRYPOINT"
@@ -31,7 +32,7 @@ _DEFAULT_MANIFEST = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build5-v22",
+    "api_contract_version": "build5-v28",
 }
 
 _DEFAULT_PRESERVED_ROOTS = {
@@ -125,6 +126,7 @@ class _CopyJournal:
 
 
 def _parse_version_tuple(version: str) -> tuple[int, ...] | None:
+    """Parse MOTO display versions; zero-padded segments compare numerically."""
     normalized = str(version or "").strip().lower()
     if normalized.startswith("v"):
         normalized = normalized[1:]
@@ -216,6 +218,19 @@ def _current_git_head() -> str | None:
     return output.strip() if code == 0 and output.strip() else None
 
 
+def _archived_git_head() -> str | None:
+    """Return the GitHub archive commit embedded by git archive export-subst."""
+    if (REPO_ROOT / ".git").exists():
+        return None
+    try:
+        content = ARCHIVAL_METADATA_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    match = re.search(r"(?im)^node:\s*([0-9a-f]{40})\s*$", content)
+    return match.group(1).lower() if match else None
+
+
 def _write_installed_manifest(manifest: BuildManifest) -> None:
     _write_json(
         LOCAL_MANIFEST_PATH,
@@ -234,6 +249,9 @@ def load_local_manifest() -> BuildManifest:
     git_head = _current_git_head()
     if git_head:
         return _manifest_with_build_commit(manifest, git_head)
+    archived_head = _archived_git_head()
+    if archived_head:
+        return _manifest_with_build_commit(manifest, archived_head)
     return manifest
 
 

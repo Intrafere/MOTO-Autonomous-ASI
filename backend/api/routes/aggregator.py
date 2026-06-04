@@ -13,12 +13,21 @@ from backend.shared.config import system_config, rag_config
 from backend.shared.token_tracker import token_tracker
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.manual_proof_context import get_manual_proof_context_lock
 from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.event_log import event_log
+from backend.aggregator.memory.shared_training import (
+    clear_manual_aggregator_prompt,
+    load_manual_aggregator_prompt,
+    save_manual_aggregator_prompt,
+    shared_training_memory,
+)
+from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
+from backend.autonomous.memory.proof_database import manual_proof_database
 from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 
 logger = logging.getLogger(__name__)
@@ -26,6 +35,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/aggregator", tags=["aggregator"])
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+
+MANUAL_PROOF_ACTIVE_KEYS = {
+    "brainstorm:manual_aggregator",
+    "paper:manual_compiler_current",
+}
+
+
+async def _manual_proof_clear_blocker() -> Optional[str]:
+    """Return a blocker message if manual proof work could write stale proofs."""
+    active_keys = await ProofVerificationStage.active_source_keys()
+    for key in active_keys:
+        if (
+            key in MANUAL_PROOF_ACTIVE_KEYS
+            or key.startswith("paper:compiler_manual_")
+            or key.startswith("paper:manual_compiler_")
+        ):
+            return "Cannot clear the manual run while manual proof verification is running. Stop or wait for proof verification to finish first."
+    return None
 
 
 def _require_positive_setting(value: int, label: str) -> int:
@@ -68,6 +95,50 @@ def _get_start_conflict() -> Optional[str]:
         return "Cannot start Aggregator while Proof Solver is running. Stop Proof Solver first."
 
     return None
+
+
+async def _ensure_manual_aggregator_memory_loaded_for_read() -> None:
+    """Load the persisted manual Aggregator database without starting a workflow."""
+    manual_path = Path(system_config.shared_training_file)
+
+    if coordinator.is_running:
+        if shared_training_memory.file_path != manual_path:
+            try:
+                paths_match = shared_training_memory.file_path.resolve() == manual_path.resolve()
+            except Exception:
+                paths_match = False
+            if not paths_match:
+                return
+        await shared_training_memory.refresh_proof_appendix_from_file()
+        return
+
+    if autonomous_coordinator.is_active:
+        return
+
+    if shared_training_memory.file_path != manual_path:
+        shared_training_memory.file_path = manual_path
+
+    if manual_path.exists() and manual_path.stat().st_size > 0:
+        await shared_training_memory.reload_insights_from_current_path()
+        return
+
+    async with shared_training_memory._lock:
+        shared_training_memory.insights.clear()
+        shared_training_memory.proof_appendix = ""
+        shared_training_memory.submission_count = 0
+        shared_training_memory.last_ragged_submission_count = 0
+
+    if not manual_path.exists():
+        manual_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiofiles.open(manual_path, "w", encoding="utf-8") as handle:
+            await handle.write("")
+
+
+async def _ensure_manual_event_log_loaded_for_read() -> None:
+    """Load persisted manual Aggregator events without starting the Aggregator."""
+    if coordinator.is_running:
+        return
+    await event_log.initialize()
 
 
 @router.post("/start")
@@ -145,6 +216,7 @@ async def start_aggregator(request: AggregatorStartRequest):
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
                 creativity_emphasis_boost_enabled=request.creativity_emphasis_boost_enabled,
             )
+            await save_manual_aggregator_prompt(request.user_prompt)
 
             # Start coordinator
             token_tracker.reset()
@@ -196,6 +268,7 @@ async def get_status():
 async def get_results():
     """Get all accepted submissions with formatting for display."""
     try:
+        await _ensure_manual_aggregator_memory_loaded_for_read()
         # Return formatted results with submission separators for GUI display
         results = await coordinator.get_results_formatted()
         return {"results": results}
@@ -208,6 +281,7 @@ async def get_results():
 async def save_results():
     """Save results to a .txt file with formatting."""
     try:
+        await _ensure_manual_aggregator_memory_loaded_for_read()
         # Get formatted results with metadata headers
         results = await coordinator.get_results_formatted()
         
@@ -232,12 +306,32 @@ async def save_results():
 async def clear_all_submissions():
     """Clear all accepted submissions and reset the system."""
     try:
-        await coordinator.clear_all_submissions()
+        async with get_manual_proof_context_lock():
+            if compiler_coordinator.is_running:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot clear Aggregator data while Compiler is running. Stop Compiler first.",
+                )
+            blocker = await _manual_proof_clear_blocker()
+            if blocker:
+                raise HTTPException(status_code=409, detail=blocker)
+            if coordinator.is_running:
+                await coordinator.stop()
+            archived_proofs = await manual_proof_database.archive_current_run(
+                Path(system_config.data_dir) / "manual_proof_runs",
+                user_prompt=await load_manual_aggregator_prompt(),
+                reason="manual_aggregator_clear_all",
+            )
+            await coordinator.clear_all_submissions()
+            await clear_manual_aggregator_prompt()
         
         return {
             "status": "cleared",
-            "message": "All submissions cleared and system reset"
+            "message": "All submissions cleared and system reset",
+            "archived_manual_proofs": archived_proofs,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to clear submissions: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -303,6 +397,7 @@ async def get_aggregator_settings():
 async def get_events():
     """Get persisted aggregator events (acceptances, rejections, cleanup removals)."""
     try:
+        await _ensure_manual_event_log_loaded_for_read()
         events = await event_log.get_all_events()
         return {"events": events}
     except Exception as e:

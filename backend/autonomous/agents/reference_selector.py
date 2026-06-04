@@ -25,6 +25,7 @@ from typing import Optional, Dict, Any, List, Callable
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config, system_config
 from backend.shared.models import ReferenceExpansionRequest
@@ -262,7 +263,7 @@ class ReferenceSelectorAgent:
             
             # Extract content (check both content and reasoning fields)
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content") or message.get("reasoning") or ""
+            content = extract_message_text(message)
             if not content:
                 return None
             
@@ -428,7 +429,7 @@ class ReferenceSelectorAgent:
             
             # Extract content (check both content and reasoning fields)
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content") or message.get("reasoning") or ""
+            content = extract_message_text(message)
             if not content:
                 return []
             

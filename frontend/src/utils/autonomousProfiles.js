@@ -1,5 +1,6 @@
 import { loadModelCache, getModelApiId } from './modelCache';
 import {
+  computeCodexAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
@@ -10,6 +11,7 @@ export const AUTONOMOUS_SETTINGS_STORAGE_KEY = 'autonomous_research_settings';
 export const AUTONOMOUS_PROFILES_STORAGE_KEY = 'autonomous_research_profiles';
 export const STARTUP_PROVIDER_CHOICE_STORAGE_KEY = 'startup_provider_choice';
 export const LM_STUDIO_STARTUP_CHOICE = 'lm_studio';
+export const OPENAI_CODEX_STARTUP_CHOICE = 'openai_codex_oauth';
 export const RECOMMENDED_PROFILE_KEY = 'recommended_slower_affordable_higher_knowledge';
 export const RECOMMENDED_ALTERNATE_PROFILE_KEY = 'recommended_fast_affordable_mid';
 export const RECOMMENDED_LAB_FAST_PROFILE_KEY = 'recommended_lab_fast_costly_extra_high';
@@ -81,6 +83,14 @@ const DEFAULT_LM_LOCAL_CONFIG = {
   critique_submitter_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
   critique_submitter_supercharge_enabled: false,
 };
+
+const DEFAULT_CODEX_STARTUP_MODEL = Object.freeze({
+  id: 'gpt-5.5',
+  name: 'gpt-5.5',
+  context_length: 400000,
+  max_output_tokens: 128000,
+});
+const CODEX_STARTUP_MODEL_PREFERENCE = ['gpt-5.5', 'gpt-5.5-mini', 'gpt-5.4', 'gpt-5.4-mini'];
 
 const createDefaultSubmitterConfigs = (modelId = '') => (
   [1, 2, 3].map((submitterId) => ({
@@ -515,6 +525,67 @@ function buildLocalConfigFromLmStudio(modelId = '') {
   };
 }
 
+function chooseCodexStartupModel(models = []) {
+  const availableModels = Array.isArray(models) ? models.filter((model) => model?.id) : [];
+  for (const preferredId of CODEX_STARTUP_MODEL_PREFERENCE) {
+    const match = availableModels.find((model) => model.id === preferredId);
+    if (match) return match;
+  }
+  return availableModels[0] || DEFAULT_CODEX_STARTUP_MODEL;
+}
+
+function buildCodexRoleDefaults(model = DEFAULT_CODEX_STARTUP_MODEL) {
+  const autoSettings = computeCodexAutoSettings(model);
+  return {
+    provider: 'openai_codex_oauth',
+    modelId: model.id || DEFAULT_CODEX_STARTUP_MODEL.id,
+    openrouterProvider: null,
+    openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    lmStudioFallbackId: null,
+    contextWindow: autoSettings.contextWindowKnown ? autoSettings.contextWindow : DEFAULT_CONTEXT_WINDOW,
+    maxOutputTokens: autoSettings.outputCapKnown ? autoSettings.maxOutputTokens : DEFAULT_MAX_OUTPUT_TOKENS,
+    superchargeEnabled: false,
+  };
+}
+
+function buildLocalConfigFromCodex(model = DEFAULT_CODEX_STARTUP_MODEL) {
+  const roleDefaults = buildCodexRoleDefaults(model);
+  return {
+    validator_provider: roleDefaults.provider,
+    validator_model: roleDefaults.modelId,
+    validator_openrouter_provider: null,
+    validator_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    validator_lm_studio_fallback: null,
+    validator_context_window: roleDefaults.contextWindow,
+    validator_max_tokens: roleDefaults.maxOutputTokens,
+    validator_supercharge_enabled: false,
+    high_context_provider: roleDefaults.provider,
+    high_context_model: roleDefaults.modelId,
+    high_context_openrouter_provider: null,
+    high_context_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    high_context_lm_studio_fallback: null,
+    high_context_context_window: roleDefaults.contextWindow,
+    high_context_max_tokens: roleDefaults.maxOutputTokens,
+    high_context_supercharge_enabled: false,
+    high_param_provider: roleDefaults.provider,
+    high_param_model: roleDefaults.modelId,
+    high_param_openrouter_provider: null,
+    high_param_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    high_param_lm_studio_fallback: null,
+    high_param_context_window: roleDefaults.contextWindow,
+    high_param_max_tokens: roleDefaults.maxOutputTokens,
+    high_param_supercharge_enabled: false,
+    critique_submitter_provider: roleDefaults.provider,
+    critique_submitter_model: roleDefaults.modelId,
+    critique_submitter_openrouter_provider: null,
+    critique_submitter_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    critique_submitter_lm_studio_fallback: null,
+    critique_submitter_context_window: roleDefaults.contextWindow,
+    critique_submitter_max_tokens: roleDefaults.maxOutputTokens,
+    critique_submitter_supercharge_enabled: false,
+  };
+}
+
 export function applyLmStudioStartupDefaults(modelId = '') {
   const currentSettings = getStoredAutonomousSettings();
   const nextSettings = persistAutonomousSettings({
@@ -531,6 +602,32 @@ export function applyLmStudioStartupDefaults(modelId = '') {
   return {
     settings: nextSettings,
     config: settingsToAutonomousConfig(nextSettings),
+  };
+}
+
+export function applyCodexStartupDefaults(models = []) {
+  const selectedModel = chooseCodexStartupModel(models);
+  const roleDefaults = buildCodexRoleDefaults(selectedModel);
+  const submitterConfigs = [1, 2, 3].map((submitterId) => ({
+    ...roleDefaults,
+    submitterId,
+  }));
+  const currentSettings = getStoredAutonomousSettings();
+  const nextSettings = persistAutonomousSettings({
+    ...currentSettings,
+    numSubmitters: 3,
+    submitterConfigs,
+    localConfig: {
+      ...currentSettings.localConfig,
+      ...buildLocalConfigFromCodex(selectedModel),
+    },
+    selectedProfile: '',
+  });
+
+  return {
+    settings: nextSettings,
+    config: settingsToAutonomousConfig(nextSettings),
+    modelId: selectedModel.id || DEFAULT_CODEX_STARTUP_MODEL.id,
   };
 }
 

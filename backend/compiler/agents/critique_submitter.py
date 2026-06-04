@@ -11,6 +11,7 @@ from backend.shared.models import Submission
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 from backend.compiler.prompts.critique_prompts import (
     build_critique_prompt,
@@ -158,7 +159,7 @@ class CritiqueSubmitterAgent:
                 return None
             
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             
             # Parse JSON response
             data = parse_json(llm_output)

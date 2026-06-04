@@ -29,6 +29,7 @@ from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.token_tracker import token_tracker
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.provider_pause import (
     is_provider_credit_pause_error,
@@ -401,7 +402,7 @@ class AutonomousCoordinator:
             )
             if response and response.get("choices"):
                 message = response["choices"][0].get("message", {})
-                content = message.get("content") or message.get("reasoning") or ""
+                content = extract_message_text(message)
                 if content:
                     parsed = parse_json(content)
                     if isinstance(parsed, list):
@@ -503,7 +504,7 @@ class AutonomousCoordinator:
         theorem_candidates: Optional[List[ProofCandidate]] = None,
         trigger: str = "automatic",
         role_suffix_override: Optional[str] = None,
-    ) -> None:
+    ) -> str:
         """Run the Lean 4 proof verification stage for a completed brainstorm or paper."""
         if not self._proof_outputs_enabled():
             logger.info(
@@ -513,9 +514,9 @@ class AutonomousCoordinator:
                 self._allow_mathematical_proofs,
                 system_config.lean4_enabled,
             )
-            return
+            return "complete"
         if not content or not source_id:
-            return
+            return "complete"
 
         if source_type == "brainstorm":
             submitter_model = self._submitter_configs[0].model_id if self._submitter_configs else self._high_context_model
@@ -529,185 +530,272 @@ class AutonomousCoordinator:
         async def save_proof_checkpoint(checkpoint: Dict[str, Any]) -> None:
             await research_metadata.save_proof_checkpoint(checkpoint)
 
-        checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id, trigger)
-        proof_candidate_indexes: Dict[str, int] = {}
-        checkpoint_attempts: Dict[str, List[ProofAttemptFeedback]] = {}
-        checkpoint_theorem_names: Dict[str, str] = {}
-        if checkpoint and (
-            trigger in set(checkpoint.get("completed_triggers") or [])
-            or checkpoint.get("status") in {"complete", "trigger_complete"}
+        automatic_followup_rounds = (
+            trigger == "automatic"
+            and theorem_candidates is None
+            and source_type in {"brainstorm", "paper"}
+        )
+        proof_max_rounds = 4 if automatic_followup_rounds else 1
+        prior_round_summaries: List[str] = []
+
+        def round_trigger_name(round_index: int) -> str:
+            if not automatic_followup_rounds or round_index <= 1:
+                return trigger
+            return f"{trigger}_round_{round_index}"
+
+        def summarize_round_result(round_index: int, proof_result) -> str:
+            if proof_result is None:
+                return f"Round {round_index}: skipped."
+            lines = [
+                (
+                    f"Round {round_index}: {proof_result.verified_count}/"
+                    f"{proof_result.total_candidates} candidates verified, "
+                    f"{proof_result.novel_count} novel."
+                )
+            ]
+            for attempt_result in list(getattr(proof_result, "results", []) or [])[:5]:
+                status = "verified" if attempt_result.success else "failed"
+                lines.append(
+                    f"- {status}: {attempt_result.theorem_statement[:220]}"
+                )
+            return "\n".join(lines)
+
+        async def run_single_proof_round(
+            *,
+            round_trigger: str,
+            proof_round_index: int,
+            prior_round_results: str,
         ):
-            await research_metadata.mark_proof_checkpoint_trigger_complete(
-                source_type,
-                source_id,
-                trigger,
-                source_title,
-            )
-            logger.info(
-                "Skipping completed proof checkpoint for %s %s trigger=%s",
-                source_type,
-                source_id,
-                trigger,
-            )
-            return
-        if checkpoint and checkpoint.get("status") != "trigger_complete":
-            (
-                checkpoint_candidates,
-                proof_candidate_indexes,
-                checkpoint_attempts,
-                checkpoint_theorem_names,
-            ) = self._deserialize_proof_checkpoint(
-                checkpoint
-            )
-            if checkpoint_candidates:
-                theorem_candidates = checkpoint_candidates
-                logger.info(
-                    "Resuming proof checkpoint for %s %s trigger=%s with %s remaining candidate(s)",
-                    source_type,
-                    source_id,
-                    trigger,
-                    len(checkpoint_candidates),
-                )
+            checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
+            proof_candidate_indexes: Dict[str, int] = {}
+            checkpoint_attempts: Dict[str, List[ProofAttemptFeedback]] = {}
+            checkpoint_theorem_names: Dict[str, str] = {}
+            retry_candidates = theorem_candidates if proof_round_index == 1 else None
 
-        retry_candidates = theorem_candidates
-        while not self._stop_event.is_set():
-            try:
-                proof_result = await self._proof_verification_stage.run(
-                    content=content,
-                    source_type=source_type,
-                    source_id=source_id,
-                    user_prompt=self._get_effective_user_research_prompt(),
-                    submitter_model=submitter_model,
-                    submitter_context=submitter_context,
-                    submitter_max_tokens=submitter_max_tokens,
-                    validator_model=self._validator_model,
-                    validator_context=self._validator_context,
-                    validator_max_tokens=self._validator_max_tokens,
-                    broadcast_fn=self._broadcast,
-                    novel_proofs_db=proof_database,
-                    source_title=source_title,
-                    theorem_candidates=retry_candidates,
-                    role_suffix_override=role_suffix_override,
-                    trigger=trigger,
-                    should_stop=self._stop_event.is_set,
-                    proof_candidate_indexes=proof_candidate_indexes,
-                    checkpoint_attempts_by_candidate=checkpoint_attempts,
-                    checkpoint_theorem_names_by_candidate=checkpoint_theorem_names,
-                    checkpoint_callback=save_proof_checkpoint,
-                )
-                if not self._stop_event.is_set() and not getattr(proof_result, "had_error", False):
-                    await research_metadata.mark_proof_checkpoint_trigger_complete(
+            if checkpoint:
+                completed_triggers = set(checkpoint.get("completed_triggers") or [])
+                same_round_checkpoint = checkpoint.get("trigger") == round_trigger
+                if round_trigger in completed_triggers:
+                    logger.info(
+                        "Skipping completed proof checkpoint for %s %s trigger=%s",
                         source_type,
                         source_id,
-                        trigger,
-                        source_title,
+                        round_trigger,
                     )
-                elif getattr(proof_result, "had_error", False):
+                    if same_round_checkpoint and int(checkpoint.get("total_candidates") or 0) == 0:
+                        return "no_candidates_skipped", None
+                    return "skipped", None
+
+                if same_round_checkpoint and checkpoint.get("status") in {"complete", "trigger_complete"}:
+                    logger.info(
+                        "Skipping completed proof checkpoint for %s %s trigger=%s",
+                        source_type,
+                        source_id,
+                        round_trigger,
+                    )
+                    if int(checkpoint.get("total_candidates") or 0) == 0:
+                        return "no_candidates_skipped", None
+                    return "skipped", None
+
+                if same_round_checkpoint and checkpoint.get("status") != "trigger_complete":
+                    (
+                        checkpoint_candidates,
+                        proof_candidate_indexes,
+                        checkpoint_attempts,
+                        checkpoint_theorem_names,
+                    ) = self._deserialize_proof_checkpoint(checkpoint)
+                    if checkpoint_candidates:
+                        retry_candidates = checkpoint_candidates
+                        logger.info(
+                            "Resuming proof checkpoint for %s %s trigger=%s with %s remaining candidate(s)",
+                            source_type,
+                            source_id,
+                            round_trigger,
+                            len(checkpoint_candidates),
+                        )
+
+            while not self._stop_event.is_set():
+                try:
+                    proof_result = await self._proof_verification_stage.run(
+                        content=content,
+                        source_type=source_type,
+                        source_id=source_id,
+                        user_prompt=self._get_effective_user_research_prompt(),
+                        submitter_model=submitter_model,
+                        submitter_context=submitter_context,
+                        submitter_max_tokens=submitter_max_tokens,
+                        validator_model=self._validator_model,
+                        validator_context=self._validator_context,
+                        validator_max_tokens=self._validator_max_tokens,
+                        broadcast_fn=self._broadcast,
+                        novel_proofs_db=proof_database,
+                        source_title=source_title,
+                        theorem_candidates=retry_candidates,
+                        role_suffix_override=role_suffix_override,
+                        trigger=round_trigger,
+                        source_reserved=automatic_followup_rounds,
+                        release_source_on_exit=not automatic_followup_rounds,
+                        should_stop=self._stop_event.is_set,
+                        proof_candidate_indexes=proof_candidate_indexes,
+                        checkpoint_attempts_by_candidate=checkpoint_attempts,
+                        checkpoint_theorem_names_by_candidate=checkpoint_theorem_names,
+                        checkpoint_callback=save_proof_checkpoint,
+                        proof_round_index=proof_round_index,
+                        proof_max_rounds=proof_max_rounds,
+                        prior_round_results=prior_round_results,
+                    )
+                    if not self._stop_event.is_set() and not getattr(proof_result, "had_error", False):
+                        await research_metadata.mark_proof_checkpoint_trigger_complete(
+                            source_type,
+                            source_id,
+                            round_trigger,
+                            source_title,
+                        )
+                    elif getattr(proof_result, "had_error", False):
+                        logger.warning(
+                            "Proof verification for %s %s trigger=%s returned an error; preserving checkpoint",
+                            source_type,
+                            source_id,
+                            round_trigger,
+                        )
+                    if getattr(proof_result, "had_error", False):
+                        return "error_preserved", proof_result
+                    return "completed", proof_result
+                except ProofVerificationProviderPause as exc:
+                    retry_candidates = exc.remaining_candidates or retry_candidates
+                    checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
+                    if checkpoint and checkpoint.get("trigger") == round_trigger:
+                        (
+                            checkpoint_candidates,
+                            proof_candidate_indexes,
+                            checkpoint_attempts,
+                            checkpoint_theorem_names,
+                        ) = self._deserialize_proof_checkpoint(checkpoint)
+                        retry_candidates = checkpoint_candidates or retry_candidates
+                    message = str(exc)
                     logger.warning(
-                        "Proof verification for %s %s trigger=%s returned an error; preserving checkpoint",
+                        "Autonomous proof verification paused for provider credits (%s %s): %s",
                         source_type,
                         source_id,
-                        trigger,
+                        message,
                     )
-                return
-            except ProofVerificationProviderPause as exc:
-                retry_candidates = exc.remaining_candidates or retry_candidates
-                checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id, trigger)
-                if checkpoint:
-                    (
-                        checkpoint_candidates,
-                        proof_candidate_indexes,
-                        checkpoint_attempts,
-                        checkpoint_theorem_names,
-                    ) = self._deserialize_proof_checkpoint(
-                        checkpoint
+                    mark_provider_paused()
+                    await self._save_workflow_state(phase=f"{source_type}_proof_verification")
+                    await self._broadcast(
+                        "autonomous_proof_provider_paused",
+                        {
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "source_title": source_title,
+                            "trigger": round_trigger,
+                            "proof_round_index": proof_round_index,
+                            "proof_max_rounds": proof_max_rounds,
+                            "reason": "openrouter_credit_exhaustion",
+                            "message": message,
+                        },
                     )
-                    retry_candidates = checkpoint_candidates or retry_candidates
-                message = str(exc)
-                logger.warning(
-                    "Autonomous proof verification paused for provider credits (%s %s): %s",
-                    source_type,
-                    source_id,
-                    message,
-                )
-                mark_provider_paused()
-                await self._save_workflow_state(phase=f"{source_type}_proof_verification")
-                await self._broadcast(
-                    "autonomous_proof_provider_paused",
-                    {
-                        "source_type": source_type,
-                        "source_id": source_id,
-                        "source_title": source_title,
-                        "trigger": trigger,
-                        "reason": "openrouter_credit_exhaustion",
-                        "message": message,
-                    },
-                )
-                await wait_for_provider_resume(self._stop_event.is_set)
-                if self._stop_event.is_set():
-                    return
-                await self._broadcast(
-                    "autonomous_proof_provider_resumed",
-                    {
-                        "source_type": source_type,
-                        "source_id": source_id,
-                        "source_title": source_title,
-                        "trigger": trigger,
-                        "reason": "openrouter_credit_exhaustion",
-                    },
-                )
-            except Exception as exc:
-                if not is_provider_credit_pause_error(exc):
-                    raise
-                checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id, trigger)
-                if checkpoint:
-                    (
-                        checkpoint_candidates,
-                        proof_candidate_indexes,
-                        checkpoint_attempts,
-                        checkpoint_theorem_names,
-                    ) = self._deserialize_proof_checkpoint(
-                        checkpoint
+                    await wait_for_provider_resume(self._stop_event.is_set)
+                    if self._stop_event.is_set():
+                        return "stopped", None
+                    await self._broadcast(
+                        "autonomous_proof_provider_resumed",
+                        {
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "source_title": source_title,
+                            "trigger": round_trigger,
+                            "proof_round_index": proof_round_index,
+                            "proof_max_rounds": proof_max_rounds,
+                            "reason": "openrouter_credit_exhaustion",
+                        },
                     )
-                    retry_candidates = checkpoint_candidates or retry_candidates
-                message = str(exc)
-                logger.warning(
-                    "Autonomous proof verification paused for provider credits (%s %s): %s",
-                    source_type,
-                    source_id,
-                    message,
-                )
-                mark_provider_paused()
-                await self._save_workflow_state(phase=f"{source_type}_proof_verification")
-                await self._broadcast(
-                    "autonomous_proof_provider_paused",
-                    {
-                        "source_type": source_type,
-                        "source_id": source_id,
-                        "source_title": source_title,
-                        "trigger": trigger,
-                        "reason": "openrouter_credit_exhaustion",
-                        "message": message,
-                    },
-                )
-                await wait_for_provider_resume(self._stop_event.is_set)
-                if self._stop_event.is_set():
-                    return
-                await self._broadcast(
-                    "autonomous_proof_provider_resumed",
-                    {
-                        "source_type": source_type,
-                        "source_id": source_id,
-                        "source_title": source_title,
-                        "trigger": trigger,
-                        "reason": "openrouter_credit_exhaustion",
-                    },
-                )
+                except Exception as exc:
+                    if not is_provider_credit_pause_error(exc):
+                        raise
+                    checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
+                    if checkpoint and checkpoint.get("trigger") == round_trigger:
+                        (
+                            checkpoint_candidates,
+                            proof_candidate_indexes,
+                            checkpoint_attempts,
+                            checkpoint_theorem_names,
+                        ) = self._deserialize_proof_checkpoint(checkpoint)
+                        retry_candidates = checkpoint_candidates or retry_candidates
+                    message = str(exc)
+                    logger.warning(
+                        "Autonomous proof verification paused for provider credits (%s %s): %s",
+                        source_type,
+                        source_id,
+                        message,
+                    )
+                    mark_provider_paused()
+                    await self._save_workflow_state(phase=f"{source_type}_proof_verification")
+                    await self._broadcast(
+                        "autonomous_proof_provider_paused",
+                        {
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "source_title": source_title,
+                            "trigger": round_trigger,
+                            "proof_round_index": proof_round_index,
+                            "proof_max_rounds": proof_max_rounds,
+                            "reason": "openrouter_credit_exhaustion",
+                            "message": message,
+                        },
+                    )
+                    await wait_for_provider_resume(self._stop_event.is_set)
+                    if self._stop_event.is_set():
+                        return "stopped", None
+                    await self._broadcast(
+                        "autonomous_proof_provider_resumed",
+                        {
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "source_title": source_title,
+                            "trigger": round_trigger,
+                            "proof_round_index": proof_round_index,
+                            "proof_max_rounds": proof_max_rounds,
+                            "reason": "openrouter_credit_exhaustion",
+                        },
+                    )
+            return "stopped", None
 
-    async def _run_brainstorm_completion_proofs(self) -> None:
+        source_reserved_for_rounds = False
+        if automatic_followup_rounds:
+            await ProofVerificationStage.reserve_source(source_type, source_id)
+            source_reserved_for_rounds = True
+
+        try:
+            for proof_round_index in range(1, proof_max_rounds + 1):
+                if self._stop_event.is_set():
+                    return "stopped"
+                round_trigger = round_trigger_name(proof_round_index)
+                prior_round_results = "\n".join(prior_round_summaries[-3:])
+                round_status, proof_result = await run_single_proof_round(
+                    round_trigger=round_trigger,
+                    proof_round_index=proof_round_index,
+                    prior_round_results=prior_round_results,
+                )
+                if round_status in {"stopped", "no_candidates_skipped"}:
+                    return "complete" if round_status == "no_candidates_skipped" else "stopped"
+                if proof_result is None:
+                    continue
+                if self._stop_event.is_set() or getattr(proof_result, "had_error", False):
+                    return "stopped" if self._stop_event.is_set() else "error_preserved"
+                prior_round_summaries.append(
+                    summarize_round_result(proof_round_index, proof_result)
+                )
+                if getattr(proof_result, "total_candidates", 0) == 0:
+                    return "complete"
+            return "complete"
+        finally:
+            if source_reserved_for_rounds:
+                await ProofVerificationStage.release_source(source_type, source_id)
+
+    async def _run_brainstorm_completion_proofs(self) -> str:
         """Run proof verification for the current completed brainstorm."""
         if not self._current_topic_id:
-            return
+            return "complete"
 
         # Entering Lean proof verification is already past brainstorm aggregation.
         # Persist that handoff before the potentially long proof stage so a restart
@@ -724,19 +812,27 @@ class AutonomousCoordinator:
             self._current_topic_id,
             strip_proofs=True,
         )
-        await self._run_proof_verification(
+        proof_status = await self._run_proof_verification(
             brainstorm_content,
             "brainstorm",
             self._current_topic_id,
             source_title=metadata.topic_prompt if metadata else "",
         )
 
-        if not self._stop_event.is_set():
-            await research_metadata.clear_proof_checkpoint("brainstorm", self._current_topic_id)
-            await self._save_workflow_state(
-                tier="tier2_paper_writing",
-                phase="pre_paper_compilation",
-            )
+        if proof_status != "complete":
+            if proof_status == "error_preserved" and not self._stop_event.is_set():
+                self._stop_event.set()
+            return proof_status
+
+        if self._stop_event.is_set():
+            return "stopped"
+
+        await research_metadata.clear_proof_checkpoint("brainstorm", self._current_topic_id)
+        await self._save_workflow_state(
+            tier="tier2_paper_writing",
+            phase="pre_paper_compilation",
+        )
+        return "complete"
 
     async def _recover_brainstorm_acceptance_count(self, topic_id: Optional[str]) -> int:
         """Recover a non-zero brainstorm acceptance count from durable files.
@@ -2428,12 +2524,16 @@ class AutonomousCoordinator:
                             if paper_metadata and paper_content:
                                 self._current_paper_title = paper_metadata.title
                                 self._current_reference_papers = paper_metadata.referenced_papers or self._current_reference_papers
-                                await self._run_completed_paper_proof_checks(
+                                proof_status = await self._run_completed_paper_proof_checks(
                                     paper_id=resume_paper,
                                     title=paper_metadata.title,
                                     content=paper_content,
                                     source_brainstorm_ids=paper_metadata.source_brainstorm_ids,
                                 )
+                                if proof_status != "complete":
+                                    if proof_status == "error_preserved" and not self._stop_event.is_set():
+                                        self._stop_event.set()
+                                    break
                                 if self._stop_event.is_set():
                                     break
                                 await self._schedule_auto_paper_critique_if_missing(
@@ -2460,8 +2560,8 @@ class AutonomousCoordinator:
                                 resume_topic,
                             )
                             self._resume_paper_phase = None
-                            await self._run_brainstorm_completion_proofs()
-                            if self._stop_event.is_set():
+                            proof_status = await self._run_brainstorm_completion_proofs()
+                            if self._stop_event.is_set() or proof_status != "complete":
                                 break
 
                         resume_state = None  # Clear resume state before retry loop
@@ -3548,7 +3648,11 @@ class AutonomousCoordinator:
                 validator_lm_studio_fallback=self._validator_lm_studio_fallback,
                 validator_supercharge_enabled=self._validator_supercharge_enabled,
                 creativity_emphasis_boost_enabled=self._creativity_emphasis_boost_enabled,
-                enable_cleanup_review=False
+                enable_cleanup_review=False,
+                proof_database_store=proof_database,
+                local_rejection_log_dir=str(brainstorm_memory._base_dir),
+                local_rejection_log_template="topic_exploration_submitter_{submitter_id}_rejections.txt",
+                reset_local_rejection_logs_on_start=True,
             )
             
             # Set WebSocket broadcaster so aggregator events flow through
@@ -3908,10 +4012,8 @@ class AutonomousCoordinator:
                     max_tokens=self._topic_selector.max_output_tokens
                 )
                 
-                content = response.get("choices", [{}])[0].get("message", {}).get("content") or ""
-                if not content:
-                    msg = response.get("choices", [{}])[0].get("message", {})
-                    content = msg.get("reasoning") or ""
+                msg = response.get("choices", [{}])[0].get("message", {})
+                content = extract_message_text(msg)
                 
                 result = parse_json(content)
                 decision = result.get("decision", "move_on")
@@ -4332,6 +4434,12 @@ class AutonomousCoordinator:
                 acceptance_cap_callback=hard_limit_callback,
                 allow_trusted_context_files=True,
                 trusted_context_texts=reference_brainstorm_contexts,
+                proof_database_store=proof_database,
+                local_rejection_log_dir=str(brainstorm_memory._base_dir),
+                local_rejection_log_template=(
+                    f"brainstorm_{brainstorm_memory._safe_topic_id(self._current_topic_id)}"
+                    "_submitter_{submitter_id}_rejections.txt"
+                ),
             )
             
             # CRITICAL FIX: Re-ingest existing submissions into RAG after resume
@@ -4371,8 +4479,8 @@ class AutonomousCoordinator:
             if self._manual_paper_writing_triggered:
                 logger.info("Manual override detected during initialization - skipping aggregator start")
                 self._manual_paper_writing_triggered = False
-                await self._run_brainstorm_completion_proofs()
-                return True
+                proof_status = await self._run_brainstorm_completion_proofs()
+                return proof_status == "complete"
             
             # Start aggregator
             await self._brainstorm_aggregator.start()
@@ -4426,8 +4534,8 @@ class AutonomousCoordinator:
                 )
                 await self._trigger_brainstorm_hard_limit(self._acceptance_count)
                 await self._brainstorm_aggregator.stop()
-                await self._run_brainstorm_completion_proofs()
-                return True
+                proof_status = await self._run_brainstorm_completion_proofs()
+                return proof_status == "complete"
             
             while self._running and not self._stop_event.is_set():
                 if not await self._current_brainstorm_available_for_aggregation(brainstorm_db_path):
@@ -4479,8 +4587,8 @@ class AutonomousCoordinator:
                     if self._acceptance_count >= _BRAINSTORM_ACCEPTANCE_HARD_LIMIT:
                         await self._trigger_brainstorm_hard_limit(self._acceptance_count)
                         await self._brainstorm_aggregator.stop()
-                        await self._run_brainstorm_completion_proofs()
-                        return True
+                        proof_status = await self._run_brainstorm_completion_proofs()
+                        return proof_status == "complete"
                     
                     # Check for early completion triggers
                     early_trigger = await self._check_early_completion_triggers()
@@ -4495,21 +4603,21 @@ class AutonomousCoordinator:
                         if write_paper:
                             # Stop aggregator
                             await self._brainstorm_aggregator.stop()
-                            await self._run_brainstorm_completion_proofs()
-                            return True
+                            proof_status = await self._run_brainstorm_completion_proofs()
+                            return proof_status == "complete"
 
                         if self._brainstorm_hard_limit_triggered:
                             await self._brainstorm_aggregator.stop()
-                            await self._run_brainstorm_completion_proofs()
-                            return True
+                            proof_status = await self._run_brainstorm_completion_proofs()
+                            return proof_status == "complete"
                 
                 # Check for manual override trigger (before checking stop event)
                 if self._manual_paper_writing_triggered:
                     logger.info("Manual override detected - transitioning to paper writing")
                     self._manual_paper_writing_triggered = False
                     await self._brainstorm_aggregator.stop()
-                    await self._run_brainstorm_completion_proofs()
-                    return True
+                    proof_status = await self._run_brainstorm_completion_proofs()
+                    return proof_status == "complete"
                 
                 # Track consecutive rejections and increment total rejections stat
                 if current_rejections > last_rejections:
@@ -4543,10 +4651,10 @@ class AutonomousCoordinator:
                         
                         # Stop aggregator
                         await self._brainstorm_aggregator.stop()
-                        await self._run_brainstorm_completion_proofs()
+                        proof_status = await self._run_brainstorm_completion_proofs()
                         
                         # Force transition to paper writing (skip completion review)
-                        return True
+                        return proof_status == "complete"
                 
                 # Brief pause between checks
                 await asyncio.sleep(2)
@@ -5346,7 +5454,14 @@ class AutonomousCoordinator:
                     validator_lm_studio_fallback=self._validator_lm_studio_fallback,
                     validator_supercharge_enabled=self._validator_supercharge_enabled,
                     creativity_emphasis_boost_enabled=self._creativity_emphasis_boost_enabled,
-                    enable_cleanup_review=False
+                    enable_cleanup_review=False,
+                    proof_database_store=proof_database,
+                    local_rejection_log_dir=str(brainstorm_memory._base_dir),
+                    local_rejection_log_template=(
+                        f"title_candidates_{re.sub(r'[^A-Za-z0-9_-]+', '_', topic_suffix)}"
+                        "_submitter_{submitter_id}_rejections.txt"
+                    ),
+                    reset_local_rejection_logs_on_start=True,
                 )
                 
                 if self._broadcast_callback:
@@ -5913,12 +6028,21 @@ class AutonomousCoordinator:
                     tier="tier2_paper_writing",
                     phase="paper_proof_verification",
                 )
-                await self._run_completed_paper_proof_checks(
+                proof_status = await self._run_completed_paper_proof_checks(
                     paper_id=paper_id,
                     title=title,
                     content=content,
                     source_brainstorm_ids=paper_metadata.source_brainstorm_ids,
                 )
+                if proof_status != "complete":
+                    if proof_status == "error_preserved" and not self._stop_event.is_set():
+                        self._stop_event.set()
+                    logger.info(
+                        "Paper proof verification for %s did not complete (%s); preserving paper state",
+                        paper_id,
+                        proof_status,
+                    )
+                    return
                 if self._stop_event.is_set():
                     logger.info(
                         "Stop requested during paper proof verification for %s; preserving proof checkpoint",
@@ -5986,31 +6110,26 @@ class AutonomousCoordinator:
         title: str,
         content: str,
         source_brainstorm_ids: List[str],
-    ) -> None:
+    ) -> str:
         """Run proof checks for a completed paper and any deferred brainstorm retries."""
+        proof_source_content = paper_library.strip_verified_proofs_from_content(content or "")
         self._state.current_tier = "tier2_paper_writing"
         await self._save_workflow_state(
             tier="tier2_paper_writing",
             phase="paper_proof_verification",
         )
 
-        automatic_complete = await research_metadata.is_proof_checkpoint_trigger_complete(
+        proof_status = await self._run_proof_verification(
+            proof_source_content,
             "paper",
             paper_id,
-            "automatic",
+            source_title=title,
         )
-        if automatic_complete:
-            logger.info("Skipping completed automatic paper proof checkpoint for %s", paper_id)
-        else:
-            await self._run_proof_verification(
-                content,
-                "paper",
-                paper_id,
-                source_title=title,
-            )
 
-        if self._stop_event.is_set():
-            return
+        if self._stop_event.is_set() or proof_status != "complete":
+            if proof_status == "error_preserved" and not self._stop_event.is_set():
+                self._stop_event.set()
+            return "stopped" if self._stop_event.is_set() else proof_status
 
         pending_retry_candidates: List[ProofCandidate] = []
         retry_source_ids = source_brainstorm_ids or ([self._current_topic_id] if self._current_topic_id else [])
@@ -6025,9 +6144,9 @@ class AutonomousCoordinator:
                     combined_excerpt_parts.append(
                         "ORIGINAL BRAINSTORM EXCERPT:\n" + pending_retry.source_excerpt
                     )
-                if content:
+                if proof_source_content:
                     combined_excerpt_parts.append(
-                        "REFINED PAPER CONTEXT:\n" + content[:6000]
+                        "REFINED PAPER CONTEXT:\n" + proof_source_content[:6000]
                     )
 
                 retry_formal_sketch = pending_retry.formal_sketch
@@ -6059,18 +6178,21 @@ class AutonomousCoordinator:
                 "count": len(pending_retry_candidates) if pending_retry_candidates else len(retry_checkpoint.get("candidates", [])),
                 "brainstorm_ids": retry_source_ids,
             })
-            await self._run_proof_verification(
-                content,
+            retry_status = await self._run_proof_verification(
+                proof_source_content,
                 "paper",
                 paper_id,
                 source_title=title,
                 theorem_candidates=pending_retry_candidates or None,
                 trigger="retry",
             )
-            if self._stop_event.is_set():
-                return
+            if self._stop_event.is_set() or retry_status != "complete":
+                if retry_status == "error_preserved" and not self._stop_event.is_set():
+                    self._stop_event.set()
+                return "stopped" if self._stop_event.is_set() else retry_status
 
         await research_metadata.clear_proof_checkpoint("paper", paper_id)
+        return "complete"
     
     async def _auto_generate_paper_critique(
         self,
@@ -6157,7 +6279,7 @@ class AutonomousCoordinator:
             response_content = ""
             if response.get("choices"):
                 message = response["choices"][0].get("message", {})
-                response_content = message.get("content") or message.get("reasoning") or ""
+                response_content = extract_message_text(message)
             
             if not response_content:
                 logger.error(f"Empty response from validator model for paper {paper_id}")

@@ -9,8 +9,9 @@ a two-stage agent:
         paper, outline, support context, or user prompt expose a novelty-first
         theorem worth formalizing and proving in Lean 4. Candidate theorems may
         verify prompt-critical existing paper claims or extend partial work when
-        that creates new/novel knowledge for the paper construction / user
-        prompt. Output is a candidate theorem JSON (or a decline).
+        that creates public/citable novelty for the paper construction / user
+        prompt, not merely a program-local first. Output is a candidate theorem
+        JSON (or a decline).
 
     Stage 2 - Placement (build_rigor_placement_prompt):
         Given a Lean-4-verified theorem, the submitter proposes an inline
@@ -59,7 +60,7 @@ The EXCEPTION is content inside the "LEAN 4 VERIFIED" certificate block provided
 # STAGE 1: THEOREM DISCOVERY
 # =============================================================================
 
-_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is a novelty-first theorem worth formalizing and proving in Lean 4 because it helps answer, support, or advance the USER RESEARCH PROMPT and/or materially improves the paper under construction.
+_DISCOVERY_SYSTEM_PROMPT = f"""You are the rigor agent for a mathematical-paper compiler. Your job during the rigor loop is to look at the paper-in-progress together with the full research context and decide whether there is a novelty-first theorem worth formalizing and proving in Lean 4 because it directly helps answer, support, or advance the USER RESEARCH PROMPT. Paper-improvement value only counts when it visibly builds toward that prompt.
 
 {INTERNAL_CONTENT_WARNING}
 
@@ -79,8 +80,8 @@ RULES FOR PROPOSING A THEOREM:
 - The theorem must be provable in Lean 4 with Mathlib.
 - You MUST NOT re-propose a theorem that is already in EXISTING VERIFIED PROOFS. Look for theorems that are DIFFERENT - new results, missed lemmas, or sharper versions that are not yet on the list.
 - You MAY retry a theorem from OPEN LEMMA TARGETS when it is still prompt-relevant, novelty-bearing, and the paper now gives you a better angle on it. When you do, set `retry_existing_failure_id` to the failed `theorem_id`.
-- EXTENSION IS EXPLICITLY ALLOWED AND ENCOURAGED WHERE HELPFUL: you are NOT limited to exact claims already present in the current paper. You may construct a Lean-verifiable theorem by extending partial paper work, the current outline, supporting context, or the USER RESEARCH PROMPT when that theorem would materially help the paper construction and/or the user's requested goal.
-- NOVELTY PRIORITY ORDER: prefer `major_mathematical_discovery`, then `mathematical_discovery`, then `novel_variant`, then prompt-critical `novel_formulation`. Supporting lemmas are allowed only when they are necessary stepping stones toward one of those novel targets.
+- EXTENSION IS EXPLICITLY ALLOWED AND ENCOURAGED WHERE HELPFUL: you are NOT limited to exact claims already present in the current paper. You may construct a Lean-verifiable theorem by extending partial paper work, the current outline, supporting context, or the USER RESEARCH PROMPT only when that theorem would directly solve or build toward solving the user's requested goal.
+- NOVELTY PRIORITY ORDER: prefer `major_mathematical_discovery`, then `mathematical_discovery`, then `novel_variant`, then prompt-critical `novel_formulation` whose exact formulation/formalization is absent from standard references or Mathlib and independently publishable/citable. Supporting lemmas are allowed only when they are necessary stepping stones toward one of those novel targets.
 - Reject routine helper lemmas, proof-engineering glue, local bookkeeping facts, coercion facts, algebra cleanup, definitional rewrites, standard Mathlib/textbook restatements, or single-tactic/routine proof goals.
 - Set `theorem_origin="existing_paper_claim"` only when the theorem directly formalizes a claim already present in the current paper text.
 - Set `theorem_origin="extension_from_partial_work"` when the theorem is constructed by extending the current paper, outline, or supporting context beyond the exact written claim.
@@ -106,7 +107,7 @@ Output your response ONLY as JSON in this exact format:
   "placement_preference": "inline | appendix_only (empty if needs_theorem_work=false)",
   "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation (empty if needs_theorem_work=false)",
   "prompt_relevance_rationale": "why proving this directly solves, solves toward, or materially helps solve the user prompt (empty if needs_theorem_work=false)",
-  "novelty_rationale": "why this is new or novel knowledge rather than known background (empty if needs_theorem_work=false)",
+  "novelty_rationale": "why this is absent from standard references or Mathlib and public/citable rather than known background or program-local novelty (empty if needs_theorem_work=false)",
   "why_not_standard_known_result": "why this is not merely textbook/Mathlib/routine helper knowledge (empty if needs_theorem_work=false)",
   "retry_existing_failure_id": "theorem_id from OPEN LEMMA TARGETS if retrying a prior failure, empty string otherwise",
   "reasoning": "why this theorem is the best prompt-relevant target right now OR why no theorem should be attempted"
@@ -132,33 +133,33 @@ _DISCOVERY_JSON_SCHEMA = """REQUIRED JSON FORMAT - STAGE 1 (DISCOVERY):
 Example (propose a theorem):
 {
   "needs_theorem_work": true,
-  "theorem_statement": "For every natural number n, the sum of the first n positive integers equals n*(n+1)/2.",
-  "formal_sketch": "Induction on n. Base: n=0 both sides are 0. Step: use Finset.sum_range_succ and Nat.succ_mul; close with omega / ring. Mathlib has Finset.sum_range_id which may finish it outright.",
-  "source_excerpt": "In Section 2 we reasoned about partial sums of the form 1 + 2 + ... + n...",
+  "theorem_statement": "For every admissible witness family W constructed in Section 2, the MOTO compression invariant C(W) is preserved by the paper's refinement operator R.",
+  "formal_sketch": "Unfold the paper-defined invariant and refinement operator, split on the admissibility hypotheses, and use the local monotonicity lemmas from the source context to show each component of C is unchanged by R.",
+  "source_excerpt": "In Section 2 we introduce a refinement operator on admissible witness families and claim that it preserves the compression invariant used by the main construction...",
   "theorem_origin": "existing_paper_claim",
   "placement_preference": "inline",
   "expected_novelty_tier": "novel_formulation",
-  "prompt_relevance_rationale": "The paper uses this arithmetic fact as a required local step for the user's requested argument.",
-  "novelty_rationale": "This is acceptable only if the formalization is prompt-critical and not already covered by existing verified proofs.",
-  "why_not_standard_known_result": "The target is included here as a low-priority example; in real discovery, decline if it is merely a standard Mathlib fact.",
+  "prompt_relevance_rationale": "The paper uses this invariant-preservation fact as a required local step for the user's requested argument.",
+  "novelty_rationale": "The theorem packages a paper-specific invariant/refinement interaction that is not a standard textbook or Mathlib theorem and would be citable as part of the paper's formal contribution.",
+  "why_not_standard_known_result": "The statement depends on paper-defined objects and an original invariant, rather than restating a standard library lemma or routine arithmetic fact.",
   "retry_existing_failure_id": "",
-  "reasoning": "Section 2 uses this closed form to support the user's requested argument but currently presents it without a verified proof. Lean 4 can close this cleanly; it does not duplicate any existing verified proof."
+  "reasoning": "Section 2 relies on this invariant-preservation claim to support the user's requested argument but currently presents it without a verified proof. The statement is narrow enough for Lean 4 while still capturing a non-standard formal contribution."
 }
 
 Example (propose an extension theorem for the appendix):
 {
   "needs_theorem_work": true,
-  "theorem_statement": "For every natural number n, n*(n+1) is even.",
-  "formal_sketch": "Use Nat.even_mul_succ_self or prove by parity cases / omega. This lemma can support a later divisibility argument about triangular numbers.",
-  "source_excerpt": "The outline asks for arithmetic constraints on triangular-number expressions, but the current paper has not yet isolated the parity lemma needed for the clean construction. This theorem extends the partial plan into a Lean-checkable support result.",
+  "theorem_statement": "For every admissible obstruction graph G satisfying the paper's local saturation hypotheses, the refinement score Phi(G) strictly decreases after applying the prompt-specific pruning operator P.",
+  "formal_sketch": "Use the source-defined saturation hypotheses to show each removed edge contributes positively to Phi, then prove all preserved terms are unchanged by P. The proof should unfold Phi and P and apply the local strict-positivity lemma from the paper context.",
+  "source_excerpt": "The outline proposes a pruning operator for saturated obstruction graphs but has not yet isolated the monotone descent claim needed to justify termination. This theorem extends the partial plan into a Lean-checkable appendix result.",
   "theorem_origin": "extension_from_partial_work",
   "placement_preference": "appendix_only",
   "expected_novelty_tier": "novel_variant",
-  "prompt_relevance_rationale": "This lemma would unlock the paper's prompt-specific divisibility route.",
-  "novelty_rationale": "The value is the prompt-specific reformulation and role in the new argument, not a generic parity fact.",
-  "why_not_standard_known_result": "Decline this target if it is merely a standard Mathlib parity lemma with no prompt-specific reformulation.",
+  "prompt_relevance_rationale": "This theorem would justify the paper's prompt-specific descent route and make the proposed obstruction-elimination argument formally checkable.",
+  "novelty_rationale": "The statement combines paper-defined saturation, pruning, and score objects into a new descent theorem rather than restating a standard library fact.",
+  "why_not_standard_known_result": "The target depends on paper-specific definitions and an original descent construction; decline if the available target reduces to a textbook graph lemma or routine Mathlib fact.",
   "retry_existing_failure_id": "",
-  "reasoning": "This is not an exact written claim in the current paper; it extends the partial outline into a useful verified lemma. Because it is extension-derived, it should be stored in the Theorems Appendix rather than inserted inline."
+  "reasoning": "This is not an exact written claim in the current paper; it extends the partial outline into a useful verified theorem. Because it is extension-derived, it should be stored in the Theorems Appendix rather than inserted inline."
 }
 
 Example (decline):

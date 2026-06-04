@@ -51,6 +51,7 @@ project-root/
 │   │   ├── wolfram_alpha_client.py      # Wolfram Alpha API client (logs redacted metadata, not raw query/result text)
 │   │   ├── utils.py                     # Common utilities
 │   │   ├── json_parser.py               # JSON parsing with sanitization for LLM quirks
+│   │   ├── response_extraction.py        # Central OpenAI-compatible assistant text extraction with content-first reasoning/thinking fallback policy
 │   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
 │   │   ├── critique_prompts.py          # Default critique prompt and builder function for validator critiques
 │   │   ├── secret_store.py              # Secure credential persistence via OS keyring (OpenRouter, OpenAI Codex OAuth, Wolfram Alpha); bypassed in generic mode
@@ -206,7 +207,7 @@ project-root/
 │   │       ├── cloud_access.py          # Cloud Access & Keys endpoints including desktop OpenAI Codex OAuth login/model listing
 │   │       ├── websocket.py             # WebSocket for real-time updates (generic proxy auth or desktop one-time tickets before accept)
 │   │       ├── features.py              # GET /api/features — shared build identity plus stable capability flags; GET /api/update-notice — launcher/runtime-refreshed update notice
-│   │       ├── proofs.py                # Proof database + Lean 4/SMT runtime + manual proof-check + certificate export + dependency graph routes; listing proofs (`GET /`, `/novel`, `/known`, `/library*`) and certificate/lean downloads (`/{id}/certificate`, `/{id}/certificate.lean`) are always available regardless of `lean4_enabled`; dependency/graph routes and `/check` are gated on `lean4_enabled`; `/status` uses short timeouts so it never blocks the UI
+│   │       ├── proofs.py                # Proof database + Lean 4/SMT runtime + manual proof-check + certificate export + dependency graph routes; current proof listing/detail/certificate/graph routes accept `scope=autonomous|manual` so active manual writer proofs use their own instance-level store; proof-library routes accept `scope=autonomous|manual`, with manual scope reading archived manual proof runs only; listing proofs (`GET /`, `/novel`, `/known`, `/library*`) and certificate/lean downloads (`/{id}/certificate`, `/{id}/certificate.lean`) are always available regardless of `lean4_enabled`; dependency/graph routes and `/check` are gated on `lean4_enabled`; `/status` uses short timeouts so it never blocks the UI
 │   │       └── health.py                # GET /api/health — readiness/liveness probe with slim instance/build metadata
 │   │
 │   ├── data/                            # Persistent data storage
@@ -254,6 +255,8 @@ project-root/
 │   │   │       ├── session_stats.json                     # Session statistics
 │   │   │       └── workflow_state.json                    # Workflow state for crash recovery
 │   │   ├── proofs/                      # Legacy (non-session) Lean 4 proof storage (mirrors per-session proofs/ layout)
+│   │   ├── manual_proofs/               # Active manual Aggregator/Compiler proof storage; archived/cleared on manual run reset so old proofs do not enter new manual prompts
+│   │   ├── manual_proof_runs/           # Archived manual proof runs for history/library viewing only, never active prompt context
 │   │   ├── leanoj_sessions/             # LeanOJ run state (state.json, master_proof.lean, master_proof_edits.jsonl, master_proof_snapshots.jsonl, phase counters, proof fragments, attempts, verified final Lean code; stop/crash resumes unless cleared)
 │   │   ├── leanoj_partial_proofs/        # LeanOJ partial/supporting proof scaffold JSONL store, keyed by session
 │   │   ├── leanoj_artifacts/            # LeanOJ full-memory artifact logs (accepted ideas with context_role metadata, verified/partial/failed proof fragments, final attempts, final-cycle packets) used for direct-first RAG allocation
@@ -294,7 +297,7 @@ project-root/
 │   │   │       ├── FinalAnswerLibrary.css   # Final answer library styles
 │   │   │       ├── ArchiveViewerModal.jsx   # Research lineage archive viewer (papers + brainstorms)
 │   │   │       ├── ArchiveViewerModal.css   # Archive viewer styles
-│   │   │       ├── MathematicalProofs.jsx   # Live-session proof tab (proof lists/status, manual checks, dependency graph, certificate/Lean exports via `/api/proofs`)
+│   │   │       ├── MathematicalProofs.jsx   # Live-session proof tab reused by Autonomous and Manual modes (proof lists/status, manual checks, dependency graph, certificate/Lean exports via scoped `/api/proofs`; proof events are filtered by scope)
 │   │   │       ├── MathematicalProofs.css   # Proof library styles
 │   │   │       ├── ProofGraph.jsx           # Proof dependency graph view (hand-rolled SVG; Build 4, may escalate to reactflow in Build 5 if needed)
 │   │   │       ├── ProofGraph.css           # Proof graph styles
@@ -315,7 +318,7 @@ project-root/
 │   │   │       ├── LeanOJProofLibrary.jsx # Cross-session completed LeanOJ proof-work library
 │   │   │       └── index.js             # LeanOJ component exports
 │   │   │
-│   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for Cloud Access vs LM Studio setup (OpenRouter-only in generic mode)
+│   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for OpenRouter, desktop OpenAI Codex OAuth, or LM Studio setup (OpenRouter-only in generic mode)
 │   │   ├── OpenRouterApiKeyModal.jsx    # Cloud Access & Keys modal for OpenRouter API key and desktop OpenAI Codex OAuth login
 │   │   ├── PaperCritiqueModal.jsx       # Modal for displaying validator paper critiques (ratings, feedback, history)
 │   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥6.25 avg)
@@ -410,6 +413,7 @@ project-root/
 - `token_tracker.py`: Cumulative input/output token tracker singleton with per-model breakdown and research timer. Reset on session start, timer start/stop tied to coordinator lifecycle. Stats broadcast via `token_usage_updated` WebSocket event after each successful LLM call.
 - `utils.py`: Token counting, text compression, file I/O
 - `json_parser.py`: JSON parsing with sanitization for LLM responses; sanitizes reasoning tokens, markdown blocks, control tokens, LaTeX escapes, control characters; **rejects truncated JSON** (raises ValueError with diagnostics) to prevent corrupted content from passing validation; also provides `sanitize_model_output_for_retry_context()` so retries/memory/RAG can preserve visible failed-output excerpts without replaying known private thought/channel/control tokens or corrupting visible Lean/math syntax such as `<|`; retry-facing parser exceptions must not include raw response excerpts
+- `response_extraction.py`: Central assistant text extraction for OpenAI-compatible responses. It prefers `message.content` and falls back to compatibility fields such as `reasoning`/`thinking` only when content is empty so reasoning-only local endpoints still work under one policy.
 - `critique_memory.py`: Paper critique persistence (ratings, feedback, history, session-aware)
 - `critique_prompts.py`: Default critique prompt and builder function
 - `secret_store.py`: Secure credential persistence via OS keyring; bypassed in generic mode (keys are env-injected/in-memory only)
@@ -454,7 +458,7 @@ project-root/
 
 - `compiler.py`: Compiler control (start/stop/status), paper/outline access, critique management
 - `autonomous.py`: Autonomous research control (start/stop/clear/status), brainstorm/paper access, pruned/history paper routes, Tier 3/final-answer library routes, critique/API-log helpers, and current-paper recovery actions
-- `proofs.py`: Proof database listing (`GET /`, `/novel`, `/known`) and `/status` runtime readiness — always available, never gated. `/{id}/certificate` and `/{id}/certificate.lean` — always available (data is stored on disk; Lean version info populated only when Lean is enabled). `/status` uses `asyncio.wait_for` timeouts (5s Lean, 3s Z3) so the endpoint never hangs. `POST /settings` runtime flag updates. `POST /check` manual proof check, `/{id}/dependencies`, `/graph`, `/mathlib/{lemma}/dependents` graph/lineage queries — gated on `lean4_enabled`. `GET /library` + `GET /library/{session_id}/{proof_id}` cross-session proof library endpoints — always available.
+- `proofs.py`: Proof database listing (`GET /`, `/novel`, `/known`) and `/status` runtime readiness — always available, never gated. Current proof listing/detail/certificate/dependency/graph routes accept optional `scope=autonomous|manual`; manual scope reads the active manual writer proof store under the active data root rather than the autonomous session store. `/{id}/certificate` and `/{id}/certificate.lean` — always available (data is stored on disk; Lean version info populated only when Lean is enabled). `/status` uses `asyncio.wait_for` timeouts (5s Lean, 3s Z3) so the endpoint never hangs. `POST /settings` runtime flag updates. `POST /check` manual proof check, `/{id}/dependencies`, `/graph`, `/mathlib/{lemma}/dependents` graph/lineage queries — gated on `lean4_enabled`. `GET /library` + `GET /library/{session_id}/{proof_id}` cross-session proof library endpoints accept `scope=autonomous|manual`; manual library scope reads archived manual proof runs only and never active prompt context.
 - `leanoj.py`: LeanOJ proof-solver routes for start (including matching saved-progress resume), stop, status, clear, skip-brainstorm, force-brainstorm, current proof listing via `/api/leanoj/proofs`, cross-session library via `/api/leanoj/library*`, plus read-only `GET /api/leanoj/master-proof` and `/api/leanoj/master-proof/edits` for the durable master proof draft and compact edit-history summaries.
 
 ### Frontend Components
@@ -463,7 +467,7 @@ project-root/
 - Live activity feeds keep long bounded histories (thousands of entries) so active workflow context is not lost quickly while still preventing unbounded UI growth.
 - **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
 - **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`
-- **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx` (Stage 3 history sub-tab), `ArchiveViewerModal.jsx`, `MathematicalProofs.jsx` (live proof/status/manual-check/certificate tab), `ProofGraph.jsx` (dependency graph), `ProofNotificationStack.jsx` (novel-proof popups), `ProofLibrary.jsx` (cross-session proof library sub-tab), `Stage2PaperHistory.jsx` (Stage 2 history sub-tab)
+- **Autonomous**: `AutonomousResearchInterface.jsx`, `BrainstormList.jsx`, `PaperLibrary.jsx`, `AutonomousResearchSettings.jsx`, `AutonomousResearchLogs.jsx`, `LivePaperProgress.jsx`, `LiveTier3Progress.jsx`, `FinalAnswerView.jsx`, `FinalAnswerLibrary.jsx` (Stage 3 history sub-tab), `ArchiveViewerModal.jsx`, `MathematicalProofs.jsx` (scoped live proof/status/manual-check/certificate tab used by Autonomous and Manual modes), `ProofGraph.jsx` (dependency graph), `ProofNotificationStack.jsx` (novel-proof popups), `ProofLibrary.jsx` (cross-session proof library sub-tab), `Stage2PaperHistory.jsx` (Stage 2 history sub-tab)
 - **LeanOJ**: `LeanOJInterface.jsx`, `LeanOJBrainstorms.jsx`, `LeanOJLogs.jsx`, `LeanOJMasterProof.jsx`, `LeanOJMathematicalProofs.jsx`, `LeanOJProofLibrary.jsx`, `LeanOJSettings.jsx`
 - **Shared**: `StartupProviderSetupModal.jsx`, `OpenRouterApiKeyModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `UpdateNotificationBanner.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
 - **Hooks**: `useProofCheckRuntime.js` (reads `/api/proofs/status` + runtime config so UI can enable/disable manual proof-check controls)

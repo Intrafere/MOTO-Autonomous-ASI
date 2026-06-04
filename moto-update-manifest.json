@@ -1,9 +1,9 @@
 {
   "manifest_version": 1,
-  "version": "1.0.9",
+  "version": "1.1.0",
   "build_commit": "7d86e422f615dcea682160126ae88006699aff34",
   "update_channel": "main",
-  "api_contract_version": "build5-v22"
+  "api_contract_version": "build5-v28"
 }
 
 

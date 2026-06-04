@@ -6,7 +6,11 @@ from typing import List, Tuple
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
-from backend.shared.model_error_utils import is_non_retryable_model_error
+from backend.shared.response_extraction import extract_message_text
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
 from backend.shared.models import ProofCandidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.utils import count_tokens
@@ -103,7 +107,7 @@ class ProofIdentificationAgent:
                 return ""
 
             message = response["choices"][0].get("message", {})
-            content = message.get("content") or message.get("reasoning") or ""
+            content = extract_message_text(message)
             if not content:
                 return ""
 
@@ -116,7 +120,7 @@ class ProofIdentificationAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as exc:
-            if is_non_retryable_model_error(exc):
+            if is_non_retryable_model_error(exc) or is_transient_model_call_error(exc):
                 raise
             logger.debug(
                 "ProofIdentificationAgent SMT translation failed for theorem %s: %s",
@@ -132,6 +136,9 @@ class ProofIdentificationAgent:
         source_id: str,
         source_content: str,
         source_title: str = "",
+        proof_round_index: int = 1,
+        proof_max_rounds: int = 1,
+        prior_round_results: str = "",
     ) -> Tuple[bool, List[ProofCandidate]]:
         """Return whether proof candidates exist and the extracted theorem list."""
         prompt = build_proof_identification_prompt(
@@ -140,6 +147,9 @@ class ProofIdentificationAgent:
             source_id=source_id,
             source_content=source_content,
             source_title=source_title,
+            proof_round_index=proof_round_index,
+            proof_max_rounds=proof_max_rounds,
+            prior_round_results=prior_round_results,
         )
         prompt_tokens = count_tokens(prompt)
         max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
@@ -170,7 +180,7 @@ class ProofIdentificationAgent:
                 return False, []
 
             message = response["choices"][0].get("message", {})
-            content = message.get("content") or message.get("reasoning") or ""
+            content = extract_message_text(message)
             if not content:
                 return False, []
 
@@ -201,19 +211,32 @@ class ProofIdentificationAgent:
                         theorem_id,
                     )
                     continue
+                prompt_relevance_rationale = str(
+                    theorem.get("prompt_relevance_rationale", "")
+                ).strip()
+                novelty_rationale = str(theorem.get("novelty_rationale", "")).strip()
+                why_not_standard_known_result = str(
+                    theorem.get("why_not_standard_known_result", "")
+                ).strip()
+                if not (
+                    prompt_relevance_rationale
+                    and novelty_rationale
+                    and why_not_standard_known_result
+                ):
+                    logger.info(
+                        "ProofIdentificationAgent skipped theorem %s because it lacked required prompt-relevance, novelty, or anti-standard-result rationale.",
+                        theorem_id,
+                    )
+                    continue
                 theorem_candidates.append(
                     ProofCandidate(
                         theorem_id=str(theorem_id),
                         statement=statement,
                         formal_sketch=str(theorem.get("formal_sketch", "")).strip(),
                         expected_novelty_tier=expected_novelty_tier,
-                        prompt_relevance_rationale=str(
-                            theorem.get("prompt_relevance_rationale", "")
-                        ).strip(),
-                        novelty_rationale=str(theorem.get("novelty_rationale", "")).strip(),
-                        why_not_standard_known_result=str(
-                            theorem.get("why_not_standard_known_result", "")
-                        ).strip(),
+                        prompt_relevance_rationale=prompt_relevance_rationale,
+                        novelty_rationale=novelty_rationale,
+                        why_not_standard_known_result=why_not_standard_known_result,
                     )
                 )
 
@@ -221,7 +244,7 @@ class ProofIdentificationAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as exc:
-            if is_non_retryable_model_error(exc):
+            if is_non_retryable_model_error(exc) or is_transient_model_call_error(exc):
                 raise
             logger.error(
                 "ProofIdentificationAgent failed for %s %s: %s",

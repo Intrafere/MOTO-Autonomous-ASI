@@ -10,6 +10,7 @@ from backend.autonomous.prompts.proof_prompts import build_proof_statement_align
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.model_error_utils import is_non_retryable_model_error
 from backend.shared.utils import count_tokens
 
@@ -225,7 +226,7 @@ async def validate_lean_statement_alignment(
                 relationship_to_candidate="alignment_unavailable",
             )
         message = response["choices"][0].get("message", {})
-        content = message.get("content") or message.get("reasoning") or ""
+        content = extract_message_text(message)
         if not content:
             return LeanProofIntegrityResult(
                 valid=True,

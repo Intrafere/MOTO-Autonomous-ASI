@@ -15,35 +15,39 @@ from backend.shared.config import system_config
 from backend.shared.token_tracker import token_tracker
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.manual_proof_context import get_manual_proof_context_lock
 from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.compiler.core.compiler_coordinator import CRITIQUE_ATTEMPT_TARGET, compiler_coordinator
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import paper_memory
 from backend.aggregator.core.coordinator import coordinator
+from backend.aggregator.memory.shared_training import (
+    append_proof_to_manual_shared_training,
+    clear_manual_shared_training_proof_appendix,
+)
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
 from backend.autonomous.memory.paper_library import paper_library
-from backend.autonomous.memory.proof_database import proof_database
+from backend.autonomous.memory.proof_database import manual_proof_database
 from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
+from backend.shared.response_extraction import extract_message_text
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/compiler", tags=["compiler"])
 
 _compiler_proof_only_task: asyncio.Task | None = None
+_saved_compiler_proof_tasks: set[asyncio.Task] = set()
+MANUAL_AGGREGATOR_SOURCE_ID = "manual_aggregator"
+MANUAL_PROOF_ACTIVE_KEYS = {
+    "brainstorm:manual_aggregator",
+    "paper:manual_compiler_current",
+}
 
 
-def _bounded_context(value: str, max_chars: int = 50000) -> str:
-    text = (value or "").strip()
-    if len(text) <= max_chars:
-        return text
-    head = max_chars // 2
-    tail = max_chars - head
-    return (
-        text[:head].rstrip()
-        + "\n\n[... source context truncated; full source remains available through compiler RAG ...]\n\n"
-        + text[-tail:].lstrip()
-    )
+async def _release_pre_reserved_source(source_type: str, source_id: str, reserved: bool) -> None:
+    if reserved and source_id:
+        await ProofVerificationStage.release_source(source_type, source_id)
 
 
 def _positive_int_setting(value, setting_name: str) -> int:
@@ -65,12 +69,20 @@ def _validate_positive_role_limits(role_limits: dict[str, tuple[object, object]]
             raise ValueError(f"{role} max output tokens must be smaller than its context window.")
 
 
-async def _read_manual_aggregator_context() -> str:
+def _strip_manual_aggregator_proof_appendix(content: str) -> str:
+    marker = "=== PROOFS GENERATED FROM THIS BRAINSTORM"
+    if marker not in content:
+        return content
+    return content.split(marker, 1)[0].rstrip()
+
+
+async def _read_manual_aggregator_context(*, strip_proofs: bool = True) -> str:
     try:
         shared_path = Path(system_config.shared_training_file)
         if not shared_path.exists():
             return ""
-        return await asyncio.to_thread(shared_path.read_text, encoding="utf-8")
+        content = await asyncio.to_thread(shared_path.read_text, encoding="utf-8")
+        return _strip_manual_aggregator_proof_appendix(content) if strip_proofs else content
     except Exception as exc:
         logger.debug("Unable to read manual compiler aggregator context for proof check: %s", exc)
         return ""
@@ -78,91 +90,119 @@ async def _read_manual_aggregator_context() -> str:
 
 async def _build_saved_compiler_proof_content(full_content: str) -> str:
     paper_content = paper_library.strip_verified_proofs_from_content(full_content or "")
-    source_context = _bounded_context(await _read_manual_aggregator_context())
+    source_context = (await _read_manual_aggregator_context()).strip()
     parts = [f"SAVED MANUAL COMPILER PAPER:\n{paper_content.strip()}"]
     if source_context:
         parts.append(f"PART 1 AGGREGATOR DATABASE CONTEXT:\n{source_context}")
     return "\n\n---\n\n".join(part for part in parts if part.strip())
 
 
+async def _append_proof_to_saved_compiler_paper(output_path: Path, proof_record) -> bool:
+    """Append a novel verified proof to the saved manual compiler paper file."""
+    try:
+        existing_content = await asyncio.to_thread(output_path.read_text, encoding="utf-8")
+        updated_content = paper_library.attach_verified_proofs_to_content(
+            existing_content,
+            proof_record,
+            source_context="manual saved-paper proof check",
+        )
+        if updated_content == existing_content:
+            return True
+        await asyncio.to_thread(output_path.write_text, updated_content, encoding="utf-8")
+        return True
+    except Exception as exc:
+        logger.error("Failed to append proof to saved compiler paper %s: %s", output_path.name, exc)
+        return False
+
+
 async def _run_saved_compiler_paper_proof_check(
     full_content: str,
     source_title: str,
     proof_config: dict,
+    output_path: Path,
+    *,
+    source_id: str = "",
+    source_reserved: bool = False,
 ) -> None:
     """Run autonomous proof extraction/tiering for a saved manual compiler paper."""
-    if not proof_config.get("lean4_enabled"):
-        logger.info("Skipping saved compiler paper proof check: Lean 4 disabled")
-        return
-    if not full_content.strip():
-        return
-    source_content = paper_library.strip_verified_proofs_from_content(full_content)
-    proof_content = await _build_saved_compiler_proof_content(full_content)
-    submitter_model = str(proof_config.get("submitter_model") or "")
-    validator_model = str(proof_config.get("validator_model") or "")
-    if not submitter_model:
-        logger.warning("Skipping saved compiler paper proof check: high-context model is unavailable")
-        return
-    if not validator_model:
-        logger.warning("Skipping saved compiler paper proof check: validator model is unavailable")
-        return
+    try:
+        if not proof_config.get("lean4_enabled"):
+            logger.info("Skipping saved compiler paper proof check: Lean 4 disabled")
+            return
+        if not full_content.strip():
+            return
+        source_content = paper_library.strip_verified_proofs_from_content(full_content)
+        proof_content = await _build_saved_compiler_proof_content(full_content)
+        submitter_model = str(proof_config.get("submitter_model") or "")
+        validator_model = str(proof_config.get("validator_model") or "")
+        if not submitter_model:
+            logger.warning("Skipping saved compiler paper proof check: high-context model is unavailable")
+            return
+        if not validator_model:
+            logger.warning("Skipping saved compiler paper proof check: validator model is unavailable")
+            return
 
-    source_hash = hashlib.sha256(source_content.encode("utf-8")).hexdigest()[:16]
-    source_id = f"compiler_manual_{source_hash}"
-    role_suffix = "compiler_manual_paper"
+        source_hash = hashlib.sha256(source_content.encode("utf-8")).hexdigest()[:16]
+        source_id = source_id or f"compiler_manual_{source_hash}"
+        role_suffix = "compiler_manual_paper"
 
-    submitter_context = proof_config.get("submitter_context")
-    submitter_max_tokens = proof_config.get("submitter_max_tokens")
-    validator_context = proof_config.get("validator_context")
-    validator_max_tokens = proof_config.get("validator_max_tokens")
+        submitter_context = proof_config.get("submitter_context")
+        submitter_max_tokens = proof_config.get("submitter_max_tokens")
+        validator_context = proof_config.get("validator_context")
+        validator_max_tokens = proof_config.get("validator_max_tokens")
 
-    submitter_config = ModelConfig(
-        provider=str(proof_config.get("submitter_provider") or "lm_studio"),
-        model_id=submitter_model,
-        openrouter_provider=proof_config.get("submitter_openrouter_provider"),
-        openrouter_reasoning_effort=proof_config.get("submitter_openrouter_reasoning_effort", "auto"),
-        lm_studio_fallback_id=proof_config.get("submitter_lm_studio_fallback"),
-        context_window=_positive_int_setting(submitter_context, "submitter proof context window"),
-        max_output_tokens=_positive_int_setting(submitter_max_tokens, "submitter proof max output tokens"),
-        supercharge_enabled=bool(proof_config.get("submitter_supercharge_enabled", False)),
-    )
-    validator_config = ModelConfig(
-        provider=str(proof_config.get("validator_provider") or "lm_studio"),
-        model_id=validator_model,
-        openrouter_provider=proof_config.get("validator_openrouter_provider"),
-        openrouter_reasoning_effort=proof_config.get("validator_openrouter_reasoning_effort", "auto"),
-        lm_studio_fallback_id=proof_config.get("validator_lm_studio_fallback"),
-        context_window=_positive_int_setting(validator_context, "validator proof context window"),
-        max_output_tokens=_positive_int_setting(validator_max_tokens, "validator proof max output tokens"),
-        supercharge_enabled=bool(proof_config.get("validator_supercharge_enabled", False)),
-    )
-    for role_id in (
-        f"autonomous_proof_identification_{role_suffix}",
-        f"autonomous_proof_lemma_search_{role_suffix}",
-        f"autonomous_proof_formalization_{role_suffix}",
-    ):
-        api_client_manager.configure_role(role_id, submitter_config)
-    api_client_manager.configure_role("autonomous_proof_novelty", validator_config)
+        submitter_config = ModelConfig(
+            provider=str(proof_config.get("submitter_provider") or "lm_studio"),
+            model_id=submitter_model,
+            openrouter_provider=proof_config.get("submitter_openrouter_provider"),
+            openrouter_reasoning_effort=proof_config.get("submitter_openrouter_reasoning_effort", "auto"),
+            lm_studio_fallback_id=proof_config.get("submitter_lm_studio_fallback"),
+            context_window=_positive_int_setting(submitter_context, "submitter proof context window"),
+            max_output_tokens=_positive_int_setting(submitter_max_tokens, "submitter proof max output tokens"),
+            supercharge_enabled=bool(proof_config.get("submitter_supercharge_enabled", False)),
+        )
+        validator_config = ModelConfig(
+            provider=str(proof_config.get("validator_provider") or "lm_studio"),
+            model_id=validator_model,
+            openrouter_provider=proof_config.get("validator_openrouter_provider"),
+            openrouter_reasoning_effort=proof_config.get("validator_openrouter_reasoning_effort", "auto"),
+            lm_studio_fallback_id=proof_config.get("validator_lm_studio_fallback"),
+            context_window=_positive_int_setting(validator_context, "validator proof context window"),
+            max_output_tokens=_positive_int_setting(validator_max_tokens, "validator proof max output tokens"),
+            supercharge_enabled=bool(proof_config.get("validator_supercharge_enabled", False)),
+        )
+        for role_id in (
+            f"autonomous_proof_identification_{role_suffix}",
+            f"autonomous_proof_lemma_search_{role_suffix}",
+            f"autonomous_proof_formalization_{role_suffix}",
+        ):
+            api_client_manager.configure_role(role_id, submitter_config)
+        api_client_manager.configure_role("autonomous_proof_novelty", validator_config)
 
-    stage = ProofVerificationStage()
-    await stage.run(
-        content=proof_content,
-        source_type="paper",
-        source_id=source_id,
-        user_prompt=proof_database.inject_into_prompt(str(proof_config.get("user_prompt") or "")),
-        submitter_model=submitter_model,
-        submitter_context=submitter_config.context_window,
-        submitter_max_tokens=submitter_config.max_output_tokens,
-        validator_model=validator_model,
-        validator_context=validator_config.context_window,
-        validator_max_tokens=validator_config.max_output_tokens,
-        broadcast_fn=websocket.broadcast_event,
-        novel_proofs_db=proof_database,
-        source_title=source_title,
-        role_suffix_override=role_suffix,
-        trigger="manual_compiler_save",
-        append_to_source=False,
-    )
+        stage = ProofVerificationStage()
+        await stage.run(
+            content=proof_content,
+            source_type="paper",
+            source_id=source_id,
+            user_prompt=manual_proof_database.inject_into_prompt(str(proof_config.get("user_prompt") or "")),
+            submitter_model=submitter_model,
+            submitter_context=submitter_config.context_window,
+            submitter_max_tokens=submitter_config.max_output_tokens,
+            validator_model=validator_model,
+            validator_context=validator_config.context_window,
+            validator_max_tokens=validator_config.max_output_tokens,
+            broadcast_fn=websocket.broadcast_event,
+            novel_proofs_db=manual_proof_database,
+            source_title=source_title,
+            role_suffix_override=role_suffix,
+            trigger="manual_compiler_save",
+            source_reserved=source_reserved,
+            release_source_on_exit=False,
+            append_to_source=False,
+            append_proof_callback=lambda proof: _append_proof_to_saved_compiler_paper(output_path, proof),
+        )
+    finally:
+        await _release_pre_reserved_source("paper", source_id, source_reserved)
 
 
 def _get_start_conflict() -> str | None:
@@ -186,7 +226,11 @@ def _get_start_conflict() -> str | None:
     return None
 
 
-async def _run_compiler_aggregator_proof_check(request: CompilerStartRequest) -> None:
+async def _run_compiler_aggregator_proof_check(
+    request: CompilerStartRequest,
+    *,
+    source_reserved: bool = False,
+) -> None:
     """Run proof verification over the manual Aggregator database without writing a paper."""
     try:
         token_tracker.reset()
@@ -199,8 +243,7 @@ async def _run_compiler_aggregator_proof_check(request: CompilerStartRequest) ->
             )
             return
 
-        source_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
-        source_id = f"compiler_aggregator_{source_hash}"
+        source_id = MANUAL_AGGREGATOR_SOURCE_ID
         role_suffix = "compiler_aggregator"
 
         submitter_config = ModelConfig(
@@ -240,7 +283,7 @@ async def _run_compiler_aggregator_proof_check(request: CompilerStartRequest) ->
             content=f"PART 1 AGGREGATOR DATABASE:\n{content}",
             source_type="brainstorm",
             source_id=source_id,
-            user_prompt=proof_database.inject_into_prompt(request.compiler_prompt),
+            user_prompt=manual_proof_database.inject_into_prompt(request.compiler_prompt),
             submitter_model=request.high_context_model,
             submitter_context=request.high_context_context_size,
             submitter_max_tokens=request.high_context_max_output_tokens,
@@ -248,27 +291,48 @@ async def _run_compiler_aggregator_proof_check(request: CompilerStartRequest) ->
             validator_context=request.validator_context_size,
             validator_max_tokens=request.validator_max_output_tokens,
             broadcast_fn=websocket.broadcast_event,
-            novel_proofs_db=proof_database,
+            novel_proofs_db=manual_proof_database,
             source_title=request.compiler_prompt or "Compiler Aggregator Database",
             role_suffix_override=role_suffix,
             trigger="manual_compiler_aggregator",
+            source_reserved=source_reserved,
             append_to_source=False,
+            append_proof_callback=append_proof_to_manual_shared_training,
         )
         await websocket.broadcast_event(
             "compiler_proof_check_complete",
             {"source_type": "brainstorm", "source_id": source_id},
         )
     finally:
+        await _release_pre_reserved_source("brainstorm", MANUAL_AGGREGATOR_SOURCE_ID, source_reserved)
         token_tracker.stop_timer()
 
 
 def _log_background_task_failure(task: asyncio.Task) -> None:
+    _saved_compiler_proof_tasks.discard(task)
     try:
         task.result()
     except asyncio.CancelledError:
         logger.info("Saved compiler paper proof check was cancelled")
     except Exception:
         logger.exception("Saved compiler paper proof check failed")
+
+
+async def _manual_proof_clear_blocker() -> str | None:
+    """Return a blocker message if manual proof work could write stale proofs."""
+    active_keys = await ProofVerificationStage.active_source_keys()
+    for key in active_keys:
+        if (
+            key in MANUAL_PROOF_ACTIVE_KEYS
+            or key.startswith("paper:compiler_manual_")
+            or key.startswith("paper:manual_compiler_")
+        ):
+            return "Cannot clear the manual run while manual proof verification is running. Stop or wait for proof verification to finish first."
+    if _compiler_proof_only_task and not _compiler_proof_only_task.done():
+        return "Cannot clear the manual run while compiler proof verification is running."
+    if any(not task.done() for task in _saved_compiler_proof_tasks):
+        return "Cannot clear the manual run while saved-paper proof verification is running."
+    return None
 
 
 @router.post("/start")
@@ -318,10 +382,15 @@ async def start_compiler(request: CompilerStartRequest):
                             "message": "Mathematical proof output requires Lean 4 proof verification to be enabled.",
                         },
                     )
-                _compiler_proof_only_task = asyncio.create_task(
-                    _run_compiler_aggregator_proof_check(request)
-                )
-                _compiler_proof_only_task.add_done_callback(_log_background_task_failure)
+                async with get_manual_proof_context_lock():
+                    try:
+                        await ProofVerificationStage.reserve_source("brainstorm", MANUAL_AGGREGATOR_SOURCE_ID)
+                    except RuntimeError:
+                        raise HTTPException(status_code=409, detail="A proof verification is already running for the manual Aggregator database.")
+                    _compiler_proof_only_task = asyncio.create_task(
+                        _run_compiler_aggregator_proof_check(request, source_reserved=True)
+                    )
+                    _compiler_proof_only_task.add_done_callback(_log_background_task_failure)
                 return {
                     "status": "proof_check_started",
                     "message": "Compiler proof verification started over the Aggregator database",
@@ -458,6 +527,15 @@ async def stop_compiler():
 @router.post("/test-models")
 async def test_models(request: CompilerStartRequest):
     """Test model compatibility without starting the compiler."""
+    if system_config.generic_mode:
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "generic_mode": True,
+                "message": "LM Studio model diagnostics are unavailable in generic hosted mode.",
+            },
+        )
+
     from backend.shared.lm_studio_client import lm_studio_client
     
     results = {
@@ -558,6 +636,12 @@ async def get_outline():
 @router.post("/save-paper")
 async def save_paper():
     """Save paper to a .txt file (includes author attribution, outline, and paper content)."""
+    async with get_manual_proof_context_lock():
+        return await _save_paper_unlocked()
+
+
+async def _save_paper_unlocked():
+    """Save paper while the manual proof context lock is held."""
     try:
         outline = await outline_memory.get_outline()
         paper = await paper_memory.get_paper()
@@ -636,6 +720,9 @@ async def save_paper():
         )
         if proof_check_scheduled:
             source_title = compiler_coordinator.paper_title or compiler_coordinator.user_prompt or "Compiler Paper"
+            proof_source_content = paper_library.strip_verified_proofs_from_content(full_content)
+            proof_source_hash = hashlib.sha256(proof_source_content.encode("utf-8")).hexdigest()[:16]
+            proof_source_id = f"compiler_manual_{proof_source_hash}"
             proof_config = {
                 "lean4_enabled": system_config.lean4_enabled,
                 "user_prompt": compiler_coordinator.user_prompt,
@@ -656,7 +743,30 @@ async def save_paper():
                 "validator_max_tokens": compiler_coordinator.validator_max_tokens,
                 "validator_supercharge_enabled": getattr(compiler_coordinator, "validator_supercharge_enabled", False),
             }
-            task = asyncio.create_task(_run_saved_compiler_paper_proof_check(full_content, source_title, proof_config))
+            try:
+                await ProofVerificationStage.reserve_source("paper", proof_source_id)
+            except RuntimeError:
+                proof_check_scheduled = False
+                logger.info("Saved compiler paper proof check already running for source %s", proof_source_id)
+                return {
+                    "status": "saved",
+                    "path": output_path.name,
+                    "word_count": word_count,
+                    "message": f"Paper saved to {output_path.name} ({word_count} words)",
+                    "has_attribution": bool(attribution_section),
+                    "proof_check_scheduled": False,
+                }
+            task = asyncio.create_task(
+                _run_saved_compiler_paper_proof_check(
+                    full_content,
+                    source_title,
+                    proof_config,
+                    output_path,
+                    source_id=proof_source_id,
+                    source_reserved=True,
+                )
+            )
+            _saved_compiler_proof_tasks.add(task)
             task.add_done_callback(_log_background_task_failure)
         
         return {
@@ -737,7 +847,19 @@ async def clear_paper(confirm: bool = False):
         )
     
     try:
-        await compiler_coordinator.clear_paper()
+        async with get_manual_proof_context_lock():
+            blocker = await _manual_proof_clear_blocker()
+            if blocker:
+                raise HTTPException(status_code=409, detail=blocker)
+            if compiler_coordinator.is_running:
+                await compiler_coordinator.stop()
+            archived_proofs = await manual_proof_database.archive_current_run(
+                Path(system_config.data_dir) / "manual_proof_runs",
+                user_prompt=compiler_coordinator.user_prompt or "",
+                reason="manual_compiler_clear_paper",
+            )
+            await clear_manual_shared_training_proof_appendix()
+            await compiler_coordinator.clear_paper()
         
         # Also clear any paper critiques
         from backend.shared.critique_memory import clear_critiques
@@ -749,8 +871,11 @@ async def clear_paper(confirm: bool = False):
         
         return {
             "status": "cleared",
-            "message": "Paper and outline cleared - system reset to fresh start"
+            "message": "Paper and outline cleared - system reset to fresh start",
+            "archived_manual_proofs": archived_proofs,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to clear paper: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -937,7 +1062,7 @@ async def request_compiler_critique(critique_request: CritiqueRequest = None):
         response_content = ""
         if response.get("choices"):
             message = response["choices"][0].get("message", {})
-            response_content = message.get("content") or message.get("reasoning") or ""
+            response_content = extract_message_text(message)
         
         if not response_content:
             raise HTTPException(status_code=500, detail="Empty response from validator model")

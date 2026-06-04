@@ -117,7 +117,7 @@ class InstallStateTests(TestCase):
             "version": "1.0.9",
             "build_commit": "stale-manifest-commit",
             "update_channel": "main",
-            "api_contract_version": "build5-v22",
+            "api_contract_version": "build5-v28",
         }
         branch_payload = {"commit": {"sha": "actual-branch-head"}}
 
@@ -127,7 +127,7 @@ class InstallStateTests(TestCase):
 
         self.assertEqual(remote_manifest.version, "1.0.9")
         self.assertEqual(remote_manifest.build_commit, "actual-branch-head")
-        self.assertEqual(remote_manifest.api_contract_version, "build5-v22")
+        self.assertEqual(remote_manifest.api_contract_version, "build5-v28")
         fetch_file.assert_called_once_with(
             "actual-branch-head",
             "moto-update-manifest.json",
@@ -166,7 +166,7 @@ class InstallStateTests(TestCase):
                         "version": "1.0.9",
                         "build_commit": "stale-local-commit",
                         "update_channel": "main",
-                        "api_contract_version": "build5-v22",
+                        "api_contract_version": "build5-v28",
                     }
                 ),
                 encoding="utf-8",
@@ -180,6 +180,61 @@ class InstallStateTests(TestCase):
                             local_manifest = moto_updater.load_local_manifest()
 
         self.assertEqual(local_manifest.build_commit, "actual-local-head")
+
+    def test_load_local_manifest_uses_archival_head_for_zip_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            manifest_path = repo_root / "moto-update-manifest.json"
+            archival_path = repo_root / ".git_archival.txt"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "manifest_version": 1,
+                        "version": "1.0.9",
+                        "build_commit": "stale-local-commit",
+                        "update_channel": "main",
+                        "api_contract_version": "build5-v28",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            archival_path.write_text(
+                "node: 0123456789abcdef0123456789abcdef01234567\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(moto_updater, "REPO_ROOT", repo_root):
+                with mock.patch.object(moto_updater, "LOCAL_MANIFEST_PATH", manifest_path):
+                    with mock.patch.object(moto_updater, "ARCHIVAL_METADATA_PATH", archival_path):
+                        local_manifest = moto_updater.load_local_manifest()
+
+        self.assertEqual(local_manifest.build_commit, "0123456789abcdef0123456789abcdef01234567")
+
+    def test_load_local_manifest_ignores_unexpanded_archival_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            manifest_path = repo_root / "moto-update-manifest.json"
+            archival_path = repo_root / ".git_archival.txt"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "manifest_version": 1,
+                        "version": "1.0.9",
+                        "build_commit": "manifest-commit",
+                        "update_channel": "main",
+                        "api_contract_version": "build5-v28",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            archival_path.write_text("node: $Format:%H$\n", encoding="utf-8")
+
+            with mock.patch.object(moto_updater, "REPO_ROOT", repo_root):
+                with mock.patch.object(moto_updater, "LOCAL_MANIFEST_PATH", manifest_path):
+                    with mock.patch.object(moto_updater, "ARCHIVAL_METADATA_PATH", archival_path):
+                        local_manifest = moto_updater.load_local_manifest()
+
+        self.assertEqual(local_manifest.build_commit, "manifest-commit")
 
 
 class UpdateAvailabilityTests(TestCase):
@@ -217,6 +272,13 @@ class UpdateAvailabilityTests(TestCase):
         result = self._result("1.0.10", "1.0.9")
 
         self.assertFalse(result.update_available)
+
+    def test_update_available_treats_zero_padded_release_as_same_version(self) -> None:
+        result = self._result("1.1.00", "1.1.0")
+
+        self.assertTrue(result.update_available)
+        self.assertTrue(result.can_apply_update)
+        self.assertEqual(moto_updater._compare_version_strings("1.1.00", "1.1.0"), 0)
 
     def test_update_available_still_true_for_same_version_new_commit(self) -> None:
         result = self._result("1.0.9", "1.0.9")
@@ -432,7 +494,7 @@ class SnapshotSyncTests(TestCase):
                 version="1.0.9",
                 build_commit="resolved-remote-head",
                 update_channel="main",
-                api_contract_version="build5-v22",
+                api_contract_version="build5-v28",
             )
 
             with mock.patch.object(moto_updater, "REPO_ROOT", repo_root):

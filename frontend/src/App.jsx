@@ -36,15 +36,18 @@ import OpenRouterPrivacyWarningModal from './components/OpenRouterPrivacyWarning
 import CritiqueNotificationStack from './components/CritiqueNotificationStack';
 import ProofNotificationStack from './components/autonomous/ProofNotificationStack';
 import CreditExhaustionNotificationStack from './components/CreditExhaustionNotificationStack';
+import CodexOAuthNotificationStack from './components/CodexOAuthNotificationStack';
 import UpdateNotificationBanner from './components/UpdateNotificationBanner';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import { websocket } from './services/websocket';
-import { api, autonomousAPI, cloudAccessAPI, leanojAPI, openRouterAPI } from './services/api';
+import { api, autonomousAPI, cloudAccessAPI, compilerAPI, leanojAPI, openRouterAPI } from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
+  OPENAI_CODEX_STARTUP_CHOICE,
   RECOMMENDED_PROFILE_KEY,
   STARTUP_PROVIDER_CHOICE_STORAGE_KEY,
   applyAutonomousProfileSelection,
+  applyCodexStartupDefaults,
   applyLmStudioStartupDefaults,
   getStoredAutonomousSettings,
   settingsToAutonomousConfig,
@@ -80,22 +83,47 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   genericMode: false,
   lmStudioEnabled: true,
   pdfDownloadAvailable: true,
+  openAICodexOauthAvailable: true,
   version: '',
   buildCommit: '',
   updateChannel: 'main',
   apiContractVersion: '',
 });
+const STARTUP_CLOUD_ACCESS_REASONS = new Set(['startup_setup', 'startup_codex_oauth']);
 
 function readDeveloperModeEnabled() {
   return localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === 'true';
 }
 
-function getHighScoreCritiqueNotificationKey(paperId, averageRating) {
+function getHighScoreCritiqueNotificationKey(paperId, averageRating, paperType = 'autonomous_paper') {
   const rating = Number(averageRating);
   if (!paperId || !Number.isFinite(rating)) {
     return null;
   }
-  return `${paperId}:${rating.toFixed(1)}`;
+  const baseKey = `${paperId}:${rating.toFixed(1)}`;
+  return paperType && paperType !== 'autonomous_paper' ? `${paperType}:${baseKey}` : baseKey;
+}
+
+function getCritiquePaperType(data = {}) {
+  const explicitType = String(data.paper_type || data.critique_type || '').toLowerCase();
+  if (explicitType === 'compiler_paper' || explicitType === 'manual_paper') {
+    return 'compiler_paper';
+  }
+  if (explicitType === 'autonomous_paper') {
+    return 'autonomous_paper';
+  }
+
+  const scope = String(data.scope || data.source_scope || '').toLowerCase();
+  const sourceId = String(data.source_id || '');
+  if (
+    scope === 'manual'
+    || sourceId === 'manual_compiler_current'
+    || sourceId.startsWith('manual_compiler')
+  ) {
+    return 'compiler_paper';
+  }
+
+  return 'autonomous_paper';
 }
 
 function readSeenHighScoreCritiques() {
@@ -162,10 +190,14 @@ function getUsableLoadedLmStudioChatModelId(loadedModels = []) {
 }
 
 function normalizeFeaturesPayload(payload = {}) {
+  const genericMode = Boolean(payload.generic_mode);
   return {
-    genericMode: Boolean(payload.generic_mode),
+    genericMode,
     lmStudioEnabled: payload.lm_studio_enabled !== false,
     pdfDownloadAvailable: payload.pdf_download_available !== false,
+    openAICodexOauthAvailable: payload.openai_codex_oauth_available === undefined
+      ? !genericMode
+      : payload.openai_codex_oauth_available !== false,
     version: payload.version || '',
     buildCommit: payload.build_commit || '',
     updateChannel: payload.update_channel || 'main',
@@ -506,16 +538,19 @@ function App() {
   const [showCritiqueModal, setShowCritiqueModal] = useState(false);
   const [proofNotifications, setProofNotifications] = useState([]);
   const [selectedProofId, setSelectedProofId] = useState(null);
+  const [selectedProofScope, setSelectedProofScope] = useState('autonomous');
   const [proofRefreshToken, setProofRefreshToken] = useState(0);
   const [latestProofDependencyEvent, setLatestProofDependencyEvent] = useState(null);
 
   // Credit exhaustion notification state (persistent until dismissed)
   const [creditExhaustionNotifications, setCreditExhaustionNotifications] = useState([]);
+  const [codexOAuthNotifications, setCodexOAuthNotifications] = useState([]);
 
   // Live refs used by websocket listeners (which are registered once)
   const autonomousRunningRef = useRef(autonomousRunning);
   const autonomousTierRef = useRef(autonomousStatus?.current_tier || null);
   const openRouterKeyJustSavedRef = useRef(false);
+  const cloudAccessJustConfiguredRef = useRef(false);
   const seenHighScoreCritiquesRef = useRef(null);
   const shownHighScoreCritiquesRef = useRef(null);
   if (seenHighScoreCritiquesRef.current === null) {
@@ -883,7 +918,7 @@ function App() {
         continue;
       }
 
-      const seenKey = getHighScoreCritiqueNotificationKey(paper.paper_id, averageRating);
+      const seenKey = getHighScoreCritiqueNotificationKey(paper.paper_id, averageRating, 'autonomous_paper');
       if (!seenKey || shownHighScoreCritiquesRef.current.has(seenKey)) {
         continue;
       }
@@ -893,6 +928,7 @@ function App() {
         id: `critique_recovered_${seenKey}_${Date.now()}`,
         paper_id: paper.paper_id,
         paper_title: paper.title || paper.paper_title || paper.paper_id,
+        paper_type: 'autonomous_paper',
         average_rating: averageRating,
         timestamp: paper.created_at || new Date().toISOString(),
         seenKey,
@@ -1003,6 +1039,12 @@ function App() {
     };
     const proofName = (data = {}) => (data.proof_label ? `Proof ${data.proof_label}` : 'Proof');
     const proofTarget = (data = {}) => data.theorem_statement || data.theorem_id || '';
+    const proofRoundLabel = (data = {}) => {
+      const round = Number(data.proof_round_index || 0);
+      const maxRounds = Number(data.proof_max_rounds || 0);
+      if (round <= 0 || maxRounds <= 1) return '';
+      return `Proof round ${round}/${maxRounds}`;
+    };
     const proofLeanResponse = (data = {}) => {
       if (data.lean_response) return data.lean_response;
       if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
@@ -1043,18 +1085,41 @@ function App() {
         || sourceId.startsWith('leanoj_')
         || trigger.startsWith('leanoj');
     };
+    const isManualProofEvent = (data = {}) => {
+      const sourceId = String(data.source_id || '');
+      const trigger = String(data.trigger || '');
+      return sourceId === 'manual_aggregator'
+        || sourceId === 'manual_compiler_current'
+        || sourceId.startsWith('manual_compiler_')
+        || sourceId.startsWith('compiler_manual_')
+        || sourceId.startsWith('compiler_aggregator_')
+        || trigger.startsWith('manual_compiler');
+    };
+    const isManualButtonProofEvent = (data = {}) => {
+      const sourceId = String(data.source_id || '');
+      return sourceId === 'manual_aggregator'
+        || sourceId === 'manual_compiler_current';
+    };
     const shouldShowAutonomousProofNovelty = (data = {}) => {
       if (isLeanOJProofEvent(data)) return false;
+      if (isManualProofEvent(data)) return false;
       if (data.source_type === 'compiler_rigor' && !isAutonomousTier2Active()) return false;
       return true;
+    };
+    const shouldShowProofNoveltyNotification = (data = {}) => {
+      if (isLeanOJProofEvent(data)) return false;
+      if (data.source_type === 'compiler_rigor' && !isAutonomousTier2Active()) return false;
+      return shouldShowAutonomousProofNovelty(data) || isManualButtonProofEvent(data);
     };
     const formatProofCheckCompleteMessage = (data = {}) => {
       const verified = data.verified_count ?? 0;
       const novel = data.novel_count ?? 0;
       const hasTotal = data.total_candidates !== undefined && data.total_candidates !== null;
-      const base = hasTotal
+      const roundLabel = proofRoundLabel(data);
+      const baseMessage = hasTotal
         ? `Proof check complete: ${verified}/${data.total_candidates} candidates verified, ${novel} novel`
         : `Proof check complete: ${verified} verified`;
+      const base = roundLabel ? `${roundLabel} complete: ${baseMessage}` : baseMessage;
       const detail = formatReason(data.message, 220);
       return detail ? `${base} - ${detail}` : base;
     };
@@ -1136,6 +1201,7 @@ function App() {
     
     // Aggregator's direct submission events (per-submission with individual submitter_id)
     unsubscribers.push(websocket.on('submission_accepted', (data) => {
+      if (!autonomousRunningRef.current) return;
       const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : 'N/A';
       const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
       addActivity({
@@ -1147,6 +1213,7 @@ function App() {
     }));
     
     unsubscribers.push(websocket.on('submission_rejected', (data) => {
+      if (!autonomousRunningRef.current) return;
       const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : 'N/A';
       const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
       addActivity({
@@ -1349,6 +1416,7 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('proof_attempt_started', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       addActivity({
         event: 'proof_attempt_started',
         timestamp: getTimestamp(data),
@@ -1358,6 +1426,7 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('smt_check_error', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       addActivity({
         event: 'smt_check_error',
         timestamp: getTimestamp(data),
@@ -1367,6 +1436,7 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('proof_attempt_failed', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       addActivity({
         event: 'proof_attempt_failed',
         timestamp: getTimestamp(data),
@@ -1380,6 +1450,7 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('proof_lean_accepted', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       addActivity({
         event: 'proof_lean_accepted',
         timestamp: getTimestamp(data),
@@ -1389,6 +1460,7 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('proof_integrity_rejected', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       addActivity({
         event: 'proof_integrity_rejected',
         timestamp: getTimestamp(data),
@@ -1398,6 +1470,7 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('proof_attempts_exhausted', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       addActivity({
         event: 'proof_attempts_exhausted',
         timestamp: getTimestamp(data),
@@ -1408,7 +1481,9 @@ function App() {
 
     unsubscribers.push(websocket.on('novel_proof_discovered', (data) => {
       setProofRefreshToken((prev) => prev + 1);
-      if (shouldShowAutonomousProofNovelty(data)) {
+      const showAutonomousProofNovelty = shouldShowAutonomousProofNovelty(data);
+      const showProofNoveltyNotification = shouldShowProofNoveltyNotification(data);
+      if (showAutonomousProofNovelty) {
         addActivity({
           event: 'novel_proof_discovered',
           timestamp: getTimestamp(data),
@@ -1416,12 +1491,17 @@ function App() {
           data
         });
       }
+      if (!showProofNoveltyNotification) {
+        return;
+      }
       setProofNotifications((prev) => {
+        const proofScope = data.proof_scope || data.scope || (isManualProofEvent(data) ? 'manual' : 'autonomous');
         const next = [
           ...prev,
           {
             id: `proof_${data.proof_id}_${Date.now()}`,
             proof_id: data.proof_id,
+            proof_scope: proofScope,
             theorem_statement: data.theorem_statement,
             source_type: data.source_type,
             source_id: data.source_id,
@@ -1460,12 +1540,17 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('proof_dependency_added', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       setLatestProofDependencyEvent(data);
       setProofRefreshToken((prev) => prev + 1);
     }));
 
     unsubscribers.push(websocket.on('proof_check_complete', (data) => {
       if (isLeanOJProofEvent(data)) return;
+      if (isManualProofEvent(data)) {
+        setProofRefreshToken((prev) => prev + 1);
+        return;
+      }
       if (data.source_type === 'compiler_rigor' && !isAutonomousTier2Active()) return;
 
       setProofRefreshToken((prev) => prev + 1);
@@ -1806,6 +1891,32 @@ function App() {
       });
     }));
 
+    unsubscribers.push(websocket.on('openai_codex_oauth_error', (data) => {
+      console.error('OpenAI Codex OAuth error:', data);
+      addActivity({
+        event: 'openai_codex_oauth_error',
+        timestamp: getTimestamp(data),
+        message: `OpenAI Codex OAuth failed for ${data.role_id || 'a role'}; check your OAuth connection and sign in again.`,
+        ...data
+      });
+      setCodexOAuthNotifications(prev => {
+        const roleId = data.role_id || 'openai_codex_oauth';
+        const reason = data.reason || 'unrecoverable_codex_error';
+        if (prev.some(n => n.role_id === roleId && n.reason === reason)) return prev;
+        return [
+          ...prev,
+          {
+            id: `codex_oauth_${roleId}_${Date.now()}`,
+            role_id: roleId,
+            model: data.model,
+            reason,
+            message: data.message || 'Check your OpenAI Codex OAuth connection, sign in again, and retry.',
+            timestamp: getTimestamp(data)
+          }
+        ].slice(-3);
+      });
+    }));
+
     unsubscribers.push(websocket.on('leanoj_provider_paused', (data) => {
       console.warn('Proof Solver paused for provider credits:', data);
       addActivity({
@@ -1936,10 +2047,11 @@ function App() {
     // High-score critique notification event (only fires for ratings >= 6.25, shows popup)
     unsubscribers.push(websocket.on('high_score_critique', (data) => {
       console.log('High-score critique received:', data);
+      const paperType = getCritiquePaperType(data);
       
       // Add to notification stack (max 3, FIFO)
       setCritiqueNotifications(prev => {
-        const seenKey = getHighScoreCritiqueNotificationKey(data.paper_id, data.average_rating);
+        const seenKey = getHighScoreCritiqueNotificationKey(data.paper_id, data.average_rating, paperType);
         if (seenKey && (seenHighScoreCritiquesRef.current.has(seenKey) || prev.some(notification => notification.seenKey === seenKey))) {
           return prev;
         }
@@ -1951,6 +2063,7 @@ function App() {
           id: `critique_${data.paper_id}_${Date.now()}`,
           paper_id: data.paper_id,
           paper_title: data.paper_title,
+          paper_type: paperType,
           average_rating: data.average_rating,
           novelty_rating: data.novelty_rating,
           correctness_rating: data.correctness_rating,
@@ -2573,9 +2686,17 @@ function App() {
     setCritiqueNotifications(prev => prev.filter(n => n.id !== notificationId));
   };
   
-  const handleClickNotification = (paperId, paperTitle, seenKey) => {
+  const handleClickNotification = (paperId, paperTitle, seenKey, paperType = 'autonomous_paper') => {
+    const normalizedPaperType = paperType || 'autonomous_paper';
     markHighScoreCritiqueSeen(seenKey);
-    setSelectedCritiquePaper({ paper_id: paperId, paper_title: paperTitle });
+    setSelectedCritiquePaper({
+      paper_id: paperId,
+      paper_title: paperTitle,
+      paper_type: normalizedPaperType,
+    });
+    if (normalizedPaperType === 'compiler_paper') {
+      handleManualTabSelect('compiler-live-paper');
+    }
     setShowCritiqueModal(true);
   };
   
@@ -2588,8 +2709,18 @@ function App() {
     setProofNotifications(prev => prev.filter(n => n.id !== notificationId));
   };
 
-  const handleClickProofNotification = (proofId) => {
+  const handleClickProofNotification = (notificationOrProofId) => {
+    const notification = typeof notificationOrProofId === 'object' && notificationOrProofId !== null
+      ? notificationOrProofId
+      : { proof_id: notificationOrProofId };
+    const proofId = notification.proof_id;
+    const proofScope = notification.proof_scope || notification.scope || 'autonomous';
     setSelectedProofId(proofId);
+    setSelectedProofScope(proofScope);
+    if (proofScope === 'manual') {
+      handleManualTabSelect('compiler-proofs');
+      return;
+    }
     handleAutonomousTabSelect('auto-proofs');
   };
 
@@ -2623,9 +2754,22 @@ function App() {
     setCreditExhaustionNotifications(prev => prev.filter(n => n.id !== notificationId));
   };
 
+  const handleDismissCodexOAuthNotification = (notificationId) => {
+    setCodexOAuthNotifications(prev => prev.filter(n => n.id !== notificationId));
+  };
+
+  const handleOpenCloudAccessFromCodexNotification = () => {
+    setOpenRouterKeyReason('codex_oauth_error');
+    setShowOpenRouterKeyModal(true);
+  };
+
   // Critique modal API functions
   const handleGenerateCritique = async (customPrompt, validatorConfig) => {
     if (!selectedCritiquePaper) return;
+
+    if (selectedCritiquePaper.paper_type === 'compiler_paper') {
+      return compilerAPI.generateCritique(customPrompt, validatorConfig);
+    }
     
     const response = await autonomousAPI.generatePaperCritique(
       selectedCritiquePaper.paper_id,
@@ -2637,6 +2781,11 @@ function App() {
   
   const handleGetCritiques = async () => {
     if (!selectedCritiquePaper) return { critiques: [] };
+
+    if (selectedCritiquePaper.paper_type === 'compiler_paper') {
+      const response = await compilerAPI.getCritiques();
+      return response.data || response;
+    }
     
     const response = await autonomousAPI.getPaperCritiques(selectedCritiquePaper.paper_id);
     return response;
@@ -2699,10 +2848,29 @@ function App() {
     setShowOpenRouterKeyModal(true);
   };
 
+  const handleStartupCodexOAuthChoice = () => {
+    if (!capabilities.openAICodexOauthAvailable) {
+      setStartupSetupMessage(
+        'OpenAI Codex OAuth is desktop-only and is not available in this deployment. Configure OpenRouter to continue.'
+      );
+      return;
+    }
+
+    setStartupSetupMessage('');
+    setShowStartupSetupModal(false);
+    setOpenRouterKeyReason('startup_codex_oauth');
+    setShowOpenRouterKeyModal(true);
+  };
+
   const handleCloseOpenRouterKeyModal = () => {
     const keyWasJustSaved = openRouterKeyJustSavedRef.current;
-    const shouldReturnToStartup = openRouterKeyReason === 'startup_setup' && !keyWasJustSaved && !hasCloudAccess;
+    const cloudAccessWasJustConfigured = cloudAccessJustConfiguredRef.current;
+    const shouldReturnToStartup = STARTUP_CLOUD_ACCESS_REASONS.has(openRouterKeyReason)
+      && !keyWasJustSaved
+      && !cloudAccessWasJustConfigured
+      && !hasCloudAccess;
     openRouterKeyJustSavedRef.current = false;
+    cloudAccessJustConfiguredRef.current = false;
     setShowOpenRouterKeyModal(false);
 
     if (shouldReturnToStartup) {
@@ -2747,8 +2915,46 @@ function App() {
     }
   };
 
+  const handleCloudAccessChanged = async (configured, provider = 'cloud', options = {}) => {
+    if (provider === 'openai_codex_oauth' && options.modelsReady === false) {
+      setHasCloudAccess(Boolean(hasOpenRouterKey));
+      return;
+    }
+
+    const hasAccess = Boolean(configured) || Boolean(hasOpenRouterKey);
+    setHasCloudAccess(hasAccess);
+
+    if (!configured) {
+      return;
+    }
+
+    cloudAccessJustConfiguredRef.current = true;
+
+    if (provider === 'openai_codex_oauth' && STARTUP_CLOUD_ACCESS_REASONS.has(openRouterKeyReason)) {
+      let codexModels = [];
+      try {
+        const result = await cloudAccessAPI.getOpenAICodexModels();
+        codexModels = result.models || [];
+      } catch (error) {
+        console.warn('OpenAI Codex model listing failed during startup defaults.', error);
+        return;
+      }
+
+      if (codexModels.length === 0) {
+        return;
+      }
+
+      const { config: nextAutonomousConfig } = applyCodexStartupDefaults(codexModels);
+      setAutonomousConfig(nextAutonomousConfig);
+      localStorage.setItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY, OPENAI_CODEX_STARTUP_CHOICE);
+      setShowStartupSetupModal(false);
+      setShowOpenRouterKeyModal(false);
+      setStartupSetupMessage('');
+    }
+  };
+
   const handleOpenRouterKeySet = async () => {
-    if (openRouterKeyReason === 'startup_setup') {
+    if (STARTUP_CLOUD_ACCESS_REASONS.has(openRouterKeyReason)) {
       const { config: nextAutonomousConfig } = await applyAutonomousProfileSelection(RECOMMENDED_PROFILE_KEY);
       setAutonomousConfig(nextAutonomousConfig);
       setShowStartupSetupModal(false);
@@ -2756,6 +2962,7 @@ function App() {
     }
 
     openRouterKeyJustSavedRef.current = true;
+    cloudAccessJustConfiguredRef.current = true;
     setHasOpenRouterKey(true);
     setHasCloudAccess(true);
     console.log('OpenRouter API key set successfully');
@@ -2779,13 +2986,14 @@ function App() {
 
   const manualTabs = [
     { id: 'aggregator-interface', label: 'Aggregator', subtext: 'Part 1', subtextClass: 'green', group: 'aggregator' },
-    { id: 'aggregator-settings', label: 'Aggregator Settings', group: 'aggregator' },
-    { id: 'aggregator-logs', label: 'Aggregator Logs', group: 'aggregator' },
     { id: 'aggregator-results', label: 'Live Results', subtext: 'Part 1 Live Results', subtextClass: 'green', group: 'aggregator' },
+    { id: 'aggregator-logs', label: 'Aggregator Logs', group: 'aggregator' },
+    { id: 'aggregator-settings', label: 'Aggregator Settings', group: 'aggregator' },
     { id: 'compiler-interface', label: 'Compiler', subtext: 'Part 2', subtextClass: 'green', group: 'compiler' },
-    { id: 'compiler-settings', label: 'Compiler Settings', group: 'compiler' },
-    { id: 'compiler-logs', label: 'Compiler Logs', group: 'compiler' },
     { id: 'compiler-live-paper', label: 'Live Paper', subtext: 'Part 2 Live Results', subtextClass: 'green', group: 'compiler' },
+    { id: 'compiler-proofs', label: 'Mathematical Proofs', subtext: 'Manual Proofs', subtextClass: 'green', group: 'compiler' },
+    { id: 'compiler-logs', label: 'Compiler Logs', group: 'compiler' },
+    { id: 'compiler-settings', label: 'Compiler Settings', group: 'compiler' },
   ];
 
   const leanojMainTabs = [
@@ -3141,7 +3349,7 @@ function App() {
             <MathematicalProofs
               api={autonomousAPI}
               refreshToken={proofRefreshToken}
-              selectedProofId={selectedProofId}
+              selectedProofId={selectedProofScope === 'autonomous' ? selectedProofId : null}
               latestDependencyEvent={latestProofDependencyEvent}
             />
           )}
@@ -3276,6 +3484,24 @@ function App() {
           {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
           {activeTab === 'compiler-logs' && <CompilerLogs />}
           {activeTab === 'compiler-live-paper' && <LivePaper capabilities={capabilities} />}
+          {activeTab === 'compiler-proofs' && (
+            <>
+              <MathematicalProofs
+                api={autonomousAPI}
+                refreshToken={proofRefreshToken}
+                selectedProofId={selectedProofScope === 'manual' ? selectedProofId : null}
+                proofScope="manual"
+                title="Manual Mathematical Proofs"
+                description="Active-run Lean 4 proofs generated from the manual Aggregator and manual Compiler. Clearing the manual run archives these proofs and removes them from future prompt context."
+                defaultSourceType="paper"
+              />
+              <ProofLibrary
+                proofScope="manual"
+                title="Manual Proof Run History"
+                description="Archived manual proof runs. These proofs are available for review and download only; they are not injected into new manual runs."
+              />
+            </>
+          )}
         </div>
       </div>
       
@@ -3334,7 +3560,7 @@ function App() {
               <p style={{ fontSize: '1.1rem', lineHeight: '1.6', marginBottom: '1.5rem', color: '#1eff1c' }}>
                 {capabilities.lmStudioEnabled ? (
                   <>
-                    <strong>QUICKSTART:</strong> In LM Studio, load the embedding model <code>nomic-ai/nomic-embed-text-v1.5</code> by <strong>Nomic AI</strong> (optional but recommended), or use only an OpenRouter API key instead of LM Studio. You must leave your PC on and awake during runtime, the program will often run for days without interruption.
+                    <strong>QUICKSTART:</strong> In LM Studio, load the embedding model <code>nomic-ai/nomic-embed-text-v1.5</code> by <strong>Nomic AI</strong> (optional but recommended), or use OpenRouter / OpenAI Codex OAuth instead of LM Studio. You must leave your PC on and awake during runtime, the program will often run for days without interruption.
                   </>
                 ) : (
                   <>
@@ -3391,6 +3617,7 @@ function App() {
         statusMessage={startupSetupMessage}
         isCheckingLmStudio={checkingLmStudioStartupChoice}
         onChooseOpenRouter={handleStartupOpenRouterChoice}
+        onChooseCodexOAuth={handleStartupCodexOAuthChoice}
         onConfirmLmStudio={handleStartupLmStudioChoice}
       />
       
@@ -3407,7 +3634,7 @@ function App() {
         isOpen={showOpenRouterKeyModal}
         onClose={handleCloseOpenRouterKeyModal}
         onKeySet={handleOpenRouterKeySet}
-        onCloudAccessChanged={(configured) => setHasCloudAccess(Boolean(configured) || Boolean(hasOpenRouterKey))}
+        onCloudAccessChanged={handleCloudAccessChanged}
         reason={openRouterKeyReason}
         capabilities={capabilities}
       />
@@ -3442,12 +3669,18 @@ function App() {
         onDismissAll={() => setCreditExhaustionNotifications([])}
       />
 
+      <CodexOAuthNotificationStack
+        notifications={codexOAuthNotifications}
+        onDismiss={handleDismissCodexOAuthNotification}
+        onOpenCloudAccess={handleOpenCloudAccessFromCodexNotification}
+      />
+
       {/* Critique Modal - Opens when notification is clicked */}
       {showCritiqueModal && selectedCritiquePaper && (
         <PaperCritiqueModal
           isOpen={showCritiqueModal}
           onClose={handleCloseCritiqueModal}
-          paperType="autonomous_paper"
+          paperType={selectedCritiquePaper.paper_type || 'autonomous_paper'}
           paperId={selectedCritiquePaper.paper_id}
           paperTitle={selectedCritiquePaper.paper_title}
           onGenerateCritique={handleGenerateCritique}

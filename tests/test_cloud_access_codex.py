@@ -236,6 +236,50 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
             OpenAICodexClient.DEFAULT_INSTRUCTIONS,
         )
 
+    async def test_generate_completion_retries_transient_gateway_response(self) -> None:
+        client = OpenAICodexClient()
+
+        class FakeResponse:
+            def __init__(self, status_code, text):
+                self.status_code = status_code
+                self.text = text
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, url, json=None, headers=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return FakeResponse(
+                        503,
+                        "upstream connect error or disconnect/reset before headers. "
+                        "retried and the latest reset reason: connection timeout",
+                    )
+                return FakeResponse(
+                    200,
+                    json_module.dumps({
+                        "id": "resp_retry",
+                        "output_text": "recovered",
+                        "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                    }),
+                )
+
+        json_module = json
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
+            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None),
+        ):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+            )
+
+        self.assertEqual(fake_http.calls, 2)
+        self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+
 
 class FeaturesContractTests(IsolatedAsyncioTestCase):
     async def test_features_exposes_codex_oauth_capability(self) -> None:

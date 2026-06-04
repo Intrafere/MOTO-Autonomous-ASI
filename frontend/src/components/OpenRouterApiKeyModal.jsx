@@ -30,8 +30,55 @@ export default function OpenRouterApiKeyModal({
   const [codexRedirectUri, setCodexRedirectUri] = useState('');
   const [codexCallbackInput, setCodexCallbackInput] = useState('');
   const [codexMessage, setCodexMessage] = useState('');
+  const [codexLoginBaselineConfigured, setCodexLoginBaselineConfigured] = useState(false);
+  const [codexLoginBaselineUpdatedAt, setCodexLoginBaselineUpdatedAt] = useState(0);
+  const [codexModelsStatus, setCodexModelsStatus] = useState({
+    checking: false,
+    count: null,
+    error: '',
+  });
+  const codexModelCheckRequestRef = React.useRef(0);
   const genericMode = Boolean(capabilities?.genericMode);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+
+  const verifyCodexModels = async () => {
+    if (genericMode) {
+      codexModelCheckRequestRef.current += 1;
+      setCodexModelsStatus({ checking: false, count: null, error: '' });
+      return false;
+    }
+
+    const requestId = codexModelCheckRequestRef.current + 1;
+    codexModelCheckRequestRef.current = requestId;
+    setCodexModelsStatus({ checking: true, count: null, error: '' });
+    try {
+      const result = await cloudAccessAPI.getOpenAICodexModels();
+      if (codexModelCheckRequestRef.current !== requestId) {
+        return null;
+      }
+      const models = Array.isArray(result.models) ? result.models : [];
+      if (models.length === 0) {
+        setCodexModelsStatus({
+          checking: false,
+          count: 0,
+          error: 'Codex login is saved, but no Codex models were returned. Reconnect OAuth or check that this ChatGPT account has Codex model access.',
+        });
+        return false;
+      }
+      setCodexModelsStatus({ checking: false, count: models.length, error: '' });
+      return true;
+    } catch (err) {
+      if (codexModelCheckRequestRef.current !== requestId) {
+        return null;
+      }
+      setCodexModelsStatus({
+        checking: false,
+        count: null,
+        error: `Codex login is saved, but models could not be loaded: ${err.message || 'unknown error'}. Reconnect OAuth or check this account's Codex access.`,
+      });
+      return false;
+    }
+  };
 
   // Reset state when modal opens
   useEffect(() => {
@@ -40,6 +87,10 @@ export default function OpenRouterApiKeyModal({
       setTestResult(null);
       setError('');
       setCodexMessage('');
+      setCodexLoginBaselineConfigured(false);
+      setCodexLoginBaselineUpdatedAt(0);
+      codexModelCheckRequestRef.current += 1;
+      setCodexModelsStatus({ checking: false, count: null, error: '' });
       let isCancelled = false;
 
       const loadKeyStatus = async () => {
@@ -58,11 +109,16 @@ export default function OpenRouterApiKeyModal({
         try {
           const status = await cloudAccessAPI.getOpenAICodexStatus();
           if (!isCancelled) {
-            setCodexStatus(status.status || { configured: false });
+            const nextStatus = status.status || { configured: false };
+            setCodexStatus(nextStatus);
+            if (nextStatus.configured) {
+              verifyCodexModels();
+            }
           }
         } catch {
           if (!isCancelled) {
             setCodexStatus({ configured: false });
+            setCodexModelsStatus({ checking: false, count: null, error: '' });
           }
         }
       };
@@ -72,8 +128,10 @@ export default function OpenRouterApiKeyModal({
 
       return () => {
         isCancelled = true;
+        codexModelCheckRequestRef.current += 1;
       };
     }
+    codexModelCheckRequestRef.current += 1;
     setHasStoredKey(false);
     return undefined;
   }, [isOpen]);
@@ -85,12 +143,25 @@ export default function OpenRouterApiKeyModal({
         const status = await cloudAccessAPI.getOpenAICodexStatus();
         const nextStatus = status.status || { configured: false };
         setCodexStatus(nextStatus);
-        if (nextStatus.configured) {
+        const statusUpdatedAt = Number(nextStatus.updated_at || 0);
+        const loginCompleted = nextStatus.configured
+          && (
+            !codexLoginBaselineConfigured
+            || (statusUpdatedAt > 0 && statusUpdatedAt > codexLoginBaselineUpdatedAt)
+          );
+        if (loginCompleted) {
+          const modelsReady = await verifyCodexModels();
+          if (modelsReady === null) {
+            return;
+          }
           setCodexState('');
           setCodexCallbackInput('');
-          setCodexMessage('OpenAI Codex login saved.');
+          setCodexMessage(modelsReady
+            ? 'OpenAI Codex login saved and model list loaded.'
+            : 'OpenAI Codex login saved, but model loading needs attention.'
+          );
           if (onCloudAccessChanged) {
-            onCloudAccessChanged(true);
+            onCloudAccessChanged(true, 'openai_codex_oauth', { modelsReady });
           }
         }
       } catch {
@@ -98,7 +169,7 @@ export default function OpenRouterApiKeyModal({
       }
     }, 2000);
     return () => window.clearInterval(interval);
-  }, [isOpen, codexState, onCloudAccessChanged]);
+  }, [isOpen, codexState, codexLoginBaselineConfigured, codexLoginBaselineUpdatedAt, onCloudAccessChanged]);
 
   const handleTestConnection = async () => {
     if (!apiKey.trim()) {
@@ -167,6 +238,8 @@ export default function OpenRouterApiKeyModal({
     setCodexLoading(true);
     setCodexMessage('');
     setError('');
+    setCodexLoginBaselineConfigured(Boolean(codexStatus?.configured));
+    setCodexLoginBaselineUpdatedAt(Number(codexStatus?.updated_at || 0));
     try {
       const result = await cloudAccessAPI.startOpenAICodexLogin();
       setCodexState(result.state || '');
@@ -202,11 +275,18 @@ export default function OpenRouterApiKeyModal({
         redirectUri: codexRedirectUri || null,
       });
       setCodexStatus(result.status || { configured: true });
+      const modelsReady = await verifyCodexModels();
+      if (modelsReady === null) {
+        return;
+      }
       setCodexCallbackInput('');
       setCodexState('');
-      setCodexMessage('OpenAI Codex login saved.');
+      setCodexMessage(modelsReady
+        ? 'OpenAI Codex login saved and model list loaded.'
+        : 'OpenAI Codex login saved, but model loading needs attention.'
+      );
       if (onCloudAccessChanged) {
-        onCloudAccessChanged(true);
+        onCloudAccessChanged(true, 'openai_codex_oauth', { modelsReady });
       }
     } catch (err) {
       setError(err.message || 'Failed to complete OpenAI Codex login');
@@ -219,12 +299,19 @@ export default function OpenRouterApiKeyModal({
     setCodexLoading(true);
     setCodexMessage('');
     setError('');
+    codexModelCheckRequestRef.current += 1;
     try {
       await cloudAccessAPI.clearOpenAICodexLogin();
       setCodexStatus({ configured: false });
       setCodexCallbackInput('');
       setCodexState('');
+      setCodexLoginBaselineConfigured(false);
+      setCodexLoginBaselineUpdatedAt(0);
+      setCodexModelsStatus({ checking: false, count: null, error: '' });
       setCodexMessage('OpenAI Codex login cleared.');
+      if (onCloudAccessChanged) {
+        onCloudAccessChanged(false, 'openai_codex_oauth');
+      }
     } catch (err) {
       setError(err.message || 'Failed to clear OpenAI Codex login');
     } finally {
@@ -237,6 +324,7 @@ export default function OpenRouterApiKeyModal({
   const reasonMessages = {
     setup: 'Configure cloud model access for MOTO roles.',
     startup_setup: 'Save cloud access credentials to unlock cloud models. MOTO will apply the recommended default profile immediately, and you can switch profiles later in Settings.',
+    startup_codex_oauth: 'Sign in with OpenAI Codex OAuth to use subscription-backed Codex models. MOTO will apply Codex-backed startup defaults immediately after login.',
     lm_studio_unavailable: lmStudioEnabled
       ? 'LM Studio is not available. Configure cloud access to continue.'
       : 'This deployment disables LM Studio. Configure cloud access to continue.',
@@ -401,8 +489,17 @@ export default function OpenRouterApiKeyModal({
               OpenAI Codex login is desktop-only until hosted callback/proxy support is designed.
             </div>
           ) : codexStatus?.configured ? (
-            <div className="test-result-banner test-result-banner--success" style={{ marginBottom: '1rem' }}>
-              OpenAI Codex login configured{codexStatus.email ? ` for ${codexStatus.email}` : ''}.
+            <div
+              className={`test-result-banner ${
+                codexModelsStatus.error
+                  ? 'test-result-banner--error'
+                  : (codexModelsStatus.checking ? '' : 'test-result-banner--success')
+              }`}
+              style={{ marginBottom: '1rem' }}
+            >
+              {codexModelsStatus.error
+                ? `OpenAI Codex OAuth token saved${codexStatus.email ? ` for ${codexStatus.email}` : ''}, but model access is not verified.`
+                : `OpenAI Codex login configured${codexStatus.email ? ` for ${codexStatus.email}` : ''}.`}
             </div>
           ) : (
             <div className="test-result-banner" style={{ marginBottom: '1rem' }}>
@@ -410,8 +507,29 @@ export default function OpenRouterApiKeyModal({
             </div>
           )}
 
-          {codexMessage && (
+          {codexModelsStatus.checking && (
+            <div className="test-result-banner" style={{ marginBottom: '1rem' }}>
+              Checking Codex model list...
+            </div>
+          )}
+
+          {!codexModelsStatus.checking && codexModelsStatus.count > 0 && (
             <div className="test-result-banner test-result-banner--success" style={{ marginBottom: '1rem' }}>
+              Codex model list loaded. {codexModelsStatus.count} model{codexModelsStatus.count === 1 ? '' : 's'} available.
+            </div>
+          )}
+
+          {!codexModelsStatus.checking && codexModelsStatus.error && (
+            <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+              {codexModelsStatus.error}
+            </div>
+          )}
+
+          {codexMessage && (
+            <div
+              className={`test-result-banner ${codexMessage.includes('needs attention') ? 'test-result-banner--error' : 'test-result-banner--success'}`}
+              style={{ marginBottom: '1rem' }}
+            >
               {codexMessage}
             </div>
           )}

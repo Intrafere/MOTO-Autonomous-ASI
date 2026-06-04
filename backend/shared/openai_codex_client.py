@@ -55,6 +55,21 @@ class OpenAICodexClient:
     DEFAULT_INSTRUCTIONS = "Follow the user's instructions and produce the requested response."
     REFRESH_SKEW_SECONDS = 60
     REASONING_EFFORT_LEVELS = {"xhigh", "high", "medium", "low", "none"}
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2.0
+    TRANSIENT_COMPLETION_STATUS_CODES = {408, 409, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+    TRANSIENT_COMPLETION_MARKERS = (
+        "bad gateway",
+        "connection timeout",
+        "disconnect/reset before headers",
+        "gateway timeout",
+        "incomplete chunked read",
+        "peer closed connection",
+        "service unavailable",
+        "temporarily unavailable",
+        "upstream connect error",
+        "upstream provider timeout",
+    )
     KNOWN_MODEL_LIMITS = {
         # OpenAI documents GPT-5.5 in Codex as a 400K-window product. Public
         # Codex runtime metadata has exposed this as 272K input + 128K output
@@ -252,6 +267,7 @@ class OpenAICodexClient:
             "configured": bool(tokens.get("access_token") and tokens.get("refresh_token")),
             "expires_at": expires_at,
             "expired": bool(expires_at and time.time() >= expires_at),
+            "updated_at": int(tokens.get("updated_at") or 0),
             "account_id": redact_log_text(tokens.get("account_id", ""), 80),
             "email": redact_log_text(tokens.get("email", ""), 120),
         }
@@ -464,6 +480,23 @@ class OpenAICodexClient:
         return None
 
     @classmethod
+    def _is_transient_completion_text(cls, text: str) -> bool:
+        lowered = (text or "").lower()
+        return any(marker in lowered for marker in cls.TRANSIENT_COMPLETION_MARKERS)
+
+    @classmethod
+    def _is_transient_completion_response(cls, response: httpx.Response) -> bool:
+        body = ""
+        try:
+            body = response.text or ""
+        except Exception:
+            body = ""
+        return (
+            response.status_code in cls.TRANSIENT_COMPLETION_STATUS_CODES
+            or cls._is_transient_completion_text(body)
+        )
+
+    @classmethod
     def _reasoning_config(cls, reasoning_effort: Optional[str]) -> Optional[Dict[str, str]]:
         if not reasoning_effort:
             return None
@@ -577,6 +610,47 @@ class OpenAICodexClient:
                         output_text += content.get("text") or ""
         return aggregate_text or output_text, tool_calls
 
+    async def _post_with_retry(self, url: str, **kwargs) -> httpx.Response:
+        """POST with retry on transport errors (peer close, read error, connect error)."""
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                response = await self.client.post(url, **kwargs)
+                if response.status_code >= 400 and self._is_transient_completion_response(response):
+                    error_detail = sanitize_provider_error_text(response.text)
+                    logger.warning(
+                        "OpenAI Codex transient completion response (attempt %s/%s): "
+                        "status=%s error=%s",
+                        attempt + 1,
+                        self.MAX_RETRIES,
+                        response.status_code,
+                        error_detail,
+                    )
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                        continue
+                    raise ValueError(
+                        f"OpenAI Codex connection failed after {self.MAX_RETRIES} attempts: "
+                        f"HTTP {response.status_code}: {error_detail}"
+                    )
+                return response
+            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+                error_type = type(e).__name__
+                error_detail = repr(e) if not str(e) else str(e)
+                logger.warning(
+                    "OpenAI Codex connection error (attempt %s/%s): [%s] %s",
+                    attempt + 1,
+                    self.MAX_RETRIES,
+                    error_type,
+                    error_detail,
+                )
+                if attempt < self.MAX_RETRIES - 1:
+                    await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                    continue
+                raise ValueError(
+                    f"OpenAI Codex connection failed after {self.MAX_RETRIES} attempts: "
+                    f"[{error_type}] {error_detail}"
+                )
+
     async def generate_completion(
         self,
         *,
@@ -613,7 +687,7 @@ class OpenAICodexClient:
             if tool_choice is not None:
                 payload["tool_choice"] = "auto" if tool_choice == "auto" else tool_choice
 
-        response = await self.client.post(
+        response = await self._post_with_retry(
             f"{self.CODEX_BASE_URL}/responses",
             json=payload,
             headers=self._headers(tokens, accept_stream=True),
@@ -623,7 +697,12 @@ class OpenAICodexClient:
             if response.status_code in {401, 403}:
                 raise OpenAICodexAuthError(message)
             raise OpenAICodexRequestError(message)
-        data = self._decode_response_body(response.text)
+        try:
+            data = self._decode_response_body(response.text)
+        except OpenAICodexRequestError as exc:
+            if self._is_transient_completion_text(str(exc)):
+                raise ValueError(f"OpenAI Codex connection failed while reading streamed response: {exc}") from exc
+            raise
         content, tool_calls = self._extract_output(data)
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:

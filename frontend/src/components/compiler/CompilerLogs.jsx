@@ -3,7 +3,28 @@ import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LiveActivityFeed from '../LiveActivityFeed';
 import { getActivityClass, getActivityIcon } from '../../utils/activityStyles';
+import {
+  MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
+  MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
+} from '../../hooks/useProofCheckRuntime';
 import '../autonomous/AutonomousResearch.css';
+
+const MANUAL_PROOF_EVENTS = [
+  'proof_check_started',
+  'proof_check_no_candidates',
+  'proof_check_candidates_found',
+  'proof_attempt_started',
+  'proof_lean_accepted',
+  'proof_attempt_failed',
+  'proof_attempts_exhausted',
+  'proof_integrity_rejected',
+  'proof_verified',
+  'known_proof_verified',
+  'proof_registration_duplicate',
+  'novel_proof_discovered',
+  'proof_dependency_added',
+  'proof_check_complete',
+];
 
 function CompilerLogs() {
   const [metrics, setMetrics] = useState({
@@ -85,6 +106,17 @@ function CompilerLogs() {
       loadMetrics(); // Refresh metrics on declines
     };
 
+    const handleManualProofEvent = (eventName, data = {}) => {
+      const isCurrentPaperProof = data.source_type === 'paper'
+        && data.source_id === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID;
+      const isAggregatorProofOnly = data.source_type === 'brainstorm'
+        && data.source_id === MANUAL_AGGREGATOR_PROOF_SOURCE_ID;
+      if (!isCurrentPaperProof && !isAggregatorProofOnly) {
+        return;
+      }
+      addEvent({ type: eventName, data });
+    };
+
     // Handler for critique progress to update stats display
     const handleCritiqueProgress = (data) => {
       setCritiqueStats({
@@ -140,6 +172,10 @@ function CompilerLogs() {
     // Wolfram Alpha tool call events (Phase 3) - main writer invoked Wolfram
     websocket.on('compiler_wolfram_call', handleCompilerEvent);
 
+    const manualProofUnsubscribers = MANUAL_PROOF_EVENTS.map((eventName) => (
+      websocket.on(eventName, (data) => handleManualProofEvent(eventName, data))
+    ));
+
     return () => {
       clearInterval(interval);
       clearInterval(recoveryInterval);
@@ -174,6 +210,8 @@ function CompilerLogs() {
 
       // Wolfram tool cleanup
       websocket.off('compiler_wolfram_call', handleCompilerEvent);
+
+      manualProofUnsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, []);
 
@@ -330,6 +368,48 @@ function CompilerLogs() {
       const previewSuffix = preview ? ` - ${preview}` : '';
       return `[Wolfram ${n}/${cap}] ${query}${previewSuffix}`;
     }
+    if (type === 'proof_check_started') {
+      return 'Proof check started for the current manual Compiler paper';
+    }
+    if (type === 'proof_check_no_candidates') {
+      return 'No formal theorem candidates found in the current manual Compiler paper';
+    }
+    if (type === 'proof_check_candidates_found') {
+      return `Proof candidates found: ${data.count || 0}`;
+    }
+    if (type === 'proof_attempt_started') {
+      return `Lean proof attempt started: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+    }
+    if (type === 'proof_lean_accepted') {
+      return `Lean accepted proof: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+    }
+    if (type === 'proof_attempt_failed') {
+      return `Proof attempt failed: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+    }
+    if (type === 'proof_attempts_exhausted') {
+      return `Proof attempts exhausted: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+    }
+    if (type === 'proof_integrity_rejected') {
+      return `Proof integrity rejected: ${data.reason || data.message || data.theorem_name || 'candidate'}`;
+    }
+    if (type === 'proof_verified') {
+      return `Proof verified: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+    }
+    if (type === 'known_proof_verified') {
+      return `Known proof verified: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+    }
+    if (type === 'proof_registration_duplicate') {
+      return `Duplicate proof reused: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+    }
+    if (type === 'novel_proof_discovered') {
+      return `Novel proof discovered: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+    }
+    if (type === 'proof_dependency_added') {
+      return `Proof dependency added: ${data.theorem_name || data.proof_label || data.proof_id || 'verified proof'}`;
+    }
+    if (type === 'proof_check_complete') {
+      return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
+    }
     if (type === 'hung_connection_alert') {
       const model = data.model || 'model';
       const provider = data.provider || 'provider';
@@ -339,6 +419,17 @@ function CompilerLogs() {
 
     // Default: show raw JSON
     return JSON.stringify(data, null, 2);
+  };
+
+  const getCompilerActivityClass = (eventName = '', item = {}) => {
+    if (eventName === 'proof_check_complete') {
+      const data = item?.data || {};
+      if (data.message) {
+        return 'activity-reject';
+      }
+      return (data.verified_count || data.novel_count) ? 'activity-success' : 'activity-info';
+    }
+    return getActivityClass(eventName, item);
   };
 
   const chronologicalEvents = events.slice().reverse();
@@ -478,7 +569,7 @@ function CompilerLogs() {
             getEventName={(event) => event.type || ''}
             getMessage={formatEventDisplay}
             getTimestamp={(event) => event.fullTimestamp || event.timestamp}
-            getClassName={getActivityClass}
+            getClassName={getCompilerActivityClass}
             getIcon={getActivityIcon}
             headerAction={(
               <button onClick={clearEventsLog} className="btn-clear">

@@ -1,6 +1,6 @@
 """
 Persistent event log for aggregator.
-Stores key events (acceptances, rejections, cleanup removals) to file.
+Stores user-visible manual Aggregator activity to file.
 """
 import aiofiles
 import json
@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 class EventLog:
     """
     Persistent event log for aggregator.
-    Stores key events to file for persistence across restarts.
+    Stores user-visible run events to file for persistence across restarts
+    and tab switches.
     """
     
     def __init__(self):
@@ -44,7 +45,7 @@ class EventLog:
                                     self.events.append(event)
                                 except json.JSONDecodeError as e:
                                     logger.warning(f"Failed to parse event log line: {e}")
-                logger.info(f"Loaded {len(self.events)} events from event log")
+                logger.debug(f"Loaded {len(self.events)} events from event log")
             except Exception as e:
                 logger.error(f"Failed to load event log: {e}")
                 self.events = []
@@ -59,7 +60,7 @@ class EventLog:
         Add a key event to the log.
         
         Args:
-            event_type: Type of event (submission_accepted, submission_rejected, cleanup_submission_removed)
+            event_type: Type of event (system_started, new_submission, submission_accepted, etc.)
             message: Human-readable message
             metadata: Optional additional data (submitter_id, submission_number, etc.)
         """

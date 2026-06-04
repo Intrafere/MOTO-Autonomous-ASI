@@ -7,6 +7,8 @@ import {
 } from '../utils/autonomousProfiles';
 
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
+export const MANUAL_AGGREGATOR_PROOF_SOURCE_ID = 'manual_aggregator';
+export const MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID = 'manual_compiler_current';
 
 function isDeveloperModeEnabled() {
   return localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === 'true';
@@ -28,6 +30,16 @@ function toPositiveInteger(value) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null;
 }
 
+function readStoredJson(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.warn(`Failed to read ${key}:`, error);
+    return null;
+  }
+}
+
 function roleFromSubmitterConfig(config = {}) {
   const superchargeAllowed = isDeveloperModeEnabled();
   return {
@@ -39,6 +51,34 @@ function roleFromSubmitterConfig(config = {}) {
     context_window: toPositiveInteger(config.contextWindow ?? config.context_window),
     max_output_tokens: toPositiveInteger(config.maxOutputTokens ?? config.max_output_tokens),
     supercharge_enabled: superchargeAllowed && Boolean(config.superchargeEnabled ?? config.supercharge_enabled),
+  };
+}
+
+function roleFromAggregatorValidatorSettings(settings = {}) {
+  const superchargeAllowed = isDeveloperModeEnabled();
+  return {
+    provider: normalizeProvider(settings.validatorProvider),
+    model_id: settings.validatorModel || settings.validator_model || '',
+    openrouter_provider: settings.validatorOpenrouterProvider ?? settings.validator_openrouter_provider ?? null,
+    openrouter_reasoning_effort: settings.validatorOpenrouterReasoningEffort ?? settings.validator_openrouter_reasoning_effort ?? 'auto',
+    lm_studio_fallback_id: settings.validatorLmStudioFallback ?? settings.validator_lm_studio_fallback ?? null,
+    context_window: toPositiveInteger(settings.validatorContextSize ?? settings.validator_context_size),
+    max_output_tokens: toPositiveInteger(settings.validatorMaxOutput ?? settings.validator_max_output_tokens),
+    supercharge_enabled: superchargeAllowed && Boolean(settings.validatorSuperchargeEnabled ?? settings.validator_supercharge_enabled),
+  };
+}
+
+function roleFromCompilerSettings(settings = {}, prefix) {
+  const superchargeAllowed = isDeveloperModeEnabled();
+  return {
+    provider: normalizeProvider(settings[`${prefix}Provider`]),
+    model_id: settings[`${prefix}Model`] || '',
+    openrouter_provider: settings[`${prefix}OpenrouterProvider`] ?? null,
+    openrouter_reasoning_effort: settings[`${prefix}OpenrouterReasoningEffort`] ?? 'auto',
+    lm_studio_fallback_id: settings[`${prefix}LmStudioFallback`] ?? null,
+    context_window: toPositiveInteger(settings[`${prefix}ContextSize`]),
+    max_output_tokens: toPositiveInteger(settings[`${prefix}MaxOutput`]),
+    supercharge_enabled: superchargeAllowed && Boolean(settings[`${prefix}SuperchargeEnabled`]),
   };
 }
 
@@ -71,6 +111,41 @@ export function buildCurrentProofRuntimeConfig() {
   }
 }
 
+export function buildManualAggregatorProofRuntimeConfig() {
+  const settings = {
+    ...(readStoredJson('aggregatorConfig') || {}),
+    ...(readStoredJson('aggregator_settings') || {}),
+  };
+  const firstSubmitter = roleFromSubmitterConfig(settings.submitterConfigs?.[0]);
+  const validator = roleFromAggregatorValidatorSettings(settings);
+  return {
+    brainstorm: firstSubmitter,
+    paper: firstSubmitter,
+    validator,
+  };
+}
+
+export function buildManualCompilerProofRuntimeConfig() {
+  const settings = readStoredJson('compiler_settings') || {};
+  const highContext = roleFromCompilerSettings(settings, 'highContext');
+  const validator = roleFromCompilerSettings(settings, 'validator');
+  return {
+    brainstorm: highContext,
+    paper: highContext,
+    validator,
+  };
+}
+
+export function buildProofRuntimeConfigForSource(sourceType, sourceId) {
+  if (sourceType === 'brainstorm' && sourceId === MANUAL_AGGREGATOR_PROOF_SOURCE_ID) {
+    return buildManualAggregatorProofRuntimeConfig();
+  }
+  if (sourceType === 'paper' && sourceId === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID) {
+    return buildManualCompilerProofRuntimeConfig();
+  }
+  return buildCurrentProofRuntimeConfig();
+}
+
 export function isProofRuntimeConfigComplete(config) {
   return Boolean(
     config?.brainstorm?.model_id &&
@@ -82,6 +157,38 @@ export function isProofRuntimeConfigComplete(config) {
     config?.validator?.model_id &&
     config?.validator?.context_window &&
     config?.validator?.max_output_tokens
+  );
+}
+
+function hasProofRuntimeConfigForSource(sourceType, sourceId) {
+  return isProofRuntimeConfigComplete(buildProofRuntimeConfigForSource(sourceType, sourceId));
+}
+
+function getLeanRuntimeUnavailableMessage(proofStatus) {
+  if (!proofStatus?.lean4_enabled) {
+    return 'Lean 4 proof checks are disabled.';
+  }
+
+  const version = (proofStatus.lean4_version || proofStatus.lean_version || '').trim().toLowerCase();
+  const versionUnavailable = (
+    !version ||
+    version.includes('not found') ||
+    version.includes('no such file') ||
+    version.includes('not recognized')
+  );
+  if (versionUnavailable) {
+    return 'Lean 4 executable is not available.';
+  }
+  if (!proofStatus.workspace_ready) {
+    return 'Lean 4 workspace is not ready yet.';
+  }
+  return '';
+}
+
+function canUseLocalProofRuntimeConfig(proofStatus, sourceType, sourceId) {
+  return (
+    hasProofRuntimeConfigForSource(sourceType, sourceId) &&
+    !getLeanRuntimeUnavailableMessage(proofStatus)
   );
 }
 
@@ -106,6 +213,33 @@ export function useProofCheckRuntime() {
   useEffect(() => {
     refreshProofStatus();
   }, [refreshProofStatus]);
+
+  useEffect(() => {
+    const handleRefresh = () => {
+      refreshProofStatus();
+    };
+
+    window.addEventListener('focus', handleRefresh);
+    document.addEventListener('visibilitychange', handleRefresh);
+
+    return () => {
+      window.removeEventListener('focus', handleRefresh);
+      document.removeEventListener('visibilitychange', handleRefresh);
+    };
+  }, [refreshProofStatus]);
+
+  useEffect(() => {
+    const shouldPollProofStatus = (
+      !proofStatus ||
+      (proofStatus.lean4_enabled && Boolean(getLeanRuntimeUnavailableMessage(proofStatus)))
+    );
+    if (!shouldPollProofStatus) {
+      return undefined;
+    }
+
+    const interval = setInterval(refreshProofStatus, 5000);
+    return () => clearInterval(interval);
+  }, [proofStatus, refreshProofStatus]);
 
   useEffect(() => {
     const unsubscribeStarted = websocket.on('proof_check_started', (data) => {
@@ -174,7 +308,7 @@ export function useProofCheckRuntime() {
     }));
 
     try {
-      const proofRuntimeConfig = buildCurrentProofRuntimeConfig();
+      const proofRuntimeConfig = buildProofRuntimeConfigForSource(sourceType, sourceId);
       return await autonomousAPI.runProofCheck({
         sourceType,
         sourceId,
@@ -213,6 +347,32 @@ export function useProofCheckRuntime() {
 
   const currentProofRuntimeConfig = buildCurrentProofRuntimeConfig();
   const hasCurrentProofRuntimeConfig = isProofRuntimeConfigComplete(currentProofRuntimeConfig);
+  const currentLocalRuntimeReady = hasCurrentProofRuntimeConfig && !getLeanRuntimeUnavailableMessage(proofStatus);
+
+  const canQueueManualProofCheck = useCallback((sourceType, sourceId) => Boolean(
+    proofStatus?.lean4_enabled &&
+    (proofStatus?.manual_check_ready || canUseLocalProofRuntimeConfig(proofStatus, sourceType, sourceId))
+  ), [proofStatus]);
+
+  const getManualCheckReason = useCallback((sourceType, sourceId) => {
+    if (!proofStatus) {
+      return 'Loading proof runtime status...';
+    }
+    if (!proofStatus.lean4_enabled) {
+      return 'Lean 4 proof checks are disabled.';
+    }
+    if (!proofStatus.manual_check_ready) {
+      const localRuntimeConfig = hasProofRuntimeConfigForSource(sourceType, sourceId);
+      const runtimeMessage = getLeanRuntimeUnavailableMessage(proofStatus);
+      if (localRuntimeConfig && runtimeMessage) {
+        return runtimeMessage;
+      }
+      if (!localRuntimeConfig) {
+        return proofStatus.manual_check_message || 'Manual proof checks are not ready yet.';
+      }
+    }
+    return '';
+  }, [proofStatus]);
 
   const manualCheckReason = useMemo(() => {
     if (!proofStatus) {
@@ -221,8 +381,14 @@ export function useProofCheckRuntime() {
     if (!proofStatus.lean4_enabled) {
       return 'Lean 4 proof checks are disabled.';
     }
-    if (!proofStatus.manual_check_ready && !hasCurrentProofRuntimeConfig) {
-      return proofStatus.manual_check_message || 'Manual proof checks are not ready yet.';
+    if (!proofStatus.manual_check_ready) {
+      const runtimeMessage = getLeanRuntimeUnavailableMessage(proofStatus);
+      if (hasCurrentProofRuntimeConfig && runtimeMessage) {
+        return runtimeMessage;
+      }
+      if (!hasCurrentProofRuntimeConfig) {
+        return proofStatus.manual_check_message || 'Manual proof checks are not ready yet.';
+      }
     }
     return '';
   }, [proofStatus, hasCurrentProofRuntimeConfig]);
@@ -234,9 +400,11 @@ export function useProofCheckRuntime() {
     queueManualProofCheck,
     getSourceState,
     isSourceBusy,
+    canQueueManualProofCheck,
+    getManualCheckReason,
     manualCheckEnabled: Boolean(
       proofStatus?.lean4_enabled &&
-      (proofStatus?.manual_check_ready || hasCurrentProofRuntimeConfig)
+      (proofStatus?.manual_check_ready || currentLocalRuntimeReady)
     ),
     manualCheckReason,
   };

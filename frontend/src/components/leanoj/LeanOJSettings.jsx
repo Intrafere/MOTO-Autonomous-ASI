@@ -243,6 +243,7 @@ export default function LeanOJSettings({
   const [modelProviders, setModelProviders] = useState(settings.modelProviders || {});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
+  const [openAICodexModelError, setOpenAICodexModelError] = useState('');
   const [userProfiles, setUserProfiles] = useState({});
   const [selectedProfile, setSelectedProfile] = useState(settings.selectedProfile || '');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -280,12 +281,21 @@ export default function LeanOJSettings({
         setHasOpenAICodexLogin(configured);
         if (configured) {
           const codexModels = await cloudAccessAPI.getOpenAICodexModels();
-          setOpenAICodexModels(codexModels.models || []);
+          const models = codexModels.models || [];
+          setOpenAICodexModels(models);
+          setHasOpenAICodexLogin(models.length > 0);
+          setOpenAICodexModelError(models.length > 0
+            ? ''
+            : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
+          );
+        } else {
+          setOpenAICodexModelError('');
         }
       } catch (error) {
         console.error('Failed to load OpenAI Codex state for Proof Solver:', error);
         setHasOpenAICodexLogin(false);
         setOpenAICodexModels([]);
+        setOpenAICodexModelError(`OpenAI Codex OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
       }
 
       if (lmStudioEnabled) {
@@ -728,6 +738,12 @@ export default function LeanOJSettings({
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {openAICodexModelError && (
+        <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+          {openAICodexModelError}
         </div>
       )}
 

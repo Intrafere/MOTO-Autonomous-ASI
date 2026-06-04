@@ -941,7 +941,7 @@ class Lean4Client:
             ).strip()
         return error_slice, failing_tactic_index
 
-    async def check_proof(self, lean_code: str, timeout: int = 120, *, allow_placeholders: bool = False) -> Lean4Result:
+    async def check_proof(self, lean_code: str, timeout: int = 600, *, allow_placeholders: bool = False) -> Lean4Result:
         """Write a temp Lean file, run Lean 4, and return structured feedback."""
         if not system_config.lean4_enabled:
             return Lean4Result(success=False, error_output="Lean 4 is disabled in system configuration.")
@@ -1039,7 +1039,7 @@ class Lean4Client:
         self,
         theorem_header: str,
         tactic_list: list[str],
-        timeout: int = 120,
+        timeout: int = 600,
     ) -> Lean4Result:
         """Compile-check a theorem header plus tactic list using the standard Lean subprocess path.
 
@@ -1699,7 +1699,7 @@ class Lean4LspClient(Lean4Client):
                 if temp_path.exists():
                     await asyncio.to_thread(temp_path.unlink)
 
-    async def check_proof(self, lean_code: str, timeout: int = 120, *, allow_placeholders: bool = False) -> Lean4Result:
+    async def check_proof(self, lean_code: str, timeout: int = 600, *, allow_placeholders: bool = False) -> Lean4Result:
         """Check a proof through the persistent Lean LSP when healthy, otherwise fall back."""
         if not system_config.lean4_enabled:
             return Lean4Result(success=False, error_output="Lean 4 is disabled in system configuration.")
@@ -1751,7 +1751,7 @@ class Lean4LspClient(Lean4Client):
         self,
         theorem_header: str,
         tactic_list: list[str],
-        timeout: int = 120,
+        timeout: int = 600,
     ) -> Lean4Result:
         """Check a tactic script through the persistent Lean LSP when healthy, otherwise fall back.
 
