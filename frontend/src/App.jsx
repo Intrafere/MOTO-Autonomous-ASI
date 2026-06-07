@@ -2873,7 +2873,7 @@ function App() {
       hasUsableLmStudioChatModel,
       hasLmStudioEmbeddingModel,
     } = await syncProviderAvailability();
-    if (keyPresent) {
+    if (keyPresent || cloudAccessPresent) {
       return;
     }
 

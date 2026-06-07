@@ -388,6 +388,10 @@ class CompilerCoordinator:
             self._current_paper_id or "",
             self._current_rigor_proof_source_title or compiler_prompt,
         )
+        self.high_param_submitter.set_rigor_proof_source(
+            self._current_paper_id or "",
+            self._current_rigor_proof_source_title or compiler_prompt,
+        )
         await self.high_param_submitter.initialize()
         # Set up task tracking callback for workflow panel integration
         self.high_param_submitter.set_task_tracking_callback(self._handle_task_event)

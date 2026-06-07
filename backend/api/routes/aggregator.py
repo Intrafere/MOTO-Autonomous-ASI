@@ -80,6 +80,30 @@ def _require_valid_role_limits(context_window: int, max_output_tokens: int, labe
         )
 
 
+def _require_positive_setting(value: int, label: str) -> int:
+    """Reject missing context/max-output settings before workflow state mutates."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be configured as a positive integer in Settings.",
+        )
+    return parsed
+
+
+def _require_valid_role_limits(context_window: int, max_output_tokens: int, label: str) -> None:
+    context = _require_positive_setting(context_window, f"{label} context window")
+    max_tokens = _require_positive_setting(max_output_tokens, f"{label} max output tokens")
+    if max_tokens >= context:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} max output tokens must be smaller than its context window.",
+        )
+
+
 def _get_start_conflict() -> Optional[str]:
     """Return a user-facing conflict message if another workflow is active."""
     if coordinator.is_running:

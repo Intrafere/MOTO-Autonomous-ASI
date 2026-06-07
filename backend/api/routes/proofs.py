@@ -205,6 +205,17 @@ def _schedule_lean4_warm_start(client) -> None:
     asyncio.create_task(_warm_start())
 
 
+def _schedule_lean4_warm_start(client) -> None:
+    """Warm the Lean workspace without blocking a settings/status request."""
+    async def _warm_start() -> None:
+        try:
+            await client.warm_start()
+        except Exception as exc:  # pragma: no cover - defensive background task
+            logger.warning("Lean 4 client warm start failed: %s", exc)
+
+    asyncio.create_task(_warm_start())
+
+
 def _safe_path_label(path_value: str) -> str:
     """Return a display-safe basename instead of an absolute local path."""
     text = str(path_value or "").strip()
