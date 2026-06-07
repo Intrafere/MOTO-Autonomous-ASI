@@ -10,6 +10,7 @@ from backend.api.routes import cloud_access as cloud_access_route
 from backend.api.routes import features as features_route
 from backend.shared import secret_store
 from backend.shared.openai_codex_client import OpenAICodexAuthError, OpenAICodexClient
+from backend.shared.xai_grok_client import XAIGrokClient, XAIGrokRequestError
 
 
 def _jwt(payload: dict) -> str:
@@ -172,7 +173,7 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(models[0]["effective_input_context_window"], 258400)
         self.assertEqual(models[0]["max_output_tokens"], 128000)
 
-    async def test_list_models_fallback_does_not_invent_160k_limits(self) -> None:
+    async def test_list_models_returns_empty_catalog_without_guessing_models(self) -> None:
         client = OpenAICodexClient()
 
         class FakeHttp:
@@ -189,10 +190,56 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
             models = await client.list_models()
 
-        by_id = {model["id"]: model for model in models}
-        self.assertEqual(by_id["gpt-5.5"]["context_length"], 400000)
-        self.assertEqual(by_id["gpt-5.5"]["max_output_tokens"], 128000)
-        self.assertNotIn("context_length", by_id["gpt-5.4"])
+        self.assertEqual(models, [])
+
+    async def test_list_models_retries_with_newer_stored_token_after_revocation(self) -> None:
+        client = OpenAICodexClient()
+        old_tokens = {"access_token": "old-access", "refresh_token": "refresh"}
+        new_tokens = {"access_token": "new-access", "refresh_token": "refresh"}
+
+        class FakeResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self._payload
+
+        class FakeHttp:
+            def __init__(self):
+                self.auth_headers = []
+
+            async def get(self, url, headers=None):
+                self.auth_headers.append(headers.get("Authorization"))
+                if len(self.auth_headers) == 1:
+                    return FakeResponse(
+                        401,
+                        {
+                            "error": {
+                                "message": "Encountered invalidated oauth token for user, failing request",
+                                "code": "token_revoked",
+                            },
+                            "status": 401,
+                        },
+                    )
+                return FakeResponse(
+                    200,
+                    {"models": [{"slug": "gpt-5.5", "title": "GPT-5.5"}]},
+                )
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value=old_tokens),
+            mock.patch.object(client, "load_tokens", return_value=new_tokens),
+            mock.patch.object(client, "refresh_tokens", wraps=client.refresh_tokens) as refresh_mock,
+        ):
+            models = await client.list_models()
+
+        self.assertEqual(fake_http.auth_headers, ["Bearer old-access", "Bearer new-access"])
+        self.assertEqual(refresh_mock.await_count, 0)
+        self.assertEqual(models[0]["id"], "gpt-5.5")
 
     async def test_generate_completion_omits_unsupported_codex_request_knobs(self) -> None:
         client = OpenAICodexClient()
@@ -280,13 +327,309 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(fake_http.calls, 2)
         self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
 
+    async def test_generate_completion_retries_with_newer_stored_token_after_revocation(self) -> None:
+        client = OpenAICodexClient()
+        old_tokens = {"access_token": "old-access", "refresh_token": "refresh"}
+        new_tokens = {"access_token": "new-access", "refresh_token": "refresh"}
+
+        class FakeResponse:
+            def __init__(self, status_code, text):
+                self.status_code = status_code
+                self.text = text
+
+        class FakeHttp:
+            def __init__(self):
+                self.auth_headers = []
+
+            async def post(self, url, json=None, headers=None):
+                self.auth_headers.append(headers.get("Authorization"))
+                if len(self.auth_headers) == 1:
+                    return FakeResponse(
+                        401,
+                        json_module.dumps({
+                            "error": {
+                                "message": "Encountered invalidated oauth token for user, failing request",
+                                "code": "token_revoked",
+                            },
+                            "status": 401,
+                        }),
+                    )
+                return FakeResponse(
+                    200,
+                    json_module.dumps({
+                        "id": "resp_retry",
+                        "output_text": "recovered",
+                        "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                    }),
+                )
+
+        json_module = json
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value=old_tokens),
+            mock.patch.object(client, "load_tokens", return_value=new_tokens),
+            mock.patch.object(client, "refresh_tokens", wraps=client.refresh_tokens) as refresh_mock,
+        ):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+            )
+
+        self.assertEqual(fake_http.auth_headers, ["Bearer old-access", "Bearer new-access"])
+        self.assertEqual(refresh_mock.await_count, 0)
+        self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+
+    async def test_generate_completion_refreshes_current_token_after_revocation(self) -> None:
+        client = OpenAICodexClient()
+        old_tokens = {"access_token": "old-access", "refresh_token": "refresh"}
+        refreshed_tokens = {"access_token": "fresh-access", "refresh_token": "refresh"}
+
+        class FakeResponse:
+            def __init__(self, status_code, text):
+                self.status_code = status_code
+                self.text = text
+
+        class FakeHttp:
+            def __init__(self):
+                self.auth_headers = []
+
+            async def post(self, url, json=None, headers=None):
+                self.auth_headers.append(headers.get("Authorization"))
+                if len(self.auth_headers) == 1:
+                    return FakeResponse(
+                        401,
+                        json_module.dumps({
+                            "error": {
+                                "message": "Encountered invalidated oauth token for user, failing request",
+                                "code": "token_revoked",
+                            },
+                            "status": 401,
+                        }),
+                    )
+                return FakeResponse(
+                    200,
+                    json_module.dumps({
+                        "id": "resp_retry",
+                        "output_text": "recovered",
+                        "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                    }),
+                )
+
+        json_module = json
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value=old_tokens),
+            mock.patch.object(client, "load_tokens", return_value=old_tokens),
+            mock.patch.object(client, "refresh_tokens", return_value=refreshed_tokens) as refresh_mock,
+        ):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+            )
+
+        self.assertEqual(fake_http.auth_headers, ["Bearer old-access", "Bearer fresh-access"])
+        self.assertEqual(refresh_mock.await_count, 1)
+        self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+
+
+class XAIGrokClientTests(IsolatedAsyncioTestCase):
+    def test_authorization_url_uses_pkce_and_loopback_callback(self) -> None:
+        verifier, challenge = XAIGrokClient.generate_pkce_pair()
+        url = XAIGrokClient.build_authorization_url(
+            code_challenge=challenge,
+            state="state-1",
+            nonce="nonce-1",
+            redirect_uri="http://127.0.0.1:56121/callback",
+        )
+
+        self.assertGreater(len(verifier), 40)
+        self.assertTrue(url.startswith("https://auth.x.ai/oauth2/authorize?"))
+        self.assertIn("client_id=", url)
+        self.assertIn("code_challenge=", url)
+        self.assertIn("code_challenge_method=S256", url)
+        self.assertIn("grok-cli%3Aaccess", url)
+        self.assertIn("api%3Aaccess", url)
+        self.assertIn("plan=generic", url)
+        self.assertIn("referrer=moto", url)
+        self.assertIn("state=state-1", url)
+        self.assertIn("nonce=nonce-1", url)
+
+    async def test_exchange_code_persists_normalized_tokens(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeHttp:
+            async def post(self, url, data=None, headers=None):
+                self.url = url
+                self.data = data
+                self.headers = headers
+
+                class Response:
+                    status_code = 200
+
+                    def json(self):
+                        return {
+                            "access_token": "access",
+                            "refresh_token": "refresh",
+                            "expires_in": 3600,
+                        }
+
+                return Response()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with mock.patch("backend.shared.xai_grok_client.store_xai_grok_oauth_tokens") as store_tokens:
+            status = await client.exchange_code(
+                code="code",
+                code_verifier="verifier",
+                code_challenge="challenge",
+            )
+
+        self.assertTrue(status["configured"])
+        self.assertEqual(fake_http.url, "https://auth.x.ai/oauth2/token")
+        self.assertEqual(fake_http.data["code_challenge"], "challenge")
+        self.assertEqual(fake_http.data["code_challenge_method"], "S256")
+        stored = store_tokens.call_args.args[0]
+        self.assertEqual(stored["provider"], "xai_grok_oauth")
+
+    async def test_list_models_normalizes_xai_catalog(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeHttp:
+            async def get(self, url, headers=None):
+                class Response:
+                    status_code = 200
+                    text = "{}"
+
+                    def json(self):
+                        return {
+                            "data": [
+                                {
+                                    "id": "grok-4.3",
+                                    "name": "Grok 4.3",
+                                    "context_length": 1000000,
+                                    "max_output_tokens": 131072,
+                                },
+                                {
+                                    "id": "grok-4.2",
+                                    "name": "Grok 4.2",
+                                },
+                                {
+                                    "id": "grok-4.20-multi-agent-0309",
+                                    "name": "Grok 4.20 Multi Agent",
+                                },
+                                {
+                                    "id": "grok-4-fast",
+                                    "name": "Grok 4 Fast",
+                                }
+                            ]
+                        }
+
+                return Response()
+
+        client.client = FakeHttp()
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            models = await client.list_models()
+
+        self.assertEqual(models[0]["id"], "grok-4.3")
+        self.assertEqual(models[0]["context_length"], 1000000)
+        self.assertEqual(models[0]["max_output_tokens"], 131072)
+        self.assertEqual(models[0]["pricing"]["prompt"], "subscription")
+        self.assertEqual(models[1]["id"], "grok-4.2")
+        self.assertEqual(models[1]["context_length"], 1000000)
+        self.assertEqual(models[1]["max_output_tokens"], 131072)
+        self.assertEqual(models[2]["id"], "grok-4-fast")
+        self.assertNotIn("context_length", models[2])
+        self.assertNotIn("max_output_tokens", models[2])
+        self.assertNotIn("grok-4.20-multi-agent-0309", [model["id"] for model in models])
+
+    async def test_generate_completion_rejects_xai_multi_agent_model_before_request(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeHttp:
+            async def post(self, url, json=None, headers=None):
+                raise AssertionError("multi-agent models should not be sent to chat completions")
+
+        client.client = FakeHttp()
+        with self.assertRaisesRegex(XAIGrokRequestError, "not supported by the OAuth chat-completions route"):
+            await client.generate_completion(
+                model="grok-4.20-multi-agent-0309",
+                messages=[{"role": "user", "content": "user"}],
+            )
+
+    async def test_generate_completion_uses_chat_completions_shape(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeHttp:
+            async def post(self, url, json=None, headers=None):
+                self.url = url
+                self.payload = json
+                self.headers = headers
+
+                class Response:
+                    status_code = 200
+                    text = "{}"
+
+                    def json(self):
+                        return {
+                            "id": "chatcmpl_1",
+                            "object": "chat.completion",
+                            "model": "grok-4.3",
+                            "choices": [
+                                {"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}
+                            ],
+                            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+                        }
+
+                return Response()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            response = await client.generate_completion(
+                model="grok-4.3",
+                messages=[{"role": "user", "content": "user"}],
+                max_tokens=100,
+                response_format={"type": "json_object"},
+                reasoning_effort="xhigh",
+            )
+
+        self.assertTrue(fake_http.url.endswith("/chat/completions"))
+        self.assertEqual(fake_http.payload["max_tokens"], 100)
+        self.assertEqual(fake_http.payload["response_format"]["type"], "json_object")
+        self.assertEqual(fake_http.payload["reasoning_effort"], "high")
+        self.assertEqual(response["choices"][0]["message"]["content"], "hello")
+
 
 class FeaturesContractTests(IsolatedAsyncioTestCase):
-    async def test_features_exposes_codex_oauth_capability(self) -> None:
+    async def test_features_exposes_desktop_oauth_capabilities(self) -> None:
         with mock.patch.object(features_route.system_config, "generic_mode", False):
             payload = await features_route.get_features()
         self.assertIn("openai_codex_oauth_available", payload)
         self.assertTrue(payload["openai_codex_oauth_available"])
+        self.assertIn("xai_grok_oauth_available", payload)
+        self.assertTrue(payload["xai_grok_oauth_available"])
+
+
+class CloudAccessStatusTests(IsolatedAsyncioTestCase):
+    async def test_status_survives_one_oauth_provider_status_failure(self) -> None:
+        async def fail_xai_status():
+            raise RuntimeError("corrupt token payload")
+
+        async def codex_status():
+            return {"configured": True, "email": "user@example.com"}
+
+        with (
+            mock.patch.object(cloud_access_route.system_config, "generic_mode", False),
+            mock.patch.object(cloud_access_route.openai_codex_client, "status", codex_status),
+            mock.patch.object(cloud_access_route.xai_grok_client, "status", fail_xai_status),
+        ):
+            payload = await cloud_access_route.get_cloud_access_status()
+
+        self.assertTrue(payload["providers"]["openai_codex_oauth"]["configured"])
+        self.assertFalse(payload["providers"]["xai_grok_oauth"]["configured"])
+        self.assertIn("status_error", payload["providers"]["xai_grok_oauth"])
 
 
 class CodexCallbackServerStateTests(IsolatedAsyncioTestCase):
@@ -376,6 +719,75 @@ class CodexCallbackServerStateTests(IsolatedAsyncioTestCase):
         self.assertTrue(fake_server.closed)
         self.assertTrue(fake_server.waited)
         self.assertIsNone(cloud_access_route._CODEX_CALLBACK_SERVER_STATE.server)
+
+
+class XAIGrokCallbackServerStateTests(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        cloud_access_route._XAI_GROK_CALLBACK_SERVER_STATE.server = None
+        cloud_access_route._PENDING_XAI_GROK_OAUTH.clear()
+
+    async def asyncTearDown(self) -> None:
+        server = cloud_access_route._XAI_GROK_CALLBACK_SERVER_STATE.server
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        cloud_access_route._XAI_GROK_CALLBACK_SERVER_STATE.server = None
+        cloud_access_route._PENDING_XAI_GROK_OAUTH.clear()
+
+    def test_callback_binding_uses_configured_redirect_uri(self) -> None:
+        with mock.patch.object(
+            cloud_access_route.xai_grok_client,
+            "DEFAULT_REDIRECT_URI",
+            "http://localhost:61234/custom-callback",
+        ):
+            host, port, path = cloud_access_route._xai_grok_callback_binding()
+
+        self.assertEqual(host, "localhost")
+        self.assertEqual(port, 61234)
+        self.assertEqual(path, "/custom-callback")
+
+    async def test_callback_server_binds_to_configured_redirect_uri(self) -> None:
+        class FakeServer:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def is_serving(self) -> bool:
+                return not self.closed
+
+            def close(self) -> None:
+                self.closed = True
+
+            async def wait_closed(self) -> None:
+                return None
+
+        calls = []
+
+        async def fake_start_server(*args, **kwargs):
+            calls.append(kwargs)
+            return FakeServer()
+
+        with (
+            mock.patch.object(
+                cloud_access_route.xai_grok_client,
+                "DEFAULT_REDIRECT_URI",
+                "http://localhost:61234/custom-callback",
+            ),
+            mock.patch.object(cloud_access_route.asyncio, "start_server", side_effect=fake_start_server),
+        ):
+            result = await cloud_access_route._ensure_xai_grok_callback_server()
+
+        self.assertTrue(result)
+        self.assertEqual(calls[0]["host"], "localhost")
+        self.assertEqual(calls[0]["port"], 61234)
+
+    def test_callback_binding_rejects_non_loopback_redirect_uri(self) -> None:
+        with mock.patch.object(
+            cloud_access_route.xai_grok_client,
+            "DEFAULT_REDIRECT_URI",
+            "https://example.com/callback",
+        ):
+            with self.assertRaises(ValueError):
+                cloud_access_route._xai_grok_callback_binding()
 
 
 class CodexSecretStoreTests(IsolatedAsyncioTestCase):

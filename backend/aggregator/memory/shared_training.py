@@ -147,7 +147,6 @@ class SharedTrainingMemory:
                         else:
                             self.submission_count = 0
                 
-                logger.info(f"Reloaded {len(self.insights)} insights from {self.file_path} (submission count: {self.submission_count})")
             else:
                 logger.info(f"Brainstorm database file doesn't exist yet: {self.file_path}")
 

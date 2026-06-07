@@ -39,6 +39,16 @@ class ModelErrorUtilsTests(unittest.TestCase):
         self.assertTrue(is_transient_model_call_error(exc))
         self.assertFalse(is_non_retryable_model_error(exc))
 
+    def test_xai_grok_gateway_timeout_with_missing_fallback_is_transient(self) -> None:
+        exc = RuntimeError(
+            "xAI Grok failed for role 'autonomous_proof_formalization_brainstorm' "
+            "and no LM Studio fallback is configured: xAI Grok connection failed after 3 attempts: "
+            "HTTP 503: upstream provider timeout"
+        )
+
+        self.assertTrue(is_transient_model_call_error(exc))
+        self.assertFalse(is_non_retryable_model_error(exc))
+
     def test_openrouter_missing_fallback_remains_non_retryable(self) -> None:
         exc = RuntimeError(
             "OpenRouter error for role 'agg_sub1': upstream connect error "

@@ -1327,6 +1327,62 @@
   display: block;
 }
 
+/* OAuth provider tag */
+.model-item--oa:hover,
+.model-item--oa:focus-within {
+  z-index: 50;
+}
+
+.oa-tag {
+  background: linear-gradient(135deg, #7ddf93, #2fa84f);
+  color: #ffffff;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.35rem;
+  border-radius: 3px;
+  line-height: 1;
+  user-select: none;
+  cursor: default;
+  box-shadow: 0 1px 4px rgba(80, 200, 120, 0.45);
+}
+
+.oa-tag-tooltip-anchor {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
+  z-index: 3;
+  display: inline-block;
+}
+
+.oa-tag-tooltip-anchor--stacked {
+  top: 1.55rem;
+}
+
+.oa-tag-tooltip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 230px;
+  background: #0b2411;
+  border: 1px solid rgba(125, 223, 147, 0.55);
+  border-radius: 6px;
+  padding: 0.55rem 0.75rem;
+  color: #d6ffde;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 200;
+  white-space: normal;
+}
+
+.oa-tag-tooltip-anchor:hover .oa-tag-tooltip,
+.oa-tag-tooltip-anchor:focus .oa-tag-tooltip {
+  display: block;
+}
+
 /* Main settings content area */
 .autonomous-settings {
   flex: 1;

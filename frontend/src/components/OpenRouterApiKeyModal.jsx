@@ -1,5 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { cloudAccessAPI, openRouterAPI } from '../services/api';
+import {
+  CLOUD_ACCESS_PROVIDERS,
+  OPENAI_CODEX_PROVIDER,
+  XAI_GROK_PROVIDER,
+  chooseDefaultCloudAccessProvider,
+  getConfiguredCloudAccessProviders,
+} from '../utils/oauthProviders';
 import './settings-common.css';
 
 /**
@@ -38,8 +45,67 @@ export default function OpenRouterApiKeyModal({
     error: '',
   });
   const codexModelCheckRequestRef = React.useRef(0);
+  const [xaiStatus, setXaiStatus] = useState({ configured: false });
+  const [xaiLoading, setXaiLoading] = useState(false);
+  const [xaiState, setXaiState] = useState('');
+  const [xaiRedirectUri, setXaiRedirectUri] = useState('');
+  const [xaiCallbackInput, setXaiCallbackInput] = useState('');
+  const [xaiMessage, setXaiMessage] = useState('');
+  const [xaiLoginBaselineConfigured, setXaiLoginBaselineConfigured] = useState(false);
+  const [xaiLoginBaselineUpdatedAt, setXaiLoginBaselineUpdatedAt] = useState(0);
+  const [xaiModelsStatus, setXaiModelsStatus] = useState({
+    checking: false,
+    count: null,
+    error: '',
+  });
+  const xaiModelCheckRequestRef = React.useRef(0);
+  const [selectedOAuthProvider, setSelectedOAuthProvider] = useState(OPENAI_CODEX_PROVIDER);
+  const [oauthProviderTouched, setOauthProviderTouched] = useState(false);
   const genericMode = Boolean(capabilities?.genericMode);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const oauthStatusByProvider = {
+    [OPENAI_CODEX_PROVIDER]: codexStatus,
+    [XAI_GROK_PROVIDER]: xaiStatus,
+  };
+  const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
+  const codexOAuthSuccess = Boolean(
+    !genericMode
+    && codexStatus?.configured
+    && !codexModelsStatus.checking
+    && codexModelsStatus.count > 0
+    && !codexModelsStatus.error
+  );
+  const xaiOAuthSuccess = Boolean(
+    !genericMode
+    && xaiStatus?.configured
+    && !xaiModelsStatus.checking
+    && xaiModelsStatus.count > 0
+    && !xaiModelsStatus.error
+  );
+  const oauthSuccessBannerStyle = {
+    marginBottom: '1rem',
+    border: '2px solid #39ff14',
+    background: 'linear-gradient(135deg, rgba(24, 204, 23, 0.38), rgba(57, 255, 20, 0.18))',
+    boxShadow: '0 0 22px rgba(57, 255, 20, 0.45)',
+    color: '#eaffea',
+    fontWeight: 800,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
+  };
+  const getOAuthMessageBannerClass = (message) => {
+    if (!message) return 'test-result-banner';
+    if (message.includes('needs attention')) return 'test-result-banner test-result-banner--error';
+    if (message.includes('saved and model list loaded')) return 'test-result-banner test-result-banner--success';
+    return 'test-result-banner';
+  };
+
+  useEffect(() => {
+    if (!isOpen || oauthProviderTouched) return;
+    const nextProvider = chooseDefaultCloudAccessProvider(oauthStatusByProvider);
+    if (nextProvider !== selectedOAuthProvider) {
+      setSelectedOAuthProvider(nextProvider);
+    }
+  }, [isOpen, codexStatus?.configured, xaiStatus?.configured, oauthProviderTouched, selectedOAuthProvider]);
 
   const verifyCodexModels = async () => {
     if (genericMode) {
@@ -80,6 +146,45 @@ export default function OpenRouterApiKeyModal({
     }
   };
 
+  const verifyXAIGrokModels = async () => {
+    if (genericMode) {
+      xaiModelCheckRequestRef.current += 1;
+      setXaiModelsStatus({ checking: false, count: null, error: '' });
+      return false;
+    }
+
+    const requestId = xaiModelCheckRequestRef.current + 1;
+    xaiModelCheckRequestRef.current = requestId;
+    setXaiModelsStatus({ checking: true, count: null, error: '' });
+    try {
+      const result = await cloudAccessAPI.getXAIGrokModels();
+      if (xaiModelCheckRequestRef.current !== requestId) {
+        return null;
+      }
+      const models = Array.isArray(result.models) ? result.models : [];
+      if (models.length === 0) {
+        setXaiModelsStatus({
+          checking: false,
+          count: 0,
+          error: 'xAI Grok login is saved, but no Grok models were returned. Reconnect OAuth or check this account\'s SuperGrok/X Premium access.',
+        });
+        return false;
+      }
+      setXaiModelsStatus({ checking: false, count: models.length, error: '' });
+      return true;
+    } catch (err) {
+      if (xaiModelCheckRequestRef.current !== requestId) {
+        return null;
+      }
+      setXaiModelsStatus({
+        checking: false,
+        count: null,
+        error: `xAI Grok login is saved, but models could not be loaded: ${err.message || 'unknown error'}. Reconnect OAuth or check this account's SuperGrok/X Premium access.`,
+      });
+      return false;
+    }
+  };
+
   // Reset state when modal opens
   useEffect(() => {
     if (isOpen) {
@@ -91,6 +196,13 @@ export default function OpenRouterApiKeyModal({
       setCodexLoginBaselineUpdatedAt(0);
       codexModelCheckRequestRef.current += 1;
       setCodexModelsStatus({ checking: false, count: null, error: '' });
+      setXaiMessage('');
+      setXaiLoginBaselineConfigured(false);
+      setXaiLoginBaselineUpdatedAt(0);
+      xaiModelCheckRequestRef.current += 1;
+      setXaiModelsStatus({ checking: false, count: null, error: '' });
+      setOauthProviderTouched(false);
+      setSelectedOAuthProvider(chooseDefaultCloudAccessProvider(oauthStatusByProvider));
       let isCancelled = false;
 
       const loadKeyStatus = async () => {
@@ -121,6 +233,21 @@ export default function OpenRouterApiKeyModal({
             setCodexModelsStatus({ checking: false, count: null, error: '' });
           }
         }
+        try {
+          const status = await cloudAccessAPI.getXAIGrokStatus();
+          if (!isCancelled) {
+            const nextStatus = status.status || { configured: false };
+            setXaiStatus(nextStatus);
+            if (nextStatus.configured) {
+              verifyXAIGrokModels();
+            }
+          }
+        } catch {
+          if (!isCancelled) {
+            setXaiStatus({ configured: false });
+            setXaiModelsStatus({ checking: false, count: null, error: '' });
+          }
+        }
       };
 
       loadKeyStatus();
@@ -129,9 +256,11 @@ export default function OpenRouterApiKeyModal({
       return () => {
         isCancelled = true;
         codexModelCheckRequestRef.current += 1;
+        xaiModelCheckRequestRef.current += 1;
       };
     }
     codexModelCheckRequestRef.current += 1;
+    xaiModelCheckRequestRef.current += 1;
     setHasStoredKey(false);
     return undefined;
   }, [isOpen]);
@@ -170,6 +299,41 @@ export default function OpenRouterApiKeyModal({
     }, 2000);
     return () => window.clearInterval(interval);
   }, [isOpen, codexState, codexLoginBaselineConfigured, codexLoginBaselineUpdatedAt, onCloudAccessChanged]);
+
+  useEffect(() => {
+    if (!isOpen || !xaiState) return undefined;
+    const interval = window.setInterval(async () => {
+      try {
+        const status = await cloudAccessAPI.getXAIGrokStatus();
+        const nextStatus = status.status || { configured: false };
+        setXaiStatus(nextStatus);
+        const statusUpdatedAt = Number(nextStatus.updated_at || 0);
+        const loginCompleted = nextStatus.configured
+          && (
+            !xaiLoginBaselineConfigured
+            || (statusUpdatedAt > 0 && statusUpdatedAt > xaiLoginBaselineUpdatedAt)
+          );
+        if (loginCompleted) {
+          const modelsReady = await verifyXAIGrokModels();
+          if (modelsReady === null) {
+            return;
+          }
+          setXaiState('');
+          setXaiCallbackInput('');
+          setXaiMessage(modelsReady
+            ? 'xAI Grok login saved and model list loaded.'
+            : 'xAI Grok login saved, but model loading needs attention.'
+          );
+          if (onCloudAccessChanged) {
+            onCloudAccessChanged(true, 'xai_grok_oauth', { modelsReady });
+          }
+        }
+      } catch {
+        // Keep waiting; manual paste remains available.
+      }
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [isOpen, xaiState, xaiLoginBaselineConfigured, xaiLoginBaselineUpdatedAt, onCloudAccessChanged]);
 
   const handleTestConnection = async () => {
     if (!apiKey.trim()) {
@@ -319,12 +483,98 @@ export default function OpenRouterApiKeyModal({
     }
   };
 
+  const handleStartXaiLogin = async () => {
+    setXaiLoading(true);
+    setXaiMessage('');
+    setError('');
+    setXaiLoginBaselineConfigured(Boolean(xaiStatus?.configured));
+    setXaiLoginBaselineUpdatedAt(Number(xaiStatus?.updated_at || 0));
+    try {
+      const result = await cloudAccessAPI.startXAIGrokLogin();
+      setXaiState(result.state || '');
+      setXaiRedirectUri(result.redirect_uri || '');
+      if (result.authorization_url) {
+        window.open(result.authorization_url, '_blank', 'noopener,noreferrer');
+      }
+      setXaiMessage(result.callback_available
+        ? 'xAI Grok login opened. MOTO will capture the callback automatically; paste the callback URL or code below if the browser cannot return to MOTO.'
+        : 'xAI Grok login opened. The local callback port is unavailable, so paste the full callback URL or authorization code below after sign-in.'
+      );
+    } catch (err) {
+      setError(err.message || 'Failed to start xAI Grok login');
+    } finally {
+      setXaiLoading(false);
+    }
+  };
+
+  const handleCompleteXaiLogin = async () => {
+    if (!xaiCallbackInput.trim()) {
+      setError('Paste the xAI Grok callback URL or authorization code first');
+      return;
+    }
+    setXaiLoading(true);
+    setXaiMessage('');
+    setError('');
+    try {
+      const isUrl = /^https?:\/\//i.test(xaiCallbackInput.trim()) || xaiCallbackInput.trim().startsWith('?');
+      const result = await cloudAccessAPI.exchangeXAIGrokCode({
+        code: isUrl ? '' : xaiCallbackInput.trim(),
+        redirectUrl: isUrl ? xaiCallbackInput.trim() : '',
+        state: xaiState,
+        redirectUri: xaiRedirectUri || null,
+      });
+      setXaiStatus(result.status || { configured: true });
+      const modelsReady = await verifyXAIGrokModels();
+      if (modelsReady === null) {
+        return;
+      }
+      setXaiCallbackInput('');
+      setXaiState('');
+      setXaiMessage(modelsReady
+        ? 'xAI Grok login saved and model list loaded.'
+        : 'xAI Grok login saved, but model loading needs attention.'
+      );
+      if (onCloudAccessChanged) {
+        onCloudAccessChanged(true, 'xai_grok_oauth', { modelsReady });
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to complete xAI Grok login');
+    } finally {
+      setXaiLoading(false);
+    }
+  };
+
+  const handleClearXaiLogin = async () => {
+    setXaiLoading(true);
+    setXaiMessage('');
+    setError('');
+    xaiModelCheckRequestRef.current += 1;
+    try {
+      await cloudAccessAPI.clearXAIGrokLogin();
+      setXaiStatus({ configured: false });
+      setXaiCallbackInput('');
+      setXaiState('');
+      setXaiLoginBaselineConfigured(false);
+      setXaiLoginBaselineUpdatedAt(0);
+      setXaiModelsStatus({ checking: false, count: null, error: '' });
+      setXaiMessage('xAI Grok login cleared.');
+      if (onCloudAccessChanged) {
+        onCloudAccessChanged(false, 'xai_grok_oauth');
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to clear xAI Grok login');
+    } finally {
+      setXaiLoading(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   const reasonMessages = {
     setup: 'Configure cloud model access for MOTO roles.',
     startup_setup: 'Save cloud access credentials to unlock cloud models. MOTO will apply the recommended default profile immediately, and you can switch profiles later in Settings.',
-    startup_codex_oauth: 'Sign in with OpenAI Codex OAuth to use subscription-backed Codex models. MOTO will apply Codex-backed startup defaults immediately after login.',
+    startup_codex_oauth: 'OAuth providers are supplementary model providers. Configure OpenRouter or LM Studio first so RAG embeddings are available.',
+    startup_oauth: 'OAuth providers are supplementary model providers. Configure OpenRouter or LM Studio first so RAG embeddings are available.',
     lm_studio_unavailable: lmStudioEnabled
       ? 'LM Studio is not available. Configure cloud access to continue.'
       : 'This deployment disables LM Studio. Configure cloud access to continue.',
@@ -480,10 +730,38 @@ export default function OpenRouterApiKeyModal({
         </div>
 
         <div className="submitter-config-section" style={{ marginBottom: '1rem' }}>
-          <h3 style={{ marginTop: 0, color: '#fff', fontSize: '1rem' }}>OpenAI Codex Login (ChatGPT Subscription)</h3>
+          <h3 style={{ marginTop: 0, color: '#fff', fontSize: '1rem' }}>oAuth</h3>
           <p className="settings-hint">
-            Sign in with OpenAI Codex OAuth for subscription-backed Codex models. This is separate from regular OpenAI API-key billing.
+            Sign in with a subscription-backed OAuth provider for chat/model roles. OAuth is supplementary: RAG embeddings still require OpenRouter, LM Studio, or hosted FastEmbed.
           </p>
+          <div style={{ marginBottom: '1rem' }}>
+            <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+              OAuth Provider
+            </label>
+            <select
+              value={selectedOAuthProvider}
+              onChange={(event) => {
+                setOauthProviderTouched(true);
+                setSelectedOAuthProvider(event.target.value);
+              }}
+              className="input-dark"
+              disabled={genericMode}
+            >
+              {CLOUD_ACCESS_PROVIDERS.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.label}{oauthStatusByProvider[provider.id]?.configured ? ' (configured)' : ''}
+                </option>
+              ))}
+            </select>
+            {configuredOAuthProviders.length === 1 && (
+              <small className="hint-text hint-text--dim">
+                Auto-selected {configuredOAuthProviders[0].label} because it is the only configured OAuth login.
+              </small>
+            )}
+          </div>
+
+          {selectedOAuthProvider === OPENAI_CODEX_PROVIDER && (
+            <>
           {genericMode ? (
             <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
               OpenAI Codex login is desktop-only until hosted callback/proxy support is designed.
@@ -493,7 +771,7 @@ export default function OpenRouterApiKeyModal({
               className={`test-result-banner ${
                 codexModelsStatus.error
                   ? 'test-result-banner--error'
-                  : (codexModelsStatus.checking ? '' : 'test-result-banner--success')
+                  : (codexOAuthSuccess ? 'test-result-banner--success' : '')
               }`}
               style={{ marginBottom: '1rem' }}
             >
@@ -514,8 +792,8 @@ export default function OpenRouterApiKeyModal({
           )}
 
           {!codexModelsStatus.checking && codexModelsStatus.count > 0 && (
-            <div className="test-result-banner test-result-banner--success" style={{ marginBottom: '1rem' }}>
-              Codex model list loaded. {codexModelsStatus.count} model{codexModelsStatus.count === 1 ? '' : 's'} available.
+            <div className="test-result-banner test-result-banner--success" style={oauthSuccessBannerStyle}>
+              SUCCESS! OpenAI Codex OAuth connected. {codexModelsStatus.count} model{codexModelsStatus.count === 1 ? '' : 's'} available.
             </div>
           )}
 
@@ -527,7 +805,7 @@ export default function OpenRouterApiKeyModal({
 
           {codexMessage && (
             <div
-              className={`test-result-banner ${codexMessage.includes('needs attention') ? 'test-result-banner--error' : 'test-result-banner--success'}`}
+              className={getOAuthMessageBannerClass(codexMessage)}
               style={{ marginBottom: '1rem' }}
             >
               {codexMessage}
@@ -598,8 +876,134 @@ export default function OpenRouterApiKeyModal({
               </button>
             </div>
           )}
-        </div>
+            </>
+          )}
 
+          {selectedOAuthProvider === XAI_GROK_PROVIDER && (
+            <>
+              <h4 style={{ marginTop: '0.25rem', color: '#ff9f4a', fontSize: '0.95rem' }}>
+                xAI Grok Login (SuperGrok / X Premium)
+              </h4>
+              <p className="settings-hint">
+                Sign in with xAI Grok OAuth for subscription-backed Grok models. xAI Console API keys are separate and may use API billing/credits instead of your subscription.
+              </p>
+              {genericMode ? (
+                <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+                  xAI Grok login is desktop-only until hosted callback/proxy support is designed.
+                </div>
+              ) : xaiStatus?.configured ? (
+                <div
+                  className={`test-result-banner ${
+                    xaiModelsStatus.error
+                      ? 'test-result-banner--error'
+                      : (xaiOAuthSuccess ? 'test-result-banner--success' : '')
+                  }`}
+                  style={{ marginBottom: '1rem' }}
+                >
+                  {xaiModelsStatus.error
+                    ? `xAI Grok OAuth token saved${xaiStatus.email ? ` for ${xaiStatus.email}` : ''}, but model access is not verified.`
+                    : `xAI Grok login configured${xaiStatus.email ? ` for ${xaiStatus.email}` : ''}.`}
+                </div>
+              ) : (
+                <div className="test-result-banner" style={{ marginBottom: '1rem' }}>
+                  xAI Grok login is not configured.
+                </div>
+              )}
+
+              {xaiModelsStatus.checking && (
+                <div className="test-result-banner" style={{ marginBottom: '1rem' }}>
+                  Checking Grok model list...
+                </div>
+              )}
+
+              {!xaiModelsStatus.checking && xaiModelsStatus.count > 0 && (
+                <div className="test-result-banner test-result-banner--success" style={oauthSuccessBannerStyle}>
+                  SUCCESS! xAI Grok OAuth connected. {xaiModelsStatus.count} model{xaiModelsStatus.count === 1 ? '' : 's'} available.
+                </div>
+              )}
+
+              {!xaiModelsStatus.checking && xaiModelsStatus.error && (
+                <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+                  {xaiModelsStatus.error}
+                </div>
+              )}
+
+              {xaiMessage && (
+                <div
+                  className={getOAuthMessageBannerClass(xaiMessage)}
+                  style={{ marginBottom: '1rem' }}
+                >
+                  {xaiMessage}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
+                <button
+                  onClick={handleStartXaiLogin}
+                  disabled={xaiLoading || genericMode}
+                  style={{
+                    flex: 1,
+                    padding: '0.75rem 1rem',
+                    backgroundColor: '#333',
+                    border: '1px solid #444',
+                    borderRadius: '6px',
+                    color: '#fff',
+                    cursor: xaiLoading || genericMode ? 'not-allowed' : 'pointer',
+                    opacity: xaiLoading || genericMode ? 0.6 : 1,
+                    fontSize: '0.95rem',
+                  }}
+                >
+                  {xaiLoading ? 'Working...' : 'Start xAI Grok Login'}
+                </button>
+                {xaiStatus?.configured && (
+                  <button
+                    onClick={handleClearXaiLogin}
+                    disabled={xaiLoading}
+                    className="btn-ghost"
+                    style={{ flex: 1 }}
+                  >
+                    Clear Grok Login
+                  </button>
+                )}
+              </div>
+
+              {xaiState && (
+                <div style={{ marginTop: '1rem' }}>
+                  <label style={{ display: 'block', color: '#ccc', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+                    Callback URL or Authorization Code
+                  </label>
+                  <input
+                    type="password"
+                    value={xaiCallbackInput}
+                    onChange={(e) => setXaiCallbackInput(e.target.value)}
+                    placeholder="Paste callback URL or code from xAI login"
+                    className="input-dark"
+                    style={{ fontSize: '0.95rem' }}
+                  />
+                  <button
+                    onClick={handleCompleteXaiLogin}
+                    disabled={xaiLoading || !xaiCallbackInput.trim()}
+                    style={{
+                      width: '100%',
+                      marginTop: '0.75rem',
+                      padding: '0.75rem 1rem',
+                      backgroundColor: '#18cc17',
+                      border: 'none',
+                      borderRadius: '6px',
+                      color: '#fff',
+                      cursor: xaiLoading || !xaiCallbackInput.trim() ? 'not-allowed' : 'pointer',
+                      opacity: xaiLoading || !xaiCallbackInput.trim() ? 0.6 : 1,
+                      fontSize: '0.95rem',
+                      fontWeight: '500',
+                    }}
+                  >
+                    Complete xAI Grok Login
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
         {/* Error Message */}
         {error && (
           <div className="test-result-banner test-result-banner--error" style={{

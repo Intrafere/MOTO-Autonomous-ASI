@@ -43,11 +43,9 @@ import { websocket } from './services/websocket';
 import { api, autonomousAPI, cloudAccessAPI, compilerAPI, leanojAPI, openRouterAPI } from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
-  OPENAI_CODEX_STARTUP_CHOICE,
   RECOMMENDED_PROFILE_KEY,
   STARTUP_PROVIDER_CHOICE_STORAGE_KEY,
   applyAutonomousProfileSelection,
-  applyCodexStartupDefaults,
   applyLmStudioStartupDefaults,
   getStoredAutonomousSettings,
   settingsToAutonomousConfig,
@@ -61,6 +59,7 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from './utils/openRouterSelection';
+import { CLOUD_ACCESS_PROVIDERS, isCloudAccessProvider } from './utils/oauthProviders';
 
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
 const DEPRECATED_SCREEN_STATE_STORAGE_KEYS = [
@@ -84,12 +83,17 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   lmStudioEnabled: true,
   pdfDownloadAvailable: true,
   openAICodexOauthAvailable: true,
+  xaiGrokOauthAvailable: true,
   version: '',
   buildCommit: '',
   updateChannel: 'main',
   apiContractVersion: '',
 });
-const STARTUP_CLOUD_ACCESS_REASONS = new Set(['startup_setup', 'startup_codex_oauth']);
+const STARTUP_CLOUD_ACCESS_REASONS = new Set(['startup_setup', 'startup_codex_oauth', 'startup_oauth']);
+
+function hasConfiguredCloudAccessProvider(cloudStatus = {}) {
+  return CLOUD_ACCESS_PROVIDERS.some((provider) => Boolean(cloudStatus.providers?.[provider.id]?.configured));
+}
 
 function readDeveloperModeEnabled() {
   return localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === 'true';
@@ -189,6 +193,21 @@ function getUsableLoadedLmStudioChatModelId(loadedModels = []) {
   return '';
 }
 
+function isLmStudioStartupReady({
+  capabilities,
+  lmStudioAvailable,
+  lmStudioStatus,
+  startupChoice,
+}) {
+  return Boolean(
+    capabilities?.lmStudioEnabled !== false
+    && startupChoice === LM_STUDIO_STARTUP_CHOICE
+    && lmStudioAvailable
+    && lmStudioStatus?.has_usable_chat_model
+    && lmStudioStatus?.has_embedding_model
+  );
+}
+
 function normalizeFeaturesPayload(payload = {}) {
   const genericMode = Boolean(payload.generic_mode);
   return {
@@ -198,6 +217,9 @@ function normalizeFeaturesPayload(payload = {}) {
     openAICodexOauthAvailable: payload.openai_codex_oauth_available === undefined
       ? !genericMode
       : payload.openai_codex_oauth_available !== false,
+    xaiGrokOauthAvailable: payload.xai_grok_oauth_available === undefined
+      ? !genericMode
+      : payload.xai_grok_oauth_available !== false,
     version: payload.version || '',
     buildCommit: payload.build_commit || '',
     updateChannel: payload.update_channel || 'main',
@@ -307,6 +329,8 @@ function App() {
     error: null,
     usable_chat_model_id: '',
     has_usable_chat_model: false,
+    embedding_model_id: '',
+    has_embedding_model: false,
   });
   // Tri-state: null = unknown (backend unreachable / cold-start in progress),
   // true = key stored in backend, false = confirmed no key. The UI treats
@@ -651,6 +675,11 @@ function App() {
       has_models: false,
       model_count: 0,
       models: [],
+      has_embedding_model: false,
+      embedding_ready: false,
+      embedding_message: nextCapabilities.genericMode
+        ? 'LM Studio is intentionally disabled in this hosted deployment.'
+        : null,
       error: nextCapabilities.lmStudioEnabled
         ? null
         : (nextCapabilities.genericMode
@@ -669,18 +698,24 @@ function App() {
           has_models: false,
           model_count: 0,
           models: [],
+          has_embedding_model: false,
+          embedding_ready: false,
+          embedding_message: err.message || 'Failed to check LM Studio embedding availability.',
           error: err.message || 'Failed to check LM Studio availability.',
           generic_mode: nextCapabilities.genericMode,
         };
       }
     }
 
-    const usableLmStudioChatModelId = getUsableLoadedLmStudioChatModelId(lmResult.models || []);
+    const loadedLmStudioModels = lmResult.models || [];
+    const usableLmStudioChatModelId = getUsableLoadedLmStudioChatModelId(loadedLmStudioModels);
     const hasUsableLmStudioChatModel = Boolean(usableLmStudioChatModelId);
+    const hasLmStudioEmbeddingModel = Boolean(lmResult.has_embedding_model || lmResult.embedding_ready);
     const nextLmStudioStatus = {
       ...lmResult,
       usable_chat_model_id: usableLmStudioChatModelId,
       has_usable_chat_model: hasUsableLmStudioChatModel,
+      has_embedding_model: hasLmStudioEmbeddingModel,
     };
     const lmAvailable = nextCapabilities.lmStudioEnabled && Boolean(lmResult.available && lmResult.has_models);
     setLmStudioStatus(nextLmStudioStatus);
@@ -708,18 +743,18 @@ function App() {
       }
     }
 
-    let codexConfigured = false;
+    let oauthConfigured = false;
     try {
       const cloudStatus = await cloudAccessAPI.getStatus();
-      codexConfigured = Boolean(cloudStatus.providers?.openai_codex_oauth?.configured);
+      oauthConfigured = hasConfiguredCloudAccessProvider(cloudStatus);
     } catch {
-      codexConfigured = false;
+      oauthConfigured = false;
     }
 
     const finalHasOpenRouterKey = Boolean(keyStatus.has_key);
     if (keyStatusOk) {
       setHasOpenRouterKey(finalHasOpenRouterKey);
-      setHasCloudAccess(finalHasOpenRouterKey || codexConfigured);
+      setHasCloudAccess(finalHasOpenRouterKey || oauthConfigured);
     }
 
     let availableModels = [];
@@ -740,9 +775,10 @@ function App() {
       capabilities: nextCapabilities,
       lmAvailable,
       hasOpenRouterKey: finalHasOpenRouterKey,
-      hasCloudAccess: finalHasOpenRouterKey || codexConfigured,
+      hasCloudAccess: finalHasOpenRouterKey || oauthConfigured,
       keyStatusReachable: keyStatusOk,
       hasUsableLmStudioChatModel,
+      hasLmStudioEmbeddingModel,
       lmStudioStatus: nextLmStudioStatus,
       defaultLmStudioModelId: usableLmStudioChatModelId,
     };
@@ -811,7 +847,7 @@ function App() {
         setHasOpenRouterKey(hasKey);
         try {
           const cloudStatus = await cloudAccessAPI.getStatus();
-          setHasCloudAccess(hasKey || Boolean(cloudStatus.providers?.openai_codex_oauth?.configured));
+          setHasCloudAccess(hasKey || hasConfiguredCloudAccessProvider(cloudStatus));
         } catch {
           setHasCloudAccess(hasKey);
         }
@@ -1902,15 +1938,48 @@ function App() {
       setCodexOAuthNotifications(prev => {
         const roleId = data.role_id || 'openai_codex_oauth';
         const reason = data.reason || 'unrecoverable_codex_error';
-        if (prev.some(n => n.role_id === roleId && n.reason === reason)) return prev;
+        const provider = data.provider || 'openai_codex_oauth';
+        if (prev.some(n => n.provider === provider && n.role_id === roleId && n.reason === reason)) return prev;
         return [
           ...prev,
           {
             id: `codex_oauth_${roleId}_${Date.now()}`,
+            provider,
+            provider_label: data.provider_label || 'OpenAI Codex',
             role_id: roleId,
             model: data.model,
             reason,
             message: data.message || 'Check your OpenAI Codex OAuth connection, sign in again, and retry.',
+            timestamp: getTimestamp(data)
+          }
+        ].slice(-3);
+      });
+    }));
+
+    unsubscribers.push(websocket.on('oauth_provider_error', (data) => {
+      console.error('OAuth provider error:', data);
+      const providerLabel = data.provider_label || 'OAuth provider';
+      addActivity({
+        event: 'oauth_provider_error',
+        timestamp: getTimestamp(data),
+        message: `${providerLabel} OAuth failed for ${data.role_id || 'a role'}; check your OAuth connection and sign in again.`,
+        ...data
+      });
+      setCodexOAuthNotifications(prev => {
+        const provider = data.provider || 'oauth';
+        const roleId = data.role_id || provider;
+        const reason = data.reason || 'unrecoverable_oauth_error';
+        if (prev.some(n => n.provider === provider && n.role_id === roleId && n.reason === reason)) return prev;
+        return [
+          ...prev,
+          {
+            id: `oauth_${provider}_${roleId}_${Date.now()}`,
+            provider,
+            provider_label: providerLabel,
+            role_id: roleId,
+            model: data.model,
+            reason,
+            message: data.message || `Check your ${providerLabel} OAuth connection, sign in again, and retry.`,
             timestamp: getTimestamp(data)
           }
         ].slice(-3);
@@ -2802,8 +2871,9 @@ function App() {
       hasCloudAccess: cloudAccessPresent,
       keyStatusReachable,
       hasUsableLmStudioChatModel,
+      hasLmStudioEmbeddingModel,
     } = await syncProviderAvailability();
-    if (keyPresent || cloudAccessPresent) {
+    if (keyPresent) {
       return;
     }
 
@@ -2828,14 +2898,32 @@ function App() {
       return;
     }
 
-    if (startupChoice === LM_STUDIO_STARTUP_CHOICE && lmAvailable && hasUsableLmStudioChatModel) {
+    if (
+      startupChoice === LM_STUDIO_STARTUP_CHOICE
+      && lmAvailable
+      && hasUsableLmStudioChatModel
+      && hasLmStudioEmbeddingModel
+    ) {
       return;
     }
 
-    if (startupChoice === LM_STUDIO_STARTUP_CHOICE && (!lmAvailable || !hasUsableLmStudioChatModel)) {
+    if (
+      startupChoice === LM_STUDIO_STARTUP_CHOICE
+      && (!lmAvailable || !hasUsableLmStudioChatModel || !hasLmStudioEmbeddingModel)
+    ) {
       setStartupSetupMessage(
         'LM Studio was previously selected, but it is not fully ready. Start LM Studio, load nomic-ai/nomic-embed-text-v1.5 and at least one usable local chat model, then try again.'
       );
+      setShowStartupSetupModal(true);
+      return;
+    }
+
+    if (cloudAccessPresent) {
+      setStartupSetupMessage(
+        'OAuth login is saved, but OAuth providers are supplementary chat/model providers. Configure OpenRouter or confirm LM Studio for RAG embeddings before starting.'
+      );
+      setShowStartupSetupModal(true);
+      return;
     }
 
     setShowStartupSetupModal(true);
@@ -2848,27 +2936,20 @@ function App() {
     setShowOpenRouterKeyModal(true);
   };
 
-  const handleStartupCodexOAuthChoice = () => {
-    if (!capabilities.openAICodexOauthAvailable) {
-      setStartupSetupMessage(
-        'OpenAI Codex OAuth is desktop-only and is not available in this deployment. Configure OpenRouter to continue.'
-      );
-      return;
-    }
-
-    setStartupSetupMessage('');
-    setShowStartupSetupModal(false);
-    setOpenRouterKeyReason('startup_codex_oauth');
-    setShowOpenRouterKeyModal(true);
-  };
-
   const handleCloseOpenRouterKeyModal = () => {
     const keyWasJustSaved = openRouterKeyJustSavedRef.current;
     const cloudAccessWasJustConfigured = cloudAccessJustConfiguredRef.current;
+    const startupChoice = localStorage.getItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY);
+    const hasEmbeddingReadyStartupProvider = Boolean(hasOpenRouterKey) || isLmStudioStartupReady({
+      capabilities,
+      lmStudioAvailable,
+      lmStudioStatus,
+      startupChoice,
+    });
     const shouldReturnToStartup = STARTUP_CLOUD_ACCESS_REASONS.has(openRouterKeyReason)
       && !keyWasJustSaved
       && !cloudAccessWasJustConfigured
-      && !hasCloudAccess;
+      && !hasEmbeddingReadyStartupProvider;
     openRouterKeyJustSavedRef.current = false;
     cloudAccessJustConfiguredRef.current = false;
     setShowOpenRouterKeyModal(false);
@@ -2890,11 +2971,23 @@ function App() {
     setStartupSetupMessage('');
 
     try {
-      const { lmAvailable, hasUsableLmStudioChatModel, defaultLmStudioModelId } = await syncProviderAvailability();
+      const {
+        lmAvailable,
+        hasUsableLmStudioChatModel,
+        hasLmStudioEmbeddingModel,
+        defaultLmStudioModelId,
+      } = await syncProviderAvailability();
 
       if (!lmAvailable) {
         setStartupSetupMessage(
           'LM Studio is not detected with a loaded model yet. Install LM Studio, start the local server, load nomic-ai/nomic-embed-text-v1.5, and then try again.'
+        );
+        return;
+      }
+
+      if (!hasLmStudioEmbeddingModel) {
+        setStartupSetupMessage(
+          'LM Studio is running, but the embedding model is not loaded. Load nomic-ai/nomic-embed-text-v1.5 in LM Studio, then try again.'
         );
         return;
       }
@@ -2916,7 +3009,7 @@ function App() {
   };
 
   const handleCloudAccessChanged = async (configured, provider = 'cloud', options = {}) => {
-    if (provider === 'openai_codex_oauth' && options.modelsReady === false) {
+    if (isCloudAccessProvider(provider) && options.modelsReady === false) {
       setHasCloudAccess(Boolean(hasOpenRouterKey));
       return;
     }
@@ -2930,26 +3023,13 @@ function App() {
 
     cloudAccessJustConfiguredRef.current = true;
 
-    if (provider === 'openai_codex_oauth' && STARTUP_CLOUD_ACCESS_REASONS.has(openRouterKeyReason)) {
-      let codexModels = [];
-      try {
-        const result = await cloudAccessAPI.getOpenAICodexModels();
-        codexModels = result.models || [];
-      } catch (error) {
-        console.warn('OpenAI Codex model listing failed during startup defaults.', error);
-        return;
-      }
-
-      if (codexModels.length === 0) {
-        return;
-      }
-
-      const { config: nextAutonomousConfig } = applyCodexStartupDefaults(codexModels);
-      setAutonomousConfig(nextAutonomousConfig);
-      localStorage.setItem(STARTUP_PROVIDER_CHOICE_STORAGE_KEY, OPENAI_CODEX_STARTUP_CHOICE);
-      setShowStartupSetupModal(false);
-      setShowOpenRouterKeyModal(false);
-      setStartupSetupMessage('');
+    if (isCloudAccessProvider(provider) && STARTUP_CLOUD_ACCESS_REASONS.has(openRouterKeyReason)) {
+      setHasCloudAccess(Boolean(hasOpenRouterKey));
+      cloudAccessJustConfiguredRef.current = false;
+      setShowStartupSetupModal(true);
+      setStartupSetupMessage(
+        'OAuth login was saved. To start MOTO, also configure OpenRouter or confirm LM Studio so RAG embeddings are available.'
+      );
     }
   };
 
@@ -3049,6 +3129,26 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  const cloudAccessChipClass = hasOpenRouterKey === true
+    ? 'header-status-chip--ready'
+    : hasCloudAccess === false
+      ? 'header-status-chip--inactive'
+      : 'header-status-chip--pending';
+  const cloudAccessChipTitle = hasOpenRouterKey === true
+    ? 'OpenRouter is configured and can provide cloud models plus RAG embedding fallback.'
+    : hasCloudAccess === true
+      ? 'OAuth login is configured for model roles. Add OpenRouter or use LM Studio embeddings before starting workflows.'
+      : hasCloudAccess === false
+        ? 'Configure Cloud Access & Keys'
+        : 'Checking cloud access status...';
+  const cloudAccessChipLabel = hasOpenRouterKey === true
+    ? 'Cloud Access & Keys ✓'
+    : hasCloudAccess === true
+      ? 'Cloud Access & Keys (OAuth add-on)'
+      : hasCloudAccess === false
+        ? 'Cloud Access & Keys'
+        : 'Cloud Access…';
+
   return (
     <div className={`app ${workflowPanelCollapsed ? 'workflow-panel-collapsed' : 'workflow-panel-expanded'}`}>
       {/* Banner Section */}
@@ -3127,30 +3227,14 @@ function App() {
           </button>
         </div>
         <button
-          className={`header-status-chip ${
-            hasCloudAccess === true
-              ? 'header-status-chip--ready'
-              : hasCloudAccess === false
-                ? 'header-status-chip--inactive'
-                : 'header-status-chip--pending'
-          }`}
+          className={`header-status-chip ${cloudAccessChipClass}`}
           onClick={() => {
             setOpenRouterKeyReason('setup');
             setShowOpenRouterKeyModal(true);
           }}
-          title={
-            hasCloudAccess === true
-              ? 'Cloud access is configured'
-              : hasCloudAccess === false
-                ? 'Configure Cloud Access & Keys'
-                : 'Checking cloud access status...'
-          }
+          title={cloudAccessChipTitle}
         >
-          {hasCloudAccess === true
-            ? 'Cloud Access & Keys ✓'
-            : hasCloudAccess === false
-              ? 'Cloud Access & Keys'
-              : 'Cloud Access…'}
+          {cloudAccessChipLabel}
         </button>
         {capabilities.lmStudioEnabled ? (
           <span
@@ -3560,7 +3644,7 @@ function App() {
               <p style={{ fontSize: '1.1rem', lineHeight: '1.6', marginBottom: '1.5rem', color: '#1eff1c' }}>
                 {capabilities.lmStudioEnabled ? (
                   <>
-                    <strong>QUICKSTART:</strong> In LM Studio, load the embedding model <code>nomic-ai/nomic-embed-text-v1.5</code> by <strong>Nomic AI</strong> (optional but recommended), or use OpenRouter / OpenAI Codex OAuth instead of LM Studio. You must leave your PC on and awake during runtime, the program will often run for days without interruption.
+                    <strong>QUICKSTART:</strong> In LM Studio, load the embedding model <code>nomic-ai/nomic-embed-text-v1.5</code> by <strong>Nomic AI</strong> (optional but recommended), or use OpenRouter instead of LM Studio. You must leave your PC on and awake during runtime, the program will often run for days without interruption.
                   </>
                 ) : (
                   <>
@@ -3612,12 +3696,12 @@ function App() {
         capabilities={capabilities}
         lmStudioAvailable={lmStudioAvailable}
         hasUsableLmStudioChatModel={Boolean(lmStudioStatus.has_usable_chat_model)}
+        hasLmStudioEmbeddingModel={Boolean(lmStudioStatus.has_embedding_model)}
         lmStudioModelCount={lmStudioStatus.model_count || 0}
         lmStudioError={lmStudioStatus.error || ''}
         statusMessage={startupSetupMessage}
         isCheckingLmStudio={checkingLmStudioStartupChoice}
         onChooseOpenRouter={handleStartupOpenRouterChoice}
-        onChooseCodexOAuth={handleStartupCodexOAuthChoice}
         onConfirmLmStudio={handleStartupLmStudioChoice}
       />
       

@@ -10,7 +10,7 @@ import {
   sanitizeFilename,
 } from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
-import { buildResearchRunGroups } from '../../utils/researchRunHistory';
+import { buildResearchRunGroups, formatRunPromptPreview } from '../../utils/researchRunHistory';
 import './FinalAnswerLibrary.css';
 
 /**
@@ -458,7 +458,7 @@ function FinalAnswerLibrary({ capabilities }) {
             <section key={runGroup.sessionId} className="run-history-group">
               <div className="run-history-group-header">
                 <div className="run-history-group-heading">
-                  <h3 className="run-history-group-title">{runGroup.userPrompt}</h3>
+                  <h3 className="run-history-group-title">{formatRunPromptPreview(runGroup.userPrompt)}</h3>
                   <p className="run-history-group-subtitle">
                     Research Run: {runGroup.displaySessionId}
                   </p>
@@ -523,7 +523,7 @@ function FinalAnswerLibrary({ capabilities }) {
                         </div>
 
                         <div className="answer-prompt">
-                          <strong>Research Question:</strong> {answer.user_prompt}
+                          <strong>Research Question:</strong> {formatRunPromptPreview(answer.user_prompt)}
                         </div>
 
                         <div className="answer-footer-info">

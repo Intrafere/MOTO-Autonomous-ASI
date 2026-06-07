@@ -38,7 +38,8 @@ project-root/
 │   │   ├── lm_studio_client.py          # LM Studio HTTP API client + same-base numeric :# instance sharing
 │   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion detection + model/endpoint metadata)
 │   │   ├── openai_codex_client.py       # Desktop-only OpenAI Codex/ChatGPT OAuth client, Codex backend adapter, and Codex model metadata normalizer
-│   │   ├── api_client_manager.py        # Unified API router (Supercharge wrapper + OpenRouter/OpenAI Codex/LM Studio fallback + boost)
+│   │   ├── xai_grok_client.py           # Desktop-only xAI Grok/SuperGrok `auth.x.ai` PKCE OAuth client and Grok model metadata normalizer
+│   │   ├── api_client_manager.py        # Unified API router (Supercharge wrapper + OpenRouter/OAuth/LM Studio fallback + boost)
 │   │   ├── boost_manager.py             # Singleton boost manager (tracks boost modes: next-count, always-prefer, category; aliases absorbed LeanOJ path-decision tasks into Final Solver boost category)
 │   │   ├── boost_logger.py              # Boost API call logger (persists redacted/default-safe entries to boost_api_log.txt)
 │   │   ├── workflow_predictor.py        # Legacy/shared workflow prediction helper; active coordinators maintain their own workflow_tasks
@@ -54,7 +55,7 @@ project-root/
 │   │   ├── response_extraction.py        # Central OpenAI-compatible assistant text extraction with content-first reasoning/thinking fallback policy
 │   │   ├── critique_memory.py           # Paper critique persistence (saves up to 10 validator critiques per paper)
 │   │   ├── critique_prompts.py          # Default critique prompt and builder function for validator critiques
-│   │   ├── secret_store.py              # Secure credential persistence via OS keyring (OpenRouter, OpenAI Codex OAuth, Wolfram Alpha); bypassed in generic mode
+│   │   ├── secret_store.py              # Secure credential persistence via OS keyring (OpenRouter, desktop OAuth tokens, Wolfram Alpha); bypassed in generic mode
 │   │   ├── runtime_settings.py          # Non-secret runtime setting persistence under the active data root (free-model knobs plus desktop/default proof knobs)
 │   │   ├── build_info.py                # Build identity resolver (manifest + git HEAD/ZIP stamp + env overrides)
 │   │   ├── path_safety.py               # Safe path resolution helpers (realpath/normpath containment checks)
@@ -204,7 +205,7 @@ project-root/
 │   │       ├── update.py                # Update/check endpoints for launcher/updater state (`POST /api/update/pull`, `GET /api/update/pull-status`)
 │   │       ├── download.py              # PDF generation endpoint via Playwright (desktop only; sanitize/block external requests; returns 501 in generic mode)
 │   │       ├── openrouter.py            # OpenRouter API endpoints (global key, models/providers via header/body keys only, LM Studio availability, model cache, reset exhaustion)
-│   │       ├── cloud_access.py          # Cloud Access & Keys endpoints including desktop OpenAI Codex OAuth login/model listing
+│   │       ├── cloud_access.py          # Cloud Access & Keys endpoints including desktop OAuth login/model listing
 │   │       ├── websocket.py             # WebSocket for real-time updates (generic proxy auth or desktop one-time tickets before accept)
 │   │       ├── features.py              # GET /api/features — shared build identity plus stable capability flags; GET /api/update-notice — launcher/runtime-refreshed update notice
 │   │       ├── proofs.py                # Proof database + Lean 4/SMT runtime + manual proof-check + certificate export + dependency graph routes; current proof listing/detail/certificate/graph routes accept `scope=autonomous|manual` so active manual writer proofs use their own instance-level store; proof-library routes accept `scope=autonomous|manual`, with manual scope reading archived manual proof runs only; listing proofs (`GET /`, `/novel`, `/known`, `/library*`) and certificate/lean downloads (`/{id}/certificate`, `/{id}/certificate.lean`) are always available regardless of `lean4_enabled`; dependency/graph routes and `/check` are gated on `lean4_enabled`; `/status` uses short timeouts so it never blocks the UI
@@ -318,8 +319,8 @@ project-root/
 │   │   │       ├── LeanOJProofLibrary.jsx # Cross-session completed LeanOJ proof-work library
 │   │   │       └── index.js             # LeanOJ component exports
 │   │   │
-│   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for OpenRouter, desktop OpenAI Codex OAuth, or LM Studio setup (OpenRouter-only in generic mode)
-│   │   ├── OpenRouterApiKeyModal.jsx    # Cloud Access & Keys modal for OpenRouter API key and desktop OpenAI Codex OAuth login
+│   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for OpenRouter or LM Studio setup; desktop OAuth is shown only as an after-startup add-on because embeddings require OpenRouter/LM Studio (OpenRouter-only in generic mode)
+│   │   ├── OpenRouterApiKeyModal.jsx    # Cloud Access & Keys modal for OpenRouter API key and desktop OAuth logins
 │   │   ├── PaperCritiqueModal.jsx       # Modal for displaying validator paper critiques (ratings, feedback, history)
 │   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥6.25 avg)
 │   │   ├── CreditExhaustionNotificationStack.jsx # Persistent red notifications for OpenRouter credit exhaustion with "Retry OpenRouter" reset button
@@ -400,7 +401,7 @@ project-root/
 - `lm_studio_client.py`: LM Studio HTTP client (completions, embeddings, model listing, same-base numeric `:#` instance sharing for independent calls); generic-mode inference and embeddings bypass it, though shared legacy diagnostics may still exist
 - `openrouter_client.py`: OpenRouter HTTP client (credit exhaustion detection, fallback, model/provider endpoint metadata)
 - `openai_codex_client.py`: Desktop-only OpenAI Codex/ChatGPT OAuth token lifecycle, Codex backend Responses adapter (`stream=true`, strips unsupported output-limit/temperature knobs, local event aggregation), and Codex model context/output metadata normalizer; not the regular OpenAI API-key billing path
-- `api_client_manager.py`: Unified API router (optional per-role Supercharge wrapper, OpenRouter/OpenAI Codex/LM Studio fallback, boost, and model tracking); generic mode early-returns FastEmbed for embeddings
+- `api_client_manager.py`: Unified API router (optional per-role Supercharge wrapper, OpenRouter/desktop OAuth/LM Studio fallback, boost, and model tracking); generic mode early-returns FastEmbed for embeddings
 - `boost_manager.py`: Singleton boost manager (next-count, always-prefer, category, and per-task boost routing; broadcasts events)
 - `boost_logger.py`: Boost API call logger (persists boost-routed calls for the combined API log view)
 - `workflow_predictor.py`: Legacy/shared prediction helper; active coordinators expose their own `workflow_tasks` for internal boost/workflow routing
@@ -463,7 +464,7 @@ project-root/
 
 ### Frontend Components
 
-- `App.jsx`: Top-level GUI shell. Default mode is `Autonomous S.T.E.M. ASI` for Part 3 screens; `Advanced Manual S.T.E.M. ASI` contains the manual Part 1 Aggregator + Part 2 Compiler workspace; `LeanOJ Proof Solver` is a developer-mode-only proof mode. Shared utility controls (Boost, Cloud Access & Keys, WorkflowPanel) remain global, and Build 3C bootstraps `/api/features` here so hosted mode can hide LM Studio/Codex-only UI and copy. Shift + Z + X toggles persisted developer-mode settings, LeanOJ mode, raw JSON editors, and Supercharge controls. Supercharge request payloads must be forced off unless developer mode is active. Active app mode and tab state are in-memory only; a fresh frontend mount starts on the autonomous main interface. **Autonomous tab groups**: main tabs (interface, brainstorms, papers, proofs, optional final-answer) + settings group (Your Completed Works Library, API Call Logs, Settings). The "Your Completed Works Library" tab hosts three sub-tabs rendered inside its content area: Stage 2 Papers History, Stage 3 Final Answers History, and Proof Library.
+- `App.jsx`: Top-level GUI shell. Default mode is `Autonomous S.T.E.M. ASI` for Part 3 screens; `Advanced Manual S.T.E.M. ASI` contains the manual Part 1 Aggregator + Part 2 Compiler workspace; `LeanOJ Proof Solver` is a developer-mode-only proof mode. Shared utility controls (Boost, Cloud Access & Keys, WorkflowPanel) remain global, and Build 3C bootstraps `/api/features` here so hosted mode can hide LM Studio/desktop-OAuth UI and copy. Shift + Z + X toggles persisted developer-mode settings, LeanOJ mode, raw JSON editors, and Supercharge controls. Supercharge request payloads must be forced off unless developer mode is active. Active app mode and tab state are in-memory only; a fresh frontend mount starts on the autonomous main interface. **Autonomous tab groups**: main tabs (interface, brainstorms, papers, proofs, optional final-answer) + settings group (Your Completed Works Library, API Call Logs, Settings). The "Your Completed Works Library" tab hosts three sub-tabs rendered inside its content area: Stage 2 Papers History, Stage 3 Final Answers History, and Proof Library.
 - Live activity feeds keep long bounded histories (thousands of entries) so active workflow context is not lost quickly while still preventing unbounded UI growth.
 - **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
 - **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`

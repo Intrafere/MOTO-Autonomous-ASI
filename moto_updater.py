@@ -32,7 +32,7 @@ _DEFAULT_MANIFEST = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build5-v28",
+    "api_contract_version": "build5-v30",
 }
 
 _DEFAULT_PRESERVED_ROOTS = {

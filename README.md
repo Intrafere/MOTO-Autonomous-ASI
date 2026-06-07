@@ -6,7 +6,9 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 20.19+](https://img.shields.io/badge/node-20.19+-green.svg)](https://nodejs.org/)
 
-**A breakthrough in AI automated theorem generation. An autonomous AI/ASI research system that generates novel and publication-worthy research papers — and the machine-checked theorem proving programming language Lean 4 proofs alongside them for definitive mathematical confirmation of correctness. This ASI is autonomously powered by Intrafere Research Group's new ASI discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/). Top-P exploration assists in deciphering how we explore AI weights, a specific combination of reiterative brainstorming, validation, feedback, and pruning allows for superintelligence exploration and creative multi-model data extraction from nearly any combination of AI models. Additionally, MOTO has optional automated theorem generation capabilities that formalize candidate theorems and lemmas in Lean 4 (with optional Z3/SMT hinting and Mathlib lemma search) and only stores proofs that Lean 4 accepts as genuinely mathematically verified. Lean 4 automation means the user gets guaranteed verification of the mathematical results produced. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.**
+**A breakthrough in AI automated theorem generation. MOTO is an autonomous research system powered by Intrafere Research Group's new prototype-superintelligence discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/): a combination of reiterative brainstorming, validation, feedback, and pruning that creates prototype-level superintelligence using creative/combinatory multi-model data from nearly any combination of AI models. When enabled, MOTO pairs this exploration with Lean 4 machine-checked proofs for the exact formal theorem statements it successfully proves.**
+
+**MOTO generates novel and publication-worthy research papers, and it can formalize candidate theorems and lemmas in Lean 4 while only storing proofs that Lean 4 accepts as mathematically verified. Lean 4 automation gives the user machine-checked verification for the exact formal statements produced, while informal papers and interpretations should still be reviewed with scrutiny. Unlike programs that may look similar, MOTO finds novel solutions with 0 creative user input required after launch: press start and let it run for hours or days while it autonomously searches for new solution paths. MOTO's Lean 4 architecture was developed before public reports of Google's AlphaProof Nexus and appears to share the broad pattern of iterative proof attempts aided by proof-sketch brainstorming, though AlphaProof Nexus itself is unreleased and not directly comparable from public information. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.**
 
 ### The Core Discovery: Top-P Exploration 
 
@@ -33,7 +35,7 @@ Paired with Top-P Exploration — and secondary to it — MOTO has an **optional
 
 **Lean 4 is authoritative.** SMT results are hints only — they never substitute for Lean verification, and any proof that would compile only because of a `sorry` or `admit` is rejected. The pipeline is entirely silent and skipped when `lean4_enabled=False`, so it never blocks brainstorm or paper completion; the default hosted image stays Lean-free and Z3-free. A manual-check endpoint (`POST /api/proofs/check`) also lets you re-run the pipeline on any stored brainstorm or paper after the fact, and the compiler's "rigor mode" reuses the same Lean 4 checker to upgrade lemmas inside a paper as it's being written.
 
-Give the program a try — MOTO is as cool as it sounds. Windows has a one-click launcher and Ubuntu 24.04 now has a repo-root launcher too. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green "< > Code" drop-down menu on the top right of this GitHub page and download the zip file. On Windows, extract it to your desktop and double-click `Click To Launch MOTO.bat`. On Ubuntu 24.04, extract it and run `bash linux-ubuntu-launcher.sh`. Configure cloud access through **Cloud Access & Keys** with an OpenRouter API key and/or desktop OpenAI Codex login, or connect LM Studio for local/faster performance. Then select your agents in the settings profile - if desired and you are unsure you may use the preselected "fastest" profile.
+Give the program a try — MOTO is as cool as it sounds. Windows has a one-click launcher and Ubuntu 24.04 now has a repo-root launcher too. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green "< > Code" drop-down menu on the top right of this GitHub page and download the zip file. On Windows, extract it to your desktop and double-click `Click To Launch MOTO.bat`. On Ubuntu 24.04, extract it and run `bash linux-ubuntu-launcher.sh`. Configure cloud access through **Cloud Access & Keys** with an OpenRouter API key, or connect LM Studio for local/faster performance. Desktop **oAuth** logins such as OpenAI Codex or xAI Grok/SuperGrok are supplementary model providers after startup, not a standalone startup path, because RAG embeddings still require OpenRouter, LM Studio, or hosted FastEmbed. xAI Console API keys are separate from Grok subscription OAuth and may consume API credits. Then select your agents in the settings profile - if desired and you are unsure you may use the preselected "fastest" profile.
 
 ***Now you are set up and every time you press launch your home lab is ready for your prompt!*** **Give MOTO the toughest question you can think of and press start to begin YOUR creations!**
 
@@ -43,12 +45,12 @@ Give the program a try — MOTO is as cool as it sounds. Windows has a one-click
 
 ## Outline of "MOTO - S.T.E.M. Mathematics Variant"
 
-MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward (novelty seeking AI) mathematics researcher designed to run for days at a time after you press start, without user interaction. This program can support multiple simultaneous models working in parallel from local LM Studio, OpenRouter API keys, desktop OpenAI Codex/ChatGPT OAuth, or a mix of those providers.
+MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward (novelty seeking AI) mathematics researcher designed to run for days at a time after you press start, without user interaction. This program can support multiple simultaneous models working in parallel from local LM Studio, OpenRouter API keys, desktop OAuth providers such as OpenAI Codex/ChatGPT and xAI Grok/SuperGrok, or a mix of those providers.
 
 ### Key Features
 
 - 🤖 **Autonomous Topic Selection, Brainstorming, and Paper Generation**: AI chooses research avenues based on high-level goals and produces you a final answer with ZERO extra user input. Let MOTO run for days using the best models without touching it, or for a few hours using a faster draft model. How deep you research and how long it takes is left up to you, the user.
-- **Cloud Access & Keys**: Supports local LM Studio models, OpenRouter API-key models, and desktop-only OpenAI Codex/ChatGPT subscription login as separate provider paths. Run local LM Studio models offline, use OpenRouter to access many third-party providers, or sign in with OpenAI Codex OAuth for Codex-backed OpenAI models.
+- **Cloud Access & Keys**: Supports local LM Studio models, OpenRouter API-key models, and desktop-only OAuth subscription logins as separate provider paths. Run local LM Studio models offline, use OpenRouter to access many third-party providers, or add OpenAI Codex/ChatGPT or xAI Grok/SuperGrok OAuth for subscription-backed chat/model roles. OAuth is supplementary because RAG embeddings are routed separately through LM Studio, OpenRouter, or hosted FastEmbed.
 - **Optional Automated Theorem Generation (Lean 4)**: When enabled, every brainstorm and paper is run through a parallel proof pipeline that identifies theorem/lemma candidates, searches Mathlib for relevant lemmas, optionally runs Z3/SMT for conservative early-exit hints, then attempts Lean 4 formalization (up to 5 retries per candidate with failure-hint direct injection). Only Lean 4-verified proofs are stored, and novel proofs are fed back into subsequent brainstorming as highest-priority context. Secondary to Top-P Exploration and silent when disabled.
 
 ---
@@ -72,8 +74,8 @@ Before installation, you need:
    - Start the local server (port 1234)
 4. **If using cloud AI - configure Cloud Access & Keys**:
    - **OpenRouter API key**: Sign up at OpenRouter.ai and get a paid or free API key to use cloud models from many providers. You can see which models are free by checking the "show only free models" checkbox(es) in MOTO settings.
-   - **OpenAI Codex login (desktop only)**: In the `Cloud Access & Keys` overlay, choose OpenAI Codex Login to sign in through OpenAI's Codex/ChatGPT OAuth flow. This is separate from regular OpenAI API-key billing and is unavailable in hosted/generic mode.
-5. **On first startup, pick your provider path**: After you acknowledge the disclaimer, MOTO will prompt you to configure cloud access or confirm that LM Studio is running. If you save an OpenRouter key there, the recommended default autonomous profile is applied immediately so you can open Settings and see it already selected. OpenAI Codex login can also be configured from the header after startup.
+   - **oAuth login (desktop only)**: In the `Cloud Access & Keys` overlay, choose the `OAuth` section to sign in through a supported subscription OAuth provider such as OpenAI Codex/ChatGPT or xAI Grok/SuperGrok. This is separate from regular API-key billing, unavailable in hosted/generic mode, and supplementary to an OpenRouter key or LM Studio because OAuth providers do not supply MOTO's RAG embeddings.
+5. **On first startup, pick your provider path**: After you acknowledge the disclaimer, MOTO will prompt you to configure OpenRouter or confirm that LM Studio is running with both `nomic-ai/nomic-embed-text-v1.5` and a usable chat model loaded. If you save an OpenRouter key there, the recommended default autonomous profile is applied immediately so you can open Settings and see it already selected. Desktop OAuth logins can also be configured from the header after startup, once the embedding-capable provider path is ready.
 
 #### Optional Lean 4 / SMT Proof Verification Requirements
 
@@ -90,11 +92,11 @@ Lean 4 proof verification is optional. The launcher prepares it when available, 
 #### Windows (One-Click Launcher)
 
 1. Clone or download this repository
-2. Start LM Studio and load your models and "nomic-embed-text-v1.5" agent **and/or** have your OpenRouter API key or OpenAI Codex login ready
+2. Start LM Studio and load your models and "nomic-embed-text-v1.5" agent **and/or** have your OpenRouter API key ready. Desktop OAuth logins are optional add-ons after startup.
 3. **Double-click `Click To Launch MOTO.bat`**
 4. After acknowledging the disclaimer, choose one of the startup setup paths:
    - Open `Cloud Access & Keys` to enter your OpenRouter API key
-   - Configure OpenAI Codex login from the same header overlay after startup (desktop only)
+   - Optionally configure an OAuth provider login from the same header overlay after startup (desktop only)
    - Confirm that LM Studio is already running with a loaded model
    - Then open Settings to keep the recommended profile or switch to your saved team profile / another default profile
 5. The launcher will:
@@ -112,7 +114,7 @@ Lean 4 proof verification is optional. The launcher prepares it when available, 
 #### Ubuntu 24.04 (Launcher + Updater Parity)
 
 1. Clone or download this repository
-2. Start LM Studio and load your models and `nomic-embed-text-v1.5` **and/or** have your OpenRouter API key or OpenAI Codex login ready
+2. Start LM Studio and load your models and `nomic-embed-text-v1.5` **and/or** have your OpenRouter API key ready. Desktop OAuth logins are optional add-ons after startup.
 3. From the repo root, run:
 
 ```bash
@@ -195,7 +197,7 @@ bash linux-ubuntu-launcher.sh
 
 - **Backend**: Python 3.10+, FastAPI, Uvicorn
 - **Frontend**: React, Vite, Tailwind CSS
-- **AI**: LM Studio API, OpenRouter API, OpenAI Codex/ChatGPT OAuth (desktop only)
+- **AI**: LM Studio API, OpenRouter API, desktop OAuth providers such as OpenAI Codex/ChatGPT and xAI Grok/SuperGrok
 - **RAG**: ChromaDB, Nomic Embeddings, or OpenRouter embeddings fallback if LM Studio is unavailable (not recommended - slower).
 - **WebSocket**: Real-time updates
 
@@ -258,12 +260,12 @@ moto-math-variant/
 ### Cloud Access & Keys
 
 Each role supports:
-- **Provider**: LM Studio (local), OpenRouter (cloud API key), or OpenAI Codex (desktop ChatGPT/Codex OAuth)
+- **Provider**: LM Studio (local), OpenRouter (cloud API key), or desktop OAuth providers such as OpenAI Codex and xAI Grok/SuperGrok
 - **Model Selection**: Choose from available models
 - **Host/Provider**: Select specific OpenRouter provider (e.g., Anthropic, Google)
 - **Fallback**: Optional LM Studio fallback if a cloud provider fails or runs out of credits
 
-`Cloud Access & Keys` in the header is where you manage cloud credentials. OpenRouter keys are stored through the backend keyring in desktop/default mode and in memory in hosted/generic mode. OpenAI Codex login stores OAuth tokens securely on the desktop backend and uses the Codex backend path; it is not the regular OpenAI API-key billing path and is not available in hosted/generic mode.
+`Cloud Access & Keys` in the header is where you manage cloud credentials. OpenRouter keys are stored through the backend keyring in desktop/default mode and in memory in hosted/generic mode. Desktop OAuth logins store tokens securely on the desktop backend and are selected through the `oAuth` provider dropdown; supported providers include OpenAI Codex/ChatGPT and xAI Grok/SuperGrok. These OAuth paths are separate from regular API-key billing, are not available in hosted/generic mode, and cannot be the only startup provider because MOTO's RAG embeddings are not routed through OAuth providers.
 
 ### Context and Output Settings
 
@@ -423,7 +425,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **[Intrafere™ LLC](https://intrafere.com)** - Creator and maintainer
 - **LM Studio** for local model hosting
 - **OpenRouter** for cloud model access
-- **OpenAI Codex / ChatGPT OAuth** for optional desktop subscription-backed Codex access
+- **OpenAI Codex / ChatGPT OAuth** and **xAI Grok / SuperGrok OAuth** for optional desktop subscription-backed model access
 - **Nomic AI** for embedding models
 - **ChromaDB** for vector storage
 - **FastAPI** and **React** frameworks
@@ -449,6 +451,7 @@ All content generated by this system is for informational purposes only. Papers 
 - **LM Studio**: https://lmstudio.ai/
 - **OpenRouter**: https://openrouter.ai/
 - **OpenAI Codex**: https://github.com/openai/codex
+- **xAI Grok**: https://x.ai/
 - **Cursor IDE**: https://cursor.com/
 
 ---
@@ -467,7 +470,7 @@ Best if you want to run local models in LM Studio, especially models above 20B p
 
 ### Option 2 - Cloud-Only Setup
 
-Best if you want the lightest local hardware requirements and are comfortable running inference in the cloud through OpenRouter and/or desktop OpenAI Codex login.
+Best if you want the lightest local hardware requirements and are comfortable running inference in the cloud through OpenRouter. Desktop OAuth logins can supplement OpenRouter for selected roles after startup.
 
 - **OS**: Windows, macOS, Linux, or Raspberry Pi OS; Ubuntu 24.04 is the tested Linux launcher target
 - **RAM**: 4GB minimum, 8GB recommended
@@ -475,7 +478,7 @@ Best if you want the lightest local hardware requirements and are comfortable ru
 - **GPU**: Not required
 - **Internet**: Required
 
-Because the heavy model inference happens in the cloud, MOTO can run on very modest local hardware in this mode, including a Raspberry Pi for OpenRouter-only usage, as long as it can run Python, Node.js, and maintain a stable internet connection. OpenAI Codex OAuth is currently a desktop/default-mode login path because it uses a local browser callback. Lean 4 proof verification adds a local toolchain and Mathlib workspace requirement even in cloud-only mode.
+Because the heavy model inference happens in the cloud, MOTO can run on very modest local hardware in this mode, including a Raspberry Pi for OpenRouter-only usage, as long as it can run Python, Node.js, and maintain a stable internet connection. Desktop OAuth providers such as OpenAI Codex and xAI Grok/SuperGrok currently use local browser callbacks, so they are default-mode add-on login paths rather than hosted/generic-mode paths, and they still require OpenRouter or LM Studio for RAG embeddings. Lean 4 proof verification adds a local toolchain and Mathlib workspace requirement even in cloud-only mode.
 
 ---
 

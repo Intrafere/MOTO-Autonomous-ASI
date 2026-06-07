@@ -58,13 +58,6 @@ class ProofVerificationStage:
 
     _active_sources: set[str] = set()
     _active_sources_lock: Optional[asyncio.Lock] = None
-    _PROOF_CONTEXT_START = "=== VERIFIED NOVEL MATHEMATICAL PROOFS (Lean 4 Verified) ==="
-    _PROOF_CONTEXT_END = "=== END VERIFIED PROOFS ==="
-    _DIRECT_LEAN_TARGET_RE = re.compile(
-        r"(?ms)^\s*((?:theorem|lemma)\s+[A-Za-z_][A-Za-z0-9_'.]*\b.{0,8000}?)"
-        r"\s*:=\s*by\b.*?(?=^\s*(?:----|Helper Proof|SOURCE CONTEXT METADATA|"
-        r"VERIFIED PROOF LIBRARY|SOURCE TYPE|SOURCE CONTENT|theorem|lemma)\b|\Z)"
-    )
 
     def __init__(self) -> None:
         self._novelty_task_sequence = 0
@@ -80,51 +73,6 @@ class ProofVerificationStage:
     @classmethod
     def _source_key(cls, source_type: str, source_id: str) -> str:
         return f"{source_type}:{source_id}"
-
-    @classmethod
-    def _strip_injected_proof_context(cls, prompt: str) -> str:
-        clean_prompt = prompt or ""
-        while cls._PROOF_CONTEXT_START in clean_prompt:
-            start = clean_prompt.find(cls._PROOF_CONTEXT_START)
-            end = clean_prompt.find(cls._PROOF_CONTEXT_END, start)
-            if end < 0:
-                break
-            end += len(cls._PROOF_CONTEXT_END)
-            clean_prompt = f"{clean_prompt[:start]}\n{clean_prompt[end:]}"
-        return clean_prompt.strip()
-
-    @classmethod
-    def _direct_user_prompt_candidate(cls, user_prompt: str) -> Optional[ProofCandidate]:
-        clean_prompt = cls._strip_injected_proof_context(user_prompt)
-        match = cls._DIRECT_LEAN_TARGET_RE.search(clean_prompt)
-        if not match:
-            return None
-
-        theorem_header = match.group(1).strip()
-        theorem_header = re.sub(r"\s+", " ", theorem_header)
-        theorem_name_match = re.match(r"(?:theorem|lemma)\s+([A-Za-z_][A-Za-z0-9_'.]*)", theorem_header)
-        theorem_id = theorem_name_match.group(1) if theorem_name_match else "direct_user_prompt_target"
-        return ProofCandidate(
-            theorem_id=f"direct_{theorem_id}",
-            statement=theorem_header,
-            formal_sketch=(
-                "Direct target extracted from the user's Lean theorem prompt. "
-                "Try to prove this theorem exactly first. If exact closure is not possible, "
-                "only prove a faithful intermediate lemma that visibly builds toward this target."
-            ),
-            expected_novelty_tier="",
-            prompt_relevance_rationale="This is the explicit Lean theorem requested by the user.",
-            novelty_rationale=(
-                "Direct user-requested Lean targets are not pre-classified as novel; "
-                "the post-Lean novelty classifier must decide whether the verified "
-                "result is public/citable novelty or standard known mathematics."
-            ),
-            why_not_standard_known_result=(
-                "This is the user's concrete theorem, but if it is a standard Mathlib/textbook result "
-                "the final novelty classifier should mark it not_novel."
-            ),
-            source_excerpt=match.group(0).strip(),
-        )
 
     @classmethod
     async def is_source_running(cls, source_type: str, source_id: str) -> bool:
@@ -437,17 +385,6 @@ class ProofVerificationStage:
     ) -> list[ProofCandidate]:
         if theorem_candidates is not None:
             return theorem_candidates
-
-        if proof_round_index == 1:
-            direct_candidate = self._direct_user_prompt_candidate(user_prompt)
-            if direct_candidate is not None:
-                logger.info(
-                    "ProofVerificationStage extracted direct Lean target %s for %s %s; skipping initial discovery.",
-                    direct_candidate.theorem_id,
-                    source_type,
-                    source_id,
-                )
-                return [direct_candidate]
 
         has_candidates, resolved_candidates = await identification_agent.identify_candidates(
             user_research_prompt=user_prompt,
@@ -1151,80 +1088,6 @@ class ProofVerificationStage:
 
             if partial_stop:
                 return result
-
-            direct_prompt_target_failed = (
-                theorem_candidates is None
-                and proof_round_index == 1
-                and trigger.startswith("manual")
-                and not trigger.endswith("_fallback")
-                and result.verified_count == 0
-                and len(resolved_candidates) == 1
-                and resolved_candidates[0].theorem_id.startswith("direct_")
-            )
-            if direct_prompt_target_failed and not _stop_requested():
-                fallback_prior = (
-                    "The exact Lean theorem requested by the user was tried through "
-                    "all configured Lean attempts, but did not verify. Now look only "
-                    "for intermediate lemmas or supporting theorems that would help "
-                    "prove that exact requested theorem. Do not collect merely "
-                    "brainstorm-related or background proofs."
-                )
-                has_fallback_candidates, fallback_candidates = await identification_agent.identify_candidates(
-                    user_research_prompt=user_prompt,
-                    source_type=source_type,
-                    source_id=source_id,
-                    source_content=content,
-                    source_title=source_title,
-                    proof_round_index=proof_round_index,
-                    proof_max_rounds=proof_max_rounds,
-                    prior_round_results=fallback_prior,
-                )
-                if has_fallback_candidates and fallback_candidates:
-                    fallback_result = await self.run(
-                        content=content,
-                        source_type=source_type,
-                        source_id=source_id,
-                        user_prompt=user_prompt,
-                        submitter_model=submitter_model,
-                        submitter_context=submitter_context,
-                        submitter_max_tokens=submitter_max_tokens,
-                        validator_model=validator_model,
-                        validator_context=validator_context,
-                        validator_max_tokens=validator_max_tokens,
-                        broadcast_fn=broadcast_fn,
-                        novel_proofs_db=novel_proofs_db,
-                        source_title=source_title,
-                        theorem_candidates=fallback_candidates,
-                        role_suffix_override=role_suffix_override,
-                        trigger=f"{trigger}_fallback",
-                        source_reserved=True,
-                        release_source_on_exit=False,
-                        should_stop=should_stop,
-                        append_to_source=append_to_source,
-                        append_proof_callback=append_proof_callback,
-                        proof_round_index=proof_round_index,
-                        proof_max_rounds=proof_max_rounds,
-                        prior_round_results=fallback_prior,
-                    )
-                    fallback_result.results = result.results + fallback_result.results
-                    fallback_result.total_candidates += result.total_candidates
-                    fallback_result.verified_count += result.verified_count
-                    fallback_result.novel_count += result.novel_count
-                    await self._broadcast(
-                        broadcast_fn,
-                        "proof_check_complete",
-                        {
-                            **base_event,
-                            "novel_count": fallback_result.novel_count,
-                            "verified_count": fallback_result.verified_count,
-                            "total_candidates": fallback_result.total_candidates,
-                            "message": (
-                                "Direct target attempt completed; fallback discovery "
-                                "was also checked for prompt-solving support."
-                            ),
-                        },
-                    )
-                    return fallback_result
 
             await save_checkpoint("complete")
             await self._broadcast(

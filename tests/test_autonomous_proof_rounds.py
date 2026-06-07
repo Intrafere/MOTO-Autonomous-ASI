@@ -2,12 +2,11 @@ import unittest
 from importlib import import_module
 from types import SimpleNamespace
 
-from backend.autonomous.agents import proof_identification_agent as proof_identification_module
 from backend.autonomous.core.autonomous_coordinator import AutonomousCoordinator
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
 from backend.autonomous.prompts.proof_prompts import build_proof_identification_prompt
 from backend.shared.config import system_config
-from backend.shared.models import ProofAttemptFeedback, ProofCandidate, ProofStageResult
+from backend.shared.models import ProofCandidate, ProofStageResult
 
 coordinator_module = import_module("backend.autonomous.core.autonomous_coordinator")
 
@@ -164,19 +163,26 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Return TRUE only if the answer is yes.", prompt)
         self.assertIn("Round 1: 1/1 candidates verified, 1 novel.", prompt)
 
-    async def test_explicit_lean_prompt_uses_direct_target_before_discovery(self):
+    async def test_explicit_lean_prompt_uses_standard_discovery(self):
         class FakeIdentificationAgent:
             def __init__(self):
                 self.called = False
+                self.kwargs = None
 
-            async def identify_candidates(self, **_kwargs):
+            async def identify_candidates(self, **kwargs):
                 self.called = True
+                self.kwargs = kwargs
                 return True, [
                     ProofCandidate(
-                        theorem_id="discovered_later",
-                        statement="Discovered fallback theorem.",
+                        theorem_id="goal_direct_solution",
+                        statement="A discovered theorem that aggressively solves the user prompt.",
                         expected_novelty_tier="mathematical_discovery",
-                    )
+                    ),
+                    ProofCandidate(
+                        theorem_id="goal_supporting_lemma",
+                        statement="A discovered theorem that builds toward solving the user prompt.",
+                        expected_novelty_tier="novel_variant",
+                    ),
                 ]
 
         fake_identifier = FakeIdentificationAgent()
@@ -199,111 +205,12 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             content="Manual source.",
         )
 
-        self.assertFalse(fake_identifier.called)
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0].theorem_id, "direct_direct_user_target")
-        self.assertIn("theorem direct_user_target", candidates[0].statement)
-        self.assertNotIn("helper_verified", candidates[0].statement)
-
-    async def test_manual_explicit_target_falls_back_to_prompt_bound_discovery(self):
-        old_lean4_enabled = system_config.lean4_enabled
-        system_config.lean4_enabled = True
-        stage = ProofVerificationStage()
-        identification_calls = []
-        attempted_ids = []
-        failed_records = []
-        complete_events = []
-
-        async def fake_identify_candidates(_self=None, **kwargs):
-            identification_calls.append(kwargs)
-            return True, [
-                ProofCandidate(
-                    theorem_id="toward_prompt",
-                    statement="A fallback theorem that builds toward the prompt.",
-                    expected_novelty_tier="mathematical_discovery",
-                    prompt_relevance_rationale="This builds toward solving the user prompt.",
-                    novelty_rationale="Novel.",
-                    why_not_standard_known_result="Not standard.",
-                )
-            ]
-
-        async def fake_run_lean_pipeline_for_candidate(**kwargs):
-            candidate = kwargs["theorem_candidate"]
-            attempted_ids.append(candidate.theorem_id)
-            return SimpleNamespace(
-                candidate=candidate,
-                proof_label=kwargs["proof_label"],
-                success=False,
-                theorem_name="",
-                lean_code="",
-                attempts=[
-                    ProofAttemptFeedback(
-                        attempt=1,
-                        theorem_id=candidate.theorem_id,
-                        reasoning="failed",
-                        lean_code="",
-                        error_output="failed",
-                        strategy="full_script",
-                        success=False,
-                    )
-                ],
-            )
-
-        class FakeProofDb:
-            async def record_failed_candidate(self, *args, **_kwargs):
-                failed_records.append(args)
-
-        async def broadcast(event_type, payload):
-            if event_type == "proof_check_complete":
-                complete_events.append(payload)
-
-        original_identify = ProofVerificationStage.__dict__["_resolve_candidates"]
-        old_method = stage._run_lean_pipeline_for_candidate
-        old_identify_candidates = proof_identification_module.ProofIdentificationAgent.identify_candidates
-        stage._run_lean_pipeline_for_candidate = fake_run_lean_pipeline_for_candidate
-
-        async def fake_resolve_candidates(**kwargs):
-            if kwargs["theorem_candidates"] is not None:
-                return kwargs["theorem_candidates"]
-            direct = stage._direct_user_prompt_candidate(kwargs["user_prompt"])
-            if direct is not None:
-                return [direct]
-            return await original_identify(stage, **kwargs)
-
-        try:
-            # Keep the direct-target path real, but replace the fallback discovery
-            # agent created inside run() with a deterministic fake.
-            stage._resolve_candidates = fake_resolve_candidates
-            proof_identification_module.ProofIdentificationAgent.identify_candidates = fake_identify_candidates
-            result = await stage.run(
-                content="Manual source.",
-                source_type="brainstorm",
-                source_id="manual_aggregator",
-                user_prompt=(
-                    "theorem direct_user_target {n : Nat} (hn : 0 < n) : n = n := by\n"
-                    "  ...\n"
-                ),
-                submitter_model="model",
-                submitter_context=8000,
-                submitter_max_tokens=1000,
-                validator_model="validator",
-                validator_context=8000,
-                validator_max_tokens=1000,
-                broadcast_fn=broadcast,
-                novel_proofs_db=FakeProofDb(),
-                append_to_source=False,
-                trigger="manual",
-            )
-        finally:
-            system_config.lean4_enabled = old_lean4_enabled
-            stage._run_lean_pipeline_for_candidate = old_method
-            proof_identification_module.ProofIdentificationAgent.identify_candidates = old_identify_candidates
-
-        self.assertEqual(attempted_ids, ["direct_direct_user_target", "toward_prompt"])
-        self.assertEqual(result.total_candidates, 2)
-        self.assertTrue(identification_calls)
-        self.assertEqual(complete_events[-1]["trigger"], "manual")
-        self.assertEqual(complete_events[-1]["total_candidates"], 2)
+        self.assertTrue(fake_identifier.called)
+        self.assertEqual(fake_identifier.kwargs["user_research_prompt"].count("direct_user_target"), 1)
+        self.assertEqual([candidate.theorem_id for candidate in candidates], [
+            "goal_direct_solution",
+            "goal_supporting_lemma",
+        ])
 
     async def test_automatic_brainstorm_rounds_continue_until_no_candidates(self):
         fake_stage = _FakeProofStage([1, 1, 0, 1])

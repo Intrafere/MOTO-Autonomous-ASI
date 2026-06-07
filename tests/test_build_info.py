@@ -23,7 +23,7 @@ class BuildInfoArchiveIdentityTests(TestCase):
                         "version": "1.0.9",
                         "build_commit": "stale-local-commit",
                         "update_channel": "main",
-                        "api_contract_version": "build5-v28",
+                        "api_contract_version": "build5-v29",
                     }
                 ),
                 encoding="utf-8",

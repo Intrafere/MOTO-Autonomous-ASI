@@ -10,6 +10,7 @@ import aiofiles
 from backend.shared.models import AggregatorStartRequest, SystemStatus, ModelInfo
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.config import system_config, rag_config
+from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.token_tracker import token_tracker
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.log_redaction import redact_log_text
@@ -165,6 +166,7 @@ async def start_aggregator(request: AggregatorStartRequest):
             for config in request.submitter_configs:
                 label = "Main submitter" if config.submitter_id == 1 else f"Submitter {config.submitter_id}"
                 _require_valid_role_limits(config.context_window, config.max_output_tokens, label)
+            await require_embedding_provider_ready()
 
             # Update validator context window configuration
             rag_config.validator_context_window = request.validator_context_size

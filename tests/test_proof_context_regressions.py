@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,7 +22,14 @@ from backend.aggregator.memory.shared_training import (
     save_manual_aggregator_prompt,
 )
 from backend.shared.config import system_config
-from backend.shared.models import ProofCandidate, ProofRecord
+from backend.shared.models import (
+    ProofCandidate,
+    ProofCheckRequest,
+    ProofRecord,
+    ProofRuntimeConfigSnapshot,
+    ProofRoleConfigSnapshot,
+    SubmitterConfig,
+)
 
 
 class _FakePaperLibrary:
@@ -55,6 +63,96 @@ class _FakeActiveProofDatabase:
 
 
 class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_aggregator_runtime_prefers_active_manual_config_over_stale_request_snapshot(self):
+        previous_state = {
+            "submitter_configs": proofs_route.coordinator.submitter_configs,
+            "validator_model": proofs_route.coordinator.validator_model,
+            "validator_provider": proofs_route.coordinator.validator_provider,
+            "validator_openrouter_provider": proofs_route.coordinator.validator_openrouter_provider,
+            "validator_openrouter_reasoning_effort": proofs_route.coordinator.validator_openrouter_reasoning_effort,
+            "validator_lm_studio_fallback": proofs_route.coordinator.validator_lm_studio_fallback,
+            "validator_context_window": proofs_route.coordinator.validator_context_window,
+            "validator_max_tokens": proofs_route.coordinator.validator_max_tokens,
+            "validator_supercharge_enabled": proofs_route.coordinator.validator_supercharge_enabled,
+        }
+        stale_request_snapshot = ProofRuntimeConfigSnapshot(
+            brainstorm=ProofRoleConfigSnapshot(
+                provider="openai_codex_oauth",
+                model_id="gpt-5.5",
+                context_window=400000,
+                max_output_tokens=128000,
+            ),
+            paper=ProofRoleConfigSnapshot(
+                provider="openai_codex_oauth",
+                model_id="gpt-5.5",
+                context_window=400000,
+                max_output_tokens=128000,
+            ),
+            validator=ProofRoleConfigSnapshot(
+                provider="openrouter",
+                model_id="~google/gemini-flash-latest",
+                context_window=1048576,
+                max_output_tokens=65536,
+            ),
+        ).model_dump(mode="json")
+
+        try:
+            proofs_route.coordinator.submitter_configs = [
+                SubmitterConfig(
+                    submitter_id=1,
+                    provider="openrouter",
+                    model_id="anthropic/claude-opus-4.7",
+                    openrouter_provider="Anthropic",
+                    context_window=1000000,
+                    max_output_tokens=128000,
+                )
+            ]
+            proofs_route.coordinator.validator_model = "anthropic/claude-opus-4.7"
+            proofs_route.coordinator.validator_provider = "openrouter"
+            proofs_route.coordinator.validator_openrouter_provider = "Anthropic"
+            proofs_route.coordinator.validator_openrouter_reasoning_effort = "xhigh"
+            proofs_route.coordinator.validator_lm_studio_fallback = None
+            proofs_route.coordinator.validator_context_window = 1000000
+            proofs_route.coordinator.validator_max_tokens = 128000
+            proofs_route.coordinator.validator_supercharge_enabled = False
+
+            request = ProofCheckRequest(
+                source_type="brainstorm",
+                source_id=proofs_route.MANUAL_AGGREGATOR_SOURCE_ID,
+                proof_runtime_config=stale_request_snapshot,
+            )
+            snapshot = await proofs_route._get_runtime_snapshot(request)
+        finally:
+            for key, value in previous_state.items():
+                setattr(proofs_route.coordinator, key, value)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.brainstorm.model_id, "anthropic/claude-opus-4.7")
+        self.assertEqual(snapshot.validator.model_id, "anthropic/claude-opus-4.7")
+        self.assertEqual(snapshot.validator.openrouter_provider, "Anthropic")
+
+    async def test_manual_aggregator_runtime_does_not_fall_back_to_autonomous_snapshot(self):
+        previous_submitters = proofs_route.coordinator.submitter_configs
+        previous_validator_model = proofs_route.coordinator.validator_model
+        try:
+            proofs_route.coordinator.submitter_configs = []
+            proofs_route.coordinator.validator_model = ""
+            request = ProofCheckRequest(
+                source_type="brainstorm",
+                source_id=proofs_route.MANUAL_AGGREGATOR_SOURCE_ID,
+            )
+            with mock.patch.object(
+                proofs_route.autonomous_coordinator,
+                "get_proof_runtime_config",
+                side_effect=AssertionError("manual sources must not read autonomous proof snapshots"),
+            ):
+                snapshot = await proofs_route._get_runtime_snapshot(request)
+        finally:
+            proofs_route.coordinator.submitter_configs = previous_submitters
+            proofs_route.coordinator.validator_model = previous_validator_model
+
+        self.assertIsNone(snapshot)
+
     async def test_cross_source_exact_proof_match_is_stored_non_novel_without_novelty_call(self):
         existing_record = ProofRecord(
             proof_id="proof_existing",

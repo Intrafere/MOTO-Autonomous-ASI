@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -13,6 +15,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from backend.api.routes import websocket
 from backend.aggregator.core.coordinator import coordinator
+from backend.aggregator.memory.event_log import event_log
 from backend.aggregator.memory.shared_training import (
     append_proof_to_manual_shared_training,
     load_manual_aggregator_prompt,
@@ -56,6 +59,21 @@ MANUAL_COMPILER_CURRENT_SOURCE_ID = "manual_compiler_current"
 PROOF_SCOPE_AUTONOMOUS = "autonomous"
 PROOF_SCOPE_MANUAL = "manual"
 _manual_proof_run_lock = asyncio.Lock()
+_LEAN_STATUS_STARTING_LOG_INTERVAL_SECONDS = 60.0
+_last_lean_status_starting_log_at = 0.0
+
+
+def _log_lean_status_starting_up(detail: str) -> None:
+    """Avoid noisy startup warnings while Lean is bootstrapping its workspace."""
+    global _last_lean_status_starting_log_at
+    now = time.monotonic()
+    if now - _last_lean_status_starting_log_at < _LEAN_STATUS_STARTING_LOG_INTERVAL_SECONDS:
+        return
+    _last_lean_status_starting_log_at = now
+    logger.info(
+        "Lean 4 is still starting up; proof status will become ready after workspace bootstrap completes. %s",
+        detail,
+    )
 
 
 def _manual_proof_history_root() -> Path:
@@ -96,6 +114,66 @@ def _manual_append_callback(request: ProofCheckRequest):
     if request.source_type == "paper" and request.source_id == MANUAL_COMPILER_CURRENT_SOURCE_ID:
         return _append_manual_compiler_current_proof
     return None
+
+
+def _is_manual_aggregator_request(request: ProofCheckRequest) -> bool:
+    return request.source_type == "brainstorm" and request.source_id == MANUAL_AGGREGATOR_SOURCE_ID
+
+
+def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
+    target = (
+        data.get("theorem_name")
+        or data.get("proof_label")
+        or data.get("theorem_id")
+        or data.get("proof_id")
+        or "candidate"
+    )
+    if event_type == "proof_check_started":
+        return "Proof check started for the manual Aggregator database"
+    if event_type == "proof_check_no_candidates":
+        return "No formal theorem candidates found in the manual Aggregator database"
+    if event_type == "proof_check_candidates_found":
+        return f"Proof candidates found: {data.get('count') or 0}"
+    if event_type == "proof_attempt_started":
+        return f"Lean proof attempt started: {target}"
+    if event_type == "proof_lean_accepted":
+        return f"Lean accepted proof: {target}"
+    if event_type == "proof_attempt_failed":
+        return f"Proof attempt failed: {target}"
+    if event_type == "proof_attempts_exhausted":
+        return f"Proof attempts exhausted: {target}"
+    if event_type == "proof_integrity_rejected":
+        return f"Proof integrity rejected: {data.get('reason') or data.get('message') or target}"
+    if event_type == "proof_verified":
+        return f"Proof verified: {target}"
+    if event_type == "known_proof_verified":
+        return f"Known proof verified: {target}"
+    if event_type == "proof_registration_duplicate":
+        return f"Duplicate proof reused: {target}"
+    if event_type == "novel_proof_discovered":
+        return f"Novel proof discovered: {target}"
+    if event_type == "proof_dependency_added":
+        return f"Proof dependency added: {target}"
+    if event_type == "proof_check_complete":
+        return f"Proof check complete: {data.get('verified_count') or 0} verified, {data.get('novel_count') or 0} novel"
+    return f"Proof event: {event_type}"
+
+
+async def _broadcast_manual_aggregator_proof_event(event_type: str, data: dict) -> None:
+    """Broadcast and durably log manual Aggregator proof activity."""
+    enriched_data = {
+        **(data or {}),
+        "manual_event_id": f"manual-aggregator-proof-{uuid.uuid4().hex}",
+    }
+    await websocket.broadcast_event(event_type, enriched_data)
+    try:
+        await event_log.add_event(
+            event_type,
+            _manual_aggregator_proof_event_message(event_type, enriched_data),
+            enriched_data,
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist manual Aggregator proof event %s: %s", event_type, exc)
 
 
 def _get_scoped_proof_database(scope: str = PROOF_SCOPE_AUTONOMOUS) -> ProofDatabase:
@@ -217,7 +295,83 @@ def _get_request_runtime_snapshot(request: Optional[ProofCheckRequest]) -> Optio
     return snapshot
 
 
+def _get_active_manual_runtime_snapshot(request: ProofCheckRequest) -> Optional[ProofRuntimeConfigSnapshot]:
+    """Build proof runtime settings from the active manual mode, never from autonomous presets."""
+    if request.source_type == "brainstorm" and request.source_id == MANUAL_AGGREGATOR_SOURCE_ID:
+        if not coordinator.submitter_configs or not coordinator.validator_model:
+            return None
+
+        first_submitter = coordinator.submitter_configs[0]
+        submitter_role = ProofRoleConfigSnapshot(
+            provider=first_submitter.provider,
+            model_id=first_submitter.model_id,
+            openrouter_provider=first_submitter.openrouter_provider,
+            openrouter_reasoning_effort=first_submitter.openrouter_reasoning_effort,
+            lm_studio_fallback_id=first_submitter.lm_studio_fallback_id,
+            context_window=first_submitter.context_window,
+            max_output_tokens=first_submitter.max_output_tokens,
+            supercharge_enabled=first_submitter.supercharge_enabled,
+        )
+        validator_role = ProofRoleConfigSnapshot(
+            provider=coordinator.validator_provider,
+            model_id=coordinator.validator_model,
+            openrouter_provider=coordinator.validator_openrouter_provider,
+            openrouter_reasoning_effort=coordinator.validator_openrouter_reasoning_effort,
+            lm_studio_fallback_id=coordinator.validator_lm_studio_fallback,
+            context_window=coordinator.validator_context_window,
+            max_output_tokens=coordinator.validator_max_tokens,
+            supercharge_enabled=coordinator.validator_supercharge_enabled,
+        )
+        return ProofRuntimeConfigSnapshot(
+            brainstorm=submitter_role,
+            paper=submitter_role,
+            validator=validator_role,
+        )
+
+    if request.source_type == "paper" and request.source_id == MANUAL_COMPILER_CURRENT_SOURCE_ID:
+        high_context = compiler_coordinator.high_context_submitter
+        if high_context is None or not getattr(high_context, "model_name", "") or not compiler_coordinator.validator_model:
+            return None
+
+        paper_role = ProofRoleConfigSnapshot(
+            provider=compiler_coordinator.high_context_provider,
+            model_id=high_context.model_name,
+            openrouter_provider=compiler_coordinator.high_context_openrouter_provider,
+            openrouter_reasoning_effort=compiler_coordinator.high_context_openrouter_reasoning_effort,
+            lm_studio_fallback_id=compiler_coordinator.high_context_lm_studio_fallback,
+            context_window=system_config.compiler_high_context_context_window,
+            max_output_tokens=system_config.compiler_high_context_max_output_tokens,
+            supercharge_enabled=compiler_coordinator.high_context_supercharge_enabled,
+        )
+        validator_role = ProofRoleConfigSnapshot(
+            provider=compiler_coordinator.validator_provider,
+            model_id=compiler_coordinator.validator_model,
+            openrouter_provider=compiler_coordinator.validator_openrouter_provider,
+            openrouter_reasoning_effort=compiler_coordinator.validator_openrouter_reasoning_effort,
+            lm_studio_fallback_id=compiler_coordinator.validator_lm_studio_fallback,
+            context_window=compiler_coordinator.validator_context_window,
+            max_output_tokens=compiler_coordinator.validator_max_tokens,
+            supercharge_enabled=compiler_coordinator.validator_supercharge_enabled,
+        )
+        return ProofRuntimeConfigSnapshot(
+            brainstorm=paper_role,
+            paper=paper_role,
+            validator=validator_role,
+        )
+
+    return None
+
+
 async def _get_runtime_snapshot(request: Optional[ProofCheckRequest] = None) -> Optional[ProofRuntimeConfigSnapshot]:
+    if request and _is_non_appending_manual_source(request):
+        # Active manual sources must not borrow autonomous proof settings.
+        # Prefer the backend's live manual runtime so stale browser/localStorage
+        # snapshots cannot override the roles that actually produced the source.
+        active_manual_snapshot = _get_active_manual_runtime_snapshot(request)
+        if active_manual_snapshot is not None:
+            return active_manual_snapshot
+        return _get_request_runtime_snapshot(request)
+
     request_snapshot = _get_request_runtime_snapshot(request)
     if request_snapshot is not None:
         return request_snapshot
@@ -530,11 +684,22 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
         )
         snapshot = await _get_runtime_snapshot(request)
         if snapshot is None:
+            if _is_non_appending_manual_source(request):
+                raise RuntimeError(
+                    "No manual proof runtime model configuration is available for this source. "
+                    "Start the manual Aggregator or Single Paper Writer with configured proof roles, "
+                    "or retry from a browser session with complete manual role settings."
+                )
             raise RuntimeError("No proof runtime model configuration is available yet.")
 
         async with _manual_proof_run_lock:
             role_config = _configure_manual_roles(request.source_type, snapshot)
             stage = autonomous_coordinator._proof_verification_stage
+            broadcast_fn = (
+                _broadcast_manual_aggregator_proof_event
+                if _is_manual_aggregator_request(request)
+                else websocket.broadcast_event
+            )
             await stage.run_manual(
                 content=source_content,
                 source_type=request.source_type,
@@ -546,7 +711,7 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
                 validator_model=snapshot.validator.model_id,
                 validator_context=snapshot.validator.context_window,
                 validator_max_tokens=snapshot.validator.max_output_tokens,
-                broadcast_fn=websocket.broadcast_event,
+                broadcast_fn=broadcast_fn,
                 novel_proofs_db=scoped_proof_database,
                 source_title=source_title,
                 source_reserved=True,
@@ -555,7 +720,12 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
             )
     except Exception as exc:
         logger.exception("Manual proof check failed for %s %s", request.source_type, request.source_id)
-        await websocket.broadcast_event(
+        broadcast_fn = (
+            _broadcast_manual_aggregator_proof_event
+            if _is_manual_aggregator_request(request)
+            else websocket.broadcast_event
+        )
+        await broadcast_fn(
             "proof_check_complete",
             {
                 "source_type": request.source_type,
@@ -754,6 +924,7 @@ async def get_proofs_status():
     lsp_active = False
     z3_version = ""
     smt_available = False
+    lean_status_starting_up = False
     manual_check_ready, manual_check_message = await _get_manual_check_status()
     if system_config.lean4_enabled:
         try:
@@ -762,8 +933,12 @@ async def get_proofs_status():
             workspace_ready = await asyncio.wait_for(client.ensure_workspace(), timeout=5.0)
             mathlib_commit = client.get_mathlib_commit()
             lsp_active = client.is_server_active()
-        except (asyncio.TimeoutError, Exception) as exc:
-            logger.warning("Lean 4 status check timed out or failed: %s", exc)
+        except asyncio.TimeoutError:
+            lean_status_starting_up = True
+            _log_lean_status_starting_up("The latest status check is waiting on startup work.")
+        except Exception as exc:
+            lean_status_starting_up = True
+            _log_lean_status_starting_up(f"Latest status detail: {exc}")
         if manual_check_ready:
             version_text = (version or "").strip().lower()
             version_unavailable = (
@@ -772,12 +947,15 @@ async def get_proofs_status():
                 or "no such file" in version_text
                 or "not recognized" in version_text
             )
-            if version_unavailable:
+            if lean_status_starting_up:
+                manual_check_ready = False
+                manual_check_message = "Lean 4 is still starting up."
+            elif version_unavailable:
                 manual_check_ready = False
                 manual_check_message = "Lean 4 executable is not available."
             elif not workspace_ready:
                 manual_check_ready = False
-                manual_check_message = "Lean 4 workspace is not ready yet."
+                manual_check_message = "Lean 4 is still starting up."
 
     if system_config.smt_enabled:
         try:
@@ -887,6 +1065,15 @@ async def run_manual_proof_check(request: ProofCheckRequest, background_tasks: B
 
     snapshot = await _get_runtime_snapshot(request)
     if snapshot is None:
+        if _is_non_appending_manual_source(request):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "No manual proof runtime model configuration is available for this source. "
+                    "Start the manual Aggregator or Single Paper Writer with configured proof roles, "
+                    "or retry from a browser session with complete manual role settings."
+                ),
+            )
         raise HTTPException(
             status_code=409,
             detail="No proof runtime model configuration is available yet. Start autonomous research once before using manual proof checks.",

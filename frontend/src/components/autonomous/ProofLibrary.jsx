@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { autonomousAPI } from '../../services/api';
-import { buildResearchRunGroups } from '../../utils/researchRunHistory';
+import { buildResearchRunGroups, formatRunPromptPreview } from '../../utils/researchRunHistory';
 import { downloadTextFile } from '../../utils/downloadHelpers';
 import './FinalAnswerLibrary.css';
 import './ProofLibrary.css';
@@ -267,7 +267,9 @@ export default function ProofLibrary({
               <div key={group.sessionId} className="run-history-group">
                 <div className="run-history-group-header">
                   <div className="run-history-group-heading">
-                    <h3 className="run-history-group-title">{group.userPrompt}</h3>
+                    <h3 className="run-history-group-title">
+                      {formatRunPromptPreview(group.userPrompt)}
+                    </h3>
                     <p className="run-history-group-subtitle">
                       {sessionProofs.length} proof{sessionProofs.length !== 1 ? 's' : ''}
                       {group.createdAt && ` \u00B7 ${formatDate(group.createdAt)}`}

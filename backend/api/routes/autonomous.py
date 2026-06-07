@@ -26,6 +26,7 @@ from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 from backend.shared.boost_logger import boost_logger
+from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.shared.response_extraction import extract_message_text
@@ -744,6 +745,7 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                     status_code=400,
                     detail=f"Number of submitters must be {system_config.min_submitters}-{system_config.max_submitters}, got {num_submitters}"
                 )
+            await require_embedding_provider_ready()
 
             # Log submitter configurations
             for config in request.submitter_configs:

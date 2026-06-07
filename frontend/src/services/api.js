@@ -3,6 +3,29 @@
  */
 
 const API_BASE = import.meta.env.VITE_MOTO_API_BASE || '/api';
+const PROOF_STATUS_READY_CACHE_MS = 5000;
+const PROOF_STATUS_STARTING_CACHE_MS = 30000;
+
+let proofStatusCache = null;
+let proofStatusCacheTime = 0;
+let proofStatusInFlight = null;
+
+function isProofStatusStartingUp(status) {
+  const version = (status?.lean4_version || status?.lean_version || '').trim();
+  return Boolean(status?.lean4_enabled && (!version || !status?.workspace_ready));
+}
+
+function getProofStatusCacheMs(status) {
+  return isProofStatusStartingUp(status)
+    ? PROOF_STATUS_STARTING_CACHE_MS
+    : PROOF_STATUS_READY_CACHE_MS;
+}
+
+function rememberProofStatus(status) {
+  proofStatusCache = status;
+  proofStatusCacheTime = Date.now();
+  return status;
+}
 
 function withProofScope(path, scope) {
   if (!scope || scope === 'autonomous') {
@@ -523,10 +546,29 @@ export const autonomousAPI = {
   },
 
   // Get Lean 4 proof system status
-  async getProofStatus() {
-    const response = await fetch(`${API_BASE}/proofs/status`);
-    if (!response.ok) throw new Error('Failed to get proof status');
-    return response.json();
+  async getProofStatus({ force = false } = {}) {
+    const now = Date.now();
+    if (
+      !force &&
+      proofStatusCache &&
+      now - proofStatusCacheTime < getProofStatusCacheMs(proofStatusCache)
+    ) {
+      return proofStatusCache;
+    }
+    if (!force && proofStatusInFlight) {
+      return proofStatusInFlight;
+    }
+
+    proofStatusInFlight = fetch(`${API_BASE}/proofs/status`)
+      .then((response) => {
+        if (!response.ok) throw new Error('Failed to get proof status');
+        return response.json();
+      })
+      .then(rememberProofStatus)
+      .finally(() => {
+        proofStatusInFlight = null;
+      });
+    return proofStatusInFlight;
   },
 
   // Update runtime Lean 4 proof settings
@@ -540,7 +582,7 @@ export const autonomousAPI = {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData?.detail?.message || errorData?.detail || 'Failed to update proof settings');
     }
-    return response.json();
+    return rememberProofStatus(await response.json());
   },
 
   // Queue a manual proof check for one brainstorm or paper
@@ -1379,6 +1421,51 @@ export const cloudAccessAPI = {
       method: 'DELETE',
     });
     if (!response.ok) await throwFromResponse(response, 'Failed to clear OpenAI Codex login');
+    return response.json();
+  },
+
+  async startXAIGrokLogin(redirectUri = null) {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok/oauth/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirect_uri: redirectUri }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to start xAI Grok login');
+    return response.json();
+  },
+
+  async exchangeXAIGrokCode({ code = '', state = '', redirectUrl = '', redirectUri = null } = {}) {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok/oauth/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code,
+        state,
+        redirect_url: redirectUrl,
+        redirect_uri: redirectUri,
+      }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to complete xAI Grok login');
+    return response.json();
+  },
+
+  async getXAIGrokStatus() {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok/status`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get xAI Grok status');
+    return response.json();
+  },
+
+  async getXAIGrokModels() {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok/models`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to fetch xAI Grok models');
+    return response.json();
+  },
+
+  async clearXAIGrokLogin() {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to clear xAI Grok login');
     return response.json();
   },
 };

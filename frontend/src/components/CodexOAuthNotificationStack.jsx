@@ -59,7 +59,8 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
 
   const roleLabel = notification.role_id
     ? notification.role_id.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
-    : 'OpenAI Codex';
+    : 'OAuth provider';
+  const providerLabel = notification.provider_label || 'OAuth';
 
   return (
     <div
@@ -102,10 +103,10 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
           </div>
           <div>
             <div style={{ fontSize: '10px', color: '#ddd6fe', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: '700' }}>
-              Codex OAuth Needs Attention
+              OAuth Needs Attention
             </div>
             <div style={{ fontSize: '14px', fontWeight: '700', lineHeight: '1.2', color: '#f5f3ff' }}>
-              OpenAI Codex
+              {providerLabel}
             </div>
           </div>
         </div>
@@ -132,7 +133,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
         {roleLabel}
       </div>
       <div style={{ fontSize: '11px', color: '#e9d5ff', lineHeight: '1.4', marginBottom: '10px' }}>
-        {notification.message || 'Check your OpenAI Codex OAuth connection, sign in again, and retry.'}
+        {notification.message || `Check your ${providerLabel} OAuth connection, sign in again, and retry.`}
       </div>
 
       <button

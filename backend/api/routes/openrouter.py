@@ -22,6 +22,7 @@ from backend.shared.config import rag_config, system_config
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.openrouter_client import OpenRouterClient
 from backend.shared.api_client_manager import api_client_manager
+from backend.shared.embedding_readiness import check_lm_studio_embedding_ready
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.provider_pause import resume_provider_pauses
@@ -65,15 +66,22 @@ async def check_lm_studio_availability() -> Dict[str, Any]:
             "has_models": False,
             "model_count": 0,
             "models": [],
+            "has_embedding_model": False,
+            "embedding_ready": False,
+            "embedding_message": "LM Studio is disabled in generic mode.",
             "error": None,
             "generic_mode": True,
         }
 
     try:
         result = await lm_studio_client.check_availability()
+        embedding_status = await check_lm_studio_embedding_ready(timeout_seconds=5.0)
         return {
             "success": True,
-            **result
+            **result,
+            "has_embedding_model": bool(embedding_status.get("ready")),
+            "embedding_ready": bool(embedding_status.get("ready")),
+            "embedding_message": embedding_status.get("message"),
         }
     except Exception as e:
         logger.error(f"Error checking LM Studio availability: {e}")
@@ -83,6 +91,9 @@ async def check_lm_studio_availability() -> Dict[str, Any]:
             "has_models": False,
             "model_count": 0,
             "models": [],
+            "has_embedding_model": False,
+            "embedding_ready": False,
+            "embedding_message": "Failed to check LM Studio embedding availability",
             "error": "Failed to check LM Studio availability"
         }
 

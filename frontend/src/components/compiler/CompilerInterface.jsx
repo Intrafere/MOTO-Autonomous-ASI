@@ -497,7 +497,7 @@ function CompilerInterface({
           id="compilerPrompt"
           value={compilerPrompt}
           onChange={(e) => setCompilerPrompt(e.target.value)}
-          placeholder='Create a final prompt that exactly relates to a solution your aggregation database helps solve, i.e. "Tell me the most theoretically advanced perspective on how squaring the circle works."'
+          placeholder='Create a final prompt that exactly relates to a solution your aggregation database helps solve, i.e. "Tell me the most theoretically advanced perspective on the "squaring the circle" problem."'
           rows={6}
           disabled={status.is_running}
         />

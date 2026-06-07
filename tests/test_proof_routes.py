@@ -1,5 +1,5 @@
 from datetime import datetime
-from unittest import TestCase, mock
+from unittest import IsolatedAsyncioTestCase, TestCase, mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -81,3 +81,32 @@ class ManualProofScopeRouteTests(TestCase):
         self.assertIn("theorem manual_theorem", lean_response.text)
         self.assertEqual(manual_db.get_proof.await_count, 2)
         self.assertEqual(manual_db.get_lean_code.await_count, 2)
+
+
+class ManualAggregatorProofEventLogTests(IsolatedAsyncioTestCase):
+    async def test_manual_aggregator_proof_event_is_broadcast_and_persisted_with_same_id(self) -> None:
+        with (
+            mock.patch.object(proofs_route.websocket, "broadcast_event", new=mock.AsyncMock()) as broadcast,
+            mock.patch.object(proofs_route.event_log, "add_event", new=mock.AsyncMock()) as add_event,
+        ):
+            await proofs_route._broadcast_manual_aggregator_proof_event(
+                "proof_check_complete",
+                {
+                    "source_type": "brainstorm",
+                    "source_id": "manual_aggregator",
+                    "verified_count": 1,
+                    "novel_count": 0,
+                },
+            )
+
+        broadcast.assert_awaited_once()
+        add_event.assert_awaited_once()
+        _, broadcast_payload = broadcast.await_args.args
+        _, message, persisted_payload = add_event.await_args.args
+
+        self.assertEqual(message, "Proof check complete: 1 verified, 0 novel")
+        self.assertEqual(
+            broadcast_payload["manual_event_id"],
+            persisted_payload["manual_event_id"],
+        )
+        self.assertEqual(persisted_payload["source_id"], "manual_aggregator")

@@ -8,6 +8,7 @@ import contextlib
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import ntpath
 import os
 from pathlib import Path
 import platform
@@ -575,20 +576,16 @@ def build_linux_terminal_command(
 def resolve_windows_console_executable(executable: str) -> str:
     """Prefer a PATH-safe executable name when building cmd.exe command text."""
     candidate = str(executable or "").strip()
-    if sys.platform != "win32" or not candidate or not os.path.isabs(candidate):
+    if sys.platform != "win32" or not candidate or not ntpath.isabs(candidate):
         return candidate
 
-    executable_path = Path(candidate)
-    command_name = executable_path.name
+    command_name = ntpath.basename(candidate)
     resolved = resolve_command(command_name)
     if not resolved:
         return candidate
 
-    try:
-        if Path(resolved).resolve() == executable_path.resolve():
-            return command_name
-    except OSError:
-        return candidate
+    if ntpath.normcase(ntpath.normpath(resolved)) == ntpath.normcase(ntpath.normpath(candidate)):
+        return command_name
 
     return candidate
 
@@ -599,7 +596,7 @@ def windows_service_requires_direct_launch(args: Sequence[str]) -> bool:
         return False
 
     executable = str(args[0] or "").strip()
-    if not executable or not os.path.isabs(executable):
+    if not executable or not ntpath.isabs(executable):
         return False
 
     normalized = resolve_windows_console_executable(executable)

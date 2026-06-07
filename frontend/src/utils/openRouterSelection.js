@@ -15,6 +15,20 @@ const AUTO_MIN_CAPABLE_OUTPUT_TOKENS = 32768;
 const KNOWN_WEAK_AUTO_PROVIDERS = new Set([
   'venice',
 ]);
+const XAI_GROK_KNOWN_MODEL_LIMITS = {
+  'grok-4': {
+    contextLength: 1000000,
+    maxOutputTokens: 131072,
+  },
+  'grok-4.2': {
+    contextLength: 1000000,
+    maxOutputTokens: 131072,
+  },
+  'grok-4.3': {
+    contextLength: 1000000,
+    maxOutputTokens: 131072,
+  },
+};
 
 function toPositiveInteger(value) {
   const parsed = Number(value);
@@ -43,6 +57,41 @@ function getEndpointProviderName(endpoint) {
     endpoint?.id ||
     ''
   );
+}
+
+function getCloudAccessModelContext(model) {
+  return (
+    toPositiveInteger(model?.context_length) ||
+    toPositiveInteger(model?.context_window) ||
+    toPositiveInteger(model?.contextTokens) ||
+    toPositiveInteger(model?.input_context_window) ||
+    toPositiveInteger(model?.effective_input_context_window)
+  );
+}
+
+function getCloudAccessModelOutputCap(model) {
+  return (
+    toPositiveInteger(model?.max_output_tokens) ||
+    toPositiveInteger(model?.max_completion_tokens) ||
+    toPositiveInteger(model?.output_tokens) ||
+    toPositiveInteger(model?.completion_tokens)
+  );
+}
+
+function getKnownXAIGrokLimits(model) {
+  const candidates = [
+    model?.id,
+    model?.name,
+    model?.title,
+    model?.slug,
+  ]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase().replace(/_/g, '-'));
+
+  const knownModelId = candidates.find((candidate) => (
+    Object.prototype.hasOwnProperty.call(XAI_GROK_KNOWN_MODEL_LIMITS, candidate)
+  ));
+  return knownModelId ? XAI_GROK_KNOWN_MODEL_LIMITS[knownModelId] : null;
 }
 
 function uniqueSorted(values) {
@@ -165,16 +214,16 @@ export function findOpenRouterModel(models, modelId) {
   return models.find((model) => model.id === modelId) || null;
 }
 
-export function computeCodexAutoSettings(model) {
+export function computeCloudAccessAutoSettings(model, providerLabel = 'Cloud Access') {
   const warnings = [];
-  const contextWindow = toPositiveInteger(model?.context_length);
-  const maxOutputTokens = toPositiveInteger(model?.max_output_tokens);
+  const contextWindow = getCloudAccessModelContext(model);
+  const maxOutputTokens = getCloudAccessModelOutputCap(model);
 
   if (!contextWindow) {
-    warnings.push('Codex model metadata did not expose a known context window; preserving the current context setting.');
+    warnings.push(`${providerLabel} model metadata did not expose a known context window; preserving the current context setting.`);
   }
   if (!maxOutputTokens) {
-    warnings.push('Codex model metadata did not expose a max output cap; preserving the current max output setting.');
+    warnings.push(`${providerLabel} model metadata did not expose a max output cap; preserving the current max output setting.`);
   }
 
   return {
@@ -182,11 +231,39 @@ export function computeCodexAutoSettings(model) {
     contextWindowKnown: contextWindow !== null,
     maxOutputTokens,
     outputCapKnown: maxOutputTokens !== null,
-    outputCapSource: maxOutputTokens !== null ? 'codex-model-metadata' : 'unknown',
-    source: 'openai-codex-model-metadata',
+    outputCapSource: maxOutputTokens !== null ? 'cloud-access-model-metadata' : 'unknown',
+    source: 'cloud-access-model-metadata',
     inputContextWindow: toPositiveInteger(model?.input_context_window),
     effectiveInputContextWindow: toPositiveInteger(model?.effective_input_context_window),
     warnings,
+  };
+}
+
+export function computeCodexAutoSettings(model) {
+  return computeCloudAccessAutoSettings(model, 'Codex');
+}
+
+export function computeXAIGrokAutoSettings(model) {
+  const knownLimits = getKnownXAIGrokLimits(model);
+  const metadataContextWindow = getCloudAccessModelContext(model);
+  const metadataOutputCap = getCloudAccessModelOutputCap(model);
+  const modelWithKnownLimits = knownLimits
+    ? {
+        ...model,
+        context_length: metadataContextWindow || knownLimits.contextLength,
+        max_output_tokens: metadataOutputCap || knownLimits.maxOutputTokens,
+      }
+    : model;
+  const autoSettings = computeCloudAccessAutoSettings(modelWithKnownLimits, 'xAI Grok');
+  if (!knownLimits || (metadataContextWindow && metadataOutputCap)) {
+    return autoSettings;
+  }
+  return {
+    ...autoSettings,
+    source: `${autoSettings.source}+xai-grok-known-limits`,
+    warnings: autoSettings.warnings.filter((warning) => (
+      !warning.includes('xAI Grok model metadata did not expose')
+    )),
   };
 }
 

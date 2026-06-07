@@ -8,7 +8,9 @@ import React, { useState, useEffect } from 'react';
 import { cloudAccessAPI, openRouterAPI, api, autonomousAPI } from '../../services/api';
 import {
   computeCodexAutoSettings,
+  computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
@@ -19,6 +21,13 @@ import {
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
+import {
+  chooseCloudAccessProvider,
+  getConfiguredCloudAccessProviders,
+  isCloudAccessProvider,
+  cloudAccessProviderLabel,
+  XAI_GROK_PROVIDER,
+} from '../../utils/oauthProviders';
 import {
   AUTONOMOUS_SETTINGS_STORAGE_KEY,
   AUTONOMOUS_PROFILES_STORAGE_KEY,
@@ -67,16 +76,25 @@ const ModelSelector = ({
   lmStudioModels,
   openRouterModels,
   openAICodexModels,
+  xaiGrokModels,
   modelProviders,
   hasOpenRouterKey,
   hasOpenAICodexLogin,
+  hasXAIGrokLogin,
   isRunning,
   lmStudioEnabled,
 }) => {
   const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
+  const oauthStatusByProvider = {
+    openai_codex_oauth: { configured: hasOpenAICodexLogin },
+    [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+  };
+  const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
   const currentModels = effectiveProvider === 'openrouter'
     ? openRouterModels
-    : (effectiveProvider === 'openai_codex_oauth' ? openAICodexModels : lmStudioModels);
+    : (isCloudAccessProvider(effectiveProvider)
+      ? (effectiveProvider === XAI_GROK_PROVIDER ? xaiGrokModels : openAICodexModels)
+      : lmStudioModels);
   const providers = modelId && effectiveProvider === 'openrouter'
     ? getProviderNames(modelProviders[modelId])
     : [];
@@ -111,14 +129,34 @@ const ModelSelector = ({
             </button>
             <button
               type="button"
-              className={`provider-toggle-btn${provider === 'openai_codex_oauth' ? ' active-or-orange' : ''}`}
-              onClick={() => hasOpenAICodexLogin && onProviderChange('openai_codex_oauth')}
-              disabled={isRunning || !hasOpenAICodexLogin}
-              style={!hasOpenAICodexLogin ? { color: '#666' } : undefined}
-              title={!hasOpenAICodexLogin ? 'Set OpenAI Codex login in Cloud Access & Keys first' : 'Use OpenAI Codex'}
+              className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
+              onClick={() => {
+                if (configuredOAuthProviders.length > 0) {
+                  onProviderChange(chooseCloudAccessProvider(oauthStatusByProvider, provider));
+                }
+              }}
+              disabled={isRunning || configuredOAuthProviders.length === 0}
+              style={configuredOAuthProviders.length === 0 ? { color: '#666' } : undefined}
+              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
             >
-              OpenAI Codex
+              oAuth
             </button>
+            {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
+              <select
+                value={provider}
+                onChange={(event) => onProviderChange(event.target.value)}
+                disabled={isRunning}
+                title="Select OAuth provider"
+                className="input-dark"
+                style={{ width: 'auto', minWidth: '150px' }}
+              >
+                {configuredOAuthProviders.map((oauthProvider) => (
+                  <option key={oauthProvider.id} value={oauthProvider.id}>
+                    {oauthProvider.label}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         ) : (
           <small className="settings-hint">OpenRouter is required in this deployment.</small>
@@ -223,9 +261,11 @@ const RoleConfig = ({
   lmStudioModels,
   openRouterModels,
   openAICodexModels,
+  xaiGrokModels,
   modelProviders,
   hasOpenRouterKey,
   hasOpenAICodexLogin,
+  hasXAIGrokLogin,
   lmStudioEnabled,
   developerModeEnabled = false,
   showProofStrengthBadge = false,
@@ -265,9 +305,11 @@ const RoleConfig = ({
         lmStudioModels={lmStudioModels}
         openRouterModels={openRouterModels}
         openAICodexModels={openAICodexModels}
+        xaiGrokModels={xaiGrokModels}
         modelProviders={modelProviders}
         hasOpenRouterKey={hasOpenRouterKey}
         hasOpenAICodexLogin={hasOpenAICodexLogin}
+        hasXAIGrokLogin={hasXAIGrokLogin}
         isRunning={isRunning}
         lmStudioEnabled={lmStudioEnabled}
       />
@@ -337,10 +379,13 @@ const AutonomousResearchSettings = ({
   const [lmStudioModels, setLmStudioModels] = useState(models || []);
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
+  const [xaiGrokModels, setXaiGrokModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
+  const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
   const [openAICodexModelError, setOpenAICodexModelError] = useState('');
+  const [xaiGrokModelError, setXaiGrokModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -402,9 +447,10 @@ const AutonomousResearchSettings = ({
   // Parse submitter configs from config
   const parseSubmitterConfigs = (cfg) => {
     if (cfg?.submitter_configs && Array.isArray(cfg.submitter_configs)) {
-      return cfg.submitter_configs.map(c => ({
+      return cfg.submitter_configs.map((c, idx) => ({
         ...DEFAULT_SUBMITTER_CONFIG,
         ...c,
+        submitterId: c.submitterId ?? (idx + 1),
         openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(c.openrouterReasoningEffort || c.openrouter_reasoning_effort),
       }));
     }
@@ -575,6 +621,20 @@ const AutonomousResearchSettings = ({
         console.error('Failed to check OpenAI Codex login:', err);
         setHasOpenAICodexLogin(false);
         setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+      }
+      try {
+        const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+        const configured = Boolean(xaiStatus.status?.configured);
+        setHasXAIGrokLogin(configured);
+        if (configured) {
+          fetchXAIGrokModels();
+        } else {
+          setXaiGrokModelError('');
+        }
+      } catch (err) {
+        console.error('Failed to check xAI Grok login:', err);
+        setHasXAIGrokLogin(false);
+        setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
       }
       
       try {
@@ -817,6 +877,24 @@ const AutonomousResearchSettings = ({
     }
   };
 
+  const fetchXAIGrokModels = async () => {
+    try {
+      const result = await cloudAccessAPI.getXAIGrokModels();
+      const models = result.models || [];
+      setXaiGrokModels(models);
+      setHasXAIGrokLogin(models.length > 0);
+      setXaiGrokModelError(models.length > 0
+        ? ''
+        : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
+      );
+    } catch (err) {
+      console.error('Failed to fetch xAI Grok models:', err);
+      setXaiGrokModels([]);
+      setHasXAIGrokLogin(false);
+      setXaiGrokModelError(`xAI Grok OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
+    }
+  };
+
   // Refetch models when free-only toggle changes
   useEffect(() => {
     if (hasOpenRouterKey && isLoadedFromStorage) {
@@ -925,6 +1003,30 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     return autoSettings;
   };
 
+  const getOAuthModels = (provider) => {
+    if (provider === 'openai_codex_oauth') return openAICodexModels;
+    if (provider === XAI_GROK_PROVIDER) return xaiGrokModels;
+    return [];
+  };
+
+  const getCloudAccessAutoSettingsForModel = (provider, modelId) => {
+    if (provider === 'openai_codex_oauth') {
+      return getCodexAutoSettingsForModel(modelId);
+    }
+    const model = getOAuthModels(provider).find((item) => item.id === modelId);
+    if (!model) {
+      console.debug('[AutonomousOAuthAutoFill] model not in loaded list, skipping auto-fill', { provider, modelId });
+      return null;
+    }
+    const autoSettings = provider === XAI_GROK_PROVIDER
+      ? computeXAIGrokAutoSettings(model)
+      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+    if (autoSettings.warnings.length > 0) {
+      console.warn('[AutonomousOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
+    }
+    return autoSettings;
+  };
+
   const markProfileAsCustom = () => {
     if (selectedProfile) {
       setSelectedProfile('');
@@ -977,12 +1079,17 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     }
   };
 
-  // Handle provider change for a role (keeps existing model settings)
+  // Handle provider change for a role.
   const handleProviderChange = (rolePrefix, provider) => {
+    if (localConfig[`${rolePrefix}_provider`] === provider) {
+      return;
+    }
     const updates = {
       [`${rolePrefix}_provider`]: provider,
-      [`${rolePrefix}_openrouter_reasoning_effort`]: DEFAULT_OPENROUTER_REASONING_EFFORT
-      // Keep existing model, openrouter_provider, and lm_studio_fallback - don't reset them
+      [`${rolePrefix}_model`]: '',
+      [`${rolePrefix}_openrouter_provider`]: null,
+      [`${rolePrefix}_openrouter_reasoning_effort`]: DEFAULT_OPENROUTER_REASONING_EFFORT,
+      [`${rolePrefix}_lm_studio_fallback`]: null,
     };
     const newConfig = { ...localConfig, ...updates };
     markProfileAsCustom();
@@ -1003,13 +1110,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     onConfigChange({ ...newConfig, submitter_configs: submitterConfigs.slice(0, numSubmitters) });
 
     const provider = localConfig[`${rolePrefix}_provider`];
-    if (!modelId || !['openrouter', 'openai_codex_oauth'].includes(provider)) {
+    if (!modelId || !(provider === 'openrouter' || isCloudAccessProvider(provider))) {
       return;
     }
 
     const autoSettings = provider === 'openrouter'
       ? await getAutoSettingsForModel(modelId, null)
-      : getCodexAutoSettingsForModel(modelId);
+      : getCloudAccessAutoSettingsForModel(provider, modelId);
     if (!autoSettings) {
       return;
     }
@@ -1141,13 +1248,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setSubmitterConfigs(newConfigs);
     onConfigChange({ ...localConfig, submitter_configs: newConfigs.slice(0, numSubmitters) });
 
-    if (!modelId || !['openrouter', 'openai_codex_oauth'].includes(newConfigs[index].provider)) {
+    if (!modelId || !(newConfigs[index].provider === 'openrouter' || isCloudAccessProvider(newConfigs[index].provider))) {
       return;
     }
 
     const autoSettings = newConfigs[index].provider === 'openrouter'
       ? await getAutoSettingsForModel(modelId, null)
-      : getCodexAutoSettingsForModel(modelId);
+      : getCloudAccessAutoSettingsForModel(newConfigs[index].provider, modelId);
     if (!autoSettings) {
       return;
     }
@@ -1680,6 +1787,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           {openAICodexModelError}
         </div>
       )}
+      {xaiGrokModelError && (
+        <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+          {xaiGrokModelError}
+        </div>
+      )}
 
       {/* Show only free models + model refresh controls — grouped at top */}
       <div className="model-refresh-controls">
@@ -1799,7 +1911,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             const effectiveProvider = lmStudioEnabled ? cfg.provider : 'openrouter';
             return (
           <div 
-            key={idx} 
+            key={cfg.submitterId}
             className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
           >
             <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : ''}>
@@ -1824,9 +1936,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               lmStudioModels={lmStudioModels}
               openRouterModels={openRouterModels}
               openAICodexModels={openAICodexModels}
+              xaiGrokModels={xaiGrokModels}
               modelProviders={modelProviders}
               hasOpenRouterKey={hasOpenRouterKey}
               hasOpenAICodexLogin={hasOpenAICodexLogin}
+              hasXAIGrokLogin={hasXAIGrokLogin}
               isRunning={isRunning}
               lmStudioEnabled={lmStudioEnabled}
             />
@@ -1906,9 +2020,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
           openAICodexModels={openAICodexModels}
+          xaiGrokModels={xaiGrokModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           hasOpenAICodexLogin={hasOpenAICodexLogin}
+          hasXAIGrokLogin={hasXAIGrokLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />
@@ -1935,9 +2051,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
           openAICodexModels={openAICodexModels}
+          xaiGrokModels={xaiGrokModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           hasOpenAICodexLogin={hasOpenAICodexLogin}
+          hasXAIGrokLogin={hasXAIGrokLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
           showProofStrengthBadge
@@ -1957,9 +2075,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
           openAICodexModels={openAICodexModels}
+          xaiGrokModels={xaiGrokModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           hasOpenAICodexLogin={hasOpenAICodexLogin}
+          hasXAIGrokLogin={hasXAIGrokLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
           showProofStrengthBadge
@@ -1979,9 +2099,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           lmStudioModels={lmStudioModels}
           openRouterModels={openRouterModels}
           openAICodexModels={openAICodexModels}
+          xaiGrokModels={xaiGrokModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           hasOpenAICodexLogin={hasOpenAICodexLogin}
+          hasXAIGrokLogin={hasXAIGrokLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />

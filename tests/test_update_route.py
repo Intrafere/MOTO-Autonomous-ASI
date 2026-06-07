@@ -14,7 +14,7 @@ class UpdateRouteGitPullTests(IsolatedAsyncioTestCase):
             version=version,
             build_commit=commit,
             update_channel="main",
-            api_contract_version="build5-v28",
+            api_contract_version="build5-v29",
         )
 
     async def test_git_pull_route_refuses_dirty_tracked_checkout(self) -> None:
@@ -69,13 +69,13 @@ class RuntimeUpdateNoticeTests(IsolatedAsyncioTestCase):
                 version=local_version,
                 build_commit="localcommit",
                 update_channel="main",
-                api_contract_version="build5-v28",
+                api_contract_version="build5-v29",
             ),
             BuildManifest(
                 version=remote_version,
                 build_commit="remotecommit",
                 update_channel="main",
-                api_contract_version="build5-v28",
+                api_contract_version="build5-v29",
             ),
             InstallState(
                 kind="clean_git_clone",

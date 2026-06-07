@@ -14,11 +14,9 @@ def validate_single_path_component(value: str, label: str = "path component") ->
     if normalized in {".", ".."}:
         raise ValueError(f"Invalid {label}: {value}")
 
-    separators = {os.path.sep}
-    if os.path.altsep:
-        separators.add(os.path.altsep)
-
-    if any(separator in normalized for separator in separators):
+    # Reject both separator styles regardless of host OS. Linux treats "\"
+    # as a normal filename character, but these IDs may later be used on Windows.
+    if any(separator in normalized for separator in ("/", "\\")):
         raise ValueError(f"Invalid {label}: {value}")
 
     return normalized

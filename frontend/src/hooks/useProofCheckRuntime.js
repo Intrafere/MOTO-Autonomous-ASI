@@ -5,10 +5,12 @@ import {
   getStoredAutonomousSettings,
   settingsToAutonomousConfig,
 } from '../utils/autonomousProfiles';
+import { isCloudAccessProvider } from '../utils/oauthProviders';
 
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
 export const MANUAL_AGGREGATOR_PROOF_SOURCE_ID = 'manual_aggregator';
 export const MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID = 'manual_compiler_current';
+const PROOF_STATUS_STARTUP_POLL_MS = 30000;
 
 function isDeveloperModeEnabled() {
   return localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === 'true';
@@ -19,7 +21,7 @@ function buildSourceKey(sourceType, sourceId) {
 }
 
 function normalizeProvider(provider) {
-  if (provider === 'openrouter' || provider === 'openai_codex_oauth') {
+  if (provider === 'openrouter' || isCloudAccessProvider(provider)) {
     return provider;
   }
   return 'lm_studio';
@@ -180,7 +182,7 @@ function getLeanRuntimeUnavailableMessage(proofStatus) {
     return 'Lean 4 executable is not available.';
   }
   if (!proofStatus.workspace_ready) {
-    return 'Lean 4 workspace is not ready yet.';
+    return 'Lean 4 is still starting up.';
   }
   return '';
 }
@@ -237,7 +239,7 @@ export function useProofCheckRuntime() {
       return undefined;
     }
 
-    const interval = setInterval(refreshProofStatus, 5000);
+    const interval = setInterval(refreshProofStatus, PROOF_STATUS_STARTUP_POLL_MS);
     return () => clearInterval(interval);
   }, [proofStatus, refreshProofStatus]);
 

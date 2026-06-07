@@ -45,6 +45,14 @@ _TRANSIENT_MODEL_CALL_MARKERS = (
     "temporarily unavailable",
     "upstream connect error",
     "upstream provider timeout",
+    "xai grok connection failed",
+    "xai grok transient",
+)
+
+_TRANSIENT_MODEL_PROVIDER_MARKERS = (
+    "codex",
+    "grok",
+    "xai",
 )
 
 
@@ -57,7 +65,7 @@ def is_retryable_model_output_error(exc: Exception) -> bool:
 def is_transient_model_call_error(exc: Exception) -> bool:
     """Return true for provider/network failures that should not be treated as config errors."""
     message = str(exc or "").lower()
-    if "codex" not in message:
+    if not any(marker in message for marker in _TRANSIENT_MODEL_PROVIDER_MARKERS):
         return False
     return any(marker in message for marker in _TRANSIENT_MODEL_CALL_MARKERS)
 

@@ -45,6 +45,9 @@ const normalizeAggregatorEventName = (eventName = '') => {
 const getEventStorageKey = (event = {}) => {
   const data = event.data || {};
   const normalizedType = normalizeAggregatorEventName(event.type || '');
+  if (MANUAL_PROOF_EVENTS.includes(normalizedType) && data.manual_event_id) {
+    return `manual-proof:${data.manual_event_id}`;
+  }
   if (
     data.submission_id &&
     ['new_submission', 'submission_accepted', 'submission_rejected', 'submission'].includes(normalizedType)

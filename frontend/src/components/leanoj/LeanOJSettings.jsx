@@ -2,7 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { api, cloudAccessAPI, openRouterAPI } from '../../services/api';
 import {
   computeCodexAutoSettings,
+  computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
@@ -13,6 +15,13 @@ import {
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
+import {
+  chooseCloudAccessProvider,
+  getConfiguredCloudAccessProviders,
+  isCloudAccessProvider,
+  cloudAccessProviderLabel,
+  XAI_GROK_PROVIDER,
+} from '../../utils/oauthProviders';
 import {
   LEANOJ_PROFILES_STORAGE_KEY,
   LEANOJ_RECOMMENDED_PROFILES,
@@ -44,16 +53,25 @@ function ModelSelector({
   lmStudioModels,
   openRouterModels,
   openAICodexModels,
+  xaiGrokModels,
   modelProviders,
   hasOpenRouterKey,
   hasOpenAICodexLogin,
+  hasXAIGrokLogin,
   isRunning,
   lmStudioEnabled,
 }) {
   const provider = lmStudioEnabled ? (config.provider || 'lm_studio') : 'openrouter';
+  const oauthStatusByProvider = {
+    openai_codex_oauth: { configured: hasOpenAICodexLogin },
+    [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+  };
+  const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
   const models = provider === 'openrouter'
     ? openRouterModels
-    : (provider === 'openai_codex_oauth' ? openAICodexModels : lmStudioModels);
+    : (isCloudAccessProvider(provider)
+      ? (provider === XAI_GROK_PROVIDER ? xaiGrokModels : openAICodexModels)
+      : lmStudioModels);
   const providers = provider === 'openrouter' && config.modelId
     ? getProviderNames(modelProviders[config.modelId])
     : [];
@@ -86,13 +104,41 @@ function ModelSelector({
             </button>
             <button
               type="button"
-              className={`provider-toggle-btn${provider === 'openai_codex_oauth' ? ' active-or-orange' : ''}`}
-              disabled={isRunning || !hasOpenAICodexLogin}
-              onClick={() => onChange({ ...config, provider: 'openai_codex_oauth', modelId: '', openrouterProvider: null, openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT })}
-              title={!hasOpenAICodexLogin ? 'Set OpenAI Codex login in Cloud Access & Keys first' : 'Use OpenAI Codex'}
+              className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
+              disabled={isRunning || configuredOAuthProviders.length === 0}
+              onClick={() => onChange({
+                ...config,
+                provider: chooseCloudAccessProvider(oauthStatusByProvider, provider),
+                modelId: '',
+                openrouterProvider: null,
+                openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+              })}
+              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
             >
-              OpenAI Codex
+              oAuth
             </button>
+            {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
+              <select
+                value={provider}
+                disabled={isRunning}
+                onChange={(event) => onChange({
+                  ...config,
+                  provider: event.target.value,
+                  modelId: '',
+                  openrouterProvider: null,
+                  openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+                })}
+                title="Select OAuth provider"
+                className="input-dark"
+                style={{ width: 'auto', minWidth: '150px' }}
+              >
+                {configuredOAuthProviders.map((oauthProvider) => (
+                  <option key={oauthProvider.id} value={oauthProvider.id}>
+                    {oauthProvider.label}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         ) : (
           <small className="settings-hint">OpenRouter is required in this deployment.</small>
@@ -240,10 +286,13 @@ export default function LeanOJSettings({
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
+  const [xaiGrokModels, setXaiGrokModels] = useState([]);
   const [modelProviders, setModelProviders] = useState(settings.modelProviders || {});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
+  const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
   const [openAICodexModelError, setOpenAICodexModelError] = useState('');
+  const [xaiGrokModelError, setXaiGrokModelError] = useState('');
   const [userProfiles, setUserProfiles] = useState({});
   const [selectedProfile, setSelectedProfile] = useState(settings.selectedProfile || '');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
@@ -298,6 +347,29 @@ export default function LeanOJSettings({
         setOpenAICodexModelError(`OpenAI Codex OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
       }
 
+      try {
+        const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+        const configured = Boolean(xaiStatus.status?.configured);
+        setHasXAIGrokLogin(configured);
+        if (configured) {
+          const xaiModels = await cloudAccessAPI.getXAIGrokModels();
+          const models = xaiModels.models || [];
+          setXaiGrokModels(models);
+          setHasXAIGrokLogin(models.length > 0);
+          setXaiGrokModelError(models.length > 0
+            ? ''
+            : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
+          );
+        } else {
+          setXaiGrokModelError('');
+        }
+      } catch (error) {
+        console.error('Failed to load xAI Grok state for Proof Solver:', error);
+        setHasXAIGrokLogin(false);
+        setXaiGrokModels([]);
+        setXaiGrokModelError(`xAI Grok OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
+      }
+
       if (lmStudioEnabled) {
         try {
           const models = await api.getModels();
@@ -341,7 +413,7 @@ export default function LeanOJSettings({
   }, { markCustom: true });
 
   const shouldAutoFillRole = (previousConfig = {}, config = {}) => (
-    ['openrouter', 'openai_codex_oauth'].includes(config.provider) && config.modelId && (
+    (config.provider === 'openrouter' || isCloudAccessProvider(config.provider)) && config.modelId && (
       previousConfig.provider !== config.provider ||
       previousConfig.modelId !== config.modelId ||
       previousConfig.openrouterProvider !== config.openrouterProvider
@@ -364,7 +436,7 @@ export default function LeanOJSettings({
 
   const updateSubmitter = (index, config) => {
     const previousConfig = settings.submitterConfigs[index] || {};
-    const shouldAutoFill = ['openrouter', 'openai_codex_oauth'].includes(config.provider) && config.modelId && (
+    const shouldAutoFill = (config.provider === 'openrouter' || isCloudAccessProvider(config.provider)) && config.modelId && (
       previousConfig.provider !== config.provider ||
       previousConfig.modelId !== config.modelId ||
       previousConfig.openrouterProvider !== config.openrouterProvider
@@ -434,11 +506,35 @@ export default function LeanOJSettings({
     return autoSettings;
   };
 
+  const getOAuthModels = (provider) => {
+    if (provider === 'openai_codex_oauth') return openAICodexModels;
+    if (provider === XAI_GROK_PROVIDER) return xaiGrokModels;
+    return [];
+  };
+
+  const getCloudAccessAutoSettingsForModel = (provider, modelId) => {
+    if (provider === 'openai_codex_oauth') {
+      return getCodexAutoSettingsForModel(modelId);
+    }
+    const model = getOAuthModels(provider).find((item) => item.id === modelId);
+    if (!model) {
+      console.debug('[ProofSolverOAuthAutoFill] model not in loaded list, skipping auto-fill', { provider, modelId });
+      return null;
+    }
+    const autoSettings = provider === XAI_GROK_PROVIDER
+      ? computeXAIGrokAutoSettings(model)
+      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+    if (autoSettings.warnings.length > 0) {
+      console.warn('[ProofSolverOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
+    }
+    return autoSettings;
+  };
+
   const applyAutoSettingsToConfig = async (config, baseSettings = settings) => {
-    if (!['openrouter', 'openai_codex_oauth'].includes(config.provider) || !config.modelId) return;
+    if (!(config.provider === 'openrouter' || isCloudAccessProvider(config.provider)) || !config.modelId) return;
     const auto = config.provider === 'openrouter'
       ? await getAutoSettingsForModel(config.modelId, config.openrouterProvider || null, baseSettings)
-      : getCodexAutoSettingsForModel(config.modelId);
+      : getCloudAccessAutoSettingsForModel(config.provider, config.modelId);
     if (!auto) return null;
     return {
       ...config,
@@ -746,6 +842,11 @@ export default function LeanOJSettings({
           {openAICodexModelError}
         </div>
       )}
+      {xaiGrokModelError && (
+        <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+          {xaiGrokModelError}
+        </div>
+      )}
 
       <div className="model-refresh-controls">
         {lmStudioEnabled && (
@@ -819,9 +920,11 @@ export default function LeanOJSettings({
             lmStudioModels={lmStudioModels}
             openRouterModels={openRouterModels}
             openAICodexModels={openAICodexModels}
+            xaiGrokModels={xaiGrokModels}
             modelProviders={modelProviders}
             hasOpenRouterKey={hasOpenRouterKey}
             hasOpenAICodexLogin={hasOpenAICodexLogin}
+            hasXAIGrokLogin={hasXAIGrokLogin}
             isRunning={isRunning}
             lmStudioEnabled={lmStudioEnabled}
             developerModeEnabled={developerModeEnabled}
@@ -840,9 +943,11 @@ export default function LeanOJSettings({
               lmStudioModels={lmStudioModels}
               openRouterModels={openRouterModels}
               openAICodexModels={openAICodexModels}
+              xaiGrokModels={xaiGrokModels}
               modelProviders={modelProviders}
               hasOpenRouterKey={hasOpenRouterKey}
               hasOpenAICodexLogin={hasOpenAICodexLogin}
+              hasXAIGrokLogin={hasXAIGrokLogin}
               isRunning={isRunning}
               lmStudioEnabled={lmStudioEnabled}
               developerModeEnabled={developerModeEnabled}

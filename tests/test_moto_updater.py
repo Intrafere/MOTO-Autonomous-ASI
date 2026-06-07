@@ -117,7 +117,7 @@ class InstallStateTests(TestCase):
             "version": "1.0.9",
             "build_commit": "stale-manifest-commit",
             "update_channel": "main",
-            "api_contract_version": "build5-v28",
+            "api_contract_version": "build5-v29",
         }
         branch_payload = {"commit": {"sha": "actual-branch-head"}}
 
@@ -127,7 +127,7 @@ class InstallStateTests(TestCase):
 
         self.assertEqual(remote_manifest.version, "1.0.9")
         self.assertEqual(remote_manifest.build_commit, "actual-branch-head")
-        self.assertEqual(remote_manifest.api_contract_version, "build5-v28")
+        self.assertEqual(remote_manifest.api_contract_version, "build5-v29")
         fetch_file.assert_called_once_with(
             "actual-branch-head",
             "moto-update-manifest.json",
@@ -166,7 +166,7 @@ class InstallStateTests(TestCase):
                         "version": "1.0.9",
                         "build_commit": "stale-local-commit",
                         "update_channel": "main",
-                        "api_contract_version": "build5-v28",
+                        "api_contract_version": "build5-v29",
                     }
                 ),
                 encoding="utf-8",
@@ -193,7 +193,7 @@ class InstallStateTests(TestCase):
                         "version": "1.0.9",
                         "build_commit": "stale-local-commit",
                         "update_channel": "main",
-                        "api_contract_version": "build5-v28",
+                        "api_contract_version": "build5-v29",
                     }
                 ),
                 encoding="utf-8",
@@ -222,7 +222,7 @@ class InstallStateTests(TestCase):
                         "version": "1.0.9",
                         "build_commit": "manifest-commit",
                         "update_channel": "main",
-                        "api_contract_version": "build5-v28",
+                        "api_contract_version": "build5-v29",
                     }
                 ),
                 encoding="utf-8",
@@ -494,7 +494,7 @@ class SnapshotSyncTests(TestCase):
                 version="1.0.9",
                 build_commit="resolved-remote-head",
                 update_channel="main",
-                api_contract_version="build5-v28",
+                api_contract_version="build5-v29",
             )
 
             with mock.patch.object(moto_updater, "REPO_ROOT", repo_root):

@@ -7,13 +7,14 @@ alwaysApply: true
 
 ## Overview
 
-Enables cloud provider access with LM Studio fallback in default mode (OpenRouter API keys plus desktop OpenAI Codex OAuth) and OpenRouter-only operation in generic mode, plus boost controls and research metrics in the workflow panel.
+Enables cloud provider access with LM Studio fallback in default mode (OpenRouter API keys plus desktop OAuth providers such as OpenAI Codex and xAI Grok/SuperGrok) and OpenRouter-only operation in generic mode, plus boost controls and research metrics in the workflow panel.
 
 **Key Features:**
-- **Per-Role Cloud Provider Selection**: Each role independently uses LM Studio, OpenRouter, or desktop-only OpenAI Codex OAuth where available (default mode); generic mode remains OpenRouter-only.
-- **Cloud Access & Keys**: Header overlay and post-disclaimer startup wizard manage OpenRouter API keys and desktop OpenAI Codex/ChatGPT subscription OAuth. OpenRouter keeps its single global key and Boost reuse behavior.
+- **Per-Role Cloud Provider Selection**: Each role independently uses LM Studio, OpenRouter, or a desktop-only OAuth provider where available (default mode); generic mode remains OpenRouter-only.
+- **Cloud Access & Keys**: Header overlay manages OpenRouter API keys and desktop OAuth provider logins. The post-disclaimer startup wizard requires OpenRouter or LM Studio first and presents OAuth only as a later add-on. The OAuth UI is provider-registry driven (`openai_codex_oauth`, `xai_grok_oauth`) so future OAuths can be added without changing saved profile shape.
+- **Startup provider requirement**: OAuth providers are supplementary role providers, not a standalone startup path, because RAG embeddings route through LM Studio, OpenRouter, or generic-mode FastEmbed. First-run startup and workflow start preflights must require OpenRouter, generic FastEmbed, or LM Studio with an embedding model available before OAuth-only role selection is allowed.
 - **OpenRouter Auto-Fill**: OpenRouter selectors fetch provider endpoint metadata and compute host-aware context/output settings from a capable endpoint set. Auto mode ignores known weak hosts (currently Venice) and low/missing-cap outliers before computing context/max-output; manual host selection uses that exact host and its largest exposed endpoint output cap.
-- **OpenAI Codex OAuth Auto-Fill**: Codex model listing must parse Codex catalog fields (`context_length`/`contextTokens`, `context_window`, `max_context_window`, `effective_context_window_percent`, `max_output_tokens`) and use documented Codex-product limits where the catalog omits them. Do not invent a generic fallback context window for unknown Codex models; preserve current settings when metadata is unknown. GPT-5.5 Codex uses the Codex 400K product window, not the 1M regular API window. UI role selection treats Codex as usable only after model-list access succeeds, not merely because OAuth tokens are stored.
+- **OAuth Auto-Fill**: OAuth model selectors auto-fill only from provider model metadata or documented provider-specific limits. Do not synthesize fallback model entries or invent generic fallback context windows for unknown OAuth models; preserve current settings when metadata is unknown. GPT-5.5 Codex uses the Codex 400K product window, not the 1M regular API window. Grok/SuperGrok OAuth uses xAI model metadata when available and may expose known Grok subscription limits only for known model IDs; model listings must filter xAI catalog entries that are not accepted by the OAuth chat-completions route, such as multi-agent-only models.
 - **OpenRouter Reasoning Effort**: Every OpenRouter role exposes a visible reasoning-effort selector. Default `auto` sends maximum OpenRouter reasoning effort (`xhigh`) through the normalized `reasoning.effort` request object; users may lower it or set `none`.
 - **LM Studio Fallback** (default mode only): Optional fallback per role on credit exhaustion
 - **Free Model Cooldown Handling**: SERIAL BOTTLENECK pause, free model looping, and auto-selector backup (see below)
@@ -30,12 +31,12 @@ Enables cloud provider access with LM Studio fallback in default mode (OpenRoute
 
 | Behavior | Default Mode | Generic Mode |
 |----------|-------------|--------------|
-| LLM provider | LM Studio + OpenRouter + OpenAI Codex OAuth + fallback | OpenRouter only |
+| LLM provider | LM Studio + OpenRouter + desktop OAuth providers + fallback | OpenRouter only |
 | Embeddings | LM Studio → OpenRouter fallback | FastEmbed (in-process) |
 | LM Studio UI | Shown (provider toggle per role) | Hidden (frontend checks `/api/features`) |
 | Secret persistence | OS keyring via `secret_store.py` | Env-injected/in-memory; keyring bypassed |
 | `Authorization` header | Used for OpenRouter key passthrough | Same; NOT reused for sandbox proxy auth |
-| API key on startup | OpenRouter key and OpenAI Codex OAuth tokens restored from keyring | Loaded from `OPENROUTER_API_KEY` env var if present |
+| Credential restore | OpenRouter key and desktop OAuth tokens restored from keyring; only OpenRouter or LM Studio satisfies first-run startup | Loaded from `OPENROUTER_API_KEY` env var if present |
 
 ---
 
@@ -81,7 +82,7 @@ Enables cloud provider access with LM Studio fallback in default mode (OpenRoute
 - Auto-routed calls include a provider `ignore` list for known weak hosts so OpenRouter can still fall back across capable providers. Explicit user-selected providers use `provider.order=[provider]` with `allow_fallbacks=false` so requests cannot silently fall back to a host whose limits were not used for settings.
 
 #### APIClientManager (`backend/shared/api_client_manager.py`)
-- Central router for all API calls: optional Supercharge wrapper → boost check → role's configured cloud provider (OpenRouter or desktop OpenAI Codex OAuth, with LM Studio fallback) → LM Studio (default mode) or OpenRouter-only (generic mode)
+- Central router for all API calls: optional Supercharge wrapper → boost check → role's configured cloud provider (OpenRouter or desktop OAuth providers, with LM Studio fallback) → LM Studio (default mode) or OpenRouter-only (generic mode)
 - Temperature policy exceptions live here: Supercharge attempts use `[0.0, 0.2, 0.4, 0.8]`; parallel brainstorm submitter lanes use `[0.0, 0.1, ..., 0.9]`. Validators, compiler roles, proof/final roles, JSON retries, and single-model sequential submitters stay `0.0`.
 - LM Studio instance sharing lives below this router in `lm_studio_client.generate_completion()`: only default-mode LM Studio calls can share same-base loaded numeric `:#` siblings, response metadata must preserve both the configured model and effective instance, and state-sensitive workflow ordering must not change.
 - OpenAI-compatible assistant text extraction is centralized in `response_extraction.py`: prefer `message.content`, then compatibility fallback fields such as `reasoning`/`thinking` when content is empty so local reasoning-only endpoints still work under one auditable policy.
@@ -90,7 +91,7 @@ Enables cloud provider access with LM Studio fallback in default mode (OpenRoute
 - Observability surfaces must default to metadata/previews with secret redaction. Provider keys, URL query keys, Wolfram query/result text, and full prompt/response bodies must not be persisted or broadcast unless an explicit trusted debug path opts in. Legacy full-payload log fields are scrubbed from persisted API logs on logger startup.
 - Tool-call assistant/tool protocol turns are the only exception where exact assistant content/structure may need preservation; ordinary JSON retry assistant turns are not tool protocol turns and must use sanitized retry context.
 - Generic mode must normalize or reject LM Studio role configs and must never fall through to `lm_studio_client.generate_completion()`, even if a direct API caller submits legacy `provider="lm_studio"` or an LM fallback value.
-- OpenAI Codex OAuth is a distinct desktop provider (`openai_codex_oauth`) using ChatGPT/Codex account tokens against `https://chatgpt.com/backend-api/codex`; it is not the regular OpenAI API-key billing path, uses the fixed Codex loopback redirect `http://localhost:1455/auth/callback` plus the current Codex authorize parameters/scopes (`api.connectors.read`, `api.connectors.invoke`, `codex_cli_simplified_flow=true`, `originator=moto`), sends Responses requests with `stream=true`, strips Codex-unsupported output-limit/temperature knobs before the upstream call, aggregates streamed events into MOTO's Chat Completions-compatible shape, parses Codex-backed model context/output metadata from the Codex model catalog, exposes non-secret token status including `updated_at` for relogin detection, chunks large OAuth token bundles across OS-keyring entries below Windows Credential Manager blob limits, releases the callback listener after pending login completion/expiry, and remains unavailable in generic mode.
+- Desktop OAuth providers are distinct from regular provider API-key billing. OpenAI Codex OAuth (`openai_codex_oauth`) uses ChatGPT/Codex account tokens against `https://chatgpt.com/backend-api/codex`; xAI Grok OAuth (`xai_grok_oauth`) uses current `auth.x.ai` PKCE login with `grok-cli:access` / `api:access` scopes and subscription tokens against the xAI OpenAI-compatible chat-completions API. xAI Console API keys are a separate pay-as-you-go/credit path, not the subscription-backed OAuth path. OAuth tokens are stored through chunked OS-keyring entries, provider status is non-secret, callback listeners are loopback-only and released after pending login completion/expiry, and OAuth providers remain unavailable in generic mode.
 - Generic mode: `get_embeddings()` early-returns to `FastEmbedProvider` before the LM Studio → OpenRouter fallback chain
 - Tracks fallback state per role: `_role_fallback_state: Dict[str, str]`
 - `reset_openrouter_fallbacks()`: Resets all roles originally configured for OpenRouter back from LM Studio fallback. Called automatically on API key set, or manually via reset endpoint.
@@ -149,7 +150,7 @@ Predictions refresh: after initialization, each task completion, mode switches, 
 
 ## WebSocket Events
 
-Workflow, boost, fallback/reset, provider pause/resume, hung-connection, rate-limit, privacy-policy, and unrecoverable OpenAI Codex OAuth failures should emit user-visible notifications when the frontend or hosted wrapper depends on them. Codex OAuth failure notifications must tell the user to check Cloud Access & Keys, sign in again, and retry. Hung-connection alerts should also appear in the active mode's live activity feed and concisely note that the model may still be thinking, the user can keep waiting, and reasoning effort can be lowered in Settings. Keep consumed event payloads stable enough for UI recovery, but do not treat every internal notification name as a rule-level invariant.
+Workflow, boost, fallback/reset, provider pause/resume, hung-connection, rate-limit, privacy-policy, and unrecoverable OAuth provider failures should emit user-visible notifications when the frontend or hosted wrapper depends on them. OAuth failure notifications must tell the user to check Cloud Access & Keys, sign in again, and retry. Hung-connection alerts should also appear in the active mode's live activity feed and concisely note that the model may still be thinking, the user can keep waiting, and reasoning effort can be lowered in Settings. Keep consumed event payloads stable enough for UI recovery, but do not treat every internal notification name as a rule-level invariant.
 
 ---
 
@@ -191,6 +192,11 @@ Workflow, boost, fallback/reset, provider pause/resume, hung-connection, rate-li
 - `GET /api/cloud-access/openai-codex/status` — Non-secret OpenAI Codex OAuth status
 - `GET /api/cloud-access/openai-codex/models` — Codex-backed model list for the signed-in account, including normalized context/output metadata when known
 - `DELETE /api/cloud-access/openai-codex` — Revoke best-effort and clear stored OpenAI Codex OAuth tokens
+- `POST /api/cloud-access/xai-grok/oauth/start` — Start desktop xAI Grok/SuperGrok OAuth PKCE login and loopback callback listener
+- `POST /api/cloud-access/xai-grok/oauth/exchange` — Exchange pasted callback URL/code for xAI Grok OAuth tokens
+- `GET /api/cloud-access/xai-grok/status` — Non-secret xAI Grok OAuth status
+- `GET /api/cloud-access/xai-grok/models` — Grok model list for the signed-in account, including normalized context/output metadata when known
+- `DELETE /api/cloud-access/xai-grok` — Revoke best-effort and clear stored xAI Grok OAuth tokens
 
 ### Workflow (`backend/api/routes/workflow.py`)
 - `GET /api/workflow/predictions` — Current workflow mode (also returns tasks for internal use)
@@ -202,7 +208,7 @@ Workflow, boost, fallback/reset, provider pause/resume, hung-connection, rate-li
 
 **Credit Exhaustion:** HTTP 402 or keywords "credit"/"insufficient"/"balance"/"quota"/"key limit"/"limit exceeded" → `CreditExhaustionError` → default mode: LM Studio fallback for that role when configured; proof workflows with no fallback checkpoint progress and pause, while currently waiting tasks can be woken by `POST /api/openrouter/reset-exhaustion`; ordinary non-proof generic-mode calls still raise provider/config errors when no fallback exists. Fallback state is resettable via `POST /api/openrouter/reset-exhaustion` or by re-setting the API key.
 
-**OpenAI Codex OAuth transient failures:** gateway/timeout/stream disconnect responses are retried and must preserve proof checkpoints instead of becoming hard "no fallback configured" stops, `no_candidates`, or proof-attempt exhaustion. Auth/config failures remain hard; when a Codex model call cannot recover through LM Studio fallback, broadcast a user-visible OAuth reconnect notification.
+**OAuth provider transient failures:** gateway/timeout/stream disconnect responses are retried where the provider adapter supports it and must preserve proof checkpoints instead of becoming hard "no fallback configured" stops, `no_candidates`, or proof-attempt exhaustion. Auth/config failures remain hard; when an OAuth model call cannot recover through LM Studio fallback, broadcast a user-visible OAuth reconnect notification.
 
 **Boost Exhaustion:** Falls back to primary for that task; boost stays enabled; counter NOT decremented.
 

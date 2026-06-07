@@ -25,6 +25,12 @@ function compareStage3Answers(a, b) {
 }
 
 const UNKNOWN_RESEARCH_QUESTION = 'Unknown research question';
+export const RUN_PROMPT_PREVIEW_LENGTH = 400;
+
+export function formatRunPromptPreview(prompt, maxLength = RUN_PROMPT_PREVIEW_LENGTH) {
+  const normalized = normalizePrompt(prompt);
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
 
 function normalizePrompt(value) {
   return typeof value === 'string' ? value.trim() : '';

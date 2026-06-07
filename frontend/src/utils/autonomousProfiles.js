@@ -1,6 +1,8 @@
 import { loadModelCache, getModelApiId } from './modelCache';
 import {
   computeCodexAutoSettings,
+  computeCloudAccessAutoSettings,
+  computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
@@ -12,12 +14,11 @@ export const AUTONOMOUS_PROFILES_STORAGE_KEY = 'autonomous_research_profiles';
 export const STARTUP_PROVIDER_CHOICE_STORAGE_KEY = 'startup_provider_choice';
 export const LM_STUDIO_STARTUP_CHOICE = 'lm_studio';
 export const OPENAI_CODEX_STARTUP_CHOICE = 'openai_codex_oauth';
+export const XAI_GROK_STARTUP_CHOICE = 'xai_grok_oauth';
 export const RECOMMENDED_PROFILE_KEY = 'recommended_slower_affordable_higher_knowledge';
-export const RECOMMENDED_ALTERNATE_PROFILE_KEY = 'recommended_fast_affordable_mid';
 export const RECOMMENDED_LAB_FAST_PROFILE_KEY = 'recommended_lab_fast_costly_extra_high';
 export const RECOMMENDED_LAB_MAX_PROFILE_KEY = 'recommended_lab_slow_costly_max';
 export const RECOMMENDED_PROFILE_KEYS = [
-  RECOMMENDED_ALTERNATE_PROFILE_KEY,
   RECOMMENDED_PROFILE_KEY,
   RECOMMENDED_LAB_FAST_PROFILE_KEY,
   RECOMMENDED_LAB_MAX_PROFILE_KEY,
@@ -91,6 +92,13 @@ const DEFAULT_CODEX_STARTUP_MODEL = Object.freeze({
   max_output_tokens: 128000,
 });
 const CODEX_STARTUP_MODEL_PREFERENCE = ['gpt-5.5', 'gpt-5.5-mini', 'gpt-5.4', 'gpt-5.4-mini'];
+const DEFAULT_XAI_GROK_STARTUP_MODEL = Object.freeze({
+  id: 'grok-4.3',
+  name: 'grok-4.3',
+  context_length: 1000000,
+  max_output_tokens: 131072,
+});
+const XAI_GROK_STARTUP_MODEL_PREFERENCE = ['grok-4.3', 'grok-4.2', 'grok-4'];
 
 const createDefaultSubmitterConfigs = (modelId = '') => (
   [1, 2, 3].map((submitterId) => ({
@@ -102,7 +110,7 @@ const createDefaultSubmitterConfigs = (modelId = '') => (
 
 export const RECOMMENDED_PROFILES = {
   [RECOMMENDED_PROFILE_KEY]: {
-    name: 'Slow, less affordable, higher knowledge',
+    name: 'Slow, affordable, high knowledge',
     numSubmitters: 3,
     submitters: [
       {
@@ -160,55 +168,6 @@ export const RECOMMENDED_PROFILES = {
       openrouterProvider: null,
       lmStudioFallbackId: null,
       contextWindow: 202752,
-      maxOutputTokens: 65500,
-    },
-  },
-  [RECOMMENDED_ALTERNATE_PROFILE_KEY]: {
-    name: 'Fast, affordable, mid-tier knowledge',
-    numSubmitters: 2,
-    submitters: [
-      {
-        modelId: 'moonshotai/kimi-k2.6',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 262000,
-        maxOutputTokens: 40000,
-      },
-      {
-        modelId: 'deepseek/deepseek-v4-pro',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 1048576,
-        maxOutputTokens: 65500,
-      },
-    ],
-    validator: {
-      ...GEMINI_FLASH_LATEST_PROFILE_CONFIG,
-    },
-    highContext: {
-      modelId: 'moonshotai/kimi-k2.6',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 262000,
-      maxOutputTokens: 40000,
-    },
-    highParam: {
-      modelId: 'google/gemini-3.1-pro-preview',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
-    },
-    critique: {
-      modelId: 'google/gemini-3.1-pro-preview',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
       maxOutputTokens: 65500,
     },
   },
@@ -411,6 +370,22 @@ const DEFAULT_AUTONOMOUS_SETTINGS = {
   selectedProfile: RECOMMENDED_PROFILE_KEY,
 };
 
+function normalizeSelectedProfile(selectedProfile) {
+  if (selectedProfile === undefined || selectedProfile === null) {
+    return DEFAULT_AUTONOMOUS_SETTINGS.selectedProfile;
+  }
+  if (selectedProfile === '') {
+    return '';
+  }
+  if (typeof selectedProfile !== 'string') {
+    return DEFAULT_AUTONOMOUS_SETTINGS.selectedProfile;
+  }
+  if (selectedProfile.startsWith('recommended_') && !RECOMMENDED_PROFILE_KEYS.includes(selectedProfile)) {
+    return '';
+  }
+  return selectedProfile;
+}
+
 function normalizeStoredSettings(settings = {}) {
   const submitterConfigs = Array.isArray(settings.submitterConfigs) && settings.submitterConfigs.length > 0
     ? settings.submitterConfigs.map((cfg, index) => ({
@@ -442,7 +417,7 @@ function normalizeStoredSettings(settings = {}) {
     tier3Enabled: settings.tier3Enabled ?? DEFAULT_AUTONOMOUS_SETTINGS.tier3Enabled,
     creativityEmphasisBoostEnabled: settings.creativityEmphasisBoostEnabled ?? DEFAULT_AUTONOMOUS_SETTINGS.creativityEmphasisBoostEnabled,
     modelProviders: settings.modelProviders || DEFAULT_AUTONOMOUS_SETTINGS.modelProviders,
-    selectedProfile: settings.selectedProfile ?? DEFAULT_AUTONOMOUS_SETTINGS.selectedProfile,
+    selectedProfile: normalizeSelectedProfile(settings.selectedProfile),
   };
 }
 
@@ -534,11 +509,27 @@ function chooseCodexStartupModel(models = []) {
   return availableModels[0] || DEFAULT_CODEX_STARTUP_MODEL;
 }
 
-function buildCodexRoleDefaults(model = DEFAULT_CODEX_STARTUP_MODEL) {
-  const autoSettings = computeCodexAutoSettings(model);
+function chooseCloudAccessStartupModel(providerId = OPENAI_CODEX_STARTUP_CHOICE, models = []) {
+  if (providerId === XAI_GROK_STARTUP_CHOICE) {
+    const availableModels = Array.isArray(models) ? models.filter((model) => model?.id) : [];
+    for (const preferredId of XAI_GROK_STARTUP_MODEL_PREFERENCE) {
+      const match = availableModels.find((model) => model.id === preferredId);
+      if (match) return match;
+    }
+    return availableModels[0] || DEFAULT_XAI_GROK_STARTUP_MODEL;
+  }
+  return chooseCodexStartupModel(models);
+}
+
+function buildCloudAccessRoleDefaults(providerId = OPENAI_CODEX_STARTUP_CHOICE, model = DEFAULT_CODEX_STARTUP_MODEL) {
+  const autoSettings = providerId === OPENAI_CODEX_STARTUP_CHOICE
+    ? computeCodexAutoSettings(model)
+    : providerId === XAI_GROK_STARTUP_CHOICE
+      ? computeXAIGrokAutoSettings(model)
+      : computeCloudAccessAutoSettings(model, 'Cloud Access');
   return {
-    provider: 'openai_codex_oauth',
-    modelId: model.id || DEFAULT_CODEX_STARTUP_MODEL.id,
+    provider: providerId,
+    modelId: model.id || (providerId === XAI_GROK_STARTUP_CHOICE ? DEFAULT_XAI_GROK_STARTUP_MODEL.id : DEFAULT_CODEX_STARTUP_MODEL.id),
     openrouterProvider: null,
     openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
     lmStudioFallbackId: null,
@@ -548,8 +539,12 @@ function buildCodexRoleDefaults(model = DEFAULT_CODEX_STARTUP_MODEL) {
   };
 }
 
-function buildLocalConfigFromCodex(model = DEFAULT_CODEX_STARTUP_MODEL) {
-  const roleDefaults = buildCodexRoleDefaults(model);
+function buildCodexRoleDefaults(model = DEFAULT_CODEX_STARTUP_MODEL) {
+  return buildCloudAccessRoleDefaults(OPENAI_CODEX_STARTUP_CHOICE, model);
+}
+
+function buildLocalConfigFromCloudAccess(providerId = OPENAI_CODEX_STARTUP_CHOICE, model = DEFAULT_CODEX_STARTUP_MODEL) {
+  const roleDefaults = buildCloudAccessRoleDefaults(providerId, model);
   return {
     validator_provider: roleDefaults.provider,
     validator_model: roleDefaults.modelId,
@@ -586,6 +581,10 @@ function buildLocalConfigFromCodex(model = DEFAULT_CODEX_STARTUP_MODEL) {
   };
 }
 
+function buildLocalConfigFromCodex(model = DEFAULT_CODEX_STARTUP_MODEL) {
+  return buildLocalConfigFromCloudAccess(OPENAI_CODEX_STARTUP_CHOICE, model);
+}
+
 export function applyLmStudioStartupDefaults(modelId = '') {
   const currentSettings = getStoredAutonomousSettings();
   const nextSettings = persistAutonomousSettings({
@@ -606,8 +605,12 @@ export function applyLmStudioStartupDefaults(modelId = '') {
 }
 
 export function applyCodexStartupDefaults(models = []) {
-  const selectedModel = chooseCodexStartupModel(models);
-  const roleDefaults = buildCodexRoleDefaults(selectedModel);
+  return applyCloudAccessStartupDefaults(OPENAI_CODEX_STARTUP_CHOICE, models);
+}
+
+export function applyCloudAccessStartupDefaults(providerId = OPENAI_CODEX_STARTUP_CHOICE, models = []) {
+  const selectedModel = chooseCloudAccessStartupModel(providerId, models);
+  const roleDefaults = buildCloudAccessRoleDefaults(providerId, selectedModel);
   const submitterConfigs = [1, 2, 3].map((submitterId) => ({
     ...roleDefaults,
     submitterId,
@@ -619,7 +622,7 @@ export function applyCodexStartupDefaults(models = []) {
     submitterConfigs,
     localConfig: {
       ...currentSettings.localConfig,
-      ...buildLocalConfigFromCodex(selectedModel),
+      ...buildLocalConfigFromCloudAccess(providerId, selectedModel),
     },
     selectedProfile: '',
   });
@@ -627,7 +630,7 @@ export function applyCodexStartupDefaults(models = []) {
   return {
     settings: nextSettings,
     config: settingsToAutonomousConfig(nextSettings),
-    modelId: selectedModel.id || DEFAULT_CODEX_STARTUP_MODEL.id,
+    modelId: selectedModel.id || (providerId === XAI_GROK_STARTUP_CHOICE ? DEFAULT_XAI_GROK_STARTUP_MODEL.id : DEFAULT_CODEX_STARTUP_MODEL.id),
   };
 }
 

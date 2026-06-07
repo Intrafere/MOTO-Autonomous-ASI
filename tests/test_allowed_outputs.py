@@ -9,6 +9,7 @@ from backend.shared.config import system_config
 from backend.shared.models import (
     AutonomousResearchStartRequest,
     CompilerStartRequest,
+    ProofCheckRequest,
     SubmitterConfig,
 )
 
@@ -165,4 +166,67 @@ class ProofStatusReadinessTests(IsolatedAsyncioTestCase):
             proofs_route.system_config.smt_enabled = previous_smt_enabled
 
         self.assertFalse(payload["manual_check_ready"])
-        self.assertEqual(payload["manual_check_message"], "Lean 4 workspace is not ready yet.")
+        self.assertEqual(payload["manual_check_message"], "Lean 4 is still starting up.")
+
+    async def test_manual_aggregator_snapshot_does_not_fall_back_to_autonomous_config(self) -> None:
+        autonomous_snapshot = {
+            "brainstorm": {
+                "provider": "openrouter",
+                "model_id": "google/gemini-flash-latest",
+                "context_window": 1000,
+                "max_output_tokens": 100,
+            },
+            "paper": {
+                "provider": "openrouter",
+                "model_id": "google/gemini-flash-latest",
+                "context_window": 1000,
+                "max_output_tokens": 100,
+            },
+            "validator": {
+                "provider": "openrouter",
+                "model_id": "google/gemini-flash-latest",
+                "context_window": 1000,
+                "max_output_tokens": 100,
+            },
+        }
+        request = ProofCheckRequest(source_type="brainstorm", source_id="manual_aggregator")
+
+        with mock.patch.object(proofs_route.coordinator, "submitter_configs", []):
+            with mock.patch.object(proofs_route.coordinator, "validator_model", ""):
+                with mock.patch.object(
+                    proofs_route.autonomous_coordinator,
+                    "get_proof_runtime_config",
+                    return_value=autonomous_snapshot,
+                ):
+                    snapshot = await proofs_route._get_runtime_snapshot(request)
+
+        self.assertIsNone(snapshot)
+
+    async def test_manual_aggregator_snapshot_uses_active_manual_validator(self) -> None:
+        request = ProofCheckRequest(source_type="brainstorm", source_id="manual_aggregator")
+        submitter = SubmitterConfig(
+            submitter_id=1,
+            provider="openrouter",
+            model_id="anthropic/claude-opus-4.7",
+            context_window=1000000,
+            max_output_tokens=128000,
+        )
+
+        patches = [
+            mock.patch.object(proofs_route.coordinator, "submitter_configs", [submitter]),
+            mock.patch.object(proofs_route.coordinator, "validator_model", "anthropic/claude-opus-4.7"),
+            mock.patch.object(proofs_route.coordinator, "validator_provider", "openrouter"),
+            mock.patch.object(proofs_route.coordinator, "validator_openrouter_provider", "Anthropic"),
+            mock.patch.object(proofs_route.coordinator, "validator_openrouter_reasoning_effort", "xhigh"),
+            mock.patch.object(proofs_route.coordinator, "validator_lm_studio_fallback", None),
+            mock.patch.object(proofs_route.coordinator, "validator_context_window", 1000000),
+            mock.patch.object(proofs_route.coordinator, "validator_max_tokens", 128000),
+            mock.patch.object(proofs_route.coordinator, "validator_supercharge_enabled", False),
+        ]
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+            snapshot = await proofs_route._get_runtime_snapshot(request)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.brainstorm.model_id, "anthropic/claude-opus-4.7")
+        self.assertEqual(snapshot.validator.model_id, "anthropic/claude-opus-4.7")
+        self.assertEqual(snapshot.validator.openrouter_provider, "Anthropic")

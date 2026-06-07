@@ -6,18 +6,18 @@ export default function StartupProviderSetupModal({
   capabilities,
   lmStudioAvailable,
   hasUsableLmStudioChatModel = false,
+  hasLmStudioEmbeddingModel = false,
   lmStudioModelCount = 0,
   lmStudioError = '',
   statusMessage = '',
   isCheckingLmStudio = false,
   onChooseOpenRouter,
-  onChooseCodexOAuth,
   onConfirmLmStudio,
 }) {
   if (!isOpen) return null;
 
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
-  const codexOAuthAvailable = Boolean(capabilities?.openAICodexOauthAvailable);
+  const oauthAvailable = Boolean(capabilities?.openAICodexOauthAvailable || capabilities?.xaiGrokOauthAvailable);
 
   return (
     <div
@@ -43,8 +43,8 @@ export default function StartupProviderSetupModal({
         <p style={{ color: '#ddd', lineHeight: '1.6', marginBottom: '0.9rem' }}>
           {lmStudioEnabled ? (
             <>
-              MOTO needs <strong>OpenRouter, OpenAI Codex OAuth, or a running LM Studio server</strong> before you start.
-              The best experience is to pair a cloud provider with LM Studio for free, faster local RAG and embeddings.
+              MOTO needs <strong>OpenRouter or a running LM Studio server</strong> before you start.
+              oAuth providers are supplementary model providers because RAG embeddings still need OpenRouter or LM Studio.
             </>
           ) : (
             <>
@@ -112,37 +112,39 @@ export default function StartupProviderSetupModal({
             </button>
           </div>
 
-          {codexOAuthAvailable && (
+          {oauthAvailable && (
             <div
               style={{
                 padding: '1rem',
                 borderRadius: '10px',
                 backgroundColor: '#1c1c33',
-                border: '1px solid #c56d2d',
+                border: '1px solid rgba(197, 109, 45, 0.55)',
+                opacity: 0.82,
               }}
             >
-              <h3 style={{ marginTop: 0, color: '#ff9f4a' }}>OpenAI Codex OAuth</h3>
+              <h3 style={{ marginTop: 0, color: '#ff9f4a' }}>oAuth Add-On</h3>
               <ol style={{ margin: '0 0 1rem 1.1rem', padding: 0, color: '#d7d7e8', lineHeight: '1.55' }}>
-                <li>Use your ChatGPT subscription through MOTO's desktop Codex OAuth flow.</li>
-                <li>Sign in with OpenAI in the browser window MOTO opens.</li>
-                <li>MOTO will save the login securely and configure Codex-backed model defaults.</li>
+                <li>Use a supported subscription login such as OpenAI Codex or xAI Grok/SuperGrok for chat/model roles.</li>
+                <li>Set up OpenRouter or LM Studio first so RAG embeddings are available.</li>
+                <li>After startup, add OAuth from Cloud Access & Keys and select it in role settings.</li>
               </ol>
               <button
                 type="button"
-                onClick={onChooseCodexOAuth}
+                disabled
+                title="OAuth cannot be the only startup provider because RAG embeddings require OpenRouter, LM Studio, or hosted FastEmbed."
                 style={{
                   width: '100%',
                   padding: '0.8rem 1rem',
-                  backgroundColor: '#c56d2d',
-                  border: 'none',
+                  backgroundColor: '#47311f',
+                  border: '1px solid rgba(255, 159, 74, 0.35)',
                   borderRadius: '8px',
-                  color: '#fff',
+                  color: '#d7b28c',
                   fontSize: '0.95rem',
                   fontWeight: '600',
-                  cursor: 'pointer',
+                  cursor: 'not-allowed',
                 }}
               >
-                Sign In with OpenAI Codex
+                Add After Startup
               </button>
             </div>
           )}
@@ -170,7 +172,7 @@ export default function StartupProviderSetupModal({
                 style={{
                   width: '100%',
                   padding: '0.8rem 1rem',
-                  backgroundColor: lmStudioAvailable && hasUsableLmStudioChatModel ? '#1f7a33' : '#21492a',
+                backgroundColor: lmStudioAvailable && hasUsableLmStudioChatModel && hasLmStudioEmbeddingModel ? '#1f7a33' : '#21492a',
                   border: '1px solid #2f8f45',
                   borderRadius: '8px',
                   color: '#fff',
@@ -203,10 +205,10 @@ export default function StartupProviderSetupModal({
         >
           {lmStudioEnabled
             ? (
-              lmStudioAvailable && hasUsableLmStudioChatModel
-                ? `LM Studio is currently detected with ${lmStudioModelCount} loaded model${lmStudioModelCount === 1 ? '' : 's'}, including a usable chat model.`
+              lmStudioAvailable && hasUsableLmStudioChatModel && hasLmStudioEmbeddingModel
+                ? `LM Studio is currently detected with ${lmStudioModelCount} loaded model${lmStudioModelCount === 1 ? '' : 's'}, including a usable chat model and embedding model.`
                 : lmStudioAvailable
-                  ? 'LM Studio is running, but you still need at least one loaded chat model in addition to embeddings.'
+                  ? 'LM Studio is running, but you still need both nomic-ai/nomic-embed-text-v1.5 and at least one loaded chat model.'
                   : `LM Studio is not detected yet${lmStudioError ? `: ${lmStudioError}` : '.'}`
             )
             : 'Hosted web mode is active. LM Studio is disabled in this deployment, so OpenRouter is the required provider path.'}

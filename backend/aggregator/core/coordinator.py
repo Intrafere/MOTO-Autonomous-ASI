@@ -113,6 +113,12 @@ class Coordinator:
         self.submitter_configs: List[SubmitterConfig] = []
         self.validator_model = ""
         self.validator_provider = "lm_studio"
+        self.validator_openrouter_provider: Optional[str] = None
+        self.validator_openrouter_reasoning_effort = "auto"
+        self.validator_lm_studio_fallback: Optional[str] = None
+        self.validator_context_window = rag_config.validator_context_window
+        self.validator_max_tokens = rag_config.validator_max_output_tokens
+        self.validator_supercharge_enabled = False
         
         # Workflow tracking
         self.workflow_tasks: List[WorkflowTask] = []
@@ -290,6 +296,10 @@ class Coordinator:
         self.submitter_configs = submitter_configs
         self.validator_model = validator_model
         self.validator_provider = validator_provider
+        self.validator_openrouter_provider = validator_openrouter_provider
+        self.validator_openrouter_reasoning_effort = validator_openrouter_reasoning_effort
+        self.validator_lm_studio_fallback = validator_lm_studio_fallback
+        self.validator_supercharge_enabled = validator_supercharge_enabled
         
         # Override validator context window if provided
         if validator_context_window is not None:
@@ -310,6 +320,8 @@ class Coordinator:
         final_validator_context = validator_context_window if validator_context_window is not None else rag_config.validator_context_window
         final_submitter_max_output = submitter_configs[0].max_output_tokens if submitter_configs else rag_config.submitter_max_output_tokens
         final_validator_max_output = validator_max_tokens if validator_max_tokens is not None else rag_config.validator_max_output_tokens
+        self.validator_context_window = final_validator_context
+        self.validator_max_tokens = final_validator_max_output
         context_allocator.set_context_windows(final_submitter_context, final_validator_context, final_submitter_max_output, final_validator_max_output)
         
         # Log currently loaded models for diagnostics and same-base instance scheduling.

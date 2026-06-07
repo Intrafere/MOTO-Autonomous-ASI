@@ -4392,7 +4392,6 @@ class AutonomousCoordinator:
         # This prevents data loss from overwriting the brainstorm file with insights
         # from the previous file (rag_shared_training.txt)
         await shared_training_memory.reload_insights_from_current_path()
-        logger.info(f"Reloaded {len(shared_training_memory.insights)} existing submissions from brainstorm database")
         
         try:
             # Get reference paper paths for brainstorm context

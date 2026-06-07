@@ -13,6 +13,15 @@ const OsTag = () => (
   </span>
 );
 
+const OauthTag = ({ stacked = false }) => (
+  <span className={`oa-tag-tooltip-anchor${stacked ? ' oa-tag-tooltip-anchor--stacked' : ''}`} tabIndex={0}>
+    <span className="oa-tag">OA</span>
+    <span className="oa-tag-tooltip">
+      This company has OAuth enabled for third-party programs, which typically allows discounted subscription-based usage for better affordability.
+    </span>
+  </span>
+);
+
 export default function HighlightedModelsSidebar() {
   const [showKothTooltip, setShowKothTooltip] = useState(false);
 
@@ -64,21 +73,23 @@ export default function HighlightedModelsSidebar() {
               <div className="model-item-badge">Highly knowledgeable and balanced cost</div>
             </div>
 
-            <div className="model-item model-item--ranked model-item--silver">
+            <div className="model-item model-item--ranked model-item--silver model-item--oa">
+              <OauthTag stacked />
               <div className="flex-row-center">
-                <div className="model-item-name">Gemini 3.1 Flash Light</div>
+                <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+                <div className="model-item-name">ChatGPT 5.5</div>
                 <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
               </div>
-              <div className="model-item-badge">Highly Knowledgeable, Fast</div>
+              <div className="model-item-badge">Powerful and affordable oAuth</div>
             </div>
 
-            <div className="model-item model-item--ranked model-item--bronze model-item--os">
-              <OsTag />
+            <div className="model-item model-item--ranked model-item--bronze model-item--oa">
+              <OauthTag />
               <div className="flex-row-center">
-                <div className="model-item-name">GPT OSS 120B</div>
+                <div className="model-item-name">Grok 4.3</div>
                 <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
               </div>
-              <div className="model-item-badge">Balanced knowledge and speed at low cost</div>
+              <div className="model-item-badge">Powerful and affordable oAuth</div>
             </div>
           </div>
 
@@ -102,11 +113,6 @@ export default function HighlightedModelsSidebar() {
             <OsTag />
             <div className="model-item-name">DeepSeek</div>
             <div className="model-item-badge">Highly knowledgeable</div>
-          </div>
-
-          <div className="model-item">
-            <div className="model-item-name">Gemini Flash</div>
-            <div className="model-item-badge">Fast validator</div>
           </div>
 
           <div className="model-item">
@@ -138,12 +144,14 @@ export default function HighlightedModelsSidebar() {
             <div className="model-item-badge">Balanced knowledge and speed</div>
           </div>
 
-          <div className="model-item">
+          <div className="model-item model-item--oa">
+            <OauthTag />
             <div className="model-item-name">Grok</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
-          <div className="model-item">
+          <div className="model-item model-item--oa">
+            <OauthTag stacked />
             <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
             <div className="model-item-name">ChatGPT</div>
             <div className="model-item-badge">Highly knowledgeable</div>

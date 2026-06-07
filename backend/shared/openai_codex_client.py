@@ -51,7 +51,6 @@ class OpenAICodexClient:
     REVOKE_URL = "https://auth.openai.com/oauth/revoke"
     CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
     DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
-    DEFAULT_MODELS = ("gpt-5.5", "gpt-5.5-mini", "gpt-5.4", "gpt-5.4-mini")
     DEFAULT_INSTRUCTIONS = "Follow the user's instructions and produce the requested response."
     REFRESH_SKEW_SECONDS = 60
     REASONING_EFFORT_LEVELS = {"xhigh", "high", "medium", "low", "none"}
@@ -258,6 +257,45 @@ class OpenAICodexClient:
             return await self.refresh_tokens(tokens)
 
     @staticmethod
+    def _access_token(tokens: Optional[Dict[str, Any]]) -> str:
+        return str((tokens or {}).get("access_token") or "")
+
+    @classmethod
+    def _is_auth_failure_text(cls, text: str) -> bool:
+        lowered = (text or "").lower()
+        return (
+            "token_revoked" in lowered
+            or "invalidated oauth token" in lowered
+            or "invalid oauth token" in lowered
+            or "expired oauth token" in lowered
+        )
+
+    async def _recover_tokens_after_auth_failure(
+        self,
+        used_tokens: Dict[str, Any],
+        *,
+        context: str,
+    ) -> Dict[str, Any]:
+        """Reload or refresh Codex OAuth tokens after a server-side auth rejection."""
+        async with self._refresh_lock:
+            current_tokens = self.load_tokens()
+            if not current_tokens or not current_tokens.get("access_token"):
+                raise OpenAICodexAuthError(
+                    f"OpenAI Codex {context} failed because OAuth is no longer configured."
+                )
+            if self._access_token(current_tokens) != self._access_token(used_tokens):
+                logger.info(
+                    "OpenAI Codex %s auth failed with an older token; retrying with the newer stored OAuth token.",
+                    context,
+                )
+                return current_tokens
+            logger.info(
+                "OpenAI Codex %s auth failed; refreshing OAuth token once before retrying.",
+                context,
+            )
+            return await self.refresh_tokens(current_tokens)
+
+    @staticmethod
     def safe_status(tokens: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Return token status without exposing token material."""
         if not tokens:
@@ -395,6 +433,12 @@ class OpenAICodexClient:
             f"{self.CODEX_BASE_URL}/models?client_version=1.0.0",
             headers=self._headers(tokens),
         )
+        if response.status_code in {401, 403}:
+            tokens = await self._recover_tokens_after_auth_failure(tokens, context="model listing")
+            response = await self.client.get(
+                f"{self.CODEX_BASE_URL}/models?client_version=1.0.0",
+                headers=self._headers(tokens),
+            )
         if response.status_code >= 400:
             raise OpenAICodexAuthError(
                 f"OpenAI Codex model listing failed: {sanitize_provider_error_text(response.text)}"
@@ -409,14 +453,7 @@ class OpenAICodexClient:
             normalized = self._normalize_model_metadata(model)
             if normalized:
                 models.append(normalized)
-        if models:
-            return models
-        fallback_models = []
-        for model in self.DEFAULT_MODELS:
-            normalized = self._normalize_model_metadata({"id": model, "name": model})
-            if normalized:
-                fallback_models.append(normalized)
-        return fallback_models
+        return models
 
     @staticmethod
     def _split_instructions(messages: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
@@ -687,22 +724,35 @@ class OpenAICodexClient:
             if tool_choice is not None:
                 payload["tool_choice"] = "auto" if tool_choice == "auto" else tool_choice
 
-        response = await self._post_with_retry(
-            f"{self.CODEX_BASE_URL}/responses",
-            json=payload,
-            headers=self._headers(tokens, accept_stream=True),
-        )
-        if response.status_code >= 400:
-            message = f"OpenAI Codex completion failed: {sanitize_provider_error_text(response.text)}"
-            if response.status_code in {401, 403}:
-                raise OpenAICodexAuthError(message)
-            raise OpenAICodexRequestError(message)
-        try:
-            data = self._decode_response_body(response.text)
-        except OpenAICodexRequestError as exc:
-            if self._is_transient_completion_text(str(exc)):
-                raise ValueError(f"OpenAI Codex connection failed while reading streamed response: {exc}") from exc
-            raise
+        auth_retry_used = False
+        while True:
+            response = await self._post_with_retry(
+                f"{self.CODEX_BASE_URL}/responses",
+                json=payload,
+                headers=self._headers(tokens, accept_stream=True),
+            )
+            if response.status_code >= 400:
+                message = f"OpenAI Codex completion failed: {sanitize_provider_error_text(response.text)}"
+                if response.status_code in {401, 403}:
+                    if not auth_retry_used:
+                        tokens = await self._recover_tokens_after_auth_failure(tokens, context="completion")
+                        auth_retry_used = True
+                        continue
+                    raise OpenAICodexAuthError(message)
+                raise OpenAICodexRequestError(message)
+            try:
+                data = self._decode_response_body(response.text)
+                break
+            except OpenAICodexRequestError as exc:
+                if self._is_auth_failure_text(str(exc)) and not auth_retry_used:
+                    tokens = await self._recover_tokens_after_auth_failure(tokens, context="completion")
+                    auth_retry_used = True
+                    continue
+                if self._is_auth_failure_text(str(exc)):
+                    raise OpenAICodexAuthError(str(exc)) from exc
+                if self._is_transient_completion_text(str(exc)):
+                    raise ValueError(f"OpenAI Codex connection failed while reading streamed response: {exc}") from exc
+                raise
         content, tool_calls = self._extract_output(data)
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:

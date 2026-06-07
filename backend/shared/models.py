@@ -11,7 +11,7 @@ DEFAULT_CONTEXT_WINDOW = 0
 DEFAULT_MAX_OUTPUT_TOKENS = 0
 DEFAULT_OPENROUTER_REASONING_EFFORT = "auto"
 OpenRouterReasoningEffort = Literal["auto", "xhigh", "high", "medium", "low", "minimal", "none"]
-ModelProvider = Literal["lm_studio", "openrouter", "openai_codex_oauth"]
+ModelProvider = Literal["lm_studio", "openrouter", "openai_codex_oauth", "xai_grok_oauth"]
 
 
 class DocumentChunk(BaseModel):

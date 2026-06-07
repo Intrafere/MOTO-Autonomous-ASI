@@ -12,6 +12,7 @@ import aiofiles
 from backend.api.routes import websocket
 from backend.shared.models import CompilerStartRequest, CompilerState, CritiqueRequest, ModelConfig
 from backend.shared.config import system_config
+from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.token_tracker import token_tracker
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.log_redaction import redact_log_text
@@ -395,6 +396,8 @@ async def start_compiler(request: CompilerStartRequest):
                     "status": "proof_check_started",
                     "message": "Compiler proof verification started over the Aggregator database",
                 }
+
+            await require_embedding_provider_ready()
 
             # Update system config with user-provided context sizes
             system_config.compiler_validator_context_window = request.validator_context_size
