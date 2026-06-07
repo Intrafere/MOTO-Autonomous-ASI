@@ -34,17 +34,19 @@ def _normalize_for_duplicate_check(value: str) -> str:
 async def _find_existing_proof(
     proof_database,
     *,
-    source_type: str,
-    source_id: str,
+    source_type: Optional[str] = None,
+    source_id: Optional[str] = None,
     theorem_statement: str,
     lean_code: str,
 ) -> Optional[ProofRecord]:
-    """Return an existing proof for the same source/theorem/code if present."""
+    """Return an existing proof for the theorem/code, optionally source-scoped."""
     normalized_statement = " ".join((theorem_statement or "").split())
     normalized_code = _normalize_for_duplicate_check(lean_code)
     try:
         for proof in await proof_database.get_all_proofs():
-            if proof.source_type != source_type or proof.source_id != source_id:
+            if source_type is not None and proof.source_type != source_type:
+                continue
+            if source_id is not None and proof.source_id != source_id:
                 continue
             if " ".join((proof.theorem_statement or "").split()) != normalized_statement:
                 continue
@@ -141,9 +143,10 @@ async def register_verified_lean_proof(
     """
     Classify and store Lean-verified proof code using the shared novelty tiers.
 
-    Duplicate detection is scoped to source type/id, theorem statement, and
-    Lean code. When a duplicate is found, the existing record is returned and
-    no novelty API call is made.
+    Same-source duplicate detection is scoped to source type/id, theorem
+    statement, and Lean code. Cross-source exact theorem/code matches are
+    stored as non-novel reused proof occurrences without spending a novelty
+    API call.
     """
     existing = await _find_existing_proof(
         proof_database,
@@ -161,18 +164,30 @@ async def register_verified_lean_proof(
         )
         return RegisteredProof(record=existing, duplicate=True)
 
-    existing_novel_proofs = proof_database.get_novel_proofs_for_injection()
-    novelty_tier, novelty_reasoning = await assess_proof_novelty(
-        user_prompt=user_prompt,
+    global_existing = await _find_existing_proof(
+        proof_database,
         theorem_statement=theorem_statement,
         lean_code=lean_code,
-        validator_model=validator_model,
-        validator_context=validator_context,
-        validator_max_tokens=validator_max_tokens,
-        existing_novel_proofs=existing_novel_proofs,
-        task_id=task_id,
-        role_id=role_id,
     )
+    if global_existing is not None:
+        novelty_tier = "not_novel"
+        novelty_reasoning = (
+            "Exact theorem statement and Lean code already exist in the proof database "
+            f"as {global_existing.proof_id}; this source records a reused verified proof occurrence."
+        )
+    else:
+        existing_novel_proofs = proof_database.get_novel_proofs_for_injection()
+        novelty_tier, novelty_reasoning = await assess_proof_novelty(
+            user_prompt=user_prompt,
+            theorem_statement=theorem_statement,
+            lean_code=lean_code,
+            validator_model=validator_model,
+            validator_context=validator_context,
+            validator_max_tokens=validator_max_tokens,
+            existing_novel_proofs=existing_novel_proofs,
+            task_id=task_id,
+            role_id=role_id,
+        )
     is_novel = novelty_tier != "not_novel"
 
     record = ProofRecord(

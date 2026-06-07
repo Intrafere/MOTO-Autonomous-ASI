@@ -9,6 +9,7 @@ from backend.autonomous.prompts.proof_prompts import LEAN4_COMMON_PITFALLS
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import system_config
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import get_lean4_client
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
@@ -395,7 +396,7 @@ async def verify_brainstorm_proof_candidate(
             if not response or not response.get("choices"):
                 raise ValueError("Proof repair model returned no choices.")
             message = response["choices"][0].get("message", {})
-            content = message.get("content") or message.get("reasoning") or ""
+            content = extract_message_text(message)
             repaired = parse_json(content)
             if isinstance(repaired, list):
                 repaired = repaired[0] if repaired else {}

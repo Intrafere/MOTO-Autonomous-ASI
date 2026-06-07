@@ -1,9 +1,108 @@
 import React, { useState, useEffect } from 'react';
 import { websocket } from '../../services/websocket';
 import { api } from '../../services/api';
+import LiveActivityFeed from '../LiveActivityFeed';
+import { MANUAL_AGGREGATOR_PROOF_SOURCE_ID } from '../../hooks/useProofCheckRuntime';
+import { getActivityClass, getActivityIcon } from '../../utils/activityStyles';
 import '../settings-common.css';
 
 const MAX_EVENT_LOG_ENTRIES = 5000;
+const AGGREGATOR_LIVE_ACTIVITY_STORAGE_KEY = 'aggregator_live_activity_manual_events';
+const MANUAL_PROOF_EVENTS = [
+  'proof_check_started',
+  'proof_check_no_candidates',
+  'proof_check_candidates_found',
+  'proof_attempt_started',
+  'proof_lean_accepted',
+  'proof_attempt_failed',
+  'proof_attempts_exhausted',
+  'proof_integrity_rejected',
+  'proof_verified',
+  'known_proof_verified',
+  'proof_registration_duplicate',
+  'novel_proof_discovered',
+  'proof_dependency_added',
+  'proof_check_complete',
+];
+
+const normalizeAggregatorEventName = (eventName = '') => {
+  switch (eventName) {
+    case 'accept':
+      return 'submission_accepted';
+    case 'reject':
+      return 'submission_rejected';
+    case 'cleanup-remove':
+      return 'cleanup_submission_removed';
+    case 'cleanup-error':
+      return 'cleanup_review_error';
+    case 'warning':
+      return 'hung_connection_alert';
+    default:
+      return eventName;
+  }
+};
+
+const getEventStorageKey = (event = {}) => {
+  const data = event.data || {};
+  const normalizedType = normalizeAggregatorEventName(event.type || '');
+  if (MANUAL_PROOF_EVENTS.includes(normalizedType) && data.manual_event_id) {
+    return `manual-proof:${data.manual_event_id}`;
+  }
+  if (
+    data.submission_id &&
+    ['new_submission', 'submission_accepted', 'submission_rejected', 'submission'].includes(normalizedType)
+  ) {
+    return `submission:${normalizedType}:${data.submission_id}`;
+  }
+  if (normalizedType === 'submission_accepted' && data.total_acceptances && data.submitter_id) {
+    return `accepted:${data.total_acceptances}:${data.submitter_id}`;
+  }
+  if (normalizedType === 'submission_rejected' && data.total_rejections && data.submitter_id) {
+    return `rejected:${data.total_rejections}:${data.submitter_id}`;
+  }
+  if (normalizedType === 'cleanup_submission_removed' && data.submission_number) {
+    return `cleanup-remove:${data.submission_number}`;
+  }
+  if (event.persisted && event.id) {
+    return `persisted:${event.id}`;
+  }
+  return [
+    event.type || '',
+    event.timestamp || '',
+    event.message || '',
+    data.source_type || '',
+    data.source_id || '',
+    data.theorem_id || '',
+    data.proof_id || '',
+  ].join('|');
+};
+
+const getEventSortTime = (event = {}) => {
+  const parsed = new Date(event.timestamp || event.fullTimestamp || '').getTime();
+  if (!Number.isNaN(parsed)) {
+    return parsed;
+  }
+  return typeof event.id === 'number' ? event.id : 0;
+};
+
+const mergeEventLists = (...eventLists) => {
+  const seen = new Set();
+  const merged = [];
+  eventLists.flat().forEach((event) => {
+    if (!event) {
+      return;
+    }
+    const key = getEventStorageKey(event);
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    merged.push(event);
+  });
+  return merged
+    .sort((left, right) => getEventSortTime(right) - getEventSortTime(left))
+    .slice(0, MAX_EVENT_LOG_ENTRIES);
+};
 
 export default function AggregatorLogs() {
   const [events, setEvents] = useState([]);
@@ -13,9 +112,10 @@ export default function AggregatorLogs() {
   useEffect(() => {
     fetchStatus();
     fetchRecoveryStatus();
-    fetchPersistedEvents(); // Load persisted events on mount
+    loadInitialEvents(); // Load local manual proof events + backend events together
     const statusInterval = setInterval(fetchStatus, 2000);
     const recoveryInterval = setInterval(fetchRecoveryStatus, 1000); // More frequent for recovery
+    const eventRefreshInterval = setInterval(refreshBackendPersistedEvents, 2000);
 
     // Subscribe to WebSocket events
     const unsubscribers = [
@@ -32,11 +132,15 @@ export default function AggregatorLogs() {
       websocket.on('cleanup_review_complete', handleCleanupComplete),
       websocket.on('cleanup_review_error', handleCleanupError),
       websocket.on('hung_connection_alert', handleHungConnectionAlert),
+      ...MANUAL_PROOF_EVENTS.map((eventName) => (
+        websocket.on(eventName, (data) => handleManualProofEvent(eventName, data))
+      )),
     ];
 
     return () => {
       clearInterval(statusInterval);
       clearInterval(recoveryInterval);
+      clearInterval(eventRefreshInterval);
       unsubscribers.forEach(unsub => unsub());
     };
   }, []);
@@ -62,51 +166,95 @@ export default function AggregatorLogs() {
     }
   };
 
-  const fetchPersistedEvents = async () => {
+  const readStoredManualEvents = () => {
+    try {
+      const savedEvents = localStorage.getItem(AGGREGATOR_LIVE_ACTIVITY_STORAGE_KEY);
+      if (!savedEvents) {
+        return [];
+      }
+      const parsed = JSON.parse(savedEvents);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      console.error('Failed to load manual Aggregator live activity:', error);
+      return [];
+    }
+  };
+
+  const fetchBackendPersistedEvents = async () => {
     try {
       const response = await fetch('/api/aggregator/events');
       if (response.ok) {
         const data = await response.json();
         if (data.events && data.events.length > 0) {
           // Convert persisted events to display format
-          const persistedEvents = data.events.map(event => ({
+          return data.events.map(event => ({
             id: event.id,
-            type: event.type === 'submission_accepted' ? 'accept' 
-                : event.type === 'submission_rejected' ? 'reject'
-                : event.type === 'cleanup_submission_removed' ? 'cleanup-remove'
-                : 'event',
-            message: event.type === 'submission_accepted' 
-              ? `✓ ${event.message}`
-              : event.type === 'submission_rejected'
-              ? `✗ ${event.message}`
-              : event.type === 'cleanup_submission_removed'
-              ? `${event.message}`
-              : event.message,
-            timestamp: new Date(event.timestamp).toLocaleTimeString(),
-            persisted: true  // Mark as persisted so we don't duplicate
-          }));
-          // Show persisted events in reverse chronological order (newest first)
-          setEvents(persistedEvents.reverse());
+            type: event.type || 'event',
+            message: formatPersistedEventMessage(event),
+            data: event.metadata || {},
+            timestamp: event.timestamp,
+            persisted: true,
+          })).reverse();
         }
       }
     } catch (error) {
       console.error('Failed to fetch persisted events:', error);
     }
+    return [];
+  };
+
+  const formatPersistedEventMessage = (event = {}) => {
+    switch (event.type) {
+      case 'submission_accepted':
+        return `✓ ${event.message}`;
+      case 'submission_rejected':
+        return `✗ ${event.message}`;
+      default:
+        return event.message || event.type || 'Aggregator event';
+    }
+  };
+
+  const loadInitialEvents = async () => {
+    const [manualEvents, backendEvents] = await Promise.all([
+      Promise.resolve(readStoredManualEvents()),
+      fetchBackendPersistedEvents(),
+    ]);
+    setEvents(mergeEventLists(backendEvents, manualEvents));
+  };
+
+  const refreshBackendPersistedEvents = async () => {
+    const backendEvents = await fetchBackendPersistedEvents();
+    if (backendEvents.length === 0) {
+      return;
+    }
+    setEvents(prev => mergeEventLists(backendEvents, prev));
+  };
+
+  const persistManualEvents = (nextEvents) => {
+    try {
+      const manualEvents = nextEvents.filter((event) => MANUAL_PROOF_EVENTS.includes(event.type));
+      localStorage.setItem(
+        AGGREGATOR_LIVE_ACTIVITY_STORAGE_KEY,
+        JSON.stringify(manualEvents.slice(0, MAX_EVENT_LOG_ENTRIES))
+      );
+    } catch (error) {
+      console.error('Failed to persist manual Aggregator live activity:', error);
+    }
   };
 
   const handleNewSubmission = (data) => {
     const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-    addEvent('submission', `${prefix}New submission from Submitter ${data.submitter_id}`);
+    addEvent('new_submission', `${prefix}New submission from Submitter ${data.submitter_id}`, data);
   };
 
   const handleAcceptance = (data) => {
     const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-    addEvent('accept', `✓ ${prefix}Submission from Submitter ${data.submitter_id} ACCEPTED`);
+    addEvent('submission_accepted', `✓ ${prefix}Submission from Submitter ${data.submitter_id} ACCEPTED`, data);
   };
 
   const handleRejection = (data) => {
     const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-    addEvent('reject', `✗ ${prefix}Submission from Submitter ${data.submitter_id} REJECTED: ${data.reasoning.substring(0, 100)}...`);
+    addEvent('submission_rejected', `✗ ${prefix}Submission from Submitter ${data.submitter_id} REJECTED: ${data.reasoning.substring(0, 100)}...`, data);
   };
 
   const handleCorruptionDetected = (data) => {
@@ -130,11 +278,11 @@ export default function AggregatorLogs() {
   };
 
   const handleRemovalProposed = (data) => {
-    addEvent('cleanup', `Cleanup proposes removing submission #${data.submission_number}`);
+    addEvent('cleanup', `Cleanup proposes removing submission #${data.submission_number}`, data);
   };
 
   const handleSubmissionRemoved = (data) => {
-    addEvent('cleanup-remove', `Submission #${data.submission_number} REMOVED (total removals: ${data.total_removals})`);
+    addEvent('cleanup_submission_removed', `Submission #${data.submission_number} REMOVED (total removals: ${data.total_removals})`, data);
   };
 
   const handleCleanupComplete = (data) => {
@@ -159,6 +307,48 @@ export default function AggregatorLogs() {
     addEvent('warning', formatHungConnectionMessage(data));
   };
 
+  const handleManualProofEvent = (eventName, data = {}) => {
+    if (data.source_type !== 'brainstorm' || data.source_id !== MANUAL_AGGREGATOR_PROOF_SOURCE_ID) {
+      return;
+    }
+    addEvent(eventName, formatProofEvent(eventName, data), data);
+  };
+
+  const formatProofEvent = (eventName, data = {}) => {
+    switch (eventName) {
+      case 'proof_check_started':
+        return 'Proof check started for the manual Aggregator database';
+      case 'proof_check_no_candidates':
+        return 'No formal theorem candidates found in the manual Aggregator database';
+      case 'proof_check_candidates_found':
+        return `Proof candidates found: ${data.count || 0}`;
+      case 'proof_attempt_started':
+        return `Lean proof attempt started: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+      case 'proof_lean_accepted':
+        return `Lean accepted proof: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+      case 'proof_attempt_failed':
+        return `Proof attempt failed: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+      case 'proof_attempts_exhausted':
+        return `Proof attempts exhausted: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+      case 'proof_integrity_rejected':
+        return `Proof integrity rejected: ${data.reason || data.message || data.theorem_name || 'candidate'}`;
+      case 'proof_verified':
+        return `Proof verified: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+      case 'known_proof_verified':
+        return `Known proof verified: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+      case 'proof_registration_duplicate':
+        return `Duplicate proof reused: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+      case 'novel_proof_discovered':
+        return `Novel proof discovered: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+      case 'proof_dependency_added':
+        return `Proof dependency added: ${data.theorem_name || data.proof_label || data.proof_id || 'verified proof'}`;
+      case 'proof_check_complete':
+        return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
+      default:
+        return `Proof event: ${eventName}`;
+    }
+  };
+
   const formatHungConnectionMessage = (data = {}) => {
     const model = data.model || 'model';
     const provider = data.provider || 'provider';
@@ -166,15 +356,40 @@ export default function AggregatorLogs() {
     return `Possible hung model call: ${model} via ${provider} (${elapsed}+ min). It may still be thinking; you can keep waiting or lower reasoning effort in Settings if this repeats.`;
   };
 
-  const addEvent = (type, message) => {
+  const addEvent = (type, message, data = {}) => {
     const event = {
       id: Date.now(),
       type,
       message,
-      timestamp: new Date().toLocaleTimeString(),
+      data,
+      timestamp: new Date().toISOString(),
     };
-    setEvents(prev => [event, ...prev].slice(0, MAX_EVENT_LOG_ENTRIES));
+    setEvents(prev => {
+      const updated = mergeEventLists([event], prev);
+      if (MANUAL_PROOF_EVENTS.includes(type)) {
+        persistManualEvents(updated);
+      }
+      return updated;
+    });
   };
+
+  const getAggregatorActivityClass = (eventName = '', item = {}) => {
+    const normalizedEventName = normalizeAggregatorEventName(eventName);
+    const data = item?.data || {};
+    if (normalizedEventName === 'proof_check_complete') {
+      if (data.message) {
+        return 'activity-reject';
+      }
+      return (data.verified_count || data.novel_count) ? 'activity-success' : 'activity-info';
+    }
+    return getActivityClass(normalizedEventName, { ...item, type: normalizedEventName });
+  };
+
+  const getAggregatorActivityIcon = (eventName = '', item = {}) => (
+    getActivityIcon(normalizeAggregatorEventName(eventName), item)
+  );
+
+  const chronologicalEvents = events.slice().reverse();
 
   return (
     <div>
@@ -301,19 +516,16 @@ export default function AggregatorLogs() {
         </>
       )}
 
-      <h2>Event Log</h2>
-      <div className="event-log">
-        {events.length === 0 ? (
-          <div style={{ color: '#666' }}>No events yet. Start the aggregator to see activity.</div>
-        ) : (
-          events.map(event => (
-            <div key={event.id} className="event-item">
-              <div className="event-time">{event.timestamp}</div>
-              <div className={`event-${event.type}`}>{event.message}</div>
-            </div>
-          ))
-        )}
-      </div>
+      <LiveActivityFeed
+        title={`Live Activity${events.length > 0 ? ` (${events.length})` : ''}`}
+        items={chronologicalEvents}
+        emptyMessage="No events yet. Start the aggregator to see activity."
+        getEventName={(event) => event.type || ''}
+        getMessage={(event) => event.message || ''}
+        getTimestamp={(event) => event.timestamp}
+        getClassName={getAggregatorActivityClass}
+        getIcon={getAggregatorActivityIcon}
+      />
     </div>
   );
 }

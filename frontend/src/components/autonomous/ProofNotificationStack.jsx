@@ -31,7 +31,7 @@ const TIER_STYLES = {
     labelColor: '#e8a060',
     label: 'Novel Formalization Discovered',
     subLabel:
-      'Your validator has determined this is the first-of-its-kind Lean 4 formalization for this historically known proof.',
+      'Your validator deemed this a citable formulation or formalization absent from standard references or Mathlib.',
   },
   novel_variant: {
     borderColor: '#c0c0c0',
@@ -83,11 +83,11 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
         return (
           <div
             key={notification.id}
-            onClick={() => onClickNotification(notification.proof_id)}
+            onClick={() => onClickNotification(notification)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
-                onClickNotification(notification.proof_id);
+                onClickNotification(notification);
               }
             }}
             role="button"
@@ -113,7 +113,12 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
                 alignItems: 'flex-start',
               }}
             >
-              <div>
+              <div
+                style={{
+                  flex: '1 1 auto',
+                  minWidth: 0,
+                }}
+              >
                 <div
                   style={{
                     fontSize: scalePx(10),
@@ -144,6 +149,8 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
                     lineHeight: 1.45,
                     color: '#e2e8f0',
                     fontWeight: 500,
+                    overflowWrap: 'anywhere',
+                    wordBreak: 'break-word',
                   }}
                   title={notification.theorem_statement}
                 >
@@ -164,6 +171,7 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
 
               <button
                 type="button"
+                aria-label="Dismiss proof notification"
                 onClick={(event) => {
                   event.stopPropagation();
                   onDismiss(notification.id);
@@ -175,7 +183,9 @@ export default function ProofNotificationStack({ notifications, onDismiss, onCli
                   cursor: 'pointer',
                   fontSize: scalePx(16),
                   lineHeight: 1,
-                  padding: 0,
+                  padding: scalePx(4),
+                  margin: `-${scalePx(4)}`,
+                  flex: '0 0 auto',
                 }}
               >
                 x

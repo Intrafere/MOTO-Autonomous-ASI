@@ -456,6 +456,16 @@ class PaperMemory:
                 return False
             
             body_text, appendix_body = self._extract_body_and_appendix(paper)
+            proof_id_match = re.search(r"(?m)^\s*Proof ID:\s*(\S+)\s*$", entry)
+            if proof_id_match and re.search(
+                rf"(?m)^\s*Proof ID:\s*{re.escape(proof_id_match.group(1))}\s*$",
+                appendix_body,
+            ):
+                logger.info(
+                    "Skipping duplicate theorem appendix entry for proof id %s",
+                    proof_id_match.group(1),
+                )
+                return True
             
             # First real entry replaces the empty placeholder
             if not appendix_body or appendix_body.strip() == APPENDIX_EMPTY_PLACEHOLDER:

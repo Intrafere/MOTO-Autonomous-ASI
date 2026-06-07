@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { api, cloudAccessAPI, openRouterAPI } from '../../services/api';
 import {
   computeCodexAutoSettings,
+  computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
@@ -13,6 +15,13 @@ import {
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
+import {
+  chooseCloudAccessProvider,
+  getConfiguredCloudAccessProviders,
+  isCloudAccessProvider,
+  cloudAccessProviderLabel,
+  XAI_GROK_PROVIDER,
+} from '../../utils/oauthProviders';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import ProofStrengthBadge from '../ProofStrengthBadge';
@@ -37,6 +46,180 @@ const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer 
 
 const formatRawSettings = (value) => JSON.stringify(value, null, 2);
 
+function AggregatorModelSelector({
+  provider,
+  modelId,
+  openrouterProvider: orProvider,
+  openrouterReasoningEffort,
+  lmStudioFallbackId,
+  onModelChange,
+  onProviderChange,
+  onOpenrouterProviderChange,
+  onOpenrouterReasoningEffortChange,
+  onFallbackChange,
+  label = 'Model',
+  lmStudioEnabled,
+  hasOpenRouterKey,
+  lmStudioModels,
+  openRouterModels,
+  oauthModelsByProvider,
+  configuredOAuthProviders,
+  oauthStatusByProvider,
+  modelProviders,
+}) {
+  const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
+  const models = effectiveProvider === 'openrouter'
+    ? openRouterModels
+    : (isCloudAccessProvider(effectiveProvider) ? (oauthModelsByProvider[effectiveProvider] || []) : lmStudioModels);
+  const providers = modelId && effectiveProvider === 'openrouter'
+    ? getProviderNames(modelProviders[modelId])
+    : [];
+  const reasoningInfo = effectiveProvider === 'openrouter'
+    ? getReasoningSupportInfo(modelProviders[modelId], orProvider || null)
+    : { hasEndpointMetadata: false, supportsReasoning: false };
+
+  return (
+    <>
+      {/* Provider Toggle */}
+      <div className="settings-row">
+        <label>Provider</label>
+        {lmStudioEnabled ? (
+          <div className="provider-toggle-group">
+            <button
+              type="button"
+              onClick={() => onProviderChange('lm_studio')}
+              className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
+            >
+              LM Studio
+            </button>
+            <button
+              type="button"
+              onClick={() => hasOpenRouterKey && onProviderChange('openrouter')}
+              disabled={!hasOpenRouterKey}
+              className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
+              title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
+            >
+              OpenRouter
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (configuredOAuthProviders.length > 0) {
+                  onProviderChange(chooseCloudAccessProvider(oauthStatusByProvider, provider));
+                }
+              }}
+              disabled={configuredOAuthProviders.length === 0}
+              className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
+              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
+            >
+              oAuth
+            </button>
+            {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
+              <select
+                value={provider}
+                onChange={(event) => onProviderChange(event.target.value)}
+                title="Select OAuth provider"
+                className="input-dark"
+                style={{ width: 'auto', minWidth: '150px' }}
+              >
+                {configuredOAuthProviders.map((oauthProvider) => (
+                  <option key={oauthProvider.id} value={oauthProvider.id}>
+                    {oauthProvider.label}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+        ) : (
+          <small className="settings-hint">
+            OpenRouter is required in this deployment.
+          </small>
+        )}
+      </div>
+
+      {/* Model Selection */}
+      <div className="settings-row">
+        <label>{label}</label>
+        <select
+          value={modelId || ''}
+          onChange={(e) => onModelChange(e.target.value)}
+        >
+          <option value="">Select model...</option>
+          {models.map(model => {
+            const isFree = effectiveProvider === 'openrouter'
+              && model.pricing?.prompt === "0"
+              && model.pricing?.completion === "0";
+            const displayName = model.name || model.id;
+            const contextInfo = model.context_length ? ` (${Math.round(model.context_length/1000)}K)` : '';
+
+            return (
+              <option key={model.id} value={model.id}>
+                {displayName}{contextInfo}{isFree ? ' [FREE]' : ''}
+              </option>
+            );
+          })}
+        </select>
+      </div>
+
+      {/* OpenRouter Provider Selection (only for OpenRouter) */}
+      {effectiveProvider === 'openrouter' && modelId && (
+        <div className="settings-row">
+          <label>Host Provider (optional)</label>
+          <select
+            value={orProvider || ''}
+            onChange={(e) => onOpenrouterProviderChange(e.target.value || null)}
+          >
+            <option value="">Auto (let OpenRouter choose)</option>
+            {providers.map(p => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {effectiveProvider === 'openrouter' && modelId && (
+        <div className="settings-row">
+          <label>Reasoning Effort</label>
+          <select
+            value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
+            onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
+          >
+            {OPENROUTER_REASONING_EFFORT_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <small className="settings-hint">
+            {reasoningInfo.hasEndpointMetadata && !reasoningInfo.supportsReasoning
+              ? 'This selected host does not advertise reasoning support; OpenRouter may ignore the setting.'
+              : 'Auto sends OpenRouter max reasoning effort by default.'}
+          </small>
+        </div>
+      )}
+
+      {/* LM Studio Fallback (only for cloud providers) */}
+      {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
+        <div className="settings-row">
+          <label className="label--muted">
+            LM Studio Fallback (optional)
+          </label>
+          <select
+            value={lmStudioFallbackId || ''}
+            onChange={(e) => onFallbackChange(e.target.value || null)}
+          >
+            <option value="">No fallback</option>
+            {lmStudioModels.map(model => (
+              <option key={model.id} value={model.id}>{model.id}</option>
+            ))}
+          </select>
+          <small className="settings-hint" style={{ marginTop: '0.25rem' }}>
+            Used if cloud provider access fails or credits run out
+          </small>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function AggregatorSettings({
   config,
   setConfig,
@@ -46,6 +229,7 @@ export default function AggregatorSettings({
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
+  const [xaiGrokModels, setXaiGrokModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({}); // { modelId: { providers: [], endpoints: [] } }
   const [loading, setLoading] = useState(true);
   const [saveMessage, setSaveMessage] = useState('');
@@ -71,6 +255,9 @@ export default function AggregatorSettings({
   // OpenRouter API key status
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
+  const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
+  const [openAICodexModelError, setOpenAICodexModelError] = useState('');
+  const [xaiGrokModelError, setXaiGrokModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -81,6 +268,11 @@ export default function AggregatorSettings({
   const [rawSettingsMessage, setRawSettingsMessage] = useState('');
   const [guiSettingsBeforeRaw, setGuiSettingsBeforeRaw] = useState(null);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const oauthStatusByProvider = {
+    openai_codex_oauth: { configured: hasOpenAICodexLogin },
+    [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+  };
+  const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
 
   useEffect(() => {
     if (!developerModeEnabled && editRawSettings) {
@@ -249,10 +441,27 @@ export default function AggregatorSettings({
       setHasOpenAICodexLogin(configured);
       if (configured) {
         fetchOpenAICodexModels();
+      } else {
+        setOpenAICodexModelError('');
       }
     } catch (err) {
       console.error('Failed to check OpenAI Codex login status:', err);
       setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+    }
+    try {
+      const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+      const configured = Boolean(xaiStatus.status?.configured);
+      setHasXAIGrokLogin(configured);
+      if (configured) {
+        fetchXAIGrokModels();
+      } else {
+        setXaiGrokModelError('');
+      }
+    } catch (err) {
+      console.error('Failed to check xAI Grok login status:', err);
+      setHasXAIGrokLogin(false);
+      setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
     }
   };
 
@@ -271,10 +480,36 @@ export default function AggregatorSettings({
   const fetchOpenAICodexModels = async () => {
     try {
       const result = await cloudAccessAPI.getOpenAICodexModels();
-      setOpenAICodexModels(result.models || []);
+      const models = result.models || [];
+      setOpenAICodexModels(models);
+      setHasOpenAICodexLogin(models.length > 0);
+      setOpenAICodexModelError(models.length > 0
+        ? ''
+        : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
+      );
     } catch (err) {
       console.error('Failed to fetch OpenAI Codex models:', err);
       setOpenAICodexModels([]);
+      setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError(`OpenAI Codex OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
+    }
+  };
+
+  const fetchXAIGrokModels = async () => {
+    try {
+      const result = await cloudAccessAPI.getXAIGrokModels();
+      const models = result.models || [];
+      setXaiGrokModels(models);
+      setHasXAIGrokLogin(models.length > 0);
+      setXaiGrokModelError(models.length > 0
+        ? ''
+        : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
+      );
+    } catch (err) {
+      console.error('Failed to fetch xAI Grok models:', err);
+      setXaiGrokModels([]);
+      setHasXAIGrokLogin(false);
+      setXaiGrokModelError(`xAI Grok OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
 
@@ -345,6 +580,28 @@ export default function AggregatorSettings({
     return autoSettings;
   };
 
+  const getCloudAccessAutoSettingsForModel = (provider, modelId) => {
+    if (provider === 'openai_codex_oauth') {
+      return getCodexAutoSettingsForModel(modelId);
+    }
+    const oauthModelsByProvider = {
+      openai_codex_oauth: openAICodexModels,
+      [XAI_GROK_PROVIDER]: xaiGrokModels,
+    };
+    const model = (oauthModelsByProvider[provider] || []).find((item) => item.id === modelId);
+    if (!model) {
+      console.debug('[AggregatorOAuthAutoFill] model not in loaded list, skipping auto-fill', { provider, modelId });
+      return null;
+    }
+    const autoSettings = provider === XAI_GROK_PROVIDER
+      ? computeXAIGrokAutoSettings(model)
+      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+    if (autoSettings.warnings.length > 0) {
+      console.warn('[AggregatorOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
+    }
+    return autoSettings;
+  };
+
   const handleSubmitterModelChange = async (submitterId, modelId) => {
     const baseConfigs = submitterConfigs.map(c =>
       c.submitterId === submitterId
@@ -355,13 +612,13 @@ export default function AggregatorSettings({
     setConfig(prev => ({ ...prev, submitterConfigs: baseConfigs }));
 
     const targetConfig = baseConfigs.find(c => c.submitterId === submitterId);
-    if (!modelId || !['openrouter', 'openai_codex_oauth'].includes(targetConfig?.provider)) {
+    if (!modelId || !(targetConfig?.provider === 'openrouter' || isCloudAccessProvider(targetConfig?.provider))) {
       return;
     }
 
     const autoSettings = targetConfig.provider === 'openrouter'
       ? await getAutoSettingsForModel(modelId, null)
-      : getCodexAutoSettingsForModel(modelId);
+      : getCloudAccessAutoSettingsForModel(targetConfig.provider, modelId);
     if (!autoSettings) {
       return;
     }
@@ -421,13 +678,13 @@ export default function AggregatorSettings({
     setValidatorOpenrouterProvider(null);
     setValidatorOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
 
-    if (!modelId || !['openrouter', 'openai_codex_oauth'].includes(validatorProvider)) {
+    if (!modelId || !(validatorProvider === 'openrouter' || isCloudAccessProvider(validatorProvider))) {
       return;
     }
 
     const autoSettings = validatorProvider === 'openrouter'
       ? await getAutoSettingsForModel(modelId, null)
-      : getCodexAutoSettingsForModel(modelId);
+      : getCloudAccessAutoSettingsForModel(validatorProvider, modelId);
     if (!autoSettings) {
       return;
     }
@@ -718,154 +975,6 @@ export default function AggregatorSettings({
     }
   };
 
-  // Model selector component for either provider
-  const ModelSelector = ({ 
-    provider, 
-    modelId, 
-    openrouterProvider: orProvider, 
-    openrouterReasoningEffort,
-    lmStudioFallbackId, 
-    onModelChange, 
-    onProviderChange, 
-    onOpenrouterProviderChange, 
-    onOpenrouterReasoningEffortChange,
-    onFallbackChange,
-    label = 'Model'
-  }) => {
-    const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
-    const models = effectiveProvider === 'openrouter'
-      ? openRouterModels
-      : (effectiveProvider === 'openai_codex_oauth' ? openAICodexModels : lmStudioModels);
-    const providers = modelId && effectiveProvider === 'openrouter'
-      ? getProviderNames(modelProviders[modelId])
-      : [];
-    const reasoningInfo = effectiveProvider === 'openrouter'
-      ? getReasoningSupportInfo(modelProviders[modelId], orProvider || null)
-      : { hasEndpointMetadata: false, supportsReasoning: false };
-    
-    return (
-      <>
-        {/* Provider Toggle */}
-        <div className="settings-row">
-          <label>Provider</label>
-          {lmStudioEnabled ? (
-            <div className="provider-toggle-group">
-              <button
-                type="button"
-                onClick={() => onProviderChange('lm_studio')}
-                className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
-              >
-                LM Studio
-              </button>
-              <button
-                type="button"
-                onClick={() => hasOpenRouterKey && onProviderChange('openrouter')}
-                disabled={!hasOpenRouterKey}
-                className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
-                title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
-              >
-                OpenRouter
-              </button>
-              <button
-                type="button"
-                onClick={() => hasOpenAICodexLogin && onProviderChange('openai_codex_oauth')}
-                disabled={!hasOpenAICodexLogin}
-                className={`provider-toggle-btn${provider === 'openai_codex_oauth' ? ' active-or-orange' : ''}`}
-                title={!hasOpenAICodexLogin ? 'Set OpenAI Codex login in Cloud Access & Keys first' : 'Use OpenAI Codex'}
-              >
-                OpenAI Codex
-              </button>
-            </div>
-          ) : (
-            <small className="settings-hint">
-              OpenRouter is required in this deployment.
-            </small>
-          )}
-        </div>
-
-        {/* Model Selection */}
-        <div className="settings-row">
-          <label>{label}</label>
-          <select
-            value={modelId || ''}
-            onChange={(e) => onModelChange(e.target.value)}
-          >
-            <option value="">Select model...</option>
-            {models.map(model => {
-              const isFree = effectiveProvider === 'openrouter' && 
-                            model.pricing?.prompt === "0" && 
-                            model.pricing?.completion === "0";
-              const displayName = model.name || model.id;
-              const contextInfo = model.context_length ? ` (${Math.round(model.context_length/1000)}K)` : '';
-              
-              return (
-                <option key={model.id} value={model.id}>
-                  {displayName}{contextInfo}{isFree ? ' [FREE]' : ''}
-                </option>
-              );
-            })}
-          </select>
-        </div>
-
-        {/* OpenRouter Provider Selection (only for OpenRouter) */}
-        {effectiveProvider === 'openrouter' && modelId && (
-          <div className="settings-row">
-            <label>Host Provider (optional)</label>
-            <select
-              value={orProvider || ''}
-              onChange={(e) => onOpenrouterProviderChange(e.target.value || null)}
-            >
-              <option value="">Auto (let OpenRouter choose)</option>
-              {providers.map(p => (
-                <option key={p} value={p}>{p}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {effectiveProvider === 'openrouter' && modelId && (
-          <div className="settings-row">
-            <label>Reasoning Effort</label>
-            <select
-              value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
-              onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
-            >
-              {OPENROUTER_REASONING_EFFORT_OPTIONS.map(option => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-            <small className="settings-hint">
-              {reasoningInfo.hasEndpointMetadata && !reasoningInfo.supportsReasoning
-                ? 'This selected host does not advertise reasoning support; OpenRouter may ignore the setting.'
-                : 'Auto sends OpenRouter max reasoning effort by default.'}
-            </small>
-          </div>
-        )}
-
-        {/* LM Studio Fallback (only for cloud providers) */}
-        {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
-          <div className="settings-row">
-            <label className="label--muted">
-              LM Studio Fallback (optional)
-            </label>
-            <select
-              value={lmStudioFallbackId || ''}
-              onChange={(e) => onFallbackChange(e.target.value || null)}
-            >
-              <option value="">No fallback</option>
-              {lmStudioModels.map(model => (
-                <option key={model.id} value={model.id}>{model.id}</option>
-              ))}
-            </select>
-            <small className="settings-hint" style={{ marginTop: '0.25rem' }}>
-              Used if cloud provider access fails or credits run out
-            </small>
-          </div>
-        )}
-      </>
-    );
-  };
-
   return (
     <div className="autonomous-settings-layout">
       <HighlightedModelsSidebar />
@@ -878,6 +987,11 @@ export default function AggregatorSettings({
               </div>
             )}
           </div>
+          {openAICodexModelError && (
+            <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+              {openAICodexModelError}
+            </div>
+          )}
 
       {/* OpenRouter Status Banner */}
       {!hasOpenRouterKey && (
@@ -993,7 +1107,7 @@ export default function AggregatorSettings({
                   {effectiveProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
                 </h5>
 
-                  <ModelSelector
+                  <AggregatorModelSelector
                     provider={cfg.provider}
                     modelId={cfg.modelId}
                     openrouterProvider={cfg.openrouterProvider}
@@ -1004,6 +1118,17 @@ export default function AggregatorSettings({
                     onOpenrouterProviderChange={(p) => handleSubmitterOpenRouterProviderChange(cfg.submitterId, p)}
                     onOpenrouterReasoningEffortChange={(effort) => updateSubmitterConfig(cfg.submitterId, 'openrouterReasoningEffort', effort)}
                     onFallbackChange={(f) => updateSubmitterConfig(cfg.submitterId, 'lmStudioFallbackId', f)}
+                    lmStudioEnabled={lmStudioEnabled}
+                    hasOpenRouterKey={hasOpenRouterKey}
+                    lmStudioModels={lmStudioModels}
+                    openRouterModels={openRouterModels}
+                    oauthModelsByProvider={{
+                      openai_codex_oauth: openAICodexModels,
+                      [XAI_GROK_PROVIDER]: xaiGrokModels,
+                    }}
+                    configuredOAuthProviders={configuredOAuthProviders}
+                    oauthStatusByProvider={oauthStatusByProvider}
+                    modelProviders={modelProviders}
                   />
 
                   <div className="settings-row">
@@ -1072,7 +1197,7 @@ export default function AggregatorSettings({
                 {validatorProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
               </h5>
 
-              <ModelSelector
+              <AggregatorModelSelector
                 provider={validatorProvider}
                 modelId={config.validatorModel}
                 openrouterProvider={validatorOpenrouterProvider}
@@ -1091,6 +1216,17 @@ export default function AggregatorSettings({
                   setConfig({ ...config, validatorLmStudioFallback: f });
                 }}
                 label="Validator Model"
+                lmStudioEnabled={lmStudioEnabled}
+                hasOpenRouterKey={hasOpenRouterKey}
+                lmStudioModels={lmStudioModels}
+                openRouterModels={openRouterModels}
+                oauthModelsByProvider={{
+                  openai_codex_oauth: openAICodexModels,
+                  [XAI_GROK_PROVIDER]: xaiGrokModels,
+                }}
+                configuredOAuthProviders={configuredOAuthProviders}
+                oauthStatusByProvider={oauthStatusByProvider}
+                modelProviders={modelProviders}
               />
 
               <div className="settings-row">

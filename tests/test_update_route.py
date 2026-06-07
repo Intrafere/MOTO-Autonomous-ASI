@@ -14,7 +14,7 @@ class UpdateRouteGitPullTests(IsolatedAsyncioTestCase):
             version=version,
             build_commit=commit,
             update_channel="main",
-            api_contract_version="build5-v22",
+            api_contract_version="build5-v29",
         )
 
     async def test_git_pull_route_refuses_dirty_tracked_checkout(self) -> None:
@@ -69,13 +69,13 @@ class RuntimeUpdateNoticeTests(IsolatedAsyncioTestCase):
                 version=local_version,
                 build_commit="localcommit",
                 update_channel="main",
-                api_contract_version="build5-v22",
+                api_contract_version="build5-v29",
             ),
             BuildManifest(
                 version=remote_version,
                 build_commit="remotecommit",
                 update_channel="main",
-                api_contract_version="build5-v22",
+                api_contract_version="build5-v29",
             ),
             InstallState(
                 kind="clean_git_clone",
@@ -144,6 +144,13 @@ class RuntimeUpdateNoticeTests(IsolatedAsyncioTestCase):
                                     result = await features_route.get_update_notice()
 
         self.assertFalse(result["update_available"])
+
+
+class UpdateVersionComparisonTests(IsolatedAsyncioTestCase):
+    async def test_downgrade_guard_treats_zero_padded_release_as_same_version(self) -> None:
+        self.assertFalse(update_route._is_downgrade("1.1.00", "1.1.0"))
+        self.assertFalse(update_route._is_downgrade("1.1.0", "1.1.00"))
+        self.assertTrue(update_route._is_downgrade("1.1.00", "1.0.99"))
 
 
 if __name__ == "__main__":

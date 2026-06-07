@@ -48,6 +48,23 @@ class CreativityEmphasisBoostTests(unittest.TestCase):
         self.assertIn("CREATIVITY EMPHASIS BOOST", creative_prompt)
         self.assertIn("potentially very helpful", creative_prompt)
 
+    def test_aggregator_prompt_hides_lean_proof_schema_when_disabled(self) -> None:
+        disabled_prompt = build_submitter_prompt("user", "context", lean4_enabled=False)
+        enabled_prompt = build_submitter_prompt("user", "context", lean4_enabled=True)
+
+        self.assertNotIn("lean_proof", disabled_prompt)
+        self.assertNotIn("Lean proof candidate", disabled_prompt)
+        self.assertIn("lean_proof", enabled_prompt)
+        self.assertIn("Lean proof candidate", enabled_prompt)
+
+    def test_brainstorm_submitter_prompts_keep_novel_insight_task_line(self) -> None:
+        aggregator_prompt = build_submitter_prompt("user", "context")
+        leanoj_prompt = build_brainstorm_prompt("prompt", "template", "topic", [], [], [])
+
+        expected_line = "Generate a novel mathematical insight that advances the user's goal."
+        self.assertIn(f"YOUR TASK:\n{expected_line}\nGenerate the strongest rigorous mathematical contribution", aggregator_prompt)
+        self.assertIn(f"YOUR TASK:\n{expected_line}\nGenerate one concrete idea", leanoj_prompt)
+
     def test_aggregator_submitter_uses_every_fifth_valid_submission_slot(self) -> None:
         submitter = SubmitterAgent(
             submitter_id=1,

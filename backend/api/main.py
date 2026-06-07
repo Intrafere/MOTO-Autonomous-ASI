@@ -206,7 +206,11 @@ async def lifespan(app: FastAPI):
         from backend.autonomous.memory.paper_library import paper_library
         from backend.autonomous.memory.research_metadata import research_metadata
         from backend.autonomous.memory.final_answer_memory import final_answer_memory
-        from backend.autonomous.memory.proof_database import proof_database
+        from backend.autonomous.memory.proof_database import manual_proof_database, proof_database
+        from backend.aggregator.memory.event_log import event_log
+        from backend.aggregator.memory.shared_training import shared_training_memory
+        from backend.compiler.memory.outline_memory import outline_memory
+        from backend.compiler.memory.paper_memory import paper_memory
         
         # Check for a resumable session
         interrupted_session = await session_manager.find_interrupted_session(system_config.auto_sessions_base_dir)
@@ -230,6 +234,11 @@ async def lifespan(app: FastAPI):
             proof_database.set_session_manager(None)
 
         await proof_database.initialize()
+        await manual_proof_database.initialize()
+        await shared_training_memory.initialize()
+        await event_log.initialize()
+        await outline_memory.initialize()
+        await paper_memory.initialize()
     except Exception as e:
         logger.warning(f"Failed to restore session context on startup: {e}")
         # Non-fatal - continue with legacy paths

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any
 
@@ -17,13 +18,14 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_MANIFEST_PATH = REPO_ROOT / "moto-update-manifest.json"
 PACKAGE_JSON_PATH = REPO_ROOT / "package.json"
+ARCHIVAL_METADATA_PATH = REPO_ROOT / ".git_archival.txt"
 
 _DEFAULT_BUILD_INFO = {
     "manifest_version": 1,
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build5-v22",
+    "api_contract_version": "build5-v30",
 }
 
 _ENV_OVERRIDES = {
@@ -104,6 +106,19 @@ def _current_git_head() -> str | None:
     return head if result.returncode == 0 and head else None
 
 
+def _archived_git_head() -> str | None:
+    """Resolve the commit embedded into GitHub-generated ZIP archives."""
+    if (REPO_ROOT / ".git").exists():
+        return None
+    try:
+        content = ARCHIVAL_METADATA_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    match = re.search(r"(?im)^node:\s*([0-9a-f]{40})\s*$", content)
+    return match.group(1).lower() if match else None
+
+
 @lru_cache(maxsize=1)
 def get_build_info() -> BuildInfo:
     """Resolve build identity from the committed manifest with env overrides."""
@@ -128,6 +143,10 @@ def get_build_info() -> BuildInfo:
     git_head = _current_git_head()
     if git_head:
         payload["build_commit"] = git_head
+    else:
+        archived_head = _archived_git_head()
+        if archived_head:
+            payload["build_commit"] = archived_head
 
     for env_name, field_name in _ENV_OVERRIDES.items():
         override = os.environ.get(env_name, "").strip()

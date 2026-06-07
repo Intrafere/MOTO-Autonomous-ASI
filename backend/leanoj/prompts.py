@@ -484,11 +484,15 @@ VERIFIED SUBPROOFS:
 USEFUL FAILED PROOF FEEDBACK:
 {_format_failures(failed_feedback)}"""
     creativity_section = f"\n{CREATIVITY_EMPHASIS_BOOST_PROMPT}\n" if creativity_emphasized else ""
-    return f"""You are a LeanOJ proof brainstorm submitter. Generate one concrete idea that helps solve the user's Lean 4 template.
+    return f"""You are a LeanOJ proof brainstorm submitter.
+
+YOUR TASK:
+Generate a novel mathematical insight that advances the user's goal.
+Generate one concrete idea that helps solve the user's Lean 4 template.
 
 Focus on exact Lean tactics, Mathlib lemmas, theorem-shaping, induction/cases structure, or mathematical transformations. If a current working proof attempt is provided, treat ACTIVE TOPIC as that exact proof-repair target. Brainstorm only information that directly helps complete or repair it; if a direct solution is unavailable, give the nearest concrete step that works toward solving that exact proof.
 
-If you can produce a complete Lean 4 proof for a useful sublemma or proof fragment, you may choose `submission_type: "lean_proof"`. Use that route only when the proved statement directly discharges, splits, or repairs a current obligation in the LeanOJ template. Do not use it to build a generic known-knowledge base of routine Mathlib facts, standard textbook lemmas, or proof-engineering glue. The system will require novelty/prompt-rationale fields, run Lean 4 first, give you up to 5 repair attempts with Lean feedback, and only then send the Lean-verified proof to the normal brainstorm validator. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
+If you can produce a complete Lean 4 proof for a useful sublemma or proof fragment, you may choose `submission_type: "lean_proof"`. Use that route only when the proved statement directly discharges, splits, or repairs a current obligation in the LeanOJ template and is either public/citable novelty absent from standard references or Mathlib, or a template-specific proof artifact whose novelty rationale clearly explains why it is not merely a standard known fact. Do not use it to build a generic known-knowledge base of routine Mathlib facts, standard textbook lemmas, proof-engineering glue, or program-local firsts. The system will require novelty/prompt-rationale fields, run Lean 4 first, give you up to 5 repair attempts with Lean feedback, and only then send the Lean-verified proof to the normal brainstorm validator. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
 
 Do not write a whole final proof unless the idea is directly useful as context. Final template solving still happens in the final loop.
 
@@ -512,7 +516,7 @@ JSON format for a normal idea:
 {{"submission_type": "idea", "submission": "one concrete proof-solving idea", "reasoning": "why it advances the LeanOJ solution"}}
 
 JSON format for a Lean proof candidate:
-{{"submission_type": "lean_proof", "theorem_statement": "natural-language statement proved", "formal_sketch": "why this proof fragment helps the LeanOJ template", "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation", "prompt_relevance_rationale": "which exact LeanOJ template obligation this proof discharges, splits, or repairs", "novelty_rationale": "why this proof fragment is novel/useful progress for this proof route rather than a generic known fact", "why_not_standard_known_result": "why this is not merely a standard Mathlib/textbook/routine helper lemma", "theorem_name": "optional Lean declaration name", "lean_code": "complete Lean 4 code", "reasoning": "why this verified proof would help"}}
+{{"submission_type": "lean_proof", "theorem_statement": "natural-language statement proved", "formal_sketch": "why this proof fragment helps the LeanOJ template", "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation", "prompt_relevance_rationale": "which exact LeanOJ template obligation this proof discharges, splits, or repairs", "novelty_rationale": "why this proof fragment is absent from standard references or Mathlib / citable for this template route rather than a generic known fact or program-local first", "why_not_standard_known_result": "why this is not merely a standard Mathlib/textbook/routine helper lemma", "theorem_name": "optional Lean declaration name", "lean_code": "complete Lean 4 code", "reasoning": "why this verified proof would help"}}
 """
 
 

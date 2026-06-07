@@ -82,6 +82,12 @@ const AutonomousResearchLogs = ({ stats, events }) => {
     const data = event.data || {};
     const proofName = data.proof_label ? `Proof ${data.proof_label}` : 'Proof';
     const proofTarget = data.theorem_statement || data.theorem_id || '';
+    const proofRoundLabel = () => {
+      const round = Number(data.proof_round_index || 0);
+      const maxRounds = Number(data.proof_max_rounds || 0);
+      if (round <= 0 || maxRounds <= 1) return '';
+      return `Proof round ${round}/${maxRounds}`;
+    };
     const proofLeanResponse = () => {
       if (data.lean_response) return data.lean_response;
       if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
@@ -177,15 +183,15 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         if (data.trigger === 'retry') {
           return `Paper-stage proof retry started for ${data.source_type} ${data.source_id}`;
         }
-        return `Proof check started for ${data.source_type} ${data.source_id}`;
+        return `${proofRoundLabel() || 'Proof check'} started for ${data.source_type} ${data.source_id}`;
       case 'proof_retry_scheduled':
         return `Scheduled ${data.count || 0} proof retry candidate(s) for paper ${data.source_id}`;
       case 'proof_retry_started':
         return `Retrying ${data.count || 0} failed proof candidate(s) against paper ${data.source_id}`;
       case 'proof_check_no_candidates':
-        return `No formal theorem candidates found in ${data.source_type} ${data.source_id}`;
+        return `${proofRoundLabel() || 'Proof check'} found no formal theorem candidates in ${data.source_type} ${data.source_id}`;
       case 'proof_check_candidates_found':
-        return `Proof candidates found: ${data.count || 0}`;
+        return `${proofRoundLabel() || 'Proof check'} candidates found: ${data.count || 0}`;
       case 'proof_attempt_started':
         return `${proofName}, Attempt ${data.attempt || 1} started: ${proofTarget}`;
       case 'proof_attempt_failed':
@@ -205,7 +211,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'proof_registration_duplicate':
         return proofNoveltyMessage();
       case 'proof_check_complete':
-        return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
+        return `${proofRoundLabel() || 'Proof check'} complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
       case 'hung_connection_alert': {
         const model = data.model || 'model';
         const provider = data.provider || 'provider';

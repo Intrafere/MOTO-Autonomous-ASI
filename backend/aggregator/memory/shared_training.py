@@ -14,6 +14,47 @@ from backend.shared.config import system_config, rag_config
 
 logger = logging.getLogger(__name__)
 
+PROOF_APPENDIX_HEADER = "=== PROOFS GENERATED FROM THIS BRAINSTORM (Lean 4 Verified) ==="
+MANUAL_AGGREGATOR_PROMPT_FILE = "manual_aggregator_prompt.txt"
+
+
+def get_manual_aggregator_prompt_path() -> Path:
+    """Return the persisted manual Aggregator prompt path for this data root."""
+    return Path(system_config.data_dir) / MANUAL_AGGREGATOR_PROMPT_FILE
+
+
+async def save_manual_aggregator_prompt(prompt: str) -> None:
+    """Persist the latest manual Aggregator prompt for stopped/restarted proof checks."""
+    path = get_manual_aggregator_prompt_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(path, "w", encoding="utf-8") as handle:
+        await handle.write(prompt or "")
+
+
+async def load_manual_aggregator_prompt() -> str:
+    """Load the latest manual Aggregator prompt, if one has been persisted."""
+    path = get_manual_aggregator_prompt_path()
+    if not path.exists():
+        return ""
+    try:
+        async with aiofiles.open(path, "r", encoding="utf-8") as handle:
+            return await handle.read()
+    except Exception as exc:
+        logger.debug("Unable to load manual Aggregator prompt: %s", exc)
+        return ""
+
+
+async def clear_manual_aggregator_prompt() -> None:
+    """Clear stale manual Aggregator prompt state after an explicit reset."""
+    path = get_manual_aggregator_prompt_path()
+    if path.exists():
+        try:
+            await asyncio.to_thread(path.unlink)
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            logger.debug("Unable to clear manual Aggregator prompt: %s", exc)
+
 
 class SharedTrainingMemory:
     """
@@ -29,6 +70,7 @@ class SharedTrainingMemory:
         self._lock = asyncio.Lock()
         self.submission_count = 0
         self.last_ragged_submission_count = 0  # Track which submissions have been RAG'd
+        self.proof_appendix = ""
     
     async def initialize(self) -> None:
         """Initialize shared training memory, creating file if needed."""
@@ -39,6 +81,7 @@ class SharedTrainingMemory:
             async with aiofiles.open(self.file_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
                 if content.strip():
+                    content, proof_appendix = self._split_proof_appendix(content)
                     # Parse formatted submissions
                     parsed_insights = self._parse_formatted_file(content)
                     
@@ -47,6 +90,7 @@ class SharedTrainingMemory:
                     # aggregator cleanup reviews and compiler initialization
                     async with self._lock:
                         self.insights = parsed_insights
+                        self.proof_appendix = proof_appendix
                         # Set submission_count to the highest submission number found
                         if self.insights:
                             max_number = max(
@@ -76,6 +120,7 @@ class SharedTrainingMemory:
         async with self._lock:
             # Clear current insights
             self.insights.clear()
+            self.proof_appendix = ""
             self.submission_count = 0
             self.last_ragged_submission_count = 0  # Reset RAG tracking
             
@@ -84,8 +129,10 @@ class SharedTrainingMemory:
                 async with aiofiles.open(self.file_path, 'r', encoding='utf-8') as f:
                     content = await f.read()
                     if content.strip():
+                        content, proof_appendix = self._split_proof_appendix(content)
                         parsed_insights = self._parse_formatted_file(content)
                         self.insights = parsed_insights
+                        self.proof_appendix = proof_appendix
                         
                         # Set submission_count to the highest submission number found
                         if self.insights:
@@ -100,9 +147,22 @@ class SharedTrainingMemory:
                         else:
                             self.submission_count = 0
                 
-                logger.info(f"Reloaded {len(self.insights)} insights from {self.file_path} (submission count: {self.submission_count})")
             else:
                 logger.info(f"Brainstorm database file doesn't exist yet: {self.file_path}")
+
+    def _split_proof_appendix(self, content: str) -> tuple[str, str]:
+        """Return accepted-submission content and a preserved proof appendix."""
+        if PROOF_APPENDIX_HEADER not in content:
+            return content, ""
+        before, _, after = content.partition(PROOF_APPENDIX_HEADER)
+        proof_appendix = f"{PROOF_APPENDIX_HEADER}{after}".strip()
+        return before.rstrip(), proof_appendix
+
+    @staticmethod
+    def _proof_field(proof, field_name: str, default: str = "") -> str:
+        if isinstance(proof, dict):
+            return str(proof.get(field_name, default) or default)
+        return str(getattr(proof, field_name, default) or default)
     
     def _parse_formatted_file(self, content: str) -> List[Dict[str, str]]:
         """Parse the formatted file to extract submissions and metadata."""
@@ -183,12 +243,15 @@ class SharedTrainingMemory:
                 except Exception as e:
                     logger.error(f"Re-chunking callback failed: {e}")
     
-    async def get_all_content(self) -> str:
+    async def get_all_content(self, *, strip_proofs: bool = False) -> str:
         """Get all shared training content as a single string (content only, no metadata)."""
         async with self._lock:
-            return '\n\n'.join([insight['content'] for insight in self.insights])
+            content = '\n\n'.join([insight['content'] for insight in self.insights])
+            if strip_proofs or not self.proof_appendix:
+                return content
+            return f"{content.rstrip()}\n\n{self.proof_appendix}\n" if content.strip() else self.proof_appendix
     
-    async def get_all_content_formatted(self) -> str:
+    async def get_all_content_formatted(self, *, strip_proofs: bool = False) -> str:
         """Get all shared training content with full formatting and metadata for export."""
         async with self._lock:
             formatted_sections = []
@@ -203,8 +266,68 @@ class SharedTrainingMemory:
                 
                 section = f"{separator}\nSUBMISSION #{number} | Accepted: {timestamp}\n{separator}\n\n{content}\n"
                 formatted_sections.append(section)
-            
-            return '\n\n'.join(formatted_sections)
+            content = '\n\n'.join(formatted_sections)
+            if strip_proofs or not self.proof_appendix:
+                return content
+            return f"{content.rstrip()}\n\n{self.proof_appendix}\n" if content.strip() else self.proof_appendix
+
+    async def append_proofs_section(self, proofs_data) -> bool:
+        """Append Lean-verified proof records without converting them into submissions."""
+        async with self._lock:
+            proofs = proofs_data if isinstance(proofs_data, list) else [proofs_data]
+            existing_appendix = self.proof_appendix or PROOF_APPENDIX_HEADER
+            existing_ids = set(re.findall(r"(?m)^Proof ID:\s*(.+?)\s*$", existing_appendix))
+            after_header = existing_appendix.split(PROOF_APPENDIX_HEADER, 1)[1] if PROOF_APPENDIX_HEADER in existing_appendix else ""
+            next_index = len(re.findall(r"(?m)^Proof \d+:", after_header)) + 1
+
+            lines = [existing_appendix.rstrip()]
+            appended = 0
+            for proof in proofs:
+                theorem_statement = self._proof_field(proof, "theorem_statement").strip()
+                proof_id = self._proof_field(proof, "proof_id").strip()
+                novel = bool(proof.get("novel", False) if isinstance(proof, dict) else getattr(proof, "novel", False))
+                lean_code = self._proof_field(proof, "lean_code").strip()
+                if proof_id and proof_id in existing_ids:
+                    continue
+                status = "Verified (Novel)" if novel else "Verified (Known)"
+                lines.extend(
+                    [
+                        "",
+                        f"Proof {next_index}: {theorem_statement}",
+                        f"Status: {status}",
+                        f"Proof ID: {proof_id or 'N/A'}",
+                        "Lean 4 Code:",
+                        lean_code or "[no Lean 4 code saved]",
+                        "---",
+                    ]
+                )
+                if proof_id:
+                    existing_ids.add(proof_id)
+                next_index += 1
+                appended += 1
+
+            if appended == 0:
+                return True
+
+            self.proof_appendix = "\n".join(lines).strip()
+            await self._save()
+            logger.info("Appended %s proof(s) to shared training database", appended)
+            return True
+
+    async def refresh_proof_appendix_from_file(self) -> None:
+        """Refresh only the proof appendix from disk without touching live submissions."""
+        try:
+            if not self.file_path.exists():
+                return
+            async with aiofiles.open(self.file_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+        except Exception as exc:
+            logger.debug("Unable to refresh proof appendix from shared training file: %s", exc)
+            return
+
+        _, proof_appendix = self._split_proof_appendix(content)
+        async with self._lock:
+            self.proof_appendix = proof_appendix
     
     async def get_insights_count(self) -> int:
         """Get number of insights in shared training."""
@@ -243,6 +366,8 @@ class SharedTrainingMemory:
         
         # Join all sections with double newline for clear separation
         full_content = '\n\n'.join(formatted_sections)
+        if self.proof_appendix:
+            full_content = f"{full_content.rstrip()}\n\n{self.proof_appendix}\n" if full_content.strip() else self.proof_appendix
         
         async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
             await f.write(full_content)
@@ -310,4 +435,46 @@ class SharedTrainingMemory:
 
 # Global shared training memory instance
 shared_training_memory = SharedTrainingMemory()
+
+
+async def append_proof_to_manual_shared_training(proof_record) -> bool:
+    """Append a proof to the manual Aggregator DB regardless of the singleton's current path."""
+    manual_path = Path(system_config.shared_training_file)
+    current_path = Path(shared_training_memory.file_path)
+    try:
+        paths_match = current_path.resolve() == manual_path.resolve()
+    except Exception:
+        paths_match = current_path == manual_path
+
+    if paths_match:
+        await shared_training_memory.refresh_proof_appendix_from_file()
+        return await shared_training_memory.append_proofs_section(proof_record)
+
+    scoped_memory = SharedTrainingMemory()
+    scoped_memory.file_path = manual_path
+    await scoped_memory.initialize()
+    return await scoped_memory.append_proofs_section(proof_record)
+
+
+async def clear_manual_shared_training_proof_appendix() -> None:
+    """Remove manual Aggregator proof appendix without deleting accepted submissions."""
+    manual_path = Path(system_config.shared_training_file)
+    current_path = Path(shared_training_memory.file_path)
+    try:
+        paths_match = current_path.resolve() == manual_path.resolve()
+    except Exception:
+        paths_match = current_path == manual_path
+
+    if paths_match:
+        async with shared_training_memory._lock:
+            shared_training_memory.proof_appendix = ""
+            await shared_training_memory._save()
+        return
+
+    scoped_memory = SharedTrainingMemory()
+    scoped_memory.file_path = manual_path
+    await scoped_memory.initialize()
+    async with scoped_memory._lock:
+        scoped_memory.proof_appendix = ""
+        await scoped_memory._save()
 

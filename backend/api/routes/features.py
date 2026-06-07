@@ -45,6 +45,7 @@ async def get_features() -> Dict[str, Any]:
             "lm_studio_enabled": not is_generic,
             "pdf_download_available": not is_generic,
             "openai_codex_oauth_available": not is_generic,
+            "xai_grok_oauth_available": not is_generic,
         }
     )
 

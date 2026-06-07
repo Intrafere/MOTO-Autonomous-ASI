@@ -3,6 +3,37 @@
  */
 
 const API_BASE = import.meta.env.VITE_MOTO_API_BASE || '/api';
+const PROOF_STATUS_READY_CACHE_MS = 5000;
+const PROOF_STATUS_STARTING_CACHE_MS = 30000;
+
+let proofStatusCache = null;
+let proofStatusCacheTime = 0;
+let proofStatusInFlight = null;
+
+function isProofStatusStartingUp(status) {
+  const version = (status?.lean4_version || status?.lean_version || '').trim();
+  return Boolean(status?.lean4_enabled && (!version || !status?.workspace_ready));
+}
+
+function getProofStatusCacheMs(status) {
+  return isProofStatusStartingUp(status)
+    ? PROOF_STATUS_STARTING_CACHE_MS
+    : PROOF_STATUS_READY_CACHE_MS;
+}
+
+function rememberProofStatus(status) {
+  proofStatusCache = status;
+  proofStatusCacheTime = Date.now();
+  return status;
+}
+
+function withProofScope(path, scope) {
+  if (!scope || scope === 'autonomous') {
+    return path;
+  }
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}scope=${encodeURIComponent(scope)}`;
+}
 
 /**
  * Extract the most useful human-readable message from a non-ok fetch Response.
@@ -175,7 +206,9 @@ export const api = {
     const response = await fetch(`${API_BASE}/aggregator/clear-all`, {
       method: 'POST',
     });
-    if (!response.ok) throw new Error('Failed to clear submissions');
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to clear submissions');
+    }
     return response.json();
   },
 
@@ -325,7 +358,9 @@ export const compilerAPI = {
     const response = await fetch(`${API_BASE}/compiler/clear-paper?confirm=true`, {
       method: 'POST',
     });
-    if (!response.ok) throw new Error('Failed to clear paper');
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to clear paper');
+    }
     return { data: await response.json() };
   },
 
@@ -497,24 +532,43 @@ export const autonomousAPI = {
   },
 
   // Get all verified proofs
-  async getProofs() {
-    const response = await fetch(`${API_BASE}/proofs`);
+  async getProofs(scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope('/proofs', scope)}`);
     if (!response.ok) throw new Error('Failed to get proofs');
     return response.json();
   },
 
   // Get only novel verified proofs
-  async getNovelProofs() {
-    const response = await fetch(`${API_BASE}/proofs/novel`);
+  async getNovelProofs(scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope('/proofs/novel', scope)}`);
     if (!response.ok) throw new Error('Failed to get novel proofs');
     return response.json();
   },
 
   // Get Lean 4 proof system status
-  async getProofStatus() {
-    const response = await fetch(`${API_BASE}/proofs/status`);
-    if (!response.ok) throw new Error('Failed to get proof status');
-    return response.json();
+  async getProofStatus({ force = false } = {}) {
+    const now = Date.now();
+    if (
+      !force &&
+      proofStatusCache &&
+      now - proofStatusCacheTime < getProofStatusCacheMs(proofStatusCache)
+    ) {
+      return proofStatusCache;
+    }
+    if (!force && proofStatusInFlight) {
+      return proofStatusInFlight;
+    }
+
+    proofStatusInFlight = fetch(`${API_BASE}/proofs/status`)
+      .then((response) => {
+        if (!response.ok) throw new Error('Failed to get proof status');
+        return response.json();
+      })
+      .then(rememberProofStatus)
+      .finally(() => {
+        proofStatusInFlight = null;
+      });
+    return proofStatusInFlight;
   },
 
   // Update runtime Lean 4 proof settings
@@ -528,7 +582,7 @@ export const autonomousAPI = {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData?.detail?.message || errorData?.detail || 'Failed to update proof settings');
     }
-    return response.json();
+    return rememberProofStatus(await response.json());
   },
 
   // Queue a manual proof check for one brainstorm or paper
@@ -554,15 +608,15 @@ export const autonomousAPI = {
   },
 
   // Get one proof with full Lean code
-  async getProof(proofId) {
-    const response = await fetch(`${API_BASE}/proofs/${encodeURIComponent(proofId)}`);
+  async getProof(proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/${encodeURIComponent(proofId)}`, scope)}`);
     if (!response.ok) throw new Error(`Failed to get proof ${proofId}`);
     return response.json();
   },
 
   // Get dependency edges for one proof
-  async getProofDependencies(proofId) {
-    const response = await fetch(`${API_BASE}/proofs/${encodeURIComponent(proofId)}/dependencies`);
+  async getProofDependencies(proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/${encodeURIComponent(proofId)}/dependencies`, scope)}`);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData?.detail?.message || errorData?.detail || `Failed to get proof dependencies for ${proofId}`);
@@ -571,8 +625,8 @@ export const autonomousAPI = {
   },
 
   // Get the full proof dependency graph in one payload
-  async getProofGraph() {
-    const response = await fetch(`${API_BASE}/proofs/graph`);
+  async getProofGraph(scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope('/proofs/graph', scope)}`);
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData?.detail?.message || errorData?.detail || 'Failed to get proof graph');
@@ -580,30 +634,30 @@ export const autonomousAPI = {
     return response.json();
   },
 
-  async getProofCertificate(proofId) {
-    const response = await fetch(`${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate`);
+  async getProofCertificate(proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/${encodeURIComponent(proofId)}/certificate`, scope)}`);
     if (!response.ok) {
       await throwFromResponse(response, `Failed to get proof certificate for ${proofId}`);
     }
     return response.json();
   },
 
-  async getProofLeanSource(proofId) {
-    const response = await fetch(`${API_BASE}/proofs/${encodeURIComponent(proofId)}/certificate.lean`);
+  async getProofLeanSource(proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/${encodeURIComponent(proofId)}/certificate.lean`, scope)}`);
     if (!response.ok) {
       await throwFromResponse(response, `Failed to get Lean source for ${proofId}`);
     }
     return response.text();
   },
 
-  async getProofLibrary(novelOnly = true) {
-    const response = await fetch(`${API_BASE}/proofs/library?novel_only=${novelOnly}`);
+  async getProofLibrary(novelOnly = true, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/library?novel_only=${novelOnly}`, scope)}`);
     if (!response.ok) throw new Error('Failed to get proof library');
     return response.json();
   },
 
-  async getLibraryProof(sessionId, proofId) {
-    const response = await fetch(`${API_BASE}/proofs/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}`);
+  async getLibraryProof(sessionId, proofId, scope = 'autonomous') {
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/library/${encodeURIComponent(sessionId)}/${encodeURIComponent(proofId)}`, scope)}`);
     if (!response.ok) throw new Error(`Failed to get library proof ${proofId}`);
     return response.json();
   },
@@ -1367,6 +1421,51 @@ export const cloudAccessAPI = {
       method: 'DELETE',
     });
     if (!response.ok) await throwFromResponse(response, 'Failed to clear OpenAI Codex login');
+    return response.json();
+  },
+
+  async startXAIGrokLogin(redirectUri = null) {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok/oauth/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirect_uri: redirectUri }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to start xAI Grok login');
+    return response.json();
+  },
+
+  async exchangeXAIGrokCode({ code = '', state = '', redirectUrl = '', redirectUri = null } = {}) {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok/oauth/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code,
+        state,
+        redirect_url: redirectUrl,
+        redirect_uri: redirectUri,
+      }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to complete xAI Grok login');
+    return response.json();
+  },
+
+  async getXAIGrokStatus() {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok/status`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get xAI Grok status');
+    return response.json();
+  },
+
+  async getXAIGrokModels() {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok/models`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to fetch xAI Grok models');
+    return response.json();
+  },
+
+  async clearXAIGrokLogin() {
+    const response = await fetch(`${API_BASE}/cloud-access/xai-grok`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to clear xAI Grok login');
     return response.json();
   },
 };

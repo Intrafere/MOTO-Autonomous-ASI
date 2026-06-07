@@ -11,6 +11,10 @@ import {
 } from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 import PaperCritiqueModal from '../PaperCritiqueModal';
+import {
+  MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
+  useProofCheckRuntime,
+} from '../../hooks/useProofCheckRuntime';
 import '../settings-common.css';
 
 function LivePaper({ capabilities }) {
@@ -22,8 +26,15 @@ function LivePaper({ capabilities }) {
   const [isSaving, setIsSaving] = useState(false);
   const [showLatex, setShowLatex] = useState(true);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [proofActionMessage, setProofActionMessage] = useState('');
   const paperContainerRef = useRef(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
+  const {
+    canQueueManualProofCheck,
+    getManualCheckReason,
+    getSourceState,
+    queueManualProofCheck,
+  } = useProofCheckRuntime();
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -134,6 +145,7 @@ function LivePaper({ capabilities }) {
       '• Delete the current paper content\n' +
       '• Delete the current outline\n' +
       '• Clear all rejection/acceptance logs\n' +
+      '• Archive active manual proofs and remove them from future prompt context\n' +
       '• Restart from outline creation\n\n' +
       'This action CANNOT be undone!';
     
@@ -199,6 +211,30 @@ function LivePaper({ capabilities }) {
     downloadRawText(paper, filename, outline, 'paper');
   };
 
+  const handleProofCheck = async () => {
+    try {
+      setProofActionMessage('');
+      await queueManualProofCheck({
+        sourceType: 'paper',
+        sourceId: MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
+      });
+      setProofActionMessage('Queued proof check for the current manual Compiler paper.');
+    } catch (error) {
+      setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    }
+  };
+
+  const proofCheckState = getSourceState('paper', MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID);
+  const proofCheckLabel = proofCheckState?.status === 'queued'
+    ? 'Queueing Proof Check...'
+    : proofCheckState?.status === 'running'
+      ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
+      : 'Try to Prove This';
+  const proofCheckEnabled = Boolean(paper) && canQueueManualProofCheck('paper', MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID);
+  const proofCheckTitle = proofCheckState?.status === 'running'
+    ? 'A proof verification is already running for the current manual Compiler paper.'
+    : getManualCheckReason('paper', MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID) || 'Queue a manual proof check for this paper.';
+
   return (
     <div className="live-paper">
       <div className="paper-header">
@@ -248,6 +284,15 @@ function LivePaper({ capabilities }) {
           </button>
 
           <button
+            onClick={handleProofCheck}
+            className="btn btn-secondary"
+            disabled={!proofCheckEnabled || Boolean(proofCheckState)}
+            title={paper ? proofCheckTitle : 'No paper content to prove yet.'}
+          >
+            {proofCheckLabel}
+          </button>
+
+          <button
             onClick={handleSaveDraft}
             className="btn btn-secondary"
             disabled={isSaving}
@@ -291,6 +336,12 @@ function LivePaper({ capabilities }) {
           </button>
         </div>
       </div>
+
+      {proofActionMessage && (
+        <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
+          {proofActionMessage}
+        </div>
+      )}
 
       <div className="paper-container" ref={paperContainerRef}>
         {paper ? (

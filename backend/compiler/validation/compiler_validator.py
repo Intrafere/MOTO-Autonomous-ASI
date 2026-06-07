@@ -10,8 +10,8 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission, CompilerValidationResult
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
-from backend.autonomous.memory.proof_database import proof_database
 from backend.aggregator.validation.json_validator import json_validator
 from backend.compiler.memory.paper_memory import (
     paper_memory,
@@ -358,9 +358,19 @@ class CompilerValidator:
     - Checks non-redundancy
     """
     
-    def __init__(self, model_name: str, user_prompt: str, websocket_broadcaster: Optional[Callable] = None):
+    def __init__(
+        self,
+        model_name: str,
+        user_prompt: str,
+        websocket_broadcaster: Optional[Callable] = None,
+        proof_database_store=None,
+    ):
         self.model_name = model_name
-        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
+        self.user_prompt = (
+            proof_database_store.inject_into_prompt(user_prompt)
+            if proof_database_store is not None
+            else user_prompt
+        )
         self.websocket_broadcaster = websocket_broadcaster
         self._initialized = False
         
@@ -537,7 +547,7 @@ class CompilerValidator:
                     return self._fallback_parse(response)
                 
                 message = retry_response["choices"][0]["message"]
-                retry_output = message.get("content") or message.get("reasoning") or ""
+                retry_output = extract_message_text(message)
                 
                 try:
                     parsed = parse_json(retry_output)
@@ -1104,7 +1114,7 @@ class CompilerValidator:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             
             # Parse JSON response with retry logic
             validation_data = await self._parse_json_with_retry(
@@ -1241,7 +1251,7 @@ class CompilerValidator:
                 )
             
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             
             validation_data = await self._parse_json_with_retry(llm_output, prompt, "", 0)
             

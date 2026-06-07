@@ -334,6 +334,7 @@ class BrainstormMemory:
                     existing_content = await handle.read()
 
                 after_header = existing_content.split(header, 1)[1] if header in existing_content else ""
+                existing_ids = set(re.findall(r"(?m)^Proof ID:\s*(.+?)\s*$", after_header))
                 next_index = len(re.findall(r"(?m)^Proof \d+:", after_header)) + 1
 
                 lines: List[str] = []
@@ -347,6 +348,8 @@ class BrainstormMemory:
                     proof_id = str(getattr(proof, "proof_id", "") or proof.get("proof_id", "")).strip()
                     novel = bool(getattr(proof, "novel", False) if hasattr(proof, "novel") else proof.get("novel", False))
                     lean_code = str(getattr(proof, "lean_code", "") or proof.get("lean_code", "")).strip()
+                    if proof_id and proof_id in existing_ids:
+                        continue
                     status = "Verified (Novel)" if novel else "Verified (Known)"
 
                     lines.extend(
@@ -359,7 +362,13 @@ class BrainstormMemory:
                             "---",
                         ]
                     )
+                    if proof_id:
+                        existing_ids.add(proof_id)
                     next_index += 1
+
+                if not any(line.startswith("Proof ") for line in lines):
+                    logger.info("No new proof entries to append to brainstorm %s", topic_id)
+                    return True
 
                 async with aiofiles.open(db_path, "a", encoding="utf-8") as handle:
                     await handle.write("\n".join(lines) + "\n")

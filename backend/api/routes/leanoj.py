@@ -13,6 +13,7 @@ from backend.autonomous.core.autonomous_coordinator import autonomous_coordinato
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 from backend.shared.config import system_config
+from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.models import LeanOJStartRequest
 from backend.shared.workflow_start_guard import workflow_start_guard
 
@@ -260,6 +261,7 @@ async def start_leanoj(request: LeanOJStartRequest):
             if not system_config.lean4_enabled:
                 raise HTTPException(status_code=400, detail="Lean 4 is disabled. Enable Lean 4 proof verification before starting Proof Solver.")
             _validate_start_role_limits(request)
+            await require_embedding_provider_ready()
             resumed = await leanoj_coordinator.resume_or_initialize(request)
             if not leanoj_coordinator.start_in_background():
                 raise HTTPException(status_code=400, detail="Proof Solver is already running")

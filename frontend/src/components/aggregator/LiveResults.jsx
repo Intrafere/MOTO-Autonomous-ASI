@@ -6,25 +6,49 @@ import { api } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
+import {
+  MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
+  useProofCheckRuntime,
+} from '../../hooks/useProofCheckRuntime';
 
 export default function LiveResults() {
   const [results, setResults] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
   const [showLatex, setShowLatex] = useState(false); // Raw text by default for performance with large docs
+  const [proofActionMessage, setProofActionMessage] = useState('');
   const resultsRef = useRef(null);
+  const {
+    canQueueManualProofCheck,
+    getManualCheckReason,
+    getSourceState,
+    queueManualProofCheck,
+  } = useProofCheckRuntime();
 
   useEffect(() => {
     fetchResults();
     const interval = setInterval(fetchResults, 5000);
 
-    const unsubscribe = websocket.on('submission_accepted', () => {
+    const unsubscribeSubmissionAccepted = websocket.on('submission_accepted', () => {
       // Fetch new results when a submission is accepted
       setTimeout(fetchResults, 500);
     });
+    const refreshManualAggregatorProofs = (data = {}) => {
+      if (data.source_type === 'brainstorm' && data.source_id === MANUAL_AGGREGATOR_PROOF_SOURCE_ID) {
+        setTimeout(fetchResults, 500);
+      }
+    };
+    const proofRefreshUnsubscribers = [
+      websocket.on('proof_check_complete', refreshManualAggregatorProofs),
+      websocket.on('proof_verified', refreshManualAggregatorProofs),
+      websocket.on('known_proof_verified', refreshManualAggregatorProofs),
+      websocket.on('proof_registration_duplicate', refreshManualAggregatorProofs),
+      websocket.on('novel_proof_discovered', refreshManualAggregatorProofs),
+    ];
 
     return () => {
       clearInterval(interval);
-      unsubscribe();
+      unsubscribeSubmissionAccepted();
+      proofRefreshUnsubscribers.forEach(unsubscribe => unsubscribe());
     };
   }, []);
 
@@ -54,7 +78,7 @@ export default function LiveResults() {
   };
 
   const handleClearAll = async () => {
-    if (!confirm('Are you sure you want to clear ALL accepted submissions? This cannot be undone!')) {
+    if (!confirm('Are you sure you want to clear ALL accepted submissions and start a fresh manual run?\n\nCurrent manual proofs will be archived to history and removed from future prompt context. This cannot be undone!')) {
       return;
     }
     
@@ -65,7 +89,7 @@ export default function LiveResults() {
       fetchResults();
     } catch (error) {
       console.error('Failed to clear submissions:', error);
-      alert('Failed to clear submissions');
+      alert('Failed to clear submissions: ' + error.message);
     }
   };
 
@@ -86,6 +110,31 @@ export default function LiveResults() {
     URL.revokeObjectURL(url);
   };
 
+  const handleProofCheck = async () => {
+    try {
+      setProofActionMessage('');
+      await queueManualProofCheck({
+        sourceType: 'brainstorm',
+        sourceId: MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
+      });
+      setProofActionMessage('Queued proof check for the manual Aggregator database.');
+    } catch (error) {
+      setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    }
+  };
+
+  const proofCheckState = getSourceState('brainstorm', MANUAL_AGGREGATOR_PROOF_SOURCE_ID);
+  const proofCheckLabel = proofCheckState?.status === 'queued'
+    ? 'Queueing Proof Check...'
+    : proofCheckState?.status === 'running'
+      ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
+      : 'Try to Prove This';
+  const hasResults = Boolean(results && results !== 'No accepted submissions yet.');
+  const proofCheckEnabled = hasResults && canQueueManualProofCheck('brainstorm', MANUAL_AGGREGATOR_PROOF_SOURCE_ID);
+  const proofCheckTitle = proofCheckState?.status === 'running'
+    ? 'A proof verification is already running for the manual Aggregator database.'
+    : getManualCheckReason('brainstorm', MANUAL_AGGREGATOR_PROOF_SOURCE_ID) || 'Queue a manual proof check for this brainstorm database.';
+
   return (
     <div className="live-results">
       <h1>Live Results</h1>
@@ -96,6 +145,14 @@ export default function LiveResults() {
         </button>
         <button onClick={handleDownload} className="secondary">
           Download
+        </button>
+        <button
+          onClick={handleProofCheck}
+          className="secondary"
+          disabled={!proofCheckEnabled || Boolean(proofCheckState)}
+          title={hasResults ? proofCheckTitle : 'No accepted submissions to prove yet.'}
+        >
+          {proofCheckLabel}
         </button>
         <button 
           onClick={() => setAutoScroll(!autoScroll)}
@@ -116,6 +173,12 @@ export default function LiveResults() {
           Clear All
         </button>
       </div>
+
+      {proofActionMessage && (
+        <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
+          {proofActionMessage}
+        </div>
+      )}
 
       <div className="results-container" ref={resultsRef}>
         <LatexRenderer

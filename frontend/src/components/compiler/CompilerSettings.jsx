@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { cloudAccessAPI, openRouterAPI, api, aggregatorAPI, compilerAPI } from '../../services/api';
 import {
   computeCodexAutoSettings,
+  computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
@@ -13,6 +15,13 @@ import {
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
+import {
+  chooseCloudAccessProvider,
+  getConfiguredCloudAccessProviders,
+  isCloudAccessProvider,
+  cloudAccessProviderLabel,
+  XAI_GROK_PROVIDER,
+} from '../../utils/oauthProviders';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import ProofStrengthBadge from '../ProofStrengthBadge';
@@ -30,9 +39,13 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
+  const [xaiGrokModels, setXaiGrokModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
+  const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
+  const [openAICodexModelError, setOpenAICodexModelError] = useState('');
+  const [xaiGrokModelError, setXaiGrokModelError] = useState('');
   const [loadingModels, setLoadingModels] = useState(true);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -99,6 +112,11 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   const [defaultCritiquePrompt, setDefaultCritiquePrompt] = useState('');
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
   const genericMode = Boolean(capabilities?.genericMode);
+  const oauthStatusByProvider = {
+    openai_codex_oauth: { configured: hasOpenAICodexLogin },
+    [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+  };
+  const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
 
   useEffect(() => {
     if (!developerModeEnabled && editRawSettings) {
@@ -137,10 +155,27 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
         setHasOpenAICodexLogin(configured);
         if (configured) {
           fetchOpenAICodexModels();
+        } else {
+          setOpenAICodexModelError('');
         }
       } catch (err) {
         console.error('Failed to check OpenAI Codex login:', err);
         setHasOpenAICodexLogin(false);
+        setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+      }
+      try {
+        const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+        const configured = Boolean(xaiStatus.status?.configured);
+        setHasXAIGrokLogin(configured);
+        if (configured) {
+          fetchXAIGrokModels();
+        } else {
+          setXaiGrokModelError('');
+        }
+      } catch (err) {
+        console.error('Failed to check xAI Grok login:', err);
+        setHasXAIGrokLogin(false);
+        setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
       }
 
       // Fetch LM Studio models
@@ -406,10 +441,36 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   const fetchOpenAICodexModels = async () => {
     try {
       const result = await cloudAccessAPI.getOpenAICodexModels();
-      setOpenAICodexModels(result.models || []);
+      const models = result.models || [];
+      setOpenAICodexModels(models);
+      setHasOpenAICodexLogin(models.length > 0);
+      setOpenAICodexModelError(models.length > 0
+        ? ''
+        : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
+      );
     } catch (err) {
       console.error('Failed to fetch OpenAI Codex models:', err);
       setOpenAICodexModels([]);
+      setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError(`OpenAI Codex OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
+    }
+  };
+
+  const fetchXAIGrokModels = async () => {
+    try {
+      const result = await cloudAccessAPI.getXAIGrokModels();
+      const models = result.models || [];
+      setXaiGrokModels(models);
+      setHasXAIGrokLogin(models.length > 0);
+      setXaiGrokModelError(models.length > 0
+        ? ''
+        : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
+      );
+    } catch (err) {
+      console.error('Failed to fetch xAI Grok models:', err);
+      setXaiGrokModels([]);
+      setHasXAIGrokLogin(false);
+      setXaiGrokModelError(`xAI Grok OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
 
@@ -517,6 +578,30 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const autoSettings = computeCodexAutoSettings(model);
     if (autoSettings.warnings.length > 0) {
       console.warn('[CompilerCodexAutoFill] auto-settings fallback used:', autoSettings.warnings);
+    }
+    return autoSettings;
+  };
+
+  const getOAuthModels = (provider) => {
+    if (provider === 'openai_codex_oauth') return openAICodexModels;
+    if (provider === XAI_GROK_PROVIDER) return xaiGrokModels;
+    return [];
+  };
+
+  const getCloudAccessAutoSettingsForModel = (provider, modelId) => {
+    if (provider === 'openai_codex_oauth') {
+      return getCodexAutoSettingsForModel(modelId);
+    }
+    const model = getOAuthModels(provider).find((item) => item.id === modelId);
+    if (!model) {
+      console.debug('[CompilerOAuthAutoFill] model not in loaded list, skipping auto-fill', { provider, modelId });
+      return null;
+    }
+    const autoSettings = provider === XAI_GROK_PROVIDER
+      ? computeXAIGrokAutoSettings(model)
+      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+    if (autoSettings.warnings.length > 0) {
+      console.warn('[CompilerOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
     }
     return autoSettings;
   };
@@ -765,8 +850,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     }
   };
 
-  // Reusable Role Configuration Component
-  const RoleConfig = ({ 
+  // Reusable role renderer. Keep this as a plain render helper instead of a nested
+  // component so periodic parent refreshes do not remount open native selects.
+  const renderRoleConfig = ({
     title, 
     description, 
     provider, setProvider,
@@ -782,7 +868,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
     const models = effectiveProvider === 'openrouter'
       ? openRouterModels
-      : (effectiveProvider === 'openai_codex_oauth' ? openAICodexModels : lmStudioModels);
+      : (isCloudAccessProvider(effectiveProvider) ? getOAuthModels(effectiveProvider) : lmStudioModels);
     const providers = model && effectiveProvider === 'openrouter'
       ? getProviderNames(modelProviders[model])
       : [];
@@ -839,20 +925,41 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <button
                 type="button"
                 onClick={() => {
-                  if (hasOpenAICodexLogin) {
-                    setProvider('openai_codex_oauth');
+                  if (configuredOAuthProviders.length > 0) {
+                    setProvider(chooseCloudAccessProvider(oauthStatusByProvider, provider));
                     setModel('');
                     setOpenrouterProv(null);
                     setOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
                     setFallback(null);
                   }
                 }}
-                disabled={!hasOpenAICodexLogin}
-                className={`provider-toggle-btn${provider === 'openai_codex_oauth' ? ' active-or-orange' : ''}`}
-                title={!hasOpenAICodexLogin ? 'Set OpenAI Codex login in Cloud Access & Keys first' : 'Use OpenAI Codex'}
+                disabled={configuredOAuthProviders.length === 0}
+                className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
+                title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
               >
-                OpenAI Codex
+                oAuth
               </button>
+              {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
+                <select
+                  value={provider}
+                  onChange={(event) => {
+                    setProvider(event.target.value);
+                    setModel('');
+                    setOpenrouterProv(null);
+                    setOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
+                    setFallback(null);
+                  }}
+                  title="Select OAuth provider"
+                  className="input-dark"
+                  style={{ width: 'auto', minWidth: '150px' }}
+                >
+                  {configuredOAuthProviders.map((oauthProvider) => (
+                    <option key={oauthProvider.id} value={oauthProvider.id}>
+                      {oauthProvider.label}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
           ) : (
             <small className="settings-hint">
@@ -871,10 +978,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               setModel(m);
               setOpenrouterProv(null);
               setOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
-              if (['openrouter', 'openai_codex_oauth'].includes(effectiveProvider) && m) {
+              if ((effectiveProvider === 'openrouter' || isCloudAccessProvider(effectiveProvider)) && m) {
                 const autoSettings = effectiveProvider === 'openrouter'
                   ? await getAutoSettingsForModel(m, null)
-                  : getCodexAutoSettingsForModel(m);
+                  : getCloudAccessAutoSettingsForModel(effectiveProvider, m);
                 if (autoSettings) {
                   if (autoSettings.contextWindowKnown) {
                     setContextSize(autoSettings.contextWindow);
@@ -1045,6 +1152,16 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </p>
         </div>
       )}
+      {openAICodexModelError && (
+        <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+          {openAICodexModelError}
+        </div>
+      )}
+      {xaiGrokModelError && (
+        <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
+          {xaiGrokModelError}
+        </div>
+      )}
 
       <div className="model-refresh-controls">
         {lmStudioEnabled && (
@@ -1119,59 +1236,91 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           Configure the validator and compiler roles used by manual paper compilation.
         </p>
         
-        <RoleConfig
-          title="Validator"
-          description="Validates all submissions for coherence, rigor, placement, and non-redundancy."
-          provider={validatorProvider} setProvider={setValidatorProvider}
-          model={validatorModel} setModel={setValidatorModel}
-          openrouterProv={validatorOpenrouterProvider} setOpenrouterProv={setValidatorOpenrouterProvider}
-          openrouterReasoningEffort={validatorOpenrouterReasoningEffort} setOpenrouterReasoningEffort={setValidatorOpenrouterReasoningEffort}
-          fallback={validatorLmStudioFallback} setFallback={setValidatorLmStudioFallback}
-          contextSize={validatorContextSize} setContextSize={setValidatorContextSize}
-          maxOutput={validatorMaxOutput} setMaxOutput={setValidatorMaxOutput}
-          superchargeEnabled={validatorSuperchargeEnabled} setSuperchargeEnabled={setValidatorSuperchargeEnabled}
-        />
+        {renderRoleConfig({
+          title: 'Validator',
+          description: 'Validates all submissions for coherence, rigor, placement, and non-redundancy.',
+          provider: validatorProvider,
+          setProvider: setValidatorProvider,
+          model: validatorModel,
+          setModel: setValidatorModel,
+          openrouterProv: validatorOpenrouterProvider,
+          setOpenrouterProv: setValidatorOpenrouterProvider,
+          openrouterReasoningEffort: validatorOpenrouterReasoningEffort,
+          setOpenrouterReasoningEffort: setValidatorOpenrouterReasoningEffort,
+          fallback: validatorLmStudioFallback,
+          setFallback: setValidatorLmStudioFallback,
+          contextSize: validatorContextSize,
+          setContextSize: setValidatorContextSize,
+          maxOutput: validatorMaxOutput,
+          setMaxOutput: setValidatorMaxOutput,
+          superchargeEnabled: validatorSuperchargeEnabled,
+          setSuperchargeEnabled: setValidatorSuperchargeEnabled,
+        })}
 
-        <RoleConfig
-          title="High-Context Model"
-          description="Handles construction, outline creation/updates, and review modes. Needs large context for comprehensive outlines."
-          provider={highContextProvider} setProvider={setHighContextProvider}
-          model={highContextModel} setModel={setHighContextModel}
-          openrouterProv={highContextOpenrouterProvider} setOpenrouterProv={setHighContextOpenrouterProvider}
-          openrouterReasoningEffort={highContextOpenrouterReasoningEffort} setOpenrouterReasoningEffort={setHighContextOpenrouterReasoningEffort}
-          fallback={highContextLmStudioFallback} setFallback={setHighContextLmStudioFallback}
-          contextSize={highContextContextSize} setContextSize={setHighContextContextSize}
-          maxOutput={highContextMaxOutput} setMaxOutput={setHighContextMaxOutput}
-          superchargeEnabled={highContextSuperchargeEnabled} setSuperchargeEnabled={setHighContextSuperchargeEnabled}
-          showProofStrengthBadge
-        />
+        {renderRoleConfig({
+          title: 'High-Context Model',
+          description: 'Handles construction, outline creation/updates, and review modes. Needs large context for comprehensive outlines.',
+          provider: highContextProvider,
+          setProvider: setHighContextProvider,
+          model: highContextModel,
+          setModel: setHighContextModel,
+          openrouterProv: highContextOpenrouterProvider,
+          setOpenrouterProv: setHighContextOpenrouterProvider,
+          openrouterReasoningEffort: highContextOpenrouterReasoningEffort,
+          setOpenrouterReasoningEffort: setHighContextOpenrouterReasoningEffort,
+          fallback: highContextLmStudioFallback,
+          setFallback: setHighContextLmStudioFallback,
+          contextSize: highContextContextSize,
+          setContextSize: setHighContextContextSize,
+          maxOutput: highContextMaxOutput,
+          setMaxOutput: setHighContextMaxOutput,
+          superchargeEnabled: highContextSuperchargeEnabled,
+          setSuperchargeEnabled: setHighContextSuperchargeEnabled,
+          showProofStrengthBadge: true,
+        })}
 
-        <RoleConfig
-          title="High-Parameter Model"
-          description="Rigor enhancement mode: adds citations, strengthens methodology, and clarifies assumptions."
-          provider={highParamProvider} setProvider={setHighParamProvider}
-          model={highParamModel} setModel={setHighParamModel}
-          openrouterProv={highParamOpenrouterProvider} setOpenrouterProv={setHighParamOpenrouterProvider}
-          openrouterReasoningEffort={highParamOpenrouterReasoningEffort} setOpenrouterReasoningEffort={setHighParamOpenrouterReasoningEffort}
-          fallback={highParamLmStudioFallback} setFallback={setHighParamLmStudioFallback}
-          contextSize={highParamContextSize} setContextSize={setHighParamContextSize}
-          maxOutput={highParamMaxOutput} setMaxOutput={setHighParamMaxOutput}
-          superchargeEnabled={highParamSuperchargeEnabled} setSuperchargeEnabled={setHighParamSuperchargeEnabled}
-          showProofStrengthBadge
-        />
+        {renderRoleConfig({
+          title: 'High-Parameter Model',
+          description: 'Rigor enhancement mode: adds citations, strengthens methodology, and clarifies assumptions.',
+          provider: highParamProvider,
+          setProvider: setHighParamProvider,
+          model: highParamModel,
+          setModel: setHighParamModel,
+          openrouterProv: highParamOpenrouterProvider,
+          setOpenrouterProv: setHighParamOpenrouterProvider,
+          openrouterReasoningEffort: highParamOpenrouterReasoningEffort,
+          setOpenrouterReasoningEffort: setHighParamOpenrouterReasoningEffort,
+          fallback: highParamLmStudioFallback,
+          setFallback: setHighParamLmStudioFallback,
+          contextSize: highParamContextSize,
+          setContextSize: setHighParamContextSize,
+          maxOutput: highParamMaxOutput,
+          setMaxOutput: setHighParamMaxOutput,
+          superchargeEnabled: highParamSuperchargeEnabled,
+          setSuperchargeEnabled: setHighParamSuperchargeEnabled,
+          showProofStrengthBadge: true,
+        })}
 
-        <RoleConfig
-          title="Critique Submitter"
-          description="Generates validated peer review critiques for the paper's AI self-review section."
-          provider={critiqueSubmitterProvider} setProvider={setCritiqueSubmitterProvider}
-          model={critiqueSubmitterModel} setModel={setCritiqueSubmitterModel}
-          openrouterProv={critiqueSubmitterOpenrouterProvider} setOpenrouterProv={setCritiqueSubmitterOpenrouterProvider}
-          openrouterReasoningEffort={critiqueSubmitterOpenrouterReasoningEffort} setOpenrouterReasoningEffort={setCritiqueSubmitterOpenrouterReasoningEffort}
-          fallback={critiqueSubmitterLmStudioFallback} setFallback={setCritiqueSubmitterLmStudioFallback}
-          contextSize={critiqueSubmitterContextSize} setContextSize={setCritiqueSubmitterContextSize}
-          maxOutput={critiqueSubmitterMaxOutput} setMaxOutput={setCritiqueSubmitterMaxOutput}
-          superchargeEnabled={critiqueSubmitterSuperchargeEnabled} setSuperchargeEnabled={setCritiqueSubmitterSuperchargeEnabled}
-        />
+        {renderRoleConfig({
+          title: 'Critique Submitter',
+          description: "Generates validated peer review critiques for the paper's AI self-review section.",
+          provider: critiqueSubmitterProvider,
+          setProvider: setCritiqueSubmitterProvider,
+          model: critiqueSubmitterModel,
+          setModel: setCritiqueSubmitterModel,
+          openrouterProv: critiqueSubmitterOpenrouterProvider,
+          setOpenrouterProv: setCritiqueSubmitterOpenrouterProvider,
+          openrouterReasoningEffort: critiqueSubmitterOpenrouterReasoningEffort,
+          setOpenrouterReasoningEffort: setCritiqueSubmitterOpenrouterReasoningEffort,
+          fallback: critiqueSubmitterLmStudioFallback,
+          setFallback: setCritiqueSubmitterLmStudioFallback,
+          contextSize: critiqueSubmitterContextSize,
+          setContextSize: setCritiqueSubmitterContextSize,
+          maxOutput: critiqueSubmitterMaxOutput,
+          setMaxOutput: setCritiqueSubmitterMaxOutput,
+          superchargeEnabled: critiqueSubmitterSuperchargeEnabled,
+          setSuperchargeEnabled: setCritiqueSubmitterSuperchargeEnabled,
+        })}
       </div>
 
       {hasOpenRouterKey && (

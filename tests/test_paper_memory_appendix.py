@@ -42,6 +42,33 @@ class PaperMemoryAppendixTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 system_config.compiler_paper_file = old_paper_file
 
+    async def test_appendix_skips_duplicate_proof_id(self) -> None:
+        old_paper_file = system_config.compiler_paper_file
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                system_config.compiler_paper_file = str(Path(tmpdir) / "paper.txt")
+                memory = PaperMemory()
+                await memory.initialize()
+                await memory.initialize_with_placeholders("II. Body\n\nBody text.")
+
+                entry = (
+                    "### Theorem A\n"
+                    "Proof ID: proof_duplicate\n"
+                    "Verified with Lean 4.\n"
+                    "```lean\n"
+                    "theorem a : True := by trivial\n"
+                    "```"
+                )
+
+                self.assertTrue(await memory.append_to_theorems_appendix(entry))
+                self.assertTrue(await memory.append_to_theorems_appendix(entry))
+
+                paper = await memory.get_paper()
+                self.assertEqual(paper.count("Proof ID: proof_duplicate"), 1)
+                self.assertEqual(paper.count("theorem a : True"), 1)
+            finally:
+                system_config.compiler_paper_file = old_paper_file
+
     async def test_latex_conclusion_content_removes_stale_placeholder(self) -> None:
         old_paper_file = system_config.compiler_paper_file
         with tempfile.TemporaryDirectory() as tmpdir:

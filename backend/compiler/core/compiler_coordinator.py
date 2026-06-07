@@ -17,6 +17,7 @@ from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouter
 from backend.shared.brainstorm_proof_gate import BRAINSTORM_LEAN_PROOF_MARKER
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 from backend.compiler.agents.high_context_submitter import HighContextSubmitter
 from backend.compiler.agents.high_param_submitter import HighParamSubmitter
@@ -34,6 +35,7 @@ from backend.compiler.memory.compiler_rejection_log import compiler_rejection_lo
 from backend.compiler.memory.critique_memory import critique_memory
 from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
 from backend.autonomous.memory.paper_model_tracker import PaperModelTracker
+from backend.autonomous.memory.proof_database import manual_proof_database, proof_database
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +354,8 @@ class CompilerCoordinator:
         self.high_context_submitter = HighContextSubmitter(
             high_context_model, 
             compiler_prompt,
-            websocket_broadcaster=self.websocket_broadcaster
+            websocket_broadcaster=self.websocket_broadcaster,
+            proof_database_store=proof_database if self.autonomous_mode else None,
         )
         await self.high_context_submitter.initialize()
         # Set up task tracking callback for workflow panel integration
@@ -379,6 +382,11 @@ class CompilerCoordinator:
             validator_model=validator_model,
             validator_context_window=self.validator_context_window,
             validator_max_tokens=self.validator_max_tokens,
+            proof_database_store=proof_database if self.autonomous_mode else manual_proof_database,
+        )
+        self.high_param_submitter.set_rigor_proof_source(
+            self._current_paper_id or "",
+            self._current_rigor_proof_source_title or compiler_prompt,
         )
         self.high_param_submitter.set_rigor_proof_source(
             self._current_paper_id or "",
@@ -433,7 +441,8 @@ class CompilerCoordinator:
         self.validator = CompilerValidator(
             validator_model, 
             compiler_prompt,
-            websocket_broadcaster=self.websocket_broadcaster
+            websocket_broadcaster=self.websocket_broadcaster,
+            proof_database_store=proof_database if self.autonomous_mode else None,
         )
         await self.validator.initialize()
         # Set up task tracking callback for workflow panel integration
@@ -732,6 +741,9 @@ class CompilerCoordinator:
             if not shared_path.exists():
                 return "", ""
             content = await asyncio.to_thread(shared_path.read_text, encoding="utf-8")
+            proof_marker = "=== PROOFS GENERATED FROM THIS BRAINSTORM"
+            if proof_marker in content:
+                content = content.split(proof_marker, 1)[0].rstrip()
             return content or "", "Part 1 aggregator database"
         except Exception as exc:
             logger.debug("Unable to load manual aggregator context for rigor: %s", exc)
@@ -3228,7 +3240,7 @@ INVALID:
             
             # Extract text from response dict
             message = response.get("choices", [{}])[0].get("message", {})
-            response_text = message.get("content") or message.get("reasoning") or ""
+            response_text = extract_message_text(message)
             
             # Parse response
             data = parse_json(response_text)
@@ -3305,7 +3317,7 @@ INVALID:
             
             # Extract text from response dict
             message = response.get("choices", [{}])[0].get("message", {})
-            response_text = message.get("content") or message.get("reasoning") or ""
+            response_text = extract_message_text(message)
             
             # Parse response
             data = parse_json(response_text)

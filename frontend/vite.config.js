@@ -53,6 +53,29 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
+    build: {
+      chunkSizeWarningLimit: 700,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            const normalizedId = id.replace(/\\/g, '/')
+            if (!normalizedId.includes('node_modules')) {
+              return undefined
+            }
+            if (normalizedId.includes('/react')) {
+              return 'vendor-react'
+            }
+            if (normalizedId.includes('/katex')) {
+              return 'vendor-katex'
+            }
+            if (normalizedId.includes('/dompurify')) {
+              return 'vendor-sanitize'
+            }
+            return 'vendor'
+          },
+        },
+      },
+    },
   }
 })
 

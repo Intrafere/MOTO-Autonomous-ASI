@@ -4,7 +4,7 @@ Tracks last 5 rejections to help submitters learn from mistakes.
 """
 import aiofiles
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Union
 import asyncio
 import logging
 
@@ -23,19 +23,42 @@ class LocalTrainingMemory:
     Maintains rolling window of last 5 rejections.
     """
     
-    def __init__(self, submitter_id: int):
+    def __init__(
+        self,
+        submitter_id: int,
+        base_dir: Optional[Union[str, Path]] = None,
+        file_name_template: Optional[str] = None,
+        reset_on_initialize: bool = False,
+    ):
         self.submitter_id = submitter_id
-        self.file_path = Path(
-            f"{system_config.data_dir}/"
-            f"Summary_Of_Last_5_Validator_Rejections_For_Submitter_{submitter_id}.txt"
+        root = Path(base_dir) if base_dir is not None else Path(system_config.data_dir)
+        file_name = (
+            file_name_template.format(submitter_id=submitter_id)
+            if file_name_template
+            else f"Summary_Of_Last_5_Validator_Rejections_For_Submitter_{submitter_id}.txt"
         )
+        if Path(file_name).name != file_name:
+            raise ValueError("Rejection log file name must be a single path component")
+        self.file_path = root / file_name
         self.rejections: List[dict] = []
         self.max_rejections = rag_config.max_local_rejections
+        self.reset_on_initialize = reset_on_initialize
         self._lock = asyncio.Lock()
     
     async def initialize(self) -> None:
         """Initialize local training memory."""
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        self.rejections = []
+
+        if self.reset_on_initialize:
+            async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
+                await f.write("")
+            logger.info(
+                "Reset rejection log for submitter %s at initialization: %s",
+                self.submitter_id,
+                self.file_path,
+            )
+            return
         
         if self.file_path.exists():
             # Load existing rejections
@@ -58,6 +81,18 @@ class LocalTrainingMemory:
             async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:
                 await f.write("")
             logger.info(f"Created new rejection log for submitter {self.submitter_id}")
+
+    @classmethod
+    async def clear_default_logs(cls) -> None:
+        """Clear persisted manual Aggregator rejection logs for all submitters."""
+        root = Path(system_config.data_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        pattern = "Summary_Of_Last_5_Validator_Rejections_For_Submitter_*.txt"
+        for path in root.glob(pattern):
+            if path.is_file():
+                async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+                    await f.write("")
+                logger.info("Cleared persisted rejection log: %s", path)
     
     async def add_rejection(
         self,

@@ -44,9 +44,9 @@ function getRatingColor(rating) {
  * - Seen notification keys are tracked by the parent to avoid replay loops
  * 
  * Props:
- * - notifications: Array of notification objects { id, paper_id, paper_title, average_rating, timestamp, seenKey }
+ * - notifications: Array of notification objects { id, paper_id, paper_title, average_rating, timestamp, seenKey, paper_type }
  * - onDismiss: (id) => void - callback when notification is dismissed
- * - onClickNotification: (paper_id, paper_title, seenKey) => void - callback when notification is clicked
+ * - onClickNotification: (paper_id, paper_title, seenKey, paper_type) => void - callback when notification is clicked
  */
 export default function CritiqueNotificationStack({ notifications, onDismiss, onClickNotification, panelCollapsed }) {
   if (!notifications || notifications.length === 0) {
@@ -98,7 +98,12 @@ function CritiqueNotification({ notification, index, onDismiss, onClickNotificat
   };
 
   const handleClick = () => {
-    onClickNotification(notification.paper_id, notification.paper_title, notification.seenKey);
+    onClickNotification(
+      notification.paper_id,
+      notification.paper_title,
+      notification.seenKey,
+      notification.paper_type
+    );
   };
 
   return (

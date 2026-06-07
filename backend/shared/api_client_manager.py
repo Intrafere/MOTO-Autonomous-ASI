@@ -23,6 +23,7 @@ from backend.shared.openrouter_client import (
     FreeModelExhaustedError
 )
 from backend.shared.openai_codex_client import OpenAICodexError, openai_codex_client
+from backend.shared.xai_grok_client import XAIGrokError, xai_grok_client
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
 from backend.shared.config import rag_config, system_config
@@ -31,6 +32,7 @@ from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import sanitize_model_output_for_retry_context
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import ModelConfig
+from backend.shared.response_extraction import extract_response_text
 from backend.shared.token_tracker import token_tracker
 
 logger = logging.getLogger(__name__)
@@ -122,6 +124,52 @@ class APIClientManager:
         """Broadcast an event through WebSocket."""
         if self._broadcast_callback:
             await self._broadcast_callback(event, data or {})
+
+    async def _broadcast_unrecoverable_codex_error(
+        self,
+        *,
+        role_id: str,
+        model: str,
+        error: Exception,
+    ) -> None:
+        """Notify the UI when a Codex role cannot recover through fallback."""
+        await self._broadcast("openai_codex_oauth_error", {
+            "role_id": role_id,
+            "model": model,
+            "provider": "openai_codex_oauth",
+            "reason": "unrecoverable_codex_error",
+            "recoverable": False,
+            "message": (
+                "OpenAI Codex failed and no LM Studio fallback is configured. "
+                "Please check your OpenAI Codex OAuth connection in Cloud Access & Keys, "
+                "sign in again, and retry."
+            ),
+            "error_summary": redact_log_text(str(error), 700),
+        })
+
+    async def _broadcast_unrecoverable_xai_grok_error(
+        self,
+        *,
+        role_id: str,
+        model: str,
+        error: Exception,
+    ) -> None:
+        """Notify the UI when a Grok OAuth role cannot recover through fallback."""
+        await self._broadcast("oauth_provider_error", {
+            "role_id": role_id,
+            "model": model,
+            "provider": "xai_grok_oauth",
+            "provider_label": "xAI Grok",
+            "reason": "unrecoverable_xai_grok_error",
+            "recoverable": False,
+            "message": (
+                "xAI Grok failed and no LM Studio fallback is configured. "
+                "Please check your xAI Grok OAuth connection in Cloud Access & Keys, "
+                "sign in again, and retry. If xAI reports subscription or credit limits, "
+                "check your SuperGrok/X Premium entitlement."
+            ),
+            "error_summary": redact_log_text(str(error), 700),
+        })
     
     async def _with_hung_connection_watchdog(
         self,
@@ -417,7 +465,7 @@ class APIClientManager:
         self._role_model_configs[role_id] = config
         
         # Set initial fallback state based on provider
-        if config.provider in {"openrouter", "openai_codex_oauth"}:
+        if config.provider in {"openrouter", "openai_codex_oauth", "xai_grok_oauth"}:
             self._role_fallback_state[role_id] = config.provider
         else:
             self._role_fallback_state[role_id] = "lm_studio"
@@ -431,6 +479,9 @@ class APIClientManager:
         elif config.provider == "openai_codex_oauth":
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
             logger.info(f"Configured role '{role_id}': provider=openai_codex_oauth, model={config.model_id}{fallback_str}")
+        elif config.provider == "xai_grok_oauth":
+            fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
+            logger.info(f"Configured role '{role_id}': provider=xai_grok_oauth, model={config.model_id}{fallback_str}")
         else:
             logger.info(f"Configured role '{role_id}': provider=lm_studio, model={config.model_id}")
     
@@ -510,10 +561,7 @@ class APIClientManager:
     @staticmethod
     def _response_text(response: Dict[str, Any]) -> str:
         """Extract assistant text from an OpenAI-compatible completion response."""
-        if not response.get("choices"):
-            return ""
-        message = response["choices"][0].get("message", {})
-        return message.get("content") or message.get("reasoning") or ""
+        return extract_response_text(response, context="api_client_manager")
 
     @classmethod
     def _sanitize_supercharge_candidate(cls, attempt: str) -> str:
@@ -773,8 +821,7 @@ class APIClientManager:
                     tokens_used = None
                     
                     if result.get("choices"):
-                        message = result["choices"][0].get("message", {})
-                        response_content = message.get("content") or message.get("reasoning") or ""
+                        response_content = extract_response_text(result, context=task_id)
                     if result.get("usage"):
                         tokens_used = result["usage"].get("total_tokens")
                         _pt = result["usage"].get("prompt_tokens")
@@ -1120,8 +1167,7 @@ class APIClientManager:
                     response_content = ""
                     tokens_used = None
                     if result.get("choices"):
-                        message = result["choices"][0].get("message", {})
-                        response_content = message.get("content") or message.get("reasoning") or ""
+                        response_content = extract_response_text(result, context=task_id)
                     if result.get("usage"):
                         tokens_used = result["usage"].get("total_tokens")
                         _pt = result["usage"].get("prompt_tokens")
@@ -1426,8 +1472,7 @@ class APIClientManager:
                 response_content = ""
                 tokens_used = None
                 if result.get("choices"):
-                    message = result["choices"][0].get("message", {})
-                    response_content = message.get("content") or message.get("reasoning") or ""
+                    response_content = extract_response_text(result, context=task_id)
                 if result.get("usage"):
                     tokens_used = result["usage"].get("total_tokens")
                     _pt = result["usage"].get("prompt_tokens")
@@ -1495,6 +1540,11 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
+                    await self._broadcast_unrecoverable_codex_error(
+                        role_id=role_id,
+                        model=codex_model,
+                        error=e,
+                    )
                     raise RuntimeError(
                         f"OpenAI Codex failed for role '{role_id}' and no LM Studio fallback is configured: {e}"
                     ) from e
@@ -1526,6 +1576,154 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
+                    await self._broadcast_unrecoverable_codex_error(
+                        role_id=role_id,
+                        model=codex_model,
+                        error=e,
+                    )
+                    raise
+
+        if fallback_state == "xai_grok_oauth" and role_config:
+            xai_model = role_config.model_id
+            start_time = time.time()
+            try:
+                logger.debug("Role %s using xAI Grok OAuth: %s", role_id, xai_model)
+                result = await self._with_hung_connection_watchdog(
+                    xai_grok_client.generate_completion(
+                        model=xai_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
+                        response_format=response_format,
+                        reasoning_effort=role_config.openrouter_reasoning_effort,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    ),
+                    role_id=role_id,
+                    model=xai_model,
+                    provider="xAI Grok",
+                )
+                duration_ms = (time.time() - start_time) * 1000
+                if not result.get("choices"):
+                    logger.error(
+                        "xAI Grok response missing 'choices' after %.0fms - %s",
+                        duration_ms,
+                        _response_shape_for_logging(result),
+                    )
+                    raise ValueError(f"xAI Grok response missing 'choices' after {duration_ms:.0f}ms")
+
+                response_content = ""
+                tokens_used = None
+                if result.get("choices"):
+                    response_content = extract_response_text(result, context=task_id)
+                if result.get("usage"):
+                    tokens_used = result["usage"].get("total_tokens")
+                    _pt = result["usage"].get("prompt_tokens")
+                    _ct = result["usage"].get("completion_tokens")
+                    if _pt is not None and _ct is not None:
+                        token_tracker.track(xai_model, _pt, _ct)
+                        await self._broadcast("token_usage_updated", token_tracker.get_stats())
+
+                result = self._annotate_response_with_call_metadata(
+                    result,
+                    task_id=task_id,
+                    role_id=role_id,
+                    configured_model=requested_model,
+                    actual_model=xai_model,
+                    configured_provider=role_config.provider,
+                    actual_provider="xai_grok_oauth",
+                    boosted=False,
+                    boost_mode=None,
+                    openrouter_reasoning_effort=role_config.openrouter_reasoning_effort,
+                )
+
+                if self._autonomous_logger_callback:
+                    full_prompt = self._prompt_for_logging(messages)
+                    await self._autonomous_logger_callback(
+                        task_id=task_id,
+                        role_id=role_id,
+                        model=xai_model,
+                        provider="xai_grok_oauth",
+                        prompt=full_prompt,
+                        response=response_content,
+                        tokens_used=tokens_used,
+                        duration_ms=duration_ms,
+                        success=True,
+                        error=None,
+                        phase=self._current_autonomous_phase,
+                    )
+
+                await self._track_model_usage(xai_model)
+                return result
+
+            except XAIGrokError as e:
+                duration_ms = (time.time() - start_time) * 1000
+                if self._autonomous_logger_callback:
+                    full_prompt = self._prompt_for_logging(messages)
+                    await self._autonomous_logger_callback(
+                        task_id=task_id,
+                        role_id=role_id,
+                        model=xai_model,
+                        provider="xai_grok_oauth",
+                        prompt=full_prompt,
+                        response="",
+                        tokens_used=None,
+                        duration_ms=duration_ms,
+                        success=False,
+                        error=str(e),
+                        phase=self._current_autonomous_phase,
+                    )
+                if role_config.lm_studio_fallback_id:
+                    async with self._state_lock:
+                        self._role_fallback_state[role_id] = "lm_studio"
+                    logger.warning(
+                        "xAI Grok failed for role '%s'; falling back to LM Studio model %s",
+                        role_id,
+                        role_config.lm_studio_fallback_id,
+                    )
+                    model = role_config.lm_studio_fallback_id
+                else:
+                    await self._broadcast_unrecoverable_xai_grok_error(
+                        role_id=role_id,
+                        model=xai_model,
+                        error=e,
+                    )
+                    raise RuntimeError(
+                        f"xAI Grok failed for role '{role_id}' and no LM Studio fallback is configured: {e}"
+                    ) from e
+            except Exception as e:
+                duration_ms = (time.time() - start_time) * 1000
+                if self._autonomous_logger_callback:
+                    full_prompt = self._prompt_for_logging(messages)
+                    await self._autonomous_logger_callback(
+                        task_id=task_id,
+                        role_id=role_id,
+                        model=xai_model,
+                        provider="xai_grok_oauth",
+                        prompt=full_prompt,
+                        response="",
+                        tokens_used=None,
+                        duration_ms=duration_ms,
+                        success=False,
+                        error=str(e),
+                        phase=self._current_autonomous_phase,
+                    )
+                if role_config.lm_studio_fallback_id:
+                    async with self._state_lock:
+                        self._role_fallback_state[role_id] = "lm_studio"
+                    logger.warning(
+                        "xAI Grok error for role '%s': %s; falling back to LM Studio model %s",
+                        role_id,
+                        e,
+                        role_config.lm_studio_fallback_id,
+                    )
+                    model = role_config.lm_studio_fallback_id
+                else:
+                    await self._broadcast_unrecoverable_xai_grok_error(
+                        role_id=role_id,
+                        model=xai_model,
+                        error=e,
+                    )
                     raise
 
         if system_config.generic_mode:
@@ -1576,8 +1774,7 @@ class APIClientManager:
             lm_routing_metadata = lm_studio_client.extract_routing_metadata(result)
             actual_lm_studio_model = lm_routing_metadata.get("actual_model") or model
             if result.get("choices"):
-                message = result["choices"][0].get("message", {})
-                response_content = message.get("content") or message.get("reasoning") or ""
+                response_content = extract_response_text(result, context=task_id)
             if result.get("usage"):
                 tokens_used = result["usage"].get("total_tokens")
                 _pt = result["usage"].get("prompt_tokens")

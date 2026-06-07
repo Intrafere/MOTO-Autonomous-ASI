@@ -13,7 +13,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
-from backend.autonomous.memory.proof_database import proof_database
+from backend.shared.response_extraction import extract_message_text
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.prompts.validator_prompts import (
@@ -49,10 +49,15 @@ class ValidatorAgent:
         model_name: str,
         user_prompt: str,
         user_files_content: Dict[str, str],
-        websocket_broadcaster: Optional[Callable] = None
+        websocket_broadcaster: Optional[Callable] = None,
+        proof_database_store: Optional[Any] = None,
     ):
         self.model_name = model_name
-        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
+        self.user_prompt = (
+            proof_database_store.inject_into_prompt(user_prompt)
+            if proof_database_store is not None
+            else user_prompt
+        )
         self.user_files_content = user_files_content
         self.chunk_size = rag_config.validator_chunk_size  # Always 512
         self.websocket_broadcaster = websocket_broadcaster
@@ -284,7 +289,7 @@ class ValidatorAgent:
             # Extract content from either 'content' or 'reasoning' field
             # Some reasoning models (e.g., DeepSeek R1, certain GPT variants) output JSON in 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             
             # Cache model config on first successful API call (only relevant for LM Studio)
             try:
@@ -650,7 +655,7 @@ class ValidatorAgent:
             
             # Extract content
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             
             # Parse JSON
             try:
@@ -1029,7 +1034,7 @@ class ValidatorAgent:
             
             # Extract content from either 'content' or 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             
             logger.info(f"CLEANUP DEBUG: LLM output length: {len(llm_output)} chars")
             logger.info(f"CLEANUP DEBUG: Raw LLM output (first 1000 chars):\n{llm_output[:1000]}")
@@ -1224,7 +1229,7 @@ class ValidatorAgent:
             
             # Extract content from either 'content' or 'reasoning' field
             message = response["choices"][0]["message"]
-            llm_output = message.get("content") or message.get("reasoning") or ""
+            llm_output = extract_message_text(message)
             
             logger.info(f"CLEANUP DEBUG: LLM output length: {len(llm_output)} chars")
             logger.info(f"CLEANUP DEBUG: Raw LLM output (first 1000 chars):\n{llm_output[:1000]}")

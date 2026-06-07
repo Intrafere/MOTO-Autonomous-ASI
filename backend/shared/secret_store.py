@@ -20,6 +20,9 @@ _OPENROUTER_KEY = "openrouter_api_key"
 _OPENAI_CODEX_OAUTH = "openai_codex_oauth"
 _OPENAI_CODEX_OAUTH_CHUNK_PREFIX = "openai_codex_oauth_chunk"
 _OPENAI_CODEX_OAUTH_CHUNK_COUNT = "openai_codex_oauth_chunk_count"
+_XAI_GROK_OAUTH = "xai_grok_oauth"
+_XAI_GROK_OAUTH_CHUNK_PREFIX = "xai_grok_oauth_chunk"
+_XAI_GROK_OAUTH_CHUNK_COUNT = "xai_grok_oauth_chunk_count"
 # Windows Credential Manager limits blobs to 2560 bytes, which is about
 # 1280 UTF-16 characters through keyring/win32cred. Keep chunks below that.
 _SECRET_CHUNK_SIZE = 1000
@@ -192,6 +195,33 @@ def clear_openai_codex_oauth_tokens() -> None:
     """Delete persisted OpenAI Codex OAuth tokens."""
     _delete_secret(_OPENAI_CODEX_OAUTH)
     _delete_chunked_secret(_OPENAI_CODEX_OAUTH_CHUNK_PREFIX, _OPENAI_CODEX_OAUTH_CHUNK_COUNT)
+
+
+def load_xai_grok_oauth_tokens() -> Optional[dict]:
+    """Load persisted xAI Grok OAuth tokens."""
+    raw_value = _load_chunked_secret(_XAI_GROK_OAUTH_CHUNK_PREFIX, _XAI_GROK_OAUTH_CHUNK_COUNT)
+    if not raw_value:
+        raw_value = _get_secret(_XAI_GROK_OAUTH)
+    if not raw_value:
+        return None
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise SecretStoreError("Stored xAI Grok OAuth token payload is invalid.") from exc
+    return payload if isinstance(payload, dict) else None
+
+
+def store_xai_grok_oauth_tokens(tokens: dict) -> None:
+    """Persist xAI Grok OAuth tokens securely."""
+    payload = json.dumps(tokens, separators=(",", ":"))
+    _store_chunked_secret(_XAI_GROK_OAUTH_CHUNK_PREFIX, _XAI_GROK_OAUTH_CHUNK_COUNT, payload)
+    _delete_secret(_XAI_GROK_OAUTH)
+
+
+def clear_xai_grok_oauth_tokens() -> None:
+    """Delete persisted xAI Grok OAuth tokens."""
+    _delete_secret(_XAI_GROK_OAUTH)
+    _delete_chunked_secret(_XAI_GROK_OAUTH_CHUNK_PREFIX, _XAI_GROK_OAUTH_CHUNK_COUNT)
 
 
 def load_wolfram_api_key() -> Optional[str]:

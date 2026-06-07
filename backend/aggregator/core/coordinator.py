@@ -24,6 +24,7 @@ from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.core.rag_manager import rag_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.event_log import event_log
+from backend.aggregator.memory.local_training import LocalTrainingMemory
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,12 @@ class Coordinator:
         self.submitter_configs: List[SubmitterConfig] = []
         self.validator_model = ""
         self.validator_provider = "lm_studio"
+        self.validator_openrouter_provider: Optional[str] = None
+        self.validator_openrouter_reasoning_effort = "auto"
+        self.validator_lm_studio_fallback: Optional[str] = None
+        self.validator_context_window = rag_config.validator_context_window
+        self.validator_max_tokens = rag_config.validator_max_output_tokens
+        self.validator_supercharge_enabled = False
         
         # Workflow tracking
         self.workflow_tasks: List[WorkflowTask] = []
@@ -125,6 +132,7 @@ class Coordinator:
         # Cleanup review toggle (disabled for short-lived mini-brainstorm phases)
         self.enable_cleanup_review = True
         self.creativity_emphasis_boost_enabled = False
+        self.persist_event_log = True
 
         # Optional source-level hard cap used by autonomous brainstorm mode.
         self.max_total_acceptances: Optional[int] = None
@@ -226,6 +234,10 @@ class Coordinator:
         acceptance_cap_callback: Optional[Callable[[int], Any]] = None,
         allow_trusted_context_files: bool = False,
         trusted_context_texts: Optional[Dict[str, str]] = None,
+        proof_database_store: Optional[Any] = None,
+        local_rejection_log_dir: Optional[str] = None,
+        local_rejection_log_template: Optional[str] = None,
+        reset_local_rejection_logs_on_start: bool = False,
     ) -> None:
         """
         Initialize the coordinator with configuration.
@@ -250,6 +262,16 @@ class Coordinator:
             allow_trusted_context_files: Allow internal callers to pass data-root files as context
             trusted_context_texts: Internal caller-provided context blocks that
                 have already been sanitized and do not need file reads
+            proof_database_store: Optional proof DB for verified-proof prompt
+                injection. Manual top-level Aggregator leaves this unset so
+                cleared/archived proofs cannot leak into new runs.
+            local_rejection_log_dir: Optional directory for submitter rejection
+                logs. Internal child aggregators use this to avoid sharing the
+                manual Aggregator rejection files.
+            local_rejection_log_template: Optional filename template containing
+                ``{submitter_id}``.
+            reset_local_rejection_logs_on_start: Clear the scoped local
+                rejection files before loading them.
         """
         logger.info("Initializing coordinator...")
         
@@ -260,6 +282,7 @@ class Coordinator:
         self.acceptance_count_offset = max(0, acceptance_count_offset)
         self.acceptance_cap_callback = acceptance_cap_callback
         self._acceptance_cap_reached = False
+        self.persist_event_log = not skip_stats_load
         
         # Validate submitter count
         num_submitters = len(submitter_configs)
@@ -273,6 +296,10 @@ class Coordinator:
         self.submitter_configs = submitter_configs
         self.validator_model = validator_model
         self.validator_provider = validator_provider
+        self.validator_openrouter_provider = validator_openrouter_provider
+        self.validator_openrouter_reasoning_effort = validator_openrouter_reasoning_effort
+        self.validator_lm_studio_fallback = validator_lm_studio_fallback
+        self.validator_supercharge_enabled = validator_supercharge_enabled
         
         # Override validator context window if provided
         if validator_context_window is not None:
@@ -293,6 +320,8 @@ class Coordinator:
         final_validator_context = validator_context_window if validator_context_window is not None else rag_config.validator_context_window
         final_submitter_max_output = submitter_configs[0].max_output_tokens if submitter_configs else rag_config.submitter_max_output_tokens
         final_validator_max_output = validator_max_tokens if validator_max_tokens is not None else rag_config.validator_max_output_tokens
+        self.validator_context_window = final_validator_context
+        self.validator_max_tokens = final_validator_max_output
         context_allocator.set_context_windows(final_submitter_context, final_validator_context, final_submitter_max_output, final_validator_max_output)
         
         # Log currently loaded models for diagnostics and same-base instance scheduling.
@@ -372,7 +401,8 @@ class Coordinator:
             self.removals_executed = 0
             # NOTE: For autonomous mode, RAG cleanup is handled by AutonomousCoordinator
             # to ensure proper isolation of brainstorm databases
-        await event_log.initialize()
+        if self.persist_event_log:
+            await event_log.initialize()
         
         # Load user files into RAG system
         user_files_content = {}
@@ -424,7 +454,11 @@ class Coordinator:
                 context_window=config.context_window,
                 max_output_tokens=config.max_output_tokens,
                 coordinator=self,
-                creativity_emphasis_boost_enabled=self.creativity_emphasis_boost_enabled
+                creativity_emphasis_boost_enabled=self.creativity_emphasis_boost_enabled,
+                proof_database_store=proof_database_store,
+                local_rejection_log_dir=local_rejection_log_dir,
+                local_rejection_log_template=local_rejection_log_template,
+                reset_local_rejection_log_on_initialize=reset_local_rejection_logs_on_start,
             )
             await submitter.initialize()
             # Set callback to add submissions to queue
@@ -460,7 +494,8 @@ class Coordinator:
             model_name=validator_model,
             user_prompt=user_prompt,
             user_files_content=user_files_content,
-            websocket_broadcaster=self.websocket_broadcaster
+            websocket_broadcaster=self.websocket_broadcaster,
+            proof_database_store=proof_database_store,
         )
         await self.validator.initialize()
         # Set task tracking callback for workflow panel integration
@@ -694,6 +729,11 @@ class Coordinator:
             self._validator_task = asyncio.create_task(self._validator_loop())
         
         await self._broadcast("system_started", {"message": "Aggregator system started"})
+        await self._add_persisted_event(
+            "system_started",
+            "Aggregator system started",
+            {"single_model_mode": self.single_model_mode, "submitter_count": len(self.submitters)},
+        )
         logger.info("Coordinator started successfully")
     
     async def stop(self) -> None:
@@ -726,6 +766,11 @@ class Coordinator:
         await queue_manager.clear()
         
         await self._broadcast("system_stopped", {"message": "Aggregator system stopped"})
+        await self._add_persisted_event(
+            "system_stopped",
+            "Aggregator system stopped",
+            {"total_acceptances": self.total_acceptances, "total_rejections": self.total_rejections},
+        )
         logger.info("Coordinator stopped")
     
     async def add_submission_to_queue(self, submission: Submission) -> None:
@@ -739,6 +784,16 @@ class Coordinator:
             "creativity_emphasized": creativity_emphasized,
             "queue_size": await queue_manager.size()
         })
+        creativity_prefix = "(Creativity Emphasized) " if creativity_emphasized else ""
+        await self._add_persisted_event(
+            "new_submission",
+            f"{creativity_prefix}New submission from Submitter {submission.submitter_id}",
+            {
+                "submission_id": submission.submission_id,
+                "submitter_id": submission.submitter_id,
+                "creativity_emphasized": creativity_emphasized,
+            },
+        )
     
     async def _validator_loop(self) -> None:
         """Main validator loop - continuously process queue with batch validation."""
@@ -964,10 +1019,11 @@ class Coordinator:
         
         # Log key event to persistent log
         creativity_prefix = "(Creativity Emphasized) " if creativity_emphasized else ""
-        await event_log.add_event(
+        await self._add_persisted_event(
             "submission_accepted",
             f"{creativity_prefix}Submission from Submitter {submission.submitter_id} ACCEPTED (#{self.total_acceptances})",
             {
+                "submission_id": submission.submission_id,
                 "submitter_id": submission.submitter_id,
                 "total_acceptances": self.total_acceptances,
                 "creativity_emphasized": creativity_emphasized,
@@ -1036,7 +1092,7 @@ class Coordinator:
             stem = Path(shared_training_memory.file_path).stem
             if stem.startswith("brainstorm_"):
                 return stem[len("brainstorm_"):] or stem
-            return stem or "manual_aggregator"
+            return "manual_aggregator"
         except Exception:
             return "manual_aggregator"
 
@@ -1053,16 +1109,19 @@ class Coordinator:
 
         try:
             from backend.autonomous.core.proof_registration import register_verified_lean_proof
-            from backend.autonomous.memory.proof_database import proof_database
+            from backend.autonomous.memory.proof_database import manual_proof_database, proof_database
 
             attempts = [
                 item if isinstance(item, ProofAttemptFeedback) else ProofAttemptFeedback.model_validate(item)
                 for item in (proof_payload.get("attempts") or [])
             ]
             source_id = self._brainstorm_proof_source_id()
+            scoped_proof_database = (
+                manual_proof_database if source_id == "manual_aggregator" else proof_database
+            )
             source_title = (self.validator.user_prompt if self.validator else "")[:300]
             registration = await register_verified_lean_proof(
-                proof_database=proof_database,
+                proof_database=scoped_proof_database,
                 user_prompt=self.validator.user_prompt if self.validator else "",
                 theorem_statement=theorem_statement,
                 lean_code=lean_code,
@@ -1146,10 +1205,11 @@ class Coordinator:
         # Log key event to persistent log
         rejection_reason = result.summary[:200] if result.summary else result.reasoning[:200]
         creativity_prefix = "(Creativity Emphasized) " if creativity_emphasized else ""
-        await event_log.add_event(
+        await self._add_persisted_event(
             "submission_rejected",
             f"{creativity_prefix}Submission from Submitter {submission.submitter_id} REJECTED: {rejection_reason}",
             {
+                "submission_id": submission.submission_id,
                 "submitter_id": submission.submitter_id,
                 "total_rejections": self.total_rejections,
                 "creativity_emphasized": creativity_emphasized,
@@ -1288,7 +1348,7 @@ class Coordinator:
                 await self._rebuild_shared_training_rag_after_cleanup()
                 
                 # Log key event to persistent log
-                await event_log.add_event(
+                await self._add_persisted_event(
                     "cleanup_submission_removed",
                     f"Cleanup removed submission #{submission_number}: {removal_reasoning[:200]}",
                     {"submission_number": submission_number, "total_removals": self.removals_executed}
@@ -1508,6 +1568,7 @@ class Coordinator:
         # Clear shared training memory
         async with shared_training_memory._lock:
             shared_training_memory.insights.clear()
+            shared_training_memory.proof_appendix = ""
             shared_training_memory.submission_count = 0
             shared_training_memory.last_ragged_submission_count = 0
             await shared_training_memory._save()
@@ -1515,6 +1576,7 @@ class Coordinator:
         # Clear local rejection logs for all submitters
         for submitter in self.submitters:
             await submitter.local_memory.clear()
+        await LocalTrainingMemory.clear_default_logs()
         
         # Clear RAG database
         try:
@@ -1542,10 +1604,25 @@ class Coordinator:
         
         logger.info("All submissions cleared and system reset")
         await self._broadcast("system_reset", {"message": "All submissions cleared"})
+        await self._add_persisted_event(
+            "system_reset",
+            "All submissions cleared",
+            {},
+        )
     
     def set_websocket_broadcaster(self, broadcaster: Callable) -> None:
         """Set WebSocket broadcaster function."""
         self.websocket_broadcaster = broadcaster
+
+    async def _add_persisted_event(
+        self,
+        event_type: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist only top-level manual Aggregator activity."""
+        if self.persist_event_log:
+            await event_log.add_event(event_type, message, metadata or {})
     
     async def _broadcast(self, event_type: str, data: Dict) -> None:
         """Broadcast event via WebSocket."""

@@ -50,6 +50,7 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.config import rag_config, system_config
 from backend.shared.json_parser import parse_json
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import Lean4Result, get_lean4_client
 from backend.shared.lean_proof_integrity import strip_lean_comments_and_strings, validate_lean_proof_integrity
 from backend.shared.model_error_utils import is_non_retryable_model_error
@@ -4711,7 +4712,7 @@ class LeanOJCoordinator:
                 content = ""
                 if choices:
                     message = choices[0].get("message") or {}
-                    content = message.get("content") or message.get("reasoning") or ""
+                    content = extract_message_text(message)
                 parsed = parse_json(content)
                 if isinstance(parsed, list):
                     parsed = parsed[0] if parsed else {}

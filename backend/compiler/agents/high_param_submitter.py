@@ -28,7 +28,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from backend.autonomous.memory.proof_database import proof_database
+from backend.autonomous.memory.paper_library import PaperLibrary
+from backend.autonomous.memory.proof_database import proof_database as autonomous_proof_database
 from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import (
@@ -41,6 +42,7 @@ from backend.compiler.prompts.rigor_prompts import (
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
+from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.models import (
@@ -84,6 +86,11 @@ def _strip_paper_markers_for_llm(paper_content: str) -> str:
     if not paper_content:
         return ""
     return paper_content.strip()
+
+
+def _strip_generated_proofs_for_rigor_context(paper_content: str) -> str:
+    """Remove generated theorem/proof appendix entries from proof-discovery context."""
+    return PaperLibrary.strip_verified_proofs_from_content(paper_content or "")
 
 
 def format_theorem_appendix_entry(
@@ -172,11 +179,14 @@ class HighParamSubmitter:
         validator_model: str = "",
         validator_context_window: Optional[int] = None,
         validator_max_tokens: Optional[int] = None,
+        proof_database_store=None,
     ):
         self.model_name = model_name
-        # NOTE: proof_database.inject_into_prompt prepends all novel proofs
-        # so later discovery calls naturally avoid re-proposing them.
-        self.user_prompt = proof_database.inject_into_prompt(user_prompt)
+        self.proof_database = proof_database_store or autonomous_proof_database
+        # Rigor discovery receives compact existing-proof summaries separately.
+        # Avoid injecting full Lean proof library text into the user prompt,
+        # which would duplicate the paper appendix/proof-list context.
+        self.user_prompt = user_prompt
         self.raw_user_prompt = user_prompt
         self.websocket_broadcaster = websocket_broadcaster
         self.validator_model = validator_model or model_name
@@ -244,8 +254,9 @@ class HighParamSubmitter:
 
     def _get_paper_proof_source_content(self, current_paper: str) -> str:
         """Combine current paper with direct source material for formal proof attempts."""
+        proof_paper = _strip_generated_proofs_for_rigor_context(current_paper)
         parts = [
-            "CURRENT PAPER UNDER CONSTRUCTION:\n" + (current_paper or "").strip(),
+            "CURRENT PAPER UNDER CONSTRUCTION:\n" + (proof_paper or "").strip(),
         ]
         source_context = self._get_direct_source_material_context(max_chars=30000)
         if source_context:
@@ -287,12 +298,12 @@ class HighParamSubmitter:
     def _resolve_session_id(self) -> str:
         """Best-effort session id for proof / failure tracking.
 
-        When the autonomous session manager is active, proof_database is
+        When the autonomous session manager is active, the active proof database is
         already storing in the session directory. Otherwise each manual
         compiler instance gets its own id so failed theorem candidates do not
         bleed into later standalone compiler runs.
         """
-        sm = getattr(proof_database, "_session_manager", None)
+        sm = getattr(self.proof_database, "_session_manager", None)
         if sm is not None and getattr(sm, "is_session_active", False):
             return str(getattr(sm, "session_id", "") or "autonomous_active")
         return self._standalone_session_id
@@ -535,7 +546,7 @@ class HighParamSubmitter:
         # resolved so it stops appearing in future failure-hint lists.
         if retry_failure_id:
             try:
-                await proof_database.mark_resolved_retry(
+                await self.proof_database.mark_resolved_retry(
                     source_brainstorm_id=self._compiler_source_id(),
                     theorem_id=retry_failure_id,
                     proof_id=stored_record.proof_id,
@@ -592,13 +603,15 @@ class HighParamSubmitter:
         """Ask the LLM whether a Lean 4 theorem is worth pursuing right now."""
         current_outline = await outline_memory.get_outline()
         current_paper_raw = await paper_memory.get_paper()
-        current_paper = _strip_paper_markers_for_llm(current_paper_raw)
+        current_paper = _strip_generated_proofs_for_rigor_context(
+            _strip_paper_markers_for_llm(current_paper_raw)
+        )
 
         # Existing verified proofs - compact blob of statements so the model
         # can recognize duplicates without blowing the token budget.
         existing_proofs: List[dict] = []
         try:
-            for record in await proof_database.get_all_proofs():
+            for record in await self.proof_database.get_all_proofs():
                 existing_proofs.append(
                     {
                         "proof_id": record.proof_id,
@@ -610,7 +623,7 @@ class HighParamSubmitter:
             logger.debug("proof_database.get_all_proofs failed: %s", exc)
 
         try:
-            failure_hints = await proof_database.get_recent_failure_hints(
+            failure_hints = await self.proof_database.get_recent_failure_hints(
                 self._compiler_source_id(), limit=5
             )
         except Exception as exc:
@@ -792,7 +805,7 @@ class HighParamSubmitter:
             # discovery step can optionally retry it.
             try:
                 error_summary = attempts[-1].error_output if attempts else ""
-                await proof_database.record_failed_candidate(
+                await self.proof_database.record_failed_candidate(
                     source_brainstorm_id=self._compiler_source_id(),
                     theorem_candidate=candidate,
                     error_summary=error_summary[:2000] if error_summary else "No Lean diagnostics captured.",
@@ -827,7 +840,7 @@ class HighParamSubmitter:
         )
         if not integrity.valid:
             try:
-                await proof_database.record_failed_candidate(
+                await self.proof_database.record_failed_candidate(
                     source_brainstorm_id=self._compiler_source_id(),
                     theorem_candidate=candidate,
                     error_summary=integrity.reason[:2000],
@@ -882,7 +895,7 @@ class HighParamSubmitter:
             from backend.autonomous.core.proof_registration import register_verified_lean_proof
 
             registration = await register_verified_lean_proof(
-                proof_database=proof_database,
+                proof_database=self.proof_database,
                 user_prompt=self.raw_user_prompt,
                 theorem_statement=theorem_statement,
                 lean_code=lean_code,
@@ -1119,7 +1132,7 @@ class HighParamSubmitter:
             return None
 
         message = response["choices"][0]["message"]
-        llm_output = message.get("content") or message.get("reasoning") or ""
+        llm_output = extract_message_text(message)
         if not llm_output.strip():
             logger.error("High-param LLM returned empty content (%s)", task_label)
             if self.task_tracking_callback:
@@ -1167,7 +1180,7 @@ class HighParamSubmitter:
             )
             if retry_response and retry_response.get("choices"):
                 retry_msg = retry_response["choices"][0]["message"]
-                retry_output = retry_msg.get("content") or retry_msg.get("reasoning") or ""
+                retry_output = extract_message_text(retry_msg)
                 parsed = parse_json(retry_output)
                 logger.info("High-param submitter (%s): retry succeeded", task_label)
                 if self.task_tracking_callback:

@@ -12,5 +12,6 @@
 
 .gitignore text eol=lf
 .gitattributes text eol=lf
+.git_archival.txt text eol=lf export-subst
 
 *.sh text eol=lf
