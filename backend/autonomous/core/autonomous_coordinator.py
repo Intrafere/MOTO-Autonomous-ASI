@@ -6122,17 +6122,9 @@ class AutonomousCoordinator:
             proof_source_content,
             "paper",
             paper_id,
-            "automatic",
+            source_title=title,
+            trigger="automatic",
         )
-        if automatic_complete:
-            logger.info("Skipping completed automatic paper proof checkpoint for %s", paper_id)
-        else:
-            await self._run_proof_verification(
-                content,
-                "paper",
-                paper_id,
-                source_title=title,
-            )
 
         if self._stop_event.is_set() or proof_status != "complete":
             if proof_status == "error_preserved" and not self._stop_event.is_set():
