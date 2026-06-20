@@ -98,14 +98,54 @@ function roleFromAutonomousConfig(config, rolePrefix, fallbackModelId = '') {
   };
 }
 
+function roleWithDefaults(role = {}, defaults = {}) {
+  const hasExplicitModel = Boolean(role?.model_id);
+  return {
+    provider: hasExplicitModel ? role.provider : defaults.provider,
+    model_id: role.model_id || defaults.model_id || '',
+    openrouter_provider: hasExplicitModel ? (role.openrouter_provider ?? null) : (defaults.openrouter_provider ?? null),
+    openrouter_reasoning_effort: hasExplicitModel
+      ? (role.openrouter_reasoning_effort || 'auto')
+      : (defaults.openrouter_reasoning_effort || 'auto'),
+    lm_studio_fallback_id: hasExplicitModel
+      ? (role.lm_studio_fallback_id ?? null)
+      : (defaults.lm_studio_fallback_id ?? null),
+    context_window: role.context_window || defaults.context_window || null,
+    max_output_tokens: role.max_output_tokens || defaults.max_output_tokens || null,
+    supercharge_enabled: hasExplicitModel
+      ? Boolean(role.supercharge_enabled)
+      : Boolean(defaults.supercharge_enabled),
+  };
+}
+
+function roleFromAggregatorAssistantSettings(settings = {}, defaults = {}) {
+  const superchargeAllowed = isDeveloperModeEnabled();
+  return roleWithDefaults({
+    provider: normalizeProvider(settings.assistantProvider),
+    model_id: settings.assistantModel || '',
+    openrouter_provider: settings.assistantOpenrouterProvider ?? null,
+    openrouter_reasoning_effort: settings.assistantOpenrouterReasoningEffort ?? 'auto',
+    lm_studio_fallback_id: settings.assistantLmStudioFallback ?? null,
+    context_window: toPositiveInteger(settings.assistantContextSize),
+    max_output_tokens: toPositiveInteger(settings.assistantMaxOutput),
+    supercharge_enabled: superchargeAllowed && Boolean(settings.assistantSuperchargeEnabled),
+  }, defaults);
+}
+
 export function buildCurrentProofRuntimeConfig() {
   try {
     const config = settingsToAutonomousConfig(getStoredAutonomousSettings());
-    const firstSubmitter = roleFromSubmitterConfig(config.submitter_configs?.[0]);
+    const rigor = roleFromAutonomousConfig(config, 'high_param');
+    const validator = roleFromAutonomousConfig(config, 'validator');
+    const assistant = roleWithDefaults(
+      roleFromAutonomousConfig(config, 'assistant'),
+      validator
+    );
     return {
-      brainstorm: firstSubmitter,
-      paper: roleFromAutonomousConfig(config, 'high_context', firstSubmitter.model_id),
-      validator: roleFromAutonomousConfig(config, 'validator'),
+      brainstorm: rigor,
+      paper: rigor,
+      validator,
+      assistant,
     };
   } catch (error) {
     console.warn('Failed to build current proof runtime config:', error);
@@ -120,21 +160,25 @@ export function buildManualAggregatorProofRuntimeConfig() {
   };
   const firstSubmitter = roleFromSubmitterConfig(settings.submitterConfigs?.[0]);
   const validator = roleFromAggregatorValidatorSettings(settings);
+  const assistant = roleFromAggregatorAssistantSettings(settings, validator);
   return {
     brainstorm: firstSubmitter,
     paper: firstSubmitter,
     validator,
+    assistant,
   };
 }
 
 export function buildManualCompilerProofRuntimeConfig() {
   const settings = readStoredJson('compiler_settings') || {};
-  const highContext = roleFromCompilerSettings(settings, 'highContext');
+  const rigor = roleFromCompilerSettings(settings, 'highParam');
   const validator = roleFromCompilerSettings(settings, 'validator');
+  const assistant = roleWithDefaults(roleFromCompilerSettings(settings, 'assistant'), validator);
   return {
-    brainstorm: highContext,
-    paper: highContext,
+    brainstorm: rigor,
+    paper: rigor,
     validator,
+    assistant,
   };
 }
 
@@ -158,7 +202,11 @@ export function isProofRuntimeConfigComplete(config) {
     config?.paper?.max_output_tokens &&
     config?.validator?.model_id &&
     config?.validator?.context_window &&
-    config?.validator?.max_output_tokens
+    config?.validator?.max_output_tokens &&
+    (
+      !config?.assistant?.model_id ||
+      Boolean(config.assistant.context_window && config.assistant.max_output_tokens)
+    )
   );
 }
 

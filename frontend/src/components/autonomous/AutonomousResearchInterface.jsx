@@ -9,6 +9,13 @@ import LiveTier3Progress from './LiveTier3Progress';
 import TextFileUploader from '../TextFileUploader';
 import '../settings-common.css';
 import { getActivityClass as getSharedActivityClass, getActivityIcon as getSharedActivityIcon } from '../../utils/activityStyles';
+import { readPromptDraft, readPromptDraftSync, removePromptDraft, savePromptDraft } from '../../utils/promptDraftStorage';
+
+const AUTONOMOUS_PROMPT_STORAGE_KEY = 'autonomous_research_prompt';
+
+const HIDDEN_LIVE_ACTIVITY_EVENTS = new Set([
+  'assistant_proof_pack_refresh_started',
+]);
 
 const AutonomousResearchInterface = ({
   isRunning,
@@ -26,9 +33,9 @@ const AutonomousResearchInterface = ({
   api
 }) => {
   const [researchPrompt, setResearchPrompt] = useState(() => {
-    const saved = localStorage.getItem('autonomous_research_prompt');
-    return saved || '';
+    return readPromptDraftSync(AUTONOMOUS_PROMPT_STORAGE_KEY);
   });
+  const [researchPromptDraftLoaded, setResearchPromptDraftLoaded] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [showForceConfirm, setShowForceConfirm] = useState(false);
@@ -39,23 +46,60 @@ const AutonomousResearchInterface = ({
   const [explorationProgress, setExplorationProgress] = useState(null);  // Topic exploration phase tracking
   const [titleExplorationProgress, setTitleExplorationProgress] = useState(null);  // Paper title exploration tracking
   const [proofOutputUpdating, setProofOutputUpdating] = useState(false);
+  const [startRequested, setStartRequested] = useState(false);
   const activityFeedRef = useRef(null);
   const prevActivityLengthRef = useRef(0);
   const proofOutputsAvailable = !capabilities?.genericMode;
+  const showStopControl = isRunning || isStopping || startRequested;
+  const showRuntimeIndicator = isRunning || isStopping;
+  const controlsLocked = isRunning || isStopping || startRequested;
+  const visibleActivity = (activity || []).filter((item) => !HIDDEN_LIVE_ACTIVITY_EVENTS.has(item?.event));
 
-  // Save research prompt to localStorage
+  // Save research prompt using IndexedDB for large drafts to avoid localStorage quota crashes.
   useEffect(() => {
-    localStorage.setItem('autonomous_research_prompt', researchPrompt);
-  }, [researchPrompt]);
+    if (researchPromptDraftLoaded) {
+      savePromptDraft(AUTONOMOUS_PROMPT_STORAGE_KEY, researchPrompt);
+    }
+  }, [researchPrompt, researchPromptDraftLoaded]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const hydrateResearchPrompt = async () => {
+      try {
+        const savedDraft = await readPromptDraft(AUTONOMOUS_PROMPT_STORAGE_KEY);
+        let promptToHydrate = savedDraft || '';
+        if (!promptToHydrate.trim() && api?.getPrompt) {
+          const persisted = await api.getPrompt();
+          promptToHydrate = persisted?.prompt || '';
+        }
+        if (promptToHydrate && !cancelled) {
+          setResearchPrompt((current) => (
+            current.trim() ? current : promptToHydrate
+          ));
+        }
+      } catch (error) {
+        console.debug('Could not hydrate autonomous research prompt:', error);
+      } finally {
+        if (!cancelled) {
+          setResearchPromptDraftLoaded(true);
+        }
+      }
+    };
+
+    hydrateResearchPrompt();
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
   // Auto-scroll activity feed only when new items are added (not on mount/tab switch)
   useEffect(() => {
-    const currentLength = activity ? activity.length : 0;
+    const currentLength = visibleActivity.length;
     if (currentLength > prevActivityLengthRef.current && activityFeedRef.current) {
       activityFeedRef.current.scrollTop = activityFeedRef.current.scrollHeight;
     }
     prevActivityLengthRef.current = currentLength;
-  }, [activity]);
+  }, [visibleActivity.length]);
 
   // Listen for critique phase events in activity feed
   useEffect(() => {
@@ -94,6 +138,12 @@ const AutonomousResearchInterface = ({
     }
   }, [status?.current_tier]);
 
+  useEffect(() => {
+    if (isRunning || isStopping) {
+      setStartRequested(false);
+    }
+  }, [isRunning, isStopping]);
+
   const handleTextFileLoaded = (content) => {
     // Append to existing prompt with separator
     const separator = researchPrompt.trim() ? '\n\n' : '';
@@ -117,15 +167,25 @@ const AutonomousResearchInterface = ({
       alert('Please allow at least one output: Mathematical Proofs or Research Papers.');
       return;
     }
+    setStartRequested(true);
     const proofOnlyRequested = mathematicalProofsAllowed && !researchPapersAllowed;
     const shouldSyncProofRuntime = mathematicalProofsAllowed && !capabilities?.genericMode;
     if (proofOnlyRequested || shouldSyncProofRuntime) {
       const enabled = await updateProofRuntimeSetting(true);
       if (!enabled) {
+        setStartRequested(false);
         return;
       }
     }
-    onStart(researchPrompt);
+    try {
+      const startResult = await onStart(researchPrompt);
+      if (startResult === false) {
+        setStartRequested(false);
+      }
+    } catch (error) {
+      setStartRequested(false);
+      throw error;
+    }
   };
 
   const updateProofRuntimeSetting = async (enabled) => {
@@ -196,6 +256,8 @@ const AutonomousResearchInterface = ({
       setIsClearing(true);
       try {
         await onClear();
+        removePromptDraft(AUTONOMOUS_PROMPT_STORAGE_KEY);
+        setResearchPrompt('');
         setShowClearConfirm(false);
       } finally {
         setIsClearing(false);
@@ -275,13 +337,13 @@ const AutonomousResearchInterface = ({
   };
 
   return (
-    <div className={`autonomous-interface workflow-main-interface ${isRunning || isStopping ? 'workflow-main-interface--running' : ''}`}>
+    <div className={`autonomous-interface workflow-main-interface ${showRuntimeIndicator ? 'workflow-main-interface--running' : ''}`}>
       {/* Header */}
       <div className="autonomous-header">
         <h2>Autonomous Research</h2>
         <div className="autonomous-controls-stack">
           <div className="autonomous-controls">
-            {!isRunning && !isStopping ? (
+            {!showStopControl ? (
               <button
                 className="btn-start"
                 onClick={handleStart}
@@ -294,15 +356,17 @@ const AutonomousResearchInterface = ({
               </button>
             ) : (
               <>
-                <span
-                  className="runtime-indicator"
-                  role="status"
-                  aria-live="polite"
-                  title={isStopping ? "Autonomous research is stopping" : "Autonomous research is currently running"}
-                >
-                  <span className="runtime-indicator-dot" aria-hidden="true"></span>
-                  <span className="runtime-indicator-label">{isStopping ? 'Stopping' : 'Running'}</span>
-                </span>
+                {showRuntimeIndicator && (
+                  <span
+                    className="runtime-indicator"
+                    role="status"
+                    aria-live="polite"
+                    title={isStopping ? "Autonomous research is stopping" : "Autonomous research is currently running"}
+                  >
+                    <span className="runtime-indicator-dot" aria-hidden="true"></span>
+                    <span className="runtime-indicator-label">{isStopping ? 'Stopping' : 'Running'}</span>
+                  </span>
+                )}
                 <button className="btn-stop" onClick={onStop} disabled={isStopping}>
                   {isStopping ? 'Stopping...' : 'Stop Research'}
                 </button>
@@ -317,7 +381,7 @@ const AutonomousResearchInterface = ({
                     ...config,
                     creativity_emphasis_boost_enabled: event.target.checked
                   })}
-                  disabled={isRunning || isStopping}
+                  disabled={controlsLocked}
                 />
                 Creativity Emphasis Boost
               </label>
@@ -325,7 +389,7 @@ const AutonomousResearchInterface = ({
               <button
               className={`btn-clear ${showClearConfirm ? 'btn-confirm' : ''}`}
               onClick={handleClear}
-              disabled={isRunning || isStopping || isClearing}
+              disabled={controlsLocked || isClearing}
             >
               {isClearing ? 'Clearing...' : (showClearConfirm ? 'Confirm Clear' : 'Clear All')}
             </button>
@@ -351,7 +415,7 @@ const AutonomousResearchInterface = ({
                 type="checkbox"
                 checked={proofOutputsAvailable && Boolean(config?.allow_mathematical_proofs ?? true)}
                 onChange={(event) => updateAllowedOutput('allow_mathematical_proofs', event.target.checked)}
-                disabled={isRunning || isStopping || proofOutputUpdating || !proofOutputsAvailable}
+                disabled={controlsLocked || proofOutputUpdating || !proofOutputsAvailable}
               />
               <span className="allowed-output-text">Mathematical Proofs</span>
             </label>
@@ -363,7 +427,7 @@ const AutonomousResearchInterface = ({
                 type="checkbox"
                 checked={Boolean(config?.allow_research_papers ?? true)}
                 onChange={(event) => updateAllowedOutput('allow_research_papers', event.target.checked)}
-                disabled={isRunning || isStopping}
+                disabled={controlsLocked}
               />
               <span className="allowed-output-text">Research Papers</span>
             </label>
@@ -379,12 +443,12 @@ const AutonomousResearchInterface = ({
           value={researchPrompt}
           onChange={(e) => setResearchPrompt(e.target.value)}
           placeholder="Enter your high level research goal on any topic that relates to S.T.E.M. mathematics, anything remotely related to mathematics (e.g., 'Advance desalination technology' or 'Solve physics unification')"
-          disabled={isRunning}
+          disabled={controlsLocked}
           rows={3}
         />
         <TextFileUploader 
           onFileLoaded={handleTextFileLoaded}
-          disabled={isRunning}
+          disabled={controlsLocked}
           maxSizeMB={5}
           showCharCount={true}
           confirmIfNotEmpty={true}
@@ -632,12 +696,12 @@ const AutonomousResearchInterface = ({
       <div className="activity-section">
         <h3>Live Activity</h3>
         <div className="activity-feed" ref={activityFeedRef}>
-          {activity.length === 0 ? (
+          {visibleActivity.length === 0 ? (
             <div className="activity-empty">
               No activity yet. Wait about 20 to 30 minutes. If you have not yet, press the start button above your prompt entry to begin research.
             </div>
           ) : (
-            activity.map((item, index) => (
+            visibleActivity.map((item, index) => (
               <div 
                 key={index} 
                 className={`activity-item ${getSharedActivityClass(item.event)}`}

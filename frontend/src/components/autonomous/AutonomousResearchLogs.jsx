@@ -124,7 +124,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'auto_research_started':
         return 'Autonomous research started';
       case 'auto_research_stopped':
-        return `Research stopped. Total: ${data.final_stats?.total_papers_completed || 0} papers`;
+        return data.message || `Research stopped. Total: ${data.final_stats?.total_papers_completed || 0} papers`;
       // Topic exploration events (pre-brainstorm)
       case 'topic_exploration_started':
         return `Topic exploration started (target: ${data.target || 5} candidates${data.resumed_count ? `, resumed: ${data.resumed_count}` : ''})`;

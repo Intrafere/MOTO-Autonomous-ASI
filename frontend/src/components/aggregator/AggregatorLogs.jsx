@@ -3,7 +3,13 @@ import { websocket } from '../../services/websocket';
 import { api } from '../../services/api';
 import LiveActivityFeed from '../LiveActivityFeed';
 import { MANUAL_AGGREGATOR_PROOF_SOURCE_ID } from '../../hooks/useProofCheckRuntime';
-import { getActivityClass, getActivityIcon } from '../../utils/activityStyles';
+import {
+  formatContextOverflowActivityMessage,
+  formatAssistantProofPackEventMessage,
+  getActivityClass,
+  getActivityIcon,
+  hasRecentAssistantProofPackDuplicate,
+} from '../../utils/activityStyles';
 import '../settings-common.css';
 
 const MAX_EVENT_LOG_ENTRIES = 5000;
@@ -24,6 +30,13 @@ const MANUAL_PROOF_EVENTS = [
   'proof_dependency_added',
   'proof_check_complete',
 ];
+const ASSISTANT_MEMORY_EVENTS = [
+  'assistant_proof_pack_refresh_started',
+  'assistant_proof_pack_updated',
+  'assistant_proof_pack_warning',
+  'assistant_proof_pack_stopped',
+];
+const HIDDEN_AGGREGATOR_ACTIVITY_EVENTS = new Set(['new_submission']);
 
 const normalizeAggregatorEventName = (eventName = '') => {
   switch (eventName) {
@@ -85,6 +98,36 @@ const getEventSortTime = (event = {}) => {
   return typeof event.id === 'number' ? event.id : 0;
 };
 
+const compactProofText = (value, maxLength = 1200) => {
+  const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) {
+    return '';
+  }
+  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength)}...` : cleaned;
+};
+
+const proofTargetLabel = (data = {}, fallback = 'candidate') => (
+  data.theorem_name || data.proof_label || data.theorem_id || data.proof_id || fallback
+);
+
+const leanProofResponse = (data = {}) => {
+  if (data.lean_response) {
+    return compactProofText(data.lean_response);
+  }
+  if (data.proof_verified === true) {
+    return 'Lean 4 response: proof verified.';
+  }
+  const error = compactProofText(data.error_summary || data.error_output || data.reason, 960);
+  return error ? `Lean 4 response: ${error} - proof not verified.` : '';
+};
+
+const formatLeanProofAttempt = (prefix, data = {}) => {
+  const attempt = data.attempt ? `, attempt ${data.attempt}` : '';
+  const response = leanProofResponse(data);
+  const base = `${prefix}: ${proofTargetLabel(data)}${attempt}`;
+  return response ? `${base} - ${response}` : base;
+};
+
 const mergeEventLists = (...eventLists) => {
   const seen = new Set();
   const merged = [];
@@ -119,7 +162,6 @@ export default function AggregatorLogs() {
 
     // Subscribe to WebSocket events
     const unsubscribers = [
-      websocket.on('new_submission', handleNewSubmission),
       websocket.on('submission_accepted', handleAcceptance),
       websocket.on('submission_rejected', handleRejection),
       websocket.on('model_corruption_detected', handleCorruptionDetected),
@@ -131,7 +173,12 @@ export default function AggregatorLogs() {
       websocket.on('cleanup_submission_removed', handleSubmissionRemoved),
       websocket.on('cleanup_review_complete', handleCleanupComplete),
       websocket.on('cleanup_review_error', handleCleanupError),
+      websocket.on('context_overflow_error', handleContextOverflow),
       websocket.on('hung_connection_alert', handleHungConnectionAlert),
+      websocket.on('assistant_proof_pack_refresh_started', (data) => handleAssistantProofPackEvent('assistant_proof_pack_refresh_started', data)),
+      websocket.on('assistant_proof_pack_updated', (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data)),
+      websocket.on('assistant_proof_pack_warning', (data) => handleAssistantProofPackEvent('assistant_proof_pack_warning', data)),
+      websocket.on('assistant_proof_pack_stopped', (data) => handleAssistantProofPackEvent('assistant_proof_pack_stopped', data)),
       ...MANUAL_PROOF_EVENTS.map((eventName) => (
         websocket.on(eventName, (data) => handleManualProofEvent(eventName, data))
       )),
@@ -173,7 +220,27 @@ export default function AggregatorLogs() {
         return [];
       }
       const parsed = JSON.parse(savedEvents);
-      return Array.isArray(parsed) ? parsed : [];
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed.map((event) => {
+        if (!event) {
+          return event;
+        }
+        if (ASSISTANT_MEMORY_EVENTS.includes(event.type)) {
+          return {
+            ...event,
+            message: formatAssistantProofPackEventMessage(event.type, event.data || {}),
+          };
+        }
+        if (!MANUAL_PROOF_EVENTS.includes(event.type)) {
+          return event;
+        }
+        return {
+          ...event,
+          message: formatProofEvent(event.type, event.data || {}),
+        };
+      });
     } catch (error) {
       console.error('Failed to load manual Aggregator live activity:', error);
       return [];
@@ -187,14 +254,17 @@ export default function AggregatorLogs() {
         const data = await response.json();
         if (data.events && data.events.length > 0) {
           // Convert persisted events to display format
-          return data.events.map(event => ({
-            id: event.id,
-            type: event.type || 'event',
-            message: formatPersistedEventMessage(event),
-            data: event.metadata || {},
-            timestamp: event.timestamp,
-            persisted: true,
-          })).reverse();
+          return data.events
+            .filter(event => !HIDDEN_AGGREGATOR_ACTIVITY_EVENTS.has(event.type))
+            .map(event => ({
+              id: event.id,
+              type: event.type || 'event',
+              message: formatPersistedEventMessage(event),
+              data: event.metadata || {},
+              timestamp: event.timestamp,
+              persisted: true,
+            }))
+            .reverse();
         }
       }
     } catch (error) {
@@ -209,6 +279,9 @@ export default function AggregatorLogs() {
         return `✓ ${event.message}`;
       case 'submission_rejected':
         return `✗ ${event.message}`;
+      case 'proof_attempt_failed':
+      case 'proof_attempts_exhausted':
+        return formatProofEvent(event.type, event.metadata || {});
       default:
         return event.message || event.type || 'Aggregator event';
     }
@@ -232,7 +305,9 @@ export default function AggregatorLogs() {
 
   const persistManualEvents = (nextEvents) => {
     try {
-      const manualEvents = nextEvents.filter((event) => MANUAL_PROOF_EVENTS.includes(event.type));
+      const manualEvents = nextEvents.filter((event) => (
+        MANUAL_PROOF_EVENTS.includes(event.type) || ASSISTANT_MEMORY_EVENTS.includes(event.type)
+      ));
       localStorage.setItem(
         AGGREGATOR_LIVE_ACTIVITY_STORAGE_KEY,
         JSON.stringify(manualEvents.slice(0, MAX_EVENT_LOG_ENTRIES))
@@ -240,11 +315,6 @@ export default function AggregatorLogs() {
     } catch (error) {
       console.error('Failed to persist manual Aggregator live activity:', error);
     }
-  };
-
-  const handleNewSubmission = (data) => {
-    const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-    addEvent('new_submission', `${prefix}New submission from Submitter ${data.submitter_id}`, data);
   };
 
   const handleAcceptance = (data) => {
@@ -307,6 +377,30 @@ export default function AggregatorLogs() {
     addEvent('warning', formatHungConnectionMessage(data));
   };
 
+  const handleContextOverflow = (data = {}) => {
+    const roleId = String(data.role_id || '').toLowerCase();
+    if (!roleId.startsWith('aggregator_')) {
+      return;
+    }
+    addEvent('context_overflow_error', formatContextOverflowActivityMessage(data), data);
+  };
+
+  const handleAssistantProofPackEvent = (eventName, data = {}) => {
+    const workflowMode = String(data.workflow_mode || '');
+    const sourceId = String(data.source_id || '');
+    const sourceType = String(data.source_type || '');
+    const isManualAggregatorProof = workflowMode === 'manual_proof_check'
+      && (
+        sourceId === MANUAL_AGGREGATOR_PROOF_SOURCE_ID
+        || sourceType.includes('aggregator')
+        || sourceId.includes('aggregator')
+      );
+    if (workflowMode !== 'aggregator' && !isManualAggregatorProof) {
+      return;
+    }
+    addEvent(eventName, formatAssistantProofPackEventMessage(eventName, data), data);
+  };
+
   const handleManualProofEvent = (eventName, data = {}) => {
     if (data.source_type !== 'brainstorm' || data.source_id !== MANUAL_AGGREGATOR_PROOF_SOURCE_ID) {
       return;
@@ -323,25 +417,25 @@ export default function AggregatorLogs() {
       case 'proof_check_candidates_found':
         return `Proof candidates found: ${data.count || 0}`;
       case 'proof_attempt_started':
-        return `Lean proof attempt started: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+        return `Lean proof attempt started: ${proofTargetLabel(data)}`;
       case 'proof_lean_accepted':
-        return `Lean accepted proof: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+        return `Lean accepted proof: ${proofTargetLabel(data)}`;
       case 'proof_attempt_failed':
-        return `Proof attempt failed: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+        return formatLeanProofAttempt('Proof attempt failed', data);
       case 'proof_attempts_exhausted':
-        return `Proof attempts exhausted: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+        return formatLeanProofAttempt('Proof attempts exhausted', data);
       case 'proof_integrity_rejected':
-        return `Proof integrity rejected: ${data.reason || data.message || data.theorem_name || 'candidate'}`;
+        return `Proof integrity rejected: ${data.reason || data.message || proofTargetLabel(data)}`;
       case 'proof_verified':
-        return `Proof verified: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+        return `Proof verified: ${proofTargetLabel(data)}`;
       case 'known_proof_verified':
-        return `Known proof verified: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+        return `Known proof verified: ${proofTargetLabel(data)}`;
       case 'proof_registration_duplicate':
-        return `Duplicate proof reused: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+        return `Duplicate proof reused: ${proofTargetLabel(data)}`;
       case 'novel_proof_discovered':
-        return `Novel proof discovered: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+        return `Novel proof discovered: ${proofTargetLabel(data)}`;
       case 'proof_dependency_added':
-        return `Proof dependency added: ${data.theorem_name || data.proof_label || data.proof_id || 'verified proof'}`;
+        return `Proof dependency added: ${proofTargetLabel(data, 'verified proof')}`;
       case 'proof_check_complete':
         return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
       default:
@@ -357,14 +451,18 @@ export default function AggregatorLogs() {
   };
 
   const addEvent = (type, message, data = {}) => {
+    const timestamp = new Date().toISOString();
     const event = {
       id: Date.now(),
       type,
       message,
       data,
-      timestamp: new Date().toISOString(),
+      timestamp,
     };
     setEvents(prev => {
+      if (hasRecentAssistantProofPackDuplicate(prev, type, data, timestamp)) {
+        return prev;
+      }
       const updated = mergeEventLists([event], prev);
       if (MANUAL_PROOF_EVENTS.includes(type)) {
         persistManualEvents(updated);

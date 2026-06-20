@@ -129,12 +129,26 @@ class ResearchMetadata:
         
         if self._metadata_path.exists():
             await self._load_metadata()
+            needs_save = False
+            saved_prompt = (
+                self._data.get("user_research_prompt")
+                or self._data.get("user_prompt")
+                or ""
+            )
+            if saved_prompt and not self._data.get("user_research_prompt"):
+                self._data["user_research_prompt"] = saved_prompt
+                needs_save = True
+            if saved_prompt and not self._data.get("base_user_research_prompt"):
+                self._data["base_user_research_prompt"] = saved_prompt
+                needs_save = True
             # If prompt provided and differs from saved, optionally update
             if user_research_prompt and self._data.get("user_research_prompt") != user_research_prompt:
                 logger.info("User research prompt updated")
                 self._data["user_research_prompt"] = user_research_prompt
                 if not self._data.get("base_user_research_prompt"):
                     self._data["base_user_research_prompt"] = user_research_prompt
+                await self._save_metadata()
+            elif needs_save:
                 await self._save_metadata()
         else:
             self._data = {
@@ -281,15 +295,15 @@ class ResearchMetadata:
             "model_config": {
                 "submitter_model": None,
                 "validator_model": None,
-                "high_context_model": None,
+                "writer_model": None,
                 "high_param_model": None,
                 "submitter_context_window": 0,
                 "validator_context_window": 0,
-                "high_context_context_window": 0,
+                "writer_context_window": 0,
                 "high_param_context_window": 0,
                 "submitter_max_tokens": 0,
                 "validator_max_tokens": 0,
-                "high_context_max_tokens": 0,
+                "writer_max_tokens": 0,
                 "high_param_max_tokens": 0
             },
             "last_updated": datetime.now().isoformat()
@@ -889,6 +903,11 @@ class ResearchMetadata:
         async with self._lock:
             self._data = {
                 "user_research_prompt": "",
+                "base_user_research_prompt": "",
+                "proof_framing_active": False,
+                "proof_framing_context": "",
+                "proof_framing_reasoning": "",
+                "proof_runtime_config": {},
                 "brainstorms": [],
                 "papers": [],
                 "next_topic_id": 1,

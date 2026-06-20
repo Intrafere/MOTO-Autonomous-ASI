@@ -23,6 +23,57 @@ export const RECOMMENDED_PROFILE_KEYS = [
   RECOMMENDED_LAB_FAST_PROFILE_KEY,
   RECOMMENDED_LAB_MAX_PROFILE_KEY,
 ];
+const LEGACY_WRITER_SNAKE_PREFIX = ['high', 'context'].join('_');
+const LEGACY_WRITER_PROFILE_KEY = ['high', 'Context'].join('');
+
+const isMeaningfulWriterLocal = (value, suffix) => {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string' && value.trim() === '') return false;
+  if ((suffix === 'context_window' || suffix === 'max_tokens') && Number(value) <= 0) return false;
+  return true;
+};
+
+const readWriterLocal = (localConfig = {}, suffix) => {
+  const current = localConfig[`writer_${suffix}`];
+  if (isMeaningfulWriterLocal(current, suffix)) {
+    return current;
+  }
+  return localConfig[`${LEGACY_WRITER_SNAKE_PREFIX}_${suffix}`];
+};
+
+const isMeaningfulProfileValue = (value) => (
+  value !== undefined
+  && value !== null
+  && !(typeof value === 'string' && value.trim() === '')
+);
+
+const normalizeProfileWriter = (profile = {}) => {
+  const current = profile.writer || {};
+  const legacy = profile[LEGACY_WRITER_PROFILE_KEY] || {};
+  if (!isMeaningfulProfileValue(current.modelId) && isMeaningfulProfileValue(legacy.modelId)) {
+    return {
+      ...current,
+      ...Object.fromEntries(
+        Object.entries(legacy).filter(([, value]) => isMeaningfulProfileValue(value))
+      ),
+    };
+  }
+  return current;
+};
+
+const normalizeProfileRigor = (profile = {}) => {
+  const current = profile.highParam || {};
+  const legacyCritique = profile.critique || {};
+  if (!isMeaningfulProfileValue(current.modelId) && isMeaningfulProfileValue(legacyCritique.modelId)) {
+    return {
+      ...current,
+      ...Object.fromEntries(
+        Object.entries(legacyCritique).filter(([, value]) => isMeaningfulProfileValue(value))
+      ),
+    };
+  }
+  return current;
+};
 
 const DEFAULT_SUBMITTER_CONFIG = {
   submitterId: 1,
@@ -50,6 +101,15 @@ const GEMINI_FLASH_LATEST_PROFILE_CONFIG = {
   maxOutputTokens: 65536,
 };
 
+const MINIMAX_M3_PROFILE_CONFIG = {
+  modelId: 'minimax/minimax-m3',
+  provider: 'openrouter',
+  openrouterProvider: null,
+  lmStudioFallbackId: null,
+  contextWindow: 1048576,
+  maxOutputTokens: 131072,
+};
+
 const DEFAULT_LM_LOCAL_CONFIG = {
   validator_provider: 'lm_studio',
   validator_model: '',
@@ -59,14 +119,22 @@ const DEFAULT_LM_LOCAL_CONFIG = {
   validator_context_window: DEFAULT_CONTEXT_WINDOW,
   validator_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
   validator_supercharge_enabled: false,
-  high_context_provider: 'lm_studio',
-  high_context_model: '',
-  high_context_openrouter_provider: null,
-  high_context_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-  high_context_lm_studio_fallback: null,
-  high_context_context_window: DEFAULT_CONTEXT_WINDOW,
-  high_context_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-  high_context_supercharge_enabled: false,
+  assistant_provider: 'lm_studio',
+  assistant_model: '',
+  assistant_openrouter_provider: null,
+  assistant_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+  assistant_lm_studio_fallback: null,
+  assistant_context_window: DEFAULT_CONTEXT_WINDOW,
+  assistant_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  assistant_supercharge_enabled: false,
+  writer_provider: 'lm_studio',
+  writer_model: '',
+  writer_openrouter_provider: null,
+  writer_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+  writer_lm_studio_fallback: null,
+  writer_context_window: DEFAULT_CONTEXT_WINDOW,
+  writer_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+  writer_supercharge_enabled: false,
   high_param_provider: 'lm_studio',
   high_param_model: '',
   high_param_openrouter_provider: null,
@@ -75,14 +143,6 @@ const DEFAULT_LM_LOCAL_CONFIG = {
   high_param_context_window: DEFAULT_CONTEXT_WINDOW,
   high_param_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
   high_param_supercharge_enabled: false,
-  critique_submitter_provider: 'lm_studio',
-  critique_submitter_model: '',
-  critique_submitter_openrouter_provider: null,
-  critique_submitter_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-  critique_submitter_lm_studio_fallback: null,
-  critique_submitter_context_window: DEFAULT_CONTEXT_WINDOW,
-  critique_submitter_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-  critique_submitter_supercharge_enabled: false,
 };
 
 const DEFAULT_CODEX_STARTUP_MODEL = Object.freeze({
@@ -91,14 +151,48 @@ const DEFAULT_CODEX_STARTUP_MODEL = Object.freeze({
   context_length: 400000,
   max_output_tokens: 128000,
 });
-const CODEX_STARTUP_MODEL_PREFERENCE = ['gpt-5.5', 'gpt-5.5-mini', 'gpt-5.4', 'gpt-5.4-mini'];
+const PUBLIC_CODEX_STARTUP_MODELS = Object.freeze([
+  DEFAULT_CODEX_STARTUP_MODEL,
+  Object.freeze({
+    id: 'gpt-5.5-mini',
+    name: 'gpt-5.5-mini',
+    context_length: 400000,
+    max_output_tokens: 128000,
+  }),
+  Object.freeze({
+    id: 'gpt-5.4',
+    name: 'gpt-5.4',
+    context_length: 400000,
+    max_output_tokens: 128000,
+  }),
+  Object.freeze({
+    id: 'gpt-5.4-mini',
+    name: 'gpt-5.4-mini',
+    context_length: 400000,
+    max_output_tokens: 128000,
+  }),
+]);
 const DEFAULT_XAI_GROK_STARTUP_MODEL = Object.freeze({
   id: 'grok-4.3',
   name: 'grok-4.3',
   context_length: 1000000,
   max_output_tokens: 131072,
 });
-const XAI_GROK_STARTUP_MODEL_PREFERENCE = ['grok-4.3', 'grok-4.2', 'grok-4'];
+const PUBLIC_XAI_GROK_STARTUP_MODELS = Object.freeze([
+  DEFAULT_XAI_GROK_STARTUP_MODEL,
+  Object.freeze({
+    id: 'grok-4.2',
+    name: 'grok-4.2',
+    context_length: 1000000,
+    max_output_tokens: 131072,
+  }),
+  Object.freeze({
+    id: 'grok-4',
+    name: 'grok-4',
+    context_length: 1000000,
+    max_output_tokens: 131072,
+  }),
+]);
 
 const createDefaultSubmitterConfigs = (modelId = '') => (
   [1, 2, 3].map((submitterId) => ({
@@ -122,12 +216,7 @@ export const RECOMMENDED_PROFILES = {
         maxOutputTokens: 65500,
       },
       {
-        modelId: 'moonshotai/kimi-k2.6',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 262000,
-        maxOutputTokens: 40000,
+        ...MINIMAX_M3_PROFILE_CONFIG,
       },
       {
         modelId: 'deepseek/deepseek-v4-pro',
@@ -139,14 +228,9 @@ export const RECOMMENDED_PROFILES = {
       },
     ],
     validator: {
-      modelId: 'moonshotai/kimi-k2.6',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 262000,
-      maxOutputTokens: 40000,
+      ...MINIMAX_M3_PROFILE_CONFIG,
     },
-    highContext: {
+    writer: {
       modelId: 'google/gemini-3.1-pro-preview',
       provider: 'openrouter',
       openrouterProvider: null,
@@ -160,14 +244,6 @@ export const RECOMMENDED_PROFILES = {
       openrouterProvider: null,
       lmStudioFallbackId: null,
       contextWindow: 1048576,
-      maxOutputTokens: 65500,
-    },
-    critique: {
-      modelId: 'z-ai/glm-5.1',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 202752,
       maxOutputTokens: 65500,
     },
   },
@@ -184,12 +260,7 @@ export const RECOMMENDED_PROFILES = {
         maxOutputTokens: 128000,
       },
       {
-        modelId: 'moonshotai/kimi-k2.6',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 262000,
-        maxOutputTokens: 40000,
+        ...MINIMAX_M3_PROFILE_CONFIG,
       },
       {
         modelId: 'deepseek/deepseek-v4-pro',
@@ -203,7 +274,7 @@ export const RECOMMENDED_PROFILES = {
     validator: {
       ...GEMINI_FLASH_LATEST_PROFILE_CONFIG,
     },
-    highContext: {
+    writer: {
       modelId: 'openai/gpt-5.5',
       provider: 'openrouter',
       openrouterProvider: null,
@@ -218,14 +289,6 @@ export const RECOMMENDED_PROFILES = {
       lmStudioFallbackId: null,
       contextWindow: 1000000,
       maxOutputTokens: 128000,
-    },
-    critique: {
-      modelId: 'google/gemini-3.1-pro-preview',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 1048576,
-      maxOutputTokens: 65500,
     },
   },
   [RECOMMENDED_LAB_MAX_PROFILE_KEY]: {
@@ -257,12 +320,7 @@ export const RECOMMENDED_PROFILES = {
         maxOutputTokens: 65500,
       },
       {
-        modelId: 'moonshotai/kimi-k2.6',
-        provider: 'openrouter',
-        openrouterProvider: null,
-        lmStudioFallbackId: null,
-        contextWindow: 262000,
-        maxOutputTokens: 40000,
+        ...MINIMAX_M3_PROFILE_CONFIG,
       },
     ],
     validator: {
@@ -273,7 +331,7 @@ export const RECOMMENDED_PROFILES = {
       contextWindow: 1050000,
       maxOutputTokens: 128000,
     },
-    highContext: {
+    writer: {
       modelId: 'anthropic/claude-opus-4.7',
       provider: 'openrouter',
       openrouterProvider: null,
@@ -288,14 +346,6 @@ export const RECOMMENDED_PROFILES = {
       lmStudioFallbackId: null,
       contextWindow: 1000000,
       maxOutputTokens: 128000,
-    },
-    critique: {
-      modelId: 'x-ai/grok-4.20-multi-agent',
-      provider: 'openrouter',
-      openrouterProvider: null,
-      lmStudioFallbackId: null,
-      contextWindow: 2000000,
-      maxOutputTokens: 65500,
     },
   },
 };
@@ -329,14 +379,22 @@ const DEFAULT_LOCAL_CONFIG = {
   validator_context_window: DEFAULT_RECOMMENDED_PROFILE.validator.contextWindow,
   validator_max_tokens: DEFAULT_RECOMMENDED_PROFILE.validator.maxOutputTokens,
   validator_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.validator.superchargeEnabled),
-  high_context_provider: DEFAULT_RECOMMENDED_PROFILE.highContext.provider || 'openrouter',
-  high_context_model: DEFAULT_RECOMMENDED_PROFILE.highContext.modelId || '',
-  high_context_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.highContext.openrouterProvider || null,
-  high_context_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.highContext.openrouterReasoningEffort),
-  high_context_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.highContext.lmStudioFallbackId || null,
-  high_context_context_window: DEFAULT_RECOMMENDED_PROFILE.highContext.contextWindow,
-  high_context_max_tokens: DEFAULT_RECOMMENDED_PROFILE.highContext.maxOutputTokens,
-  high_context_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.highContext.superchargeEnabled),
+  assistant_provider: DEFAULT_RECOMMENDED_PROFILE.validator.provider || 'openrouter',
+  assistant_model: DEFAULT_RECOMMENDED_PROFILE.validator.modelId || '',
+  assistant_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.validator.openrouterProvider || null,
+  assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.validator.openrouterReasoningEffort),
+  assistant_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.validator.lmStudioFallbackId || null,
+  assistant_context_window: DEFAULT_RECOMMENDED_PROFILE.validator.contextWindow,
+  assistant_max_tokens: DEFAULT_RECOMMENDED_PROFILE.validator.maxOutputTokens,
+  assistant_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.validator.superchargeEnabled),
+  writer_provider: DEFAULT_RECOMMENDED_PROFILE.writer.provider || 'openrouter',
+  writer_model: DEFAULT_RECOMMENDED_PROFILE.writer.modelId || '',
+  writer_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.writer.openrouterProvider || null,
+  writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.writer.openrouterReasoningEffort),
+  writer_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.writer.lmStudioFallbackId || null,
+  writer_context_window: DEFAULT_RECOMMENDED_PROFILE.writer.contextWindow,
+  writer_max_tokens: DEFAULT_RECOMMENDED_PROFILE.writer.maxOutputTokens,
+  writer_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.writer.superchargeEnabled),
   high_param_provider: DEFAULT_RECOMMENDED_PROFILE.highParam.provider || 'openrouter',
   high_param_model: DEFAULT_RECOMMENDED_PROFILE.highParam.modelId || '',
   high_param_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.highParam.openrouterProvider || null,
@@ -345,14 +403,14 @@ const DEFAULT_LOCAL_CONFIG = {
   high_param_context_window: DEFAULT_RECOMMENDED_PROFILE.highParam.contextWindow,
   high_param_max_tokens: DEFAULT_RECOMMENDED_PROFILE.highParam.maxOutputTokens,
   high_param_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.highParam.superchargeEnabled),
-  critique_submitter_provider: DEFAULT_RECOMMENDED_PROFILE.critique.provider || 'openrouter',
-  critique_submitter_model: DEFAULT_RECOMMENDED_PROFILE.critique.modelId || '',
-  critique_submitter_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.critique.openrouterProvider || null,
-  critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.critique.openrouterReasoningEffort),
-  critique_submitter_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.critique.lmStudioFallbackId || null,
-  critique_submitter_context_window: DEFAULT_RECOMMENDED_PROFILE.critique.contextWindow,
-  critique_submitter_max_tokens: DEFAULT_RECOMMENDED_PROFILE.critique.maxOutputTokens,
-  critique_submitter_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.critique.superchargeEnabled),
+  critique_submitter_provider: DEFAULT_RECOMMENDED_PROFILE.highParam.provider || 'openrouter',
+  critique_submitter_model: DEFAULT_RECOMMENDED_PROFILE.highParam.modelId || '',
+  critique_submitter_openrouter_provider: DEFAULT_RECOMMENDED_PROFILE.highParam.openrouterProvider || null,
+  critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(DEFAULT_RECOMMENDED_PROFILE.highParam.openrouterReasoningEffort),
+  critique_submitter_lm_studio_fallback: DEFAULT_RECOMMENDED_PROFILE.highParam.lmStudioFallbackId || null,
+  critique_submitter_context_window: DEFAULT_RECOMMENDED_PROFILE.highParam.contextWindow,
+  critique_submitter_max_tokens: DEFAULT_RECOMMENDED_PROFILE.highParam.maxOutputTokens,
+  critique_submitter_supercharge_enabled: Boolean(DEFAULT_RECOMMENDED_PROFILE.highParam.superchargeEnabled),
 };
 
 const DEFAULT_AUTONOMOUS_SETTINGS = {
@@ -370,6 +428,161 @@ const DEFAULT_AUTONOMOUS_SETTINGS = {
   selectedProfile: RECOMMENDED_PROFILE_KEY,
 };
 
+const PUBLIC_ROLE_STORAGE_KEYS = [
+  'provider',
+  'modelId',
+  'openrouterProvider',
+  'openrouterReasoningEffort',
+  'lmStudioFallbackId',
+  'contextWindow',
+  'maxOutputTokens',
+  'superchargeEnabled',
+];
+
+const PUBLIC_LOCAL_CONFIG_STORAGE_KEYS = [
+  'validator_provider',
+  'validator_model',
+  'validator_openrouter_provider',
+  'validator_openrouter_reasoning_effort',
+  'validator_lm_studio_fallback',
+  'validator_context_window',
+  'validator_max_tokens',
+  'validator_supercharge_enabled',
+  'assistant_provider',
+  'assistant_model',
+  'assistant_openrouter_provider',
+  'assistant_openrouter_reasoning_effort',
+  'assistant_lm_studio_fallback',
+  'assistant_context_window',
+  'assistant_max_tokens',
+  'assistant_supercharge_enabled',
+  'writer_provider',
+  'writer_model',
+  'writer_openrouter_provider',
+  'writer_openrouter_reasoning_effort',
+  'writer_lm_studio_fallback',
+  'writer_context_window',
+  'writer_max_tokens',
+  'writer_supercharge_enabled',
+  'high_param_provider',
+  'high_param_model',
+  'high_param_openrouter_provider',
+  'high_param_openrouter_reasoning_effort',
+  'high_param_lm_studio_fallback',
+  'high_param_context_window',
+  'high_param_max_tokens',
+  'high_param_supercharge_enabled',
+  'critique_submitter_provider',
+  'critique_submitter_model',
+  'critique_submitter_openrouter_provider',
+  'critique_submitter_openrouter_reasoning_effort',
+  'critique_submitter_lm_studio_fallback',
+  'critique_submitter_context_window',
+  'critique_submitter_max_tokens',
+  'critique_submitter_supercharge_enabled',
+];
+
+const SECRET_STORAGE_KEY_PATTERN = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|bearer|password|secret|credential|session|cookie)/i;
+
+function stripSecretLikeStorageFields(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripSecretLikeStorageFields);
+  }
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !SECRET_STORAGE_KEY_PATTERN.test(key))
+      .map(([key, nestedValue]) => [key, stripSecretLikeStorageFields(nestedValue)])
+  );
+}
+
+function pickPublicFields(source = {}, keys = []) {
+  return Object.fromEntries(
+    keys
+      .filter((key) => Object.prototype.hasOwnProperty.call(source, key))
+      .map((key) => [key, source[key]])
+  );
+}
+
+function publicSubmitterConfigForStorage(config = {}, index = 0) {
+  return {
+    ...pickPublicFields(config, PUBLIC_ROLE_STORAGE_KEYS),
+    submitterId: config.submitterId || index + 1,
+    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort),
+    superchargeEnabled: Boolean(config.superchargeEnabled),
+  };
+}
+
+function publicRoleProfileForStorage(profile = {}) {
+  return {
+    ...pickPublicFields(profile, PUBLIC_ROLE_STORAGE_KEYS),
+    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(profile.openrouterReasoningEffort),
+    superchargeEnabled: Boolean(profile.superchargeEnabled),
+  };
+}
+
+function publicLocalConfigForStorage(localConfig = {}) {
+  return {
+    ...pickPublicFields(localConfig, PUBLIC_LOCAL_CONFIG_STORAGE_KEYS),
+    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.validator_openrouter_reasoning_effort),
+    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort),
+    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort),
+    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
+    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.critique_submitter_openrouter_reasoning_effort),
+    validator_supercharge_enabled: Boolean(localConfig.validator_supercharge_enabled),
+    assistant_supercharge_enabled: Boolean(localConfig.assistant_supercharge_enabled),
+    writer_supercharge_enabled: Boolean(localConfig.writer_supercharge_enabled),
+    high_param_supercharge_enabled: Boolean(localConfig.high_param_supercharge_enabled),
+    critique_submitter_supercharge_enabled: Boolean(localConfig.critique_submitter_supercharge_enabled),
+  };
+}
+
+export function publicAutonomousSettingsForStorage(settings = {}) {
+  const normalized = normalizeStoredSettings(settings);
+  return {
+    numSubmitters: normalized.numSubmitters,
+    submitterConfigs: normalized.submitterConfigs
+      .slice(0, normalized.numSubmitters)
+      .map(publicSubmitterConfigForStorage),
+    localConfig: publicLocalConfigForStorage(normalized.localConfig),
+    freeOnly: Boolean(normalized.freeOnly),
+    freeModelLooping: Boolean(normalized.freeModelLooping),
+    freeModelAutoSelector: Boolean(normalized.freeModelAutoSelector),
+    allowMathematicalProofs: Boolean(normalized.allowMathematicalProofs),
+    allowResearchPapers: Boolean(normalized.allowResearchPapers),
+    tier3Enabled: Boolean(normalized.tier3Enabled),
+    creativityEmphasisBoostEnabled: Boolean(normalized.creativityEmphasisBoostEnabled),
+    selectedProfile: normalizeSelectedProfile(normalized.selectedProfile),
+  };
+}
+
+export function publicAutonomousProfilesForStorage(profiles = {}) {
+  return Object.fromEntries(
+    Object.entries(profiles).map(([profileKey, profile = {}]) => {
+      const writerProfile = normalizeProfileWriter(profile);
+      const rigorProfile = normalizeProfileRigor(profile);
+      const publicProfile = {
+        name: typeof profile.name === 'string' ? profile.name : '',
+        numSubmitters: profile.numSubmitters,
+        submitters: Array.isArray(profile.submitters)
+          ? profile.submitters.map(publicRoleProfileForStorage)
+          : [],
+        validator: publicRoleProfileForStorage(profile.validator),
+        assistant: profile.assistant ? publicRoleProfileForStorage(profile.assistant) : undefined,
+        writer: publicRoleProfileForStorage(writerProfile),
+        highParam: publicRoleProfileForStorage(rigorProfile),
+      };
+      return [profileKey, stripSecretLikeStorageFields(publicProfile)];
+    })
+  );
+}
+
+function hasOwnSetting(settings = {}, key) {
+  return Object.prototype.hasOwnProperty.call(settings, key);
+}
+
 function normalizeSelectedProfile(selectedProfile) {
   if (selectedProfile === undefined || selectedProfile === null) {
     return DEFAULT_AUTONOMOUS_SETTINGS.selectedProfile;
@@ -386,6 +599,19 @@ function normalizeSelectedProfile(selectedProfile) {
   return selectedProfile;
 }
 
+function mirrorCritiqueFromRigor(localConfig = {}) {
+  return {
+    critique_submitter_provider: localConfig.high_param_provider,
+    critique_submitter_model: localConfig.high_param_model,
+    critique_submitter_openrouter_provider: localConfig.high_param_openrouter_provider,
+    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
+    critique_submitter_lm_studio_fallback: localConfig.high_param_lm_studio_fallback,
+    critique_submitter_context_window: localConfig.high_param_context_window,
+    critique_submitter_max_tokens: localConfig.high_param_max_tokens,
+    critique_submitter_supercharge_enabled: Boolean(localConfig.high_param_supercharge_enabled),
+  };
+}
+
 function normalizeStoredSettings(settings = {}) {
   const submitterConfigs = Array.isArray(settings.submitterConfigs) && settings.submitterConfigs.length > 0
     ? settings.submitterConfigs.map((cfg, index) => ({
@@ -396,18 +622,48 @@ function normalizeStoredSettings(settings = {}) {
       }))
     : DEFAULT_AUTONOMOUS_SETTINGS.submitterConfigs;
 
+  const inputLocalConfig = settings.localConfig || {};
+  const migratedWriterLocalConfig = {
+    writer_provider: readWriterLocal(inputLocalConfig, 'provider'),
+    writer_model: readWriterLocal(inputLocalConfig, 'model'),
+    writer_openrouter_provider: readWriterLocal(inputLocalConfig, 'openrouter_provider'),
+    writer_openrouter_reasoning_effort: readWriterLocal(inputLocalConfig, 'openrouter_reasoning_effort'),
+    writer_lm_studio_fallback: readWriterLocal(inputLocalConfig, 'lm_studio_fallback'),
+    writer_context_window: readWriterLocal(inputLocalConfig, 'context_window'),
+    writer_max_tokens: readWriterLocal(inputLocalConfig, 'max_tokens'),
+    writer_supercharge_enabled: readWriterLocal(inputLocalConfig, 'supercharge_enabled'),
+  };
+  const baseLocalConfig = {
+    ...DEFAULT_LOCAL_CONFIG,
+    ...inputLocalConfig,
+    ...Object.fromEntries(
+      Object.entries(migratedWriterLocalConfig).filter(([, value]) => value !== undefined)
+    ),
+    validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(inputLocalConfig.validator_openrouter_reasoning_effort),
+    assistant_provider: inputLocalConfig.assistant_provider || inputLocalConfig.validator_provider || DEFAULT_LOCAL_CONFIG.assistant_provider,
+    assistant_model: inputLocalConfig.assistant_model || inputLocalConfig.validator_model || DEFAULT_LOCAL_CONFIG.assistant_model,
+    assistant_openrouter_provider: inputLocalConfig.assistant_openrouter_provider ?? inputLocalConfig.validator_openrouter_provider ?? DEFAULT_LOCAL_CONFIG.assistant_openrouter_provider,
+    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(inputLocalConfig.assistant_openrouter_reasoning_effort || inputLocalConfig.validator_openrouter_reasoning_effort),
+    assistant_lm_studio_fallback: inputLocalConfig.assistant_lm_studio_fallback ?? inputLocalConfig.validator_lm_studio_fallback ?? DEFAULT_LOCAL_CONFIG.assistant_lm_studio_fallback,
+    assistant_context_window: inputLocalConfig.assistant_context_window || inputLocalConfig.validator_context_window || DEFAULT_LOCAL_CONFIG.assistant_context_window,
+    assistant_max_tokens: inputLocalConfig.assistant_max_tokens || inputLocalConfig.validator_max_tokens || DEFAULT_LOCAL_CONFIG.assistant_max_tokens,
+    assistant_supercharge_enabled: inputLocalConfig.assistant_model
+      ? Boolean(inputLocalConfig.assistant_supercharge_enabled)
+      : Boolean(inputLocalConfig.validator_supercharge_enabled ?? DEFAULT_LOCAL_CONFIG.assistant_supercharge_enabled),
+    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(
+      migratedWriterLocalConfig.writer_openrouter_reasoning_effort
+    ),
+    high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(inputLocalConfig.high_param_openrouter_reasoning_effort),
+  };
+
   return {
     ...DEFAULT_AUTONOMOUS_SETTINGS,
     ...settings,
     numSubmitters: settings.numSubmitters || submitterConfigs.length || DEFAULT_AUTONOMOUS_SETTINGS.numSubmitters,
     submitterConfigs,
     localConfig: {
-      ...DEFAULT_LOCAL_CONFIG,
-      ...(settings.localConfig || {}),
-      validator_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(settings.localConfig?.validator_openrouter_reasoning_effort),
-      high_context_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(settings.localConfig?.high_context_openrouter_reasoning_effort),
-      high_param_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(settings.localConfig?.high_param_openrouter_reasoning_effort),
-      critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(settings.localConfig?.critique_submitter_openrouter_reasoning_effort),
+      ...baseLocalConfig,
+      ...mirrorCritiqueFromRigor(baseLocalConfig),
     },
     freeOnly: settings.freeOnly ?? DEFAULT_AUTONOMOUS_SETTINGS.freeOnly,
     freeModelLooping: settings.freeModelLooping ?? DEFAULT_AUTONOMOUS_SETTINGS.freeModelLooping,
@@ -436,9 +692,28 @@ export function getStoredAutonomousSettings() {
 }
 
 export function persistAutonomousSettings(settings) {
-  const normalized = normalizeStoredSettings(settings);
-  localStorage.setItem(AUTONOMOUS_SETTINGS_STORAGE_KEY, JSON.stringify(normalized));
+  const inputSettings = settings || {};
+  const existingSettings = getStoredAutonomousSettings();
+  const normalized = normalizeStoredSettings({
+    ...inputSettings,
+    allowMathematicalProofs: hasOwnSetting(inputSettings, 'allowMathematicalProofs')
+      ? inputSettings.allowMathematicalProofs
+      : existingSettings.allowMathematicalProofs,
+    allowResearchPapers: hasOwnSetting(inputSettings, 'allowResearchPapers')
+      ? inputSettings.allowResearchPapers
+      : existingSettings.allowResearchPapers,
+    creativityEmphasisBoostEnabled: hasOwnSetting(inputSettings, 'creativityEmphasisBoostEnabled')
+      ? inputSettings.creativityEmphasisBoostEnabled
+      : existingSettings.creativityEmphasisBoostEnabled,
+  });
+  localStorage.setItem(AUTONOMOUS_SETTINGS_STORAGE_KEY, JSON.stringify(publicAutonomousSettingsForStorage(normalized)));
   return normalized;
+}
+
+export function persistAutonomousProfiles(profiles) {
+  const publicProfiles = publicAutonomousProfilesForStorage(profiles);
+  localStorage.setItem(AUTONOMOUS_PROFILES_STORAGE_KEY, JSON.stringify(publicProfiles));
+  return publicProfiles;
 }
 
 export function settingsToAutonomousConfig(settings) {
@@ -460,14 +735,22 @@ export function settingsToAutonomousConfig(settings) {
     validator_context_window: localConfig.validator_context_window,
     validator_max_tokens: localConfig.validator_max_tokens,
     validator_supercharge_enabled: Boolean(localConfig.validator_supercharge_enabled),
-    high_context_provider: localConfig.high_context_provider,
-    high_context_model: localConfig.high_context_model,
-    high_context_openrouter_provider: localConfig.high_context_openrouter_provider,
-    high_context_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_context_openrouter_reasoning_effort),
-    high_context_lm_studio_fallback: localConfig.high_context_lm_studio_fallback,
-    high_context_context_window: localConfig.high_context_context_window,
-    high_context_max_tokens: localConfig.high_context_max_tokens,
-    high_context_supercharge_enabled: Boolean(localConfig.high_context_supercharge_enabled),
+    assistant_provider: localConfig.assistant_provider || localConfig.validator_provider,
+    assistant_model: localConfig.assistant_model || localConfig.validator_model,
+    assistant_openrouter_provider: localConfig.assistant_openrouter_provider ?? localConfig.validator_openrouter_provider,
+    assistant_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort || localConfig.validator_openrouter_reasoning_effort),
+    assistant_lm_studio_fallback: localConfig.assistant_lm_studio_fallback ?? localConfig.validator_lm_studio_fallback,
+    assistant_context_window: localConfig.assistant_context_window || localConfig.validator_context_window,
+    assistant_max_tokens: localConfig.assistant_max_tokens || localConfig.validator_max_tokens,
+    assistant_supercharge_enabled: Boolean(localConfig.assistant_supercharge_enabled),
+    writer_provider: localConfig.writer_provider,
+    writer_model: localConfig.writer_model,
+    writer_openrouter_provider: localConfig.writer_openrouter_provider,
+    writer_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort),
+    writer_lm_studio_fallback: localConfig.writer_lm_studio_fallback,
+    writer_context_window: localConfig.writer_context_window,
+    writer_max_tokens: localConfig.writer_max_tokens,
+    writer_supercharge_enabled: Boolean(localConfig.writer_supercharge_enabled),
     high_param_provider: localConfig.high_param_provider,
     high_param_model: localConfig.high_param_model,
     high_param_openrouter_provider: localConfig.high_param_openrouter_provider,
@@ -476,14 +759,14 @@ export function settingsToAutonomousConfig(settings) {
     high_param_context_window: localConfig.high_param_context_window,
     high_param_max_tokens: localConfig.high_param_max_tokens,
     high_param_supercharge_enabled: Boolean(localConfig.high_param_supercharge_enabled),
-    critique_submitter_provider: localConfig.critique_submitter_provider,
-    critique_submitter_model: localConfig.critique_submitter_model,
-    critique_submitter_openrouter_provider: localConfig.critique_submitter_openrouter_provider,
-    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.critique_submitter_openrouter_reasoning_effort),
-    critique_submitter_lm_studio_fallback: localConfig.critique_submitter_lm_studio_fallback,
-    critique_submitter_context_window: localConfig.critique_submitter_context_window,
-    critique_submitter_max_tokens: localConfig.critique_submitter_max_tokens,
-    critique_submitter_supercharge_enabled: Boolean(localConfig.critique_submitter_supercharge_enabled),
+    critique_submitter_provider: localConfig.high_param_provider,
+    critique_submitter_model: localConfig.high_param_model,
+    critique_submitter_openrouter_provider: localConfig.high_param_openrouter_provider,
+    critique_submitter_openrouter_reasoning_effort: normalizeOpenRouterReasoningEffort(localConfig.high_param_openrouter_reasoning_effort),
+    critique_submitter_lm_studio_fallback: localConfig.high_param_lm_studio_fallback,
+    critique_submitter_context_window: localConfig.high_param_context_window,
+    critique_submitter_max_tokens: localConfig.high_param_max_tokens,
+    critique_submitter_supercharge_enabled: Boolean(localConfig.high_param_supercharge_enabled),
     allow_mathematical_proofs: Boolean(normalized.allowMathematicalProofs),
     allow_research_papers: Boolean(normalized.allowResearchPapers),
     tier3_enabled: normalized.tier3Enabled ?? false,
@@ -494,39 +777,37 @@ function buildLocalConfigFromLmStudio(modelId = '') {
   return {
     ...DEFAULT_LM_LOCAL_CONFIG,
     validator_model: modelId,
-    high_context_model: modelId,
+    assistant_model: modelId,
+    writer_model: modelId,
     high_param_model: modelId,
-    critique_submitter_model: modelId,
   };
 }
 
-function chooseCodexStartupModel(models = []) {
-  const availableModels = Array.isArray(models) ? models.filter((model) => model?.id) : [];
-  for (const preferredId of CODEX_STARTUP_MODEL_PREFERENCE) {
-    const match = availableModels.find((model) => model.id === preferredId);
-    if (match) return match;
+function choosePublicStartupModel(availableModels = [], publicModels = []) {
+  const modelList = Array.isArray(availableModels) ? availableModels : [];
+  for (const publicModel of publicModels) {
+    if (modelList.some((model) => model?.id === publicModel.id)) {
+      return publicModel;
+    }
   }
-  return availableModels[0] || DEFAULT_CODEX_STARTUP_MODEL;
+  return publicModels[0];
 }
 
 function chooseCloudAccessStartupModel(providerId = OPENAI_CODEX_STARTUP_CHOICE, models = []) {
-  if (providerId === XAI_GROK_STARTUP_CHOICE) {
-    const availableModels = Array.isArray(models) ? models.filter((model) => model?.id) : [];
-    for (const preferredId of XAI_GROK_STARTUP_MODEL_PREFERENCE) {
-      const match = availableModels.find((model) => model.id === preferredId);
-      if (match) return match;
-    }
-    return availableModels[0] || DEFAULT_XAI_GROK_STARTUP_MODEL;
-  }
-  return chooseCodexStartupModel(models);
+  // Use live OAuth model lists only as availability signals. Persisted defaults
+  // are reconstructed from public constants so account-scoped response objects
+  // never flow into localStorage.
+  return providerId === XAI_GROK_STARTUP_CHOICE
+    ? choosePublicStartupModel(models, PUBLIC_XAI_GROK_STARTUP_MODELS)
+    : choosePublicStartupModel(models, PUBLIC_CODEX_STARTUP_MODELS);
 }
 
-function buildCloudAccessRoleDefaults(providerId = OPENAI_CODEX_STARTUP_CHOICE, model = DEFAULT_CODEX_STARTUP_MODEL) {
+function buildStartupRoleDefaults(providerId = OPENAI_CODEX_STARTUP_CHOICE, model = DEFAULT_CODEX_STARTUP_MODEL) {
   const autoSettings = providerId === OPENAI_CODEX_STARTUP_CHOICE
     ? computeCodexAutoSettings(model)
     : providerId === XAI_GROK_STARTUP_CHOICE
       ? computeXAIGrokAutoSettings(model)
-      : computeCloudAccessAutoSettings(model, 'Cloud Access');
+      : computeCloudAccessAutoSettings(model, 'OpenRouter/OAuth');
   return {
     provider: providerId,
     modelId: model.id || (providerId === XAI_GROK_STARTUP_CHOICE ? DEFAULT_XAI_GROK_STARTUP_MODEL.id : DEFAULT_CODEX_STARTUP_MODEL.id),
@@ -539,12 +820,7 @@ function buildCloudAccessRoleDefaults(providerId = OPENAI_CODEX_STARTUP_CHOICE, 
   };
 }
 
-function buildCodexRoleDefaults(model = DEFAULT_CODEX_STARTUP_MODEL) {
-  return buildCloudAccessRoleDefaults(OPENAI_CODEX_STARTUP_CHOICE, model);
-}
-
-function buildLocalConfigFromCloudAccess(providerId = OPENAI_CODEX_STARTUP_CHOICE, model = DEFAULT_CODEX_STARTUP_MODEL) {
-  const roleDefaults = buildCloudAccessRoleDefaults(providerId, model);
+function buildStartupLocalConfig(roleDefaults = buildStartupRoleDefaults()) {
   return {
     validator_provider: roleDefaults.provider,
     validator_model: roleDefaults.modelId,
@@ -554,14 +830,22 @@ function buildLocalConfigFromCloudAccess(providerId = OPENAI_CODEX_STARTUP_CHOIC
     validator_context_window: roleDefaults.contextWindow,
     validator_max_tokens: roleDefaults.maxOutputTokens,
     validator_supercharge_enabled: false,
-    high_context_provider: roleDefaults.provider,
-    high_context_model: roleDefaults.modelId,
-    high_context_openrouter_provider: null,
-    high_context_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-    high_context_lm_studio_fallback: null,
-    high_context_context_window: roleDefaults.contextWindow,
-    high_context_max_tokens: roleDefaults.maxOutputTokens,
-    high_context_supercharge_enabled: false,
+    assistant_provider: roleDefaults.provider,
+    assistant_model: roleDefaults.modelId,
+    assistant_openrouter_provider: null,
+    assistant_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    assistant_lm_studio_fallback: null,
+    assistant_context_window: roleDefaults.contextWindow,
+    assistant_max_tokens: roleDefaults.maxOutputTokens,
+    assistant_supercharge_enabled: false,
+    writer_provider: roleDefaults.provider,
+    writer_model: roleDefaults.modelId,
+    writer_openrouter_provider: null,
+    writer_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    writer_lm_studio_fallback: null,
+    writer_context_window: roleDefaults.contextWindow,
+    writer_max_tokens: roleDefaults.maxOutputTokens,
+    writer_supercharge_enabled: false,
     high_param_provider: roleDefaults.provider,
     high_param_model: roleDefaults.modelId,
     high_param_openrouter_provider: null,
@@ -570,19 +854,7 @@ function buildLocalConfigFromCloudAccess(providerId = OPENAI_CODEX_STARTUP_CHOIC
     high_param_context_window: roleDefaults.contextWindow,
     high_param_max_tokens: roleDefaults.maxOutputTokens,
     high_param_supercharge_enabled: false,
-    critique_submitter_provider: roleDefaults.provider,
-    critique_submitter_model: roleDefaults.modelId,
-    critique_submitter_openrouter_provider: null,
-    critique_submitter_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-    critique_submitter_lm_studio_fallback: null,
-    critique_submitter_context_window: roleDefaults.contextWindow,
-    critique_submitter_max_tokens: roleDefaults.maxOutputTokens,
-    critique_submitter_supercharge_enabled: false,
   };
-}
-
-function buildLocalConfigFromCodex(model = DEFAULT_CODEX_STARTUP_MODEL) {
-  return buildLocalConfigFromCloudAccess(OPENAI_CODEX_STARTUP_CHOICE, model);
 }
 
 export function applyLmStudioStartupDefaults(modelId = '') {
@@ -610,7 +882,7 @@ export function applyCodexStartupDefaults(models = []) {
 
 export function applyCloudAccessStartupDefaults(providerId = OPENAI_CODEX_STARTUP_CHOICE, models = []) {
   const selectedModel = chooseCloudAccessStartupModel(providerId, models);
-  const roleDefaults = buildCloudAccessRoleDefaults(providerId, selectedModel);
+  const roleDefaults = buildStartupRoleDefaults(providerId, selectedModel);
   const submitterConfigs = [1, 2, 3].map((submitterId) => ({
     ...roleDefaults,
     submitterId,
@@ -622,7 +894,7 @@ export function applyCloudAccessStartupDefaults(providerId = OPENAI_CODEX_STARTU
     submitterConfigs,
     localConfig: {
       ...currentSettings.localConfig,
-      ...buildLocalConfigFromCloudAccess(providerId, selectedModel),
+      ...buildStartupLocalConfig(roleDefaults),
     },
     selectedProfile: '',
   });
@@ -673,6 +945,8 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
 
   const getOpenRouterProvider = (roleProfile = {}) => roleProfile.openrouterProvider || null;
   const getOpenRouterReasoningEffort = (roleProfile = {}) => normalizeOpenRouterReasoningEffort(roleProfile.openrouterReasoningEffort);
+  const writerProfile = normalizeProfileWriter(profile);
+  const rigorProfile = normalizeProfileRigor(profile);
 
   const currentSettings = getStoredAutonomousSettings();
   const nextSettings = persistAutonomousSettings({
@@ -689,30 +963,38 @@ export async function applyAutonomousProfileSelection(profileKey, userProfiles =
       validator_context_window: profile.validator.contextWindow,
       validator_max_tokens: profile.validator.maxOutputTokens,
       validator_supercharge_enabled: Boolean(profile.validator.superchargeEnabled),
-      high_context_provider: isRecommended ? 'openrouter' : (profile.highContext.provider || 'openrouter'),
-      high_context_model: getModelId(profile.highContext),
-      high_context_openrouter_provider: getOpenRouterProvider(profile.highContext),
-      high_context_openrouter_reasoning_effort: getOpenRouterReasoningEffort(profile.highContext),
-      high_context_lm_studio_fallback: isRecommended ? null : (profile.highContext.lmStudioFallbackId || null),
-      high_context_context_window: profile.highContext.contextWindow,
-      high_context_max_tokens: profile.highContext.maxOutputTokens,
-      high_context_supercharge_enabled: Boolean(profile.highContext.superchargeEnabled),
-      high_param_provider: isRecommended ? 'openrouter' : (profile.highParam.provider || 'openrouter'),
-      high_param_model: getModelId(profile.highParam),
-      high_param_openrouter_provider: getOpenRouterProvider(profile.highParam),
-      high_param_openrouter_reasoning_effort: getOpenRouterReasoningEffort(profile.highParam),
-      high_param_lm_studio_fallback: isRecommended ? null : (profile.highParam.lmStudioFallbackId || null),
-      high_param_context_window: profile.highParam.contextWindow,
-      high_param_max_tokens: profile.highParam.maxOutputTokens,
-      high_param_supercharge_enabled: Boolean(profile.highParam.superchargeEnabled),
-      critique_submitter_provider: isRecommended ? 'openrouter' : (profile.critique.provider || 'openrouter'),
-      critique_submitter_model: getModelId(profile.critique),
-      critique_submitter_openrouter_provider: getOpenRouterProvider(profile.critique),
-      critique_submitter_openrouter_reasoning_effort: getOpenRouterReasoningEffort(profile.critique),
-      critique_submitter_lm_studio_fallback: isRecommended ? null : (profile.critique.lmStudioFallbackId || null),
-      critique_submitter_context_window: profile.critique.contextWindow,
-      critique_submitter_max_tokens: profile.critique.maxOutputTokens,
-      critique_submitter_supercharge_enabled: Boolean(profile.critique.superchargeEnabled),
+      assistant_provider: isRecommended ? 'openrouter' : (profile.assistant?.provider || profile.validator.provider || 'openrouter'),
+      assistant_model: getModelId(profile.assistant || profile.validator),
+      assistant_openrouter_provider: getOpenRouterProvider(profile.assistant || profile.validator),
+      assistant_openrouter_reasoning_effort: getOpenRouterReasoningEffort(profile.assistant || profile.validator),
+      assistant_lm_studio_fallback: isRecommended ? null : ((profile.assistant || profile.validator).lmStudioFallbackId || null),
+      assistant_context_window: (profile.assistant || profile.validator).contextWindow,
+      assistant_max_tokens: (profile.assistant || profile.validator).maxOutputTokens,
+      assistant_supercharge_enabled: Boolean((profile.assistant || profile.validator).superchargeEnabled),
+      writer_provider: isRecommended ? 'openrouter' : (writerProfile.provider || 'openrouter'),
+      writer_model: getModelId(writerProfile),
+      writer_openrouter_provider: getOpenRouterProvider(writerProfile),
+      writer_openrouter_reasoning_effort: getOpenRouterReasoningEffort(writerProfile),
+      writer_lm_studio_fallback: isRecommended ? null : (writerProfile.lmStudioFallbackId || null),
+      writer_context_window: writerProfile.contextWindow,
+      writer_max_tokens: writerProfile.maxOutputTokens,
+      writer_supercharge_enabled: Boolean(writerProfile.superchargeEnabled),
+      high_param_provider: isRecommended ? 'openrouter' : (rigorProfile.provider || 'openrouter'),
+      high_param_model: getModelId(rigorProfile),
+      high_param_openrouter_provider: getOpenRouterProvider(rigorProfile),
+      high_param_openrouter_reasoning_effort: getOpenRouterReasoningEffort(rigorProfile),
+      high_param_lm_studio_fallback: isRecommended ? null : (rigorProfile.lmStudioFallbackId || null),
+      high_param_context_window: rigorProfile.contextWindow,
+      high_param_max_tokens: rigorProfile.maxOutputTokens,
+      high_param_supercharge_enabled: Boolean(rigorProfile.superchargeEnabled),
+      critique_submitter_provider: isRecommended ? 'openrouter' : (rigorProfile.provider || 'openrouter'),
+      critique_submitter_model: getModelId(rigorProfile),
+      critique_submitter_openrouter_provider: getOpenRouterProvider(rigorProfile),
+      critique_submitter_openrouter_reasoning_effort: getOpenRouterReasoningEffort(rigorProfile),
+      critique_submitter_lm_studio_fallback: isRecommended ? null : (rigorProfile.lmStudioFallbackId || null),
+      critique_submitter_context_window: rigorProfile.contextWindow,
+      critique_submitter_max_tokens: rigorProfile.maxOutputTokens,
+      critique_submitter_supercharge_enabled: Boolean(rigorProfile.superchargeEnabled),
     },
     selectedProfile: profileKey,
   });

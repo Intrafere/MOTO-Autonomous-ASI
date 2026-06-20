@@ -15,6 +15,7 @@ from backend.leanoj.prompts import (
 from backend.shared.boost_manager import BoostManager
 from backend.shared.config import system_config
 from backend.shared.models import DocumentChunk, LeanOJRoleConfig, LeanOJStartRequest, ProofRecord
+from backend.shared.proof_search.assistant_models import AssistantProofPack, AssistantProofSupport
 
 
 def _role() -> LeanOJRoleConfig:
@@ -100,6 +101,88 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("You must choose exactly one action: edit_proof.", prompt)
         self.assertIn(LEANOJ_FORMALIZATION_GUARDRAILS, prompt)
         self.assertIn("truncated natural subtraction", prompt)
+
+    def test_final_solver_prompt_includes_proof_search_context_block(self) -> None:
+        prompt = build_final_solver_prompt(
+            "Prove one equals one.",
+            "import Mathlib\n\nexample : 1 = 1 := by\n  sorry",
+            "import Mathlib\n\nexample : 1 = 1 := by\n  sorry",
+            {"version": 1},
+            accepted_ideas=[],
+            verified_subproofs=[],
+            partial_proofs=[],
+            failed_feedback=[],
+            final_attempts=[],
+            context_blocks={
+                "proof_search_context": (
+                    "Result 1\n"
+                    "Source: syntheticlib4 stable\n"
+                    "Theorem: searched_helper\n"
+                    "Lean code hash: code_hash"
+                )
+            },
+        )
+
+        self.assertIn("SYNTHETIC / LOCAL VERIFIED PROOF SEARCH RESULTS", prompt)
+        self.assertIn("searched_helper", prompt)
+
+    async def test_final_solver_proof_search_context_uses_metadata_only_results(self) -> None:
+        request = _request()
+        coordinator = await self._initialized_coordinator()
+        captured = {}
+
+        class FakeAssistantCoordinator:
+            def submit_target(self, snapshot):
+                captured["snapshot"] = snapshot
+                return "target_hash"
+
+            def get_latest_pack(self, target_hash=None):
+                captured["target_hash"] = target_hash
+                return AssistantProofPack(
+                    workflow_mode="leanoj",
+                    target_kind="final_solver",
+                    target_hash="target_hash",
+                    query_summary="LeanOJ final solver",
+                    results=[
+                        AssistantProofSupport(
+                            search_id="syntheticlib4:sl4_mock_fp_001",
+                            corpus="syntheticlib4",
+                            corpus_scope="stable",
+                            source_kind="verified_proof",
+                            proof_id="sl4_mock_fp_001",
+                            fingerprint="sl4_mock_fp_001",
+                            theorem_name="SyntheticLib4.Test.helper",
+                            theorem_statement="theorem helper : True",
+                            proof_description="A helper proof pattern.",
+                            imports=["Mathlib"],
+                            dependency_names=["True.intro"],
+                            theorem_statement_hash="stmt_hash",
+                            lean_code_hash="code_hash",
+                            canonical_uri="syntheticlib4://stable/sl4_mock_fp_001",
+                            lean_code="theorem helper : True := by\n  trivial",
+                        )
+                    ],
+                )
+
+        original_assistant = leanoj_module.assistant_proof_search_coordinator
+        try:
+            leanoj_module.assistant_proof_search_coordinator = FakeAssistantCoordinator()
+            coordinator._read_master_proof = (  # type: ignore[method-assign]
+                lambda: asyncio.sleep(0, result="import Mathlib\n\nexample : True := by\n  sorry")
+            )
+            context = await coordinator._build_final_solver_proof_search_context(
+                request=request,
+                task_request="Edit the master proof.",
+            )
+        finally:
+            leanoj_module.assistant_proof_search_coordinator = original_assistant
+
+        self.assertEqual(captured["target_hash"], "target_hash")
+        self.assertEqual(captured["snapshot"].workflow_mode, "leanoj")
+        self.assertEqual(captured["snapshot"].target_kind, "final_solver")
+        self.assertIn("SyntheticLib4.Test.helper", context)
+        self.assertIn("syntheticlib4://stable/sl4_mock_fp_001", context)
+        self.assertNotIn("theorem helper : True := by", context)
 
     def test_final_review_prompt_requires_semantic_cross_check(self) -> None:
         prompt = build_final_solution_review_prompt(

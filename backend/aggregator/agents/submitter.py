@@ -17,7 +17,7 @@ from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verif
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
-from backend.aggregator.core.context_allocator import context_allocator
+from backend.aggregator.core.context_allocator import ContextAllocationError, context_allocator
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.local_training import LocalTrainingMemory
@@ -50,6 +50,7 @@ class SubmitterAgent:
         local_rejection_log_dir: Optional[Any] = None,
         local_rejection_log_template: Optional[str] = None,
         reset_local_rejection_log_on_initialize: bool = False,
+        assistant_workflow_mode_override: Optional[str] = None,
     ):
         self.submitter_id = submitter_id
         self.model_name = model_name
@@ -62,6 +63,7 @@ class SubmitterAgent:
         self.websocket_broadcaster = websocket_broadcaster
         self.coordinator = coordinator
         self.creativity_emphasis_boost_enabled = creativity_emphasis_boost_enabled
+        self.assistant_workflow_mode_override = assistant_workflow_mode_override
         
         # Per-submitter context settings (fall back to global config if not provided)
         self.context_window = context_window if context_window is not None else rag_config.submitter_context_window
@@ -188,6 +190,14 @@ class SubmitterAgent:
                 # All free models exhausted after retries - wait briefly and retry
                 logger.warning(f"Submitter {self.submitter_id}: all free models exhausted: {e}")
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+            except ContextAllocationError as e:
+                logger.error("Submitter %s context overflow: %s", self.submitter_id, e)
+                if self.coordinator and hasattr(self.coordinator, "_handle_context_overflow"):
+                    await self.coordinator._handle_context_overflow(e, role_id=self.role_id)
+                else:
+                    self.is_running = False
+                    self.state.is_active = False
+                break
             except Exception as e:
                 logger.error(f"Submitter {self.submitter_id} error on iteration {iteration}: {e}", exc_info=True)
                 await asyncio.sleep(5)
@@ -240,6 +250,14 @@ class SubmitterAgent:
                 lean4_enabled=system_config.lean4_enabled,
             )
             
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+                workflow_mode_override=self.assistant_workflow_mode_override,
+            )
+
             # CRITICAL: Verify actual prompt size fits in context window
             from backend.shared.utils import count_tokens
             actual_prompt_tokens = count_tokens(prompt)
@@ -279,11 +297,17 @@ class SubmitterAgent:
                 actual_prompt_tokens = count_tokens(prompt)
             
             if actual_prompt_tokens > max_allowed_tokens:
-                logger.error(
-                    f"Submitter {self.submitter_id}: Assembled prompt ({actual_prompt_tokens} tokens) exceeds context window "
-                    f"({max_allowed_tokens} tokens after safety margin). This indicates a context allocation bug."
+                raise ContextAllocationError(
+                    f"Submitter {self.submitter_id} context overflow: mandatory direct context requires "
+                    f"{actual_prompt_tokens:,} tokens, but the submitter can only accept {max_allowed_tokens:,} "
+                    f"input tokens (context window: {self.context_window:,}, output reserve: {self.max_output_tokens:,}). "
+                    "This prompt must be direct-injected. Please condense into a new prompt and restart, "
+                    "or select a submitter model with a larger context window.",
+                    required_tokens=actual_prompt_tokens,
+                    available_tokens=max_allowed_tokens,
+                    context_window=self.context_window,
+                    output_reserve=self.max_output_tokens,
                 )
-                return None  # Skip this submission
             
             logger.debug(f"Submitter {self.submitter_id} prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
@@ -297,8 +321,6 @@ class SubmitterAgent:
             else:
                 logger.debug(f"Submitter {self.submitter_id}: All content direct-injected, no RAG context used")
             
-            # Generate task ID for tracking
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -319,7 +341,8 @@ class SubmitterAgent:
                         model=self.model_name,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=self._generation_temperature(),
-                        max_tokens=self.max_output_tokens  # Per-submitter max output tokens
+                        max_tokens=self.max_output_tokens,  # Per-submitter max output tokens
+                        _moto_assistant_workflow_mode=self.assistant_workflow_mode_override,
                     )
                     call_metadata = api_client_manager.extract_call_metadata(response)
                     break  # Success
@@ -341,6 +364,20 @@ class SubmitterAgent:
                         logger.error(
                             f"Submitter {self.submitter_id}: Failed to generate completion after {attempt + 1} attempts: {e}"
                         )
+                        if "context" in error_msg.lower():
+                            raise ContextAllocationError(
+                                f"Submitter {self.submitter_id} context overflow or provider context mismatch: "
+                                f"the assembled prompt requires {actual_prompt_tokens:,} tokens and the configured "
+                                f"input budget is {max_allowed_tokens:,} tokens (context window: {self.context_window:,}, "
+                                f"output reserve: {self.max_output_tokens:,}). The provider still rejected the request "
+                                "as too large, so the loaded/provider context is smaller than configured. Please condense "
+                                "into a new prompt and restart, select a larger-context model, or reload the local model "
+                                "with the configured context window.",
+                                required_tokens=actual_prompt_tokens,
+                                available_tokens=max_allowed_tokens,
+                                context_window=self.context_window,
+                                output_reserve=self.max_output_tokens,
+                            ) from e
                         # Notify task completed (failed but still completed)
                         if self.task_tracking_callback:
                             self.task_tracking_callback("completed", task_id)
@@ -720,6 +757,8 @@ class SubmitterAgent:
             
             return submission
             
+        except ContextAllocationError:
+            raise
         except Exception as e:
             logger.error(f"Submitter {self.submitter_id} failed to generate submission: {e}")
             return None

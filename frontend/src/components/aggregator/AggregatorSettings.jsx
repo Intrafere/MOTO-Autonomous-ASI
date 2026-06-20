@@ -9,6 +9,8 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
+  formatOpenRouterProviderLabel,
+  getOpenRouterProviderTitle,
   getProviderNames,
   getReasoningSupportInfo,
   hasEndpointMetadata,
@@ -110,7 +112,7 @@ function AggregatorModelSelector({
               }}
               disabled={configuredOAuthProviders.length === 0}
               className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
-              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
+              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in OpenRouter/OAuth first' : 'Use an OAuth subscription provider'}
             >
               oAuth
             </button>
@@ -166,12 +168,16 @@ function AggregatorModelSelector({
         <div className="settings-row">
           <label>Host Provider (optional)</label>
           <select
+            className="openrouter-host-provider-select"
             value={orProvider || ''}
             onChange={(e) => onOpenrouterProviderChange(e.target.value || null)}
+            title={getOpenRouterProviderTitle(orProvider)}
           >
             <option value="">Auto (let OpenRouter choose)</option>
             {providers.map(p => (
-              <option key={p} value={p}>{p}</option>
+              <option key={p} value={p} title={getOpenRouterProviderTitle(p)}>
+                {formatOpenRouterProviderLabel(p)}
+              </option>
             ))}
           </select>
         </div>
@@ -224,6 +230,7 @@ export default function AggregatorSettings({
   config,
   setConfig,
   capabilities,
+  connectivityStatus,
   developerModeEnabled = false,
 }) {
   const [lmStudioModels, setLmStudioModels] = useState([]);
@@ -268,6 +275,10 @@ export default function AggregatorSettings({
   const [rawSettingsMessage, setRawSettingsMessage] = useState('');
   const [guiSettingsBeforeRaw, setGuiSettingsBeforeRaw] = useState(null);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const genericMode = Boolean(capabilities?.genericMode);
+  const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
+  const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
+  const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
   const oauthStatusByProvider = {
     openai_codex_oauth: { configured: hasOpenAICodexLogin },
     [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
@@ -337,21 +348,37 @@ export default function AggregatorSettings({
     if (validatorProvider === 'openrouter' && config.validatorModel) {
       fetchProvidersForModel(config.validatorModel);
     }
-  }, [isLoaded, hasOpenRouterKey, submitterConfigs, validatorProvider, config.validatorModel]);
+    const assistantProvider = config.assistantProvider || validatorProvider;
+    const assistantModel = config.assistantModel || config.validatorModel;
+    if (assistantProvider === 'openrouter' && assistantModel) {
+      fetchProvidersForModel(assistantModel);
+    }
+  }, [isLoaded, hasOpenRouterKey, submitterConfigs, validatorProvider, config.validatorModel, config.assistantProvider, config.assistantModel]);
 
   // Save settings to localStorage whenever values change
   useEffect(() => {
     if (!isLoaded) return;
     
     const settings = {
+      userPrompt: config.userPrompt || '',
       numSubmitters,
       submitterConfigs,
+      validatorModel: config.validatorModel || '',
       validatorProvider,
       validatorOpenrouterProvider,
       validatorOpenrouterReasoningEffort,
       validatorLmStudioFallback,
       validatorSuperchargeEnabled,
+      validatorContextSize: config.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
       validatorMaxOutput,
+      assistantModel: config.assistantModel || config.validatorModel || '',
+      assistantProvider: config.assistantProvider || validatorProvider,
+      assistantOpenrouterProvider: config.assistantOpenrouterProvider || null,
+      assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.assistantOpenrouterReasoningEffort || validatorOpenrouterReasoningEffort),
+      assistantLmStudioFallback: config.assistantLmStudioFallback || null,
+      assistantContextSize: config.assistantContextSize || config.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
+      assistantMaxOutput: config.assistantMaxOutput || validatorMaxOutput,
+      assistantSuperchargeEnabled: Boolean(config.assistantSuperchargeEnabled),
       freeOnly,
       freeModelLooping,
       freeModelAutoSelector,
@@ -359,7 +386,7 @@ export default function AggregatorSettings({
       creativityEmphasisBoostEnabled: config.creativityEmphasisBoostEnabled,
     };
     localStorage.setItem('aggregator_settings', JSON.stringify(settings));
-  }, [isLoaded, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback, validatorSuperchargeEnabled, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders, config.creativityEmphasisBoostEnabled]);
+  }, [isLoaded, config.userPrompt, config.validatorModel, config.validatorContextSize, config.assistantModel, config.assistantProvider, config.assistantOpenrouterProvider, config.assistantOpenrouterReasoningEffort, config.assistantLmStudioFallback, config.assistantContextSize, config.assistantMaxOutput, config.assistantSuperchargeEnabled, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback, validatorSuperchargeEnabled, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders, config.creativityEmphasisBoostEnabled]);
 
   useEffect(() => {
     if (lmStudioEnabled) {
@@ -403,6 +430,9 @@ export default function AggregatorSettings({
     }
 
     setConfig((prev) => {
+      const assistantProvider = prev.assistantProvider || validatorProvider;
+      const keepAssistantOpenRouterState = assistantProvider === 'openrouter';
+      const hasAssistantModelField = Object.prototype.hasOwnProperty.call(prev, 'assistantModel');
       const next = {
         ...prev,
         submitterConfigs: normalizedSubmitters,
@@ -413,6 +443,15 @@ export default function AggregatorSettings({
           : null,
         validatorOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(prev.validatorOpenrouterReasoningEffort),
         validatorLmStudioFallback: null,
+        assistantProvider: 'openrouter',
+        assistantModel: keepAssistantOpenRouterState
+          ? (hasAssistantModelField ? (prev.assistantModel || '') : (prev.validatorModel || ''))
+          : '',
+        assistantOpenrouterProvider: keepAssistantOpenRouterState
+          ? (prev.assistantOpenrouterProvider || null)
+          : null,
+        assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(prev.assistantOpenrouterReasoningEffort),
+        assistantLmStudioFallback: null,
       };
       return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
     });
@@ -422,6 +461,7 @@ export default function AggregatorSettings({
     validatorProvider,
     validatorOpenrouterProvider,
     validatorLmStudioFallback,
+    config.assistantProvider,
     setConfig,
   ]);
 
@@ -435,33 +475,45 @@ export default function AggregatorSettings({
     } catch (err) {
       console.error('Failed to check OpenRouter key status:', err);
     }
-    try {
-      const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
-      const configured = Boolean(codexStatus.status?.configured);
-      setHasOpenAICodexLogin(configured);
-      if (configured) {
-        fetchOpenAICodexModels();
-      } else {
-        setOpenAICodexModelError('');
+    if (openAICodexOauthAvailable) {
+      try {
+        const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+        const configured = Boolean(codexStatus.status?.configured);
+        setHasOpenAICodexLogin(configured);
+        if (configured) {
+          fetchOpenAICodexModels();
+        } else {
+          setOpenAICodexModelError('');
+        }
+      } catch (err) {
+        console.error('Failed to check OpenAI Codex login status:', err);
+        setHasOpenAICodexLogin(false);
+        setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
       }
-    } catch (err) {
-      console.error('Failed to check OpenAI Codex login status:', err);
+    } else {
       setHasOpenAICodexLogin(false);
-      setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+      setOpenAICodexModels([]);
+      setOpenAICodexModelError('');
     }
-    try {
-      const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
-      const configured = Boolean(xaiStatus.status?.configured);
-      setHasXAIGrokLogin(configured);
-      if (configured) {
-        fetchXAIGrokModels();
-      } else {
-        setXaiGrokModelError('');
+    if (xaiGrokOauthAvailable) {
+      try {
+        const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+        const configured = Boolean(xaiStatus.status?.configured);
+        setHasXAIGrokLogin(configured);
+        if (configured) {
+          fetchXAIGrokModels();
+        } else {
+          setXaiGrokModelError('');
+        }
+      } catch (err) {
+        console.error('Failed to check xAI Grok login status:', err);
+        setHasXAIGrokLogin(false);
+        setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
       }
-    } catch (err) {
-      console.error('Failed to check xAI Grok login status:', err);
+    } else {
       setHasXAIGrokLogin(false);
-      setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+      setXaiGrokModels([]);
+      setXaiGrokModelError('');
     }
   };
 
@@ -478,6 +530,12 @@ export default function AggregatorSettings({
   };
 
   const fetchOpenAICodexModels = async () => {
+    if (!openAICodexOauthAvailable) {
+      setOpenAICodexModels([]);
+      setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError('');
+      return;
+    }
     try {
       const result = await cloudAccessAPI.getOpenAICodexModels();
       const models = result.models || [];
@@ -496,6 +554,12 @@ export default function AggregatorSettings({
   };
 
   const fetchXAIGrokModels = async () => {
+    if (!xaiGrokOauthAvailable) {
+      setXaiGrokModels([]);
+      setHasXAIGrokLogin(false);
+      setXaiGrokModelError('');
+      return;
+    }
     try {
       const result = await cloudAccessAPI.getXAIGrokModels();
       const models = result.models || [];
@@ -875,6 +939,14 @@ export default function AggregatorSettings({
     validatorSuperchargeEnabled,
     validatorContextSize: config.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
     validatorMaxOutput,
+    assistantModel: config.assistantModel || config.validatorModel || '',
+    assistantProvider: config.assistantProvider || validatorProvider,
+    assistantOpenrouterProvider: config.assistantOpenrouterProvider || null,
+    assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(config.assistantOpenrouterReasoningEffort || validatorOpenrouterReasoningEffort),
+    assistantLmStudioFallback: config.assistantLmStudioFallback || null,
+    assistantContextSize: config.assistantContextSize || config.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
+    assistantMaxOutput: config.assistantMaxOutput || validatorMaxOutput,
+    assistantSuperchargeEnabled: Boolean(config.assistantSuperchargeEnabled),
     freeOnly,
     freeModelLooping,
     freeModelAutoSelector,
@@ -914,9 +986,10 @@ export default function AggregatorSettings({
       .setFreeModelSettings(rawSettings.freeModelLooping ?? true, rawSettings.freeModelAutoSelector ?? true)
       .catch(() => {});
 
+    const hasRawUserPrompt = Object.prototype.hasOwnProperty.call(rawSettings, 'userPrompt');
     const nextConfig = {
       ...config,
-      userPrompt: rawSettings.userPrompt || '',
+      userPrompt: hasRawUserPrompt ? (rawSettings.userPrompt || '') : (config.userPrompt || ''),
       submitterConfigs: nextSubmitters,
       validatorModel: rawSettings.validatorModel || '',
       validatorProvider: nextValidatorProvider,
@@ -926,6 +999,14 @@ export default function AggregatorSettings({
       validatorSuperchargeEnabled: nextValidatorSuperchargeEnabled,
       validatorContextSize: nextValidatorContextSize,
       validatorMaxOutput: nextValidatorMaxOutput,
+      assistantModel: rawSettings.assistantModel || rawSettings.validatorModel || '',
+      assistantProvider: rawSettings.assistantProvider || nextValidatorProvider,
+      assistantOpenrouterProvider: rawSettings.assistantOpenrouterProvider || null,
+      assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort),
+      assistantLmStudioFallback: rawSettings.assistantLmStudioFallback || null,
+      assistantContextSize: rawSettings.assistantContextSize || nextValidatorContextSize,
+      assistantMaxOutput: rawSettings.assistantMaxOutput || nextValidatorMaxOutput,
+      assistantSuperchargeEnabled: Boolean(rawSettings.assistantSuperchargeEnabled),
     };
     setConfig(nextConfig);
 
@@ -1293,6 +1374,130 @@ export default function AggregatorSettings({
                   </label>
                 </div>
               )}
+            </div>
+          </div>
+
+          <div className="settings-group">
+            <h4>Assistant</h4>
+            <p className="settings-info">
+              Runs in parallel during brainstorming and proof work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases never receive Assistant context.
+            </p>
+            <div
+              className={`submitter-config-section${(config.assistantProvider || validatorProvider) === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
+              aria-disabled={!assistantMemoryEnabled}
+              style={!assistantMemoryEnabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}
+            >
+              <h5 className={(config.assistantProvider || validatorProvider) === 'openrouter' ? 'card-title--orange' : ''}>
+                Assistant
+                {(config.assistantProvider || validatorProvider) === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
+              </h5>
+              {!assistantMemoryEnabled && (
+                <p className="settings-hint">
+                  Assistant requires Session History Memory. Enable it from Connectivity to edit or run this role.
+                </p>
+              )}
+              <fieldset disabled={!assistantMemoryEnabled} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
+                <AggregatorModelSelector
+                  provider={config.assistantProvider || validatorProvider}
+                  modelId={config.assistantModel || config.validatorModel || ''}
+                  openrouterProvider={config.assistantOpenrouterProvider || null}
+                  openrouterReasoningEffort={config.assistantOpenrouterReasoningEffort || validatorOpenrouterReasoningEffort}
+                  lmStudioFallbackId={config.assistantLmStudioFallback || null}
+                  onProviderChange={(provider) => setConfig({
+                    ...config,
+                    assistantProvider: provider,
+                    assistantModel: '',
+                    assistantOpenrouterProvider: null,
+                    assistantOpenrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+                    assistantLmStudioFallback: null,
+                  })}
+                  onModelChange={async (modelId) => {
+                    const next = {
+                      ...config,
+                      assistantModel: modelId,
+                      assistantOpenrouterProvider: null,
+                      assistantOpenrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+                    };
+                    const provider = config.assistantProvider || validatorProvider;
+                    if (modelId && (provider === 'openrouter' || isCloudAccessProvider(provider))) {
+                      const autoSettings = provider === 'openrouter'
+                        ? await getAutoSettingsForModel(modelId, null)
+                        : getCloudAccessAutoSettingsForModel(provider, modelId);
+                      if (autoSettings?.contextWindowKnown) next.assistantContextSize = autoSettings.contextWindow;
+                      if (autoSettings?.outputCapKnown) next.assistantMaxOutput = autoSettings.maxOutputTokens;
+                    }
+                    setConfig(next);
+                  }}
+                  onOpenrouterProviderChange={async (providerName) => {
+                    const next = { ...config, assistantOpenrouterProvider: providerName };
+                    if (config.assistantModel) {
+                      const autoSettings = await getAutoSettingsForModel(config.assistantModel, providerName);
+                      if (autoSettings?.contextWindowKnown) next.assistantContextSize = autoSettings.contextWindow;
+                      if (autoSettings?.outputCapKnown) next.assistantMaxOutput = autoSettings.maxOutputTokens;
+                    }
+                    setConfig(next);
+                  }}
+                  onOpenrouterReasoningEffortChange={(effort) => setConfig({
+                    ...config,
+                    assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(effort),
+                  })}
+                  onFallbackChange={(fallback) => setConfig({ ...config, assistantLmStudioFallback: fallback })}
+                  label="Assistant Model"
+                  lmStudioEnabled={lmStudioEnabled}
+                  hasOpenRouterKey={hasOpenRouterKey}
+                  lmStudioModels={lmStudioModels}
+                  openRouterModels={openRouterModels}
+                  oauthModelsByProvider={{
+                    openai_codex_oauth: openAICodexModels,
+                    [XAI_GROK_PROVIDER]: xaiGrokModels,
+                  }}
+                  configuredOAuthProviders={configuredOAuthProviders}
+                  oauthStatusByProvider={oauthStatusByProvider}
+                  modelProviders={modelProviders}
+                />
+                <div className="settings-row">
+                  <label>Context Window</label>
+                  <input
+                    type="number"
+                    value={config.assistantContextSize || config.validatorContextSize || DEFAULT_CONTEXT_WINDOW}
+                    onChange={(e) => setConfig({ ...config, assistantContextSize: parseInt(e.target.value) || '' })}
+                    min="4096"
+                    max="50000000"
+                    step="1024"
+                  />
+                </div>
+                <div className="settings-row">
+                  <label>Max Output Tokens</label>
+                  <input
+                    type="number"
+                    value={config.assistantMaxOutput || validatorMaxOutput}
+                    onChange={(e) => setConfig({ ...config, assistantMaxOutput: parseInt(e.target.value) || '' })}
+                    min="1000"
+                    max="50000000"
+                    step="1000"
+                  />
+                </div>
+                {developerModeEnabled && (
+                  <div className="settings-row settings-row--inline-checkbox">
+                    <label className="settings-checkbox-label settings-checkbox-label--supercharge">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(config.assistantSuperchargeEnabled)}
+                        onChange={(e) => setConfig({ ...config, assistantSuperchargeEnabled: e.target.checked })}
+                      />
+                      <HelpTooltip
+                        label="Learn about Supercharge"
+                        buttonContent="Supercharge"
+                        buttonClassName="help-tooltip-btn--text"
+                        popupClassName="help-tooltip-popup--fixed"
+                        useFixedPosition
+                      >
+                        {SUPERCHARGE_TOOLTIP}
+                      </HelpTooltip>
+                    </label>
+                  </div>
+                )}
+              </fieldset>
             </div>
           </div>
 

@@ -1,0 +1,25 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "schema_version": "syntheticlib4.release_manifest.v1",
+  "release_id": "stable-2026-06-11",
+  "channel": "stable",
+  "generated_at": "2026-06-11T00:00:00Z",
+  "lean_toolchain": "leanprover/lean4:v4.18.0",
+  "mathlib_revision": "mock-mathlib-rev",
+  "syntheticlib4_revision": "mock-syntheticlib4-rev",
+  "license_terms_id": "syntheticlib4-member-license-v1",
+  "proof_count": 30,
+  "novelty_distribution": {
+    "novel_formalization": 20,
+    "novel_reformulation": 7,
+    "minor_mathematical_discovery": 3
+  },
+  "compatible_moto_contract_versions": ["moto-syntheticlib4-v1"],
+  "files": [
+    {
+      "name": "proof_metadata.jsonl",
+      "sha256": "mocksha256-proof-metadata-jsonl",
+      "size_bytes": 30000
+    }
+  ]
+}

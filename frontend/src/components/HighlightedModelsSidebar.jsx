@@ -39,8 +39,8 @@ export default function HighlightedModelsSidebar() {
             The models and hosts listed here are not affiliated with MOTO or Intrafere LLC. This chart reflects developer-tested configurations intended to help guide model selection. All statements regarding pricing, performance, roles, rankings, or capabilities are speculative and based on individual testing experience. Intrafere LLC and the MOTO development team make no guarantees about the accuracy of this chart. MOTO is compatible with the majority of models, including many not listed here.
           </HelpTooltip>
         </h3>
-        <p className="hint-text hint-text--dim" style={{ marginLeft: '20px', marginBottom: '0.45rem' }}>
-          Note: Most models over 20 billion parameters are compatible with MOTO.
+        <p className="hint-text hint-text--dim known-models-note">
+          Note: Most models are compatible with MOTO.
         </p>
         <div className="models-list">
           <div className="models-podium">
@@ -48,7 +48,7 @@ export default function HighlightedModelsSidebar() {
             <div className="model-item model-item--ranked model-item--gold model-item--os">
               <OsTag />
               <div className="flex-row-center">
-                <div className="model-item-name">Kimi K2.6</div>
+                <div className="model-item-name">MiniMax M3</div>
                 <div
                   className="help-tooltip-anchor"
                   style={{ zIndex: 100 }}
@@ -59,7 +59,13 @@ export default function HighlightedModelsSidebar() {
                   onBlur={() => setShowKothTooltip(false)}
                   tabIndex={0}
                 >
-                  <div className="ranking-badge ranking-badge--gold">👑 KING OF THE HILL</div>
+                  <div className="ranking-badge ranking-badge--gold ranking-badge--stacked">
+                    <span className="ranking-badge-crown">👑</span>
+                    <span className="ranking-badge-text">
+                      <span>KING OF</span>
+                      <span>THE HILL</span>
+                    </span>
+                  </div>
                   {showKothTooltip && (
                     <div
                       className="help-tooltip-popup"
@@ -70,7 +76,7 @@ export default function HighlightedModelsSidebar() {
                   )}
                 </div>
               </div>
-              <div className="model-item-badge">Highly knowledgeable and balanced cost</div>
+              <div className="model-item-badge">Highly knowledgeable, affordable API cost</div>
             </div>
 
             <div className="model-item model-item--ranked model-item--silver model-item--oa">

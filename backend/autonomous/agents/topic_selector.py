@@ -131,8 +131,13 @@ class TopicSelectorAgent:
                     logger.error(f"TopicSelector: Even after truncation, prompt ({prompt_tokens}) exceeds limit ({max_input_tokens})")
                     return None
             
-            # Generate task ID for tracking
             task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
+
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)

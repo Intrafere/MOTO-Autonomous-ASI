@@ -1,0 +1,7 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "schema_version": "syntheticlib4.account_proofs.v1",
+  "proofs": [],
+  "next_cursor": null,
+  "quota_remaining": {}
+}

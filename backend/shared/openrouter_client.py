@@ -381,6 +381,7 @@ class OpenRouterClient:
         reasoning_effort: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        allow_provider_auto_fallback: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate a completion using OpenRouter API with validation and retry.
@@ -418,6 +419,7 @@ class OpenRouterClient:
                 reasoning_effort,
                 tools=tools,
                 tool_choice=tool_choice,
+            allow_provider_auto_fallback=allow_provider_auto_fallback,
             )
     
     def _is_reasoning_model_without_temperature(self, model: str) -> bool:
@@ -481,6 +483,7 @@ class OpenRouterClient:
         reasoning_effort: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        allow_provider_auto_fallback: bool = False,
     ) -> Dict[str, Any]:
         """Execute the actual completion request."""
         # Check if this model is currently rate-limited (for free models)
@@ -533,6 +536,7 @@ class OpenRouterClient:
                 payload["tool_choice"] = tool_choice
         
         # Add provider routing if specified
+        provider_auto_fallback_from: Optional[str] = None
         if provider:
             payload["provider"] = {
                 "order": [provider],
@@ -574,7 +578,12 @@ class OpenRouterClient:
                 
                 response.raise_for_status()
                 try:
-                    return response.json()
+                    data = response.json()
+                    if provider_auto_fallback_from and isinstance(data, dict):
+                        data["_moto_openrouter_provider_auto_fallback"] = {
+                            "from_provider": provider_auto_fallback_from,
+                        }
+                    return data
                 except (json.JSONDecodeError, ValueError) as json_err:
                     # OpenRouter returned 2xx but body is not valid JSON.
                     # This is typically a gateway/CDN error page, truncated stream,
@@ -618,6 +627,7 @@ class OpenRouterClient:
                 
             except httpx.HTTPStatusError as e:
                 error_detail = sanitize_provider_error_text(e.response.text if hasattr(e.response, 'text') else str(e))
+                error_detail_lower = error_detail.lower()
                 
                 # Check for rate limit (429 Too Many Requests)
                 if e.response.status_code == 429:
@@ -658,7 +668,7 @@ class OpenRouterClient:
                 
                 # Check for privacy policy error (404 with specific message)
                 # This occurs when user's OpenRouter privacy settings block free models
-                if e.response.status_code == 404 and "data policy" in error_detail.lower():
+                if e.response.status_code == 404 and "data policy" in error_detail_lower:
                     logger.error(
                         f"OpenRouter privacy policy error detected (404): {error_detail}"
                     )
@@ -668,9 +678,31 @@ class OpenRouterClient:
                         f"the option to allow your data to be used for model training. "
                         f"Free models on OpenRouter require this setting to be enabled."
                     )
+
+                if e.response.status_code == 404 and "no endpoints found" in error_detail_lower:
+                    if provider and allow_provider_auto_fallback and provider_auto_fallback_from is None:
+                        provider_auto_fallback_from = provider
+                        provider = None
+                        if self.AUTO_IGNORED_PROVIDERS:
+                            payload["provider"] = {
+                                "ignore": list(self.AUTO_IGNORED_PROVIDERS),
+                            }
+                        else:
+                            payload.pop("provider", None)
+                        logger.warning(
+                            "OpenRouter provider %s has no endpoint for model %s; retrying once with auto-routing.",
+                            redact_log_text(provider_auto_fallback_from, 120),
+                            redact_log_text(model, 160),
+                        )
+                        continue
+                    raise OpenRouterNoEndpointsError(
+                        model=model,
+                        provider=provider,
+                        detail=error_detail,
+                    )
                 
                 # Check for credit/key-limit-related errors in message
-                if any(keyword in error_detail.lower() for keyword in ["credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"]):
+                if any(keyword in error_detail_lower for keyword in ["credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"]):
                     logger.error(f"OpenRouter credit/key exhaustion detected in error message: {error_detail}")
                     raise CreditExhaustionError(
                         f"OpenRouter credits exhausted for model '{model}'. "
@@ -912,6 +944,20 @@ class OpenRouterPrivacyPolicyError(Exception):
     enable the option to allow data to be used for model training.
     """
     pass
+
+
+class OpenRouterNoEndpointsError(ValueError):
+    """Raised when OpenRouter has no callable endpoint for a model/provider pair."""
+
+    def __init__(self, *, model: str, provider: Optional[str], detail: str):
+        provider_text = f" via provider '{provider}'" if provider else ""
+        super().__init__(
+            f"OpenRouter has no available endpoint for model '{model}'{provider_text}. "
+            "Set Host Provider to Auto or choose a currently available host provider."
+        )
+        self.model = model
+        self.provider = provider
+        self.detail = detail
 
 
 class RateLimitError(Exception):

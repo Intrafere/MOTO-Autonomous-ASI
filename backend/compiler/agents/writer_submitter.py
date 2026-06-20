@@ -1,5 +1,5 @@
 """
-High-context submitter agent for compiler.
+Writing submitter agent for compiler.
 Handles 3 modes: construction, outline update, and review.
 """
 import hashlib
@@ -175,9 +175,9 @@ def _strip_paper_markers_for_llm(paper_content: str) -> str:
     return paper_content.strip()
 
 
-class HighContextSubmitter:
+class WritingSubmitter:
     """
-    High-context, low-parameter submitter for compiler.
+    Writing submitter for compiler outline, construction, and review work.
     
     Modes:
     - outline_create: Generate initial outline
@@ -203,13 +203,13 @@ class HighContextSubmitter:
         self._initialized = False
         
         # Calculate context budget from the user-configured role settings.
-        self.context_window = system_config.compiler_high_context_context_window
-        self.max_output_tokens = system_config.compiler_high_context_max_output_tokens
+        self.context_window = system_config.compiler_writer_context_window
+        self.max_output_tokens = system_config.compiler_writer_max_output_tokens
         self.available_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
         
         # Task tracking for workflow panel and boost integration
         self.task_sequence: int = 0
-        self.role_id = "compiler_high_context"
+        self.role_id = "compiler_writer"
         self.task_tracking_callback: Optional[Callable] = None
     
     def set_task_tracking_callback(self, callback: Callable) -> None:
@@ -218,7 +218,7 @@ class HighContextSubmitter:
     
     def get_current_task_id(self) -> str:
         """Get the task ID for the current/next API call."""
-        return f"comp_hc_{self.task_sequence:03d}"
+        return f"comp_writer_{self.task_sequence:03d}"
     
     async def initialize(self) -> None:
         """Initialize submitter."""
@@ -226,12 +226,12 @@ class HighContextSubmitter:
             return
         
         # Re-read context window from config (in case it was updated)
-        self.context_window = system_config.compiler_high_context_context_window
-        self.max_output_tokens = system_config.compiler_high_context_max_output_tokens
+        self.context_window = system_config.compiler_writer_context_window
+        self.max_output_tokens = system_config.compiler_writer_max_output_tokens
         self.available_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
         
         self._initialized = True
-        logger.info(f"High-context submitter initialized with model: {self.model_name}")
+        logger.info(f"Writing submitter initialized with model: {self.model_name}")
         logger.info(f"Context budget: {self.available_input_tokens} tokens (window: {self.context_window})")
     
     async def submit_outline_create(self) -> CompilerSubmission:
@@ -261,10 +261,17 @@ class HighContextSubmitter:
                 rag_evidence=context_pack.text
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
+
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
             
             # Validate prompt size
             actual_prompt_tokens = count_tokens(prompt)
-            max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_high_context_context_window, system_config.compiler_high_context_max_output_tokens)
+            max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_writer_context_window, system_config.compiler_writer_max_output_tokens)
             
             if actual_prompt_tokens > max_allowed_tokens:
                 logger.error(
@@ -275,8 +282,6 @@ class HighContextSubmitter:
             
             logger.debug(f"outline_create prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
-            # Generate task ID for tracking
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -291,7 +296,7 @@ class HighContextSubmitter:
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,  # Deterministic generation - evolving context provides diversity
-                max_tokens=system_config.compiler_high_context_max_output_tokens  # User-configurable (outline creation, update, construction, review)
+                max_tokens=system_config.compiler_writer_max_output_tokens  # User-configurable (outline creation, update, construction, review)
             )
             
             # Check for empty response
@@ -409,10 +414,17 @@ class HighContextSubmitter:
                 rag_evidence=context_pack.text
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
+
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
             
             # Validate prompt size
             actual_prompt_tokens = count_tokens(prompt)
-            max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_high_context_context_window, system_config.compiler_high_context_max_output_tokens)
+            max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_writer_context_window, system_config.compiler_writer_max_output_tokens)
             
             if actual_prompt_tokens > max_allowed_tokens:
                 logger.error(
@@ -423,8 +435,6 @@ class HighContextSubmitter:
             
             logger.debug(f"outline_update prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
-            # Generate task ID for tracking
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -439,7 +449,7 @@ class HighContextSubmitter:
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,  # Deterministic generation - evolving context provides diversity
-                max_tokens=system_config.compiler_high_context_max_output_tokens  # User-configurable (outline creation, update, construction, review)
+                max_tokens=system_config.compiler_writer_max_output_tokens  # User-configurable (outline creation, update, construction, review)
             )
             
             # Check for empty response
@@ -555,8 +565,8 @@ class HighContextSubmitter:
             
             # Calculate RAG budget accounting for brainstorm content (prevents context overflow)
             max_allowed_tokens = rag_config.get_available_input_tokens(
-                system_config.compiler_high_context_context_window,
-                system_config.compiler_high_context_max_output_tokens
+                system_config.compiler_writer_context_window,
+                system_config.compiler_writer_max_output_tokens
             )
             outline_tokens = count_tokens(current_outline)
             paper_tokens = count_tokens(paper_for_llm) if paper_for_llm else 0
@@ -652,6 +662,13 @@ class HighContextSubmitter:
                     rejection_feedback=rejection_feedback
                 )
             logger.info(f"Prompt built: {len(prompt)} chars")
+
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
             
             # Validate prompt size (max_allowed_tokens already calculated above for RAG budget)
             actual_prompt_tokens = count_tokens(prompt)
@@ -668,8 +685,6 @@ class HighContextSubmitter:
             
             logger.debug(f"construction prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
-            # Generate task ID for tracking
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -699,7 +714,7 @@ class HighContextSubmitter:
                     model=self.model_name,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.0,
-                    max_tokens=system_config.compiler_high_context_max_output_tokens,
+                    max_tokens=system_config.compiler_writer_max_output_tokens,
                 )
                 if not fallback.get("choices") or not fallback["choices"][0].get("message"):
                     logger.error("construction: LLM returned empty response structure")
@@ -875,10 +890,17 @@ class HighContextSubmitter:
                 review_focus=review_focus
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
+
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
             
             # Validate prompt size
             actual_prompt_tokens = count_tokens(prompt)
-            max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_high_context_context_window, system_config.compiler_high_context_max_output_tokens)
+            max_allowed_tokens = rag_config.get_available_input_tokens(system_config.compiler_writer_context_window, system_config.compiler_writer_max_output_tokens)
             
             if actual_prompt_tokens > max_allowed_tokens:
                 logger.error(
@@ -889,8 +911,6 @@ class HighContextSubmitter:
             
             logger.debug(f"review prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
-            # Generate task ID for tracking
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -905,7 +925,7 @@ class HighContextSubmitter:
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,  # Deterministic generation - evolving context provides diversity
-                max_tokens=system_config.compiler_high_context_max_output_tokens  # User-configurable (outline creation, update, construction, review)
+                max_tokens=system_config.compiler_writer_max_output_tokens  # User-configurable (outline creation, update, construction, review)
             )
             
             # Check for empty response
@@ -1061,7 +1081,7 @@ class HighContextSubmitter:
                 model=self.model_name,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=system_config.compiler_high_context_max_output_tokens,
+                max_tokens=system_config.compiler_writer_max_output_tokens,
                 tools=tools_param,
             )
 
@@ -1252,7 +1272,7 @@ class HighContextSubmitter:
             return parsed
         except Exception as parse_error:
             error = str(parse_error)
-            logger.info(f"Compiler high-context submitter ({mode}): Initial JSON parse failed, attempting single retry")
+            logger.info(f"Compiler writing submitter ({mode}): Initial JSON parse failed, attempting single retry")
             logger.debug(f"Parse error: {error}")
         
         # Build mode-specific retry prompt
@@ -1263,16 +1283,29 @@ class HighContextSubmitter:
             # Generate a retry task ID (append _retry to distinguish from original)
             retry_task_id = f"{self.get_current_task_id()}_retry"
             retry_context = sanitize_model_output_for_retry_context(response)
+            retry_messages = [
+                {"role": "user", "content": original_prompt},
+                {"role": "assistant", "content": retry_context},
+                {"role": "user", "content": retry_prompt}
+            ]
+            max_input_tokens = rag_config.get_available_input_tokens(
+                self.context_window,
+                self.max_output_tokens,
+            )
+            if sum(count_tokens(str(message.get("content") or "")) for message in retry_messages) > max_input_tokens:
+                retry_context = "[failed output omitted because retry context would exceed the model input budget]"
+                retry_messages[1]["content"] = retry_context
+            if sum(count_tokens(str(message.get("content") or "")) for message in retry_messages) > max_input_tokens:
+                raise ValueError(
+                    f"Compiler writing retry prompt exceeds context limit for {mode}; "
+                    "the original prompt is already at the configured model budget."
+                )
             
             retry_response = await api_client_manager.generate_completion(
                 task_id=retry_task_id,
                 role_id=self.role_id,
                 model=self.model_name,
-                messages=[
-                    {"role": "user", "content": original_prompt},
-                    {"role": "assistant", "content": retry_context},
-                    {"role": "user", "content": retry_prompt}
-                ],
+                messages=retry_messages,
                 temperature=0.0,  # Deterministic JSON formatting
                 max_tokens=self.max_output_tokens
             )
@@ -1283,18 +1316,20 @@ class HighContextSubmitter:
                 
                 try:
                     parsed = parse_json(retry_output)
-                    logger.info(f"Compiler high-context submitter ({mode}): Retry succeeded!")
+                    logger.info(f"Compiler writing submitter ({mode}): Retry succeeded!")
                     return parsed
                 except Exception as retry_parse_error:
-                    logger.warning(f"Compiler high-context submitter ({mode}): Retry parse failed - {retry_parse_error}")
+                    logger.warning(f"Compiler writing submitter ({mode}): Retry parse failed - {retry_parse_error}")
             else:
-                logger.warning(f"Compiler high-context submitter ({mode}): Retry returned empty response")
+                logger.warning(f"Compiler writing submitter ({mode}): Retry returned empty response")
                 
         except Exception as e:
-            logger.error(f"Compiler high-context submitter ({mode}): Retry request failed - {e}")
+            if "retry prompt exceeds context limit" in str(e).lower():
+                raise
+            logger.error(f"Compiler writing submitter ({mode}): Retry request failed - {e}")
         
         # Retry failed - return None and let coordinator handle it
-        logger.error(f"Compiler high-context submitter ({mode}): JSON validation failed after retry: {error}")
+        logger.error(f"Compiler writing submitter ({mode}): JSON validation failed after retry: {error}")
         return None
     
     def _build_retry_prompt(self, mode: str, error: str) -> str:

@@ -31,10 +31,10 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
             "validator_model": "validator-model",
             "validator_context_size": 1000,
             "validator_max_output_tokens": 100,
-            "high_context_model": "high-context-model",
-            "high_context_context_size": 1000,
-            "high_context_max_output_tokens": 100,
-            "high_param_model": "high-param-model",
+            "writer_model": "writer-model",
+            "writer_context_size": 1000,
+            "writer_max_output_tokens": 100,
+            "high_param_model": "rigor-model",
             "high_param_context_size": 1000,
             "high_param_max_output_tokens": 100,
             "critique_submitter_model": "critique-model",
@@ -60,10 +60,10 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
             "validator_model": "validator-model",
             "validator_context_window": 1000,
             "validator_max_tokens": 100,
-            "high_context_model": "high-context-model",
-            "high_context_context_window": 1000,
-            "high_context_max_tokens": 100,
-            "high_param_model": "high-param-model",
+            "writer_model": "writer-model",
+            "writer_context_window": 1000,
+            "writer_max_tokens": 100,
+            "high_param_model": "rigor-model",
             "high_param_context_window": 1000,
             "high_param_max_tokens": 100,
             "critique_submitter_model": "critique-model",
@@ -72,6 +72,57 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
         }
         data.update(overrides)
         return AutonomousResearchStartRequest(**data)
+
+    def test_compiler_request_accepts_previous_writer_field_names(self) -> None:
+        legacy_prefix = "_".join(("high", "context"))
+        request = self._compiler_request(
+            writer_model="new-writer-model",
+            **{
+                f"{legacy_prefix}_model": "previous-writer-model",
+                f"{legacy_prefix}_context_size": 2000,
+                f"{legacy_prefix}_max_output_tokens": 200,
+            },
+        )
+
+        self.assertEqual(request.writer_model, "new-writer-model")
+
+        legacy_only = CompilerStartRequest(
+            compiler_prompt="Write a paper",
+            validator_model="validator-model",
+            validator_context_size=1000,
+            validator_max_output_tokens=100,
+            **{
+                f"{legacy_prefix}_model": "previous-writer-model",
+                f"{legacy_prefix}_context_size": 2000,
+                f"{legacy_prefix}_max_output_tokens": 200,
+            },
+            high_param_model="rigor-model",
+            high_param_context_size=1000,
+            high_param_max_output_tokens=100,
+        )
+        self.assertEqual(legacy_only.writer_model, "previous-writer-model")
+        self.assertEqual(legacy_only.writer_context_size, 2000)
+        self.assertEqual(legacy_only.writer_max_output_tokens, 200)
+
+    def test_autonomous_request_accepts_previous_writer_field_names(self) -> None:
+        legacy_prefix = "_".join(("high", "context"))
+        data = {
+            "user_research_prompt": "Research prompt",
+            "submitter_configs": [],
+            "validator_model": "validator-model",
+            f"{legacy_prefix}_model": "previous-writer-model",
+            f"{legacy_prefix}_context_window": 2000,
+            f"{legacy_prefix}_max_tokens": 200,
+            "high_param_model": "rigor-model",
+            "high_param_context_window": 3000,
+            "high_param_max_tokens": 300,
+        }
+
+        request = AutonomousResearchStartRequest(**data)
+
+        self.assertEqual(request.writer_model, "previous-writer-model")
+        self.assertEqual(request.writer_context_window, 2000)
+        self.assertEqual(request.writer_max_tokens, 200)
 
     async def test_compiler_rejects_proof_requested_when_lean_disabled_in_desktop_mode(self) -> None:
         system_config.generic_mode = False
@@ -104,6 +155,59 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(exc.exception.status_code, 501)
         self.assertTrue(exc.exception.detail["generic_mode"])
+
+    async def test_compiler_proof_only_uses_rigor_and_proofs_submitter_settings(self) -> None:
+        system_config.generic_mode = False
+        system_config.lean4_enabled = True
+        request = self._compiler_request(
+            allow_research_papers=False,
+            writer_model="writer-model",
+            writer_context_size=2000,
+            writer_max_output_tokens=200,
+            high_param_provider="openrouter",
+            high_param_model="rigor-model",
+            high_param_openrouter_provider="RigorHost",
+            high_param_openrouter_reasoning_effort="high",
+            high_param_lm_studio_fallback="rigor-fallback",
+            high_param_context_size=3000,
+            high_param_max_output_tokens=300,
+            high_param_supercharge_enabled=True,
+        )
+        configured_roles = {}
+        stage_calls = {}
+
+        class FakeStage:
+            async def run(self, **kwargs):
+                stage_calls.update(kwargs)
+
+        def capture_role(role_id, config):
+            configured_roles[role_id] = config
+
+        with (
+            mock.patch.object(compiler_route, "_read_manual_aggregator_context", new=mock.AsyncMock(return_value="accepted brainstorm")),
+            mock.patch.object(compiler_route, "_release_pre_reserved_source", new=mock.AsyncMock()),
+            mock.patch.object(compiler_route.websocket, "broadcast_event", new=mock.AsyncMock()),
+            mock.patch.object(compiler_route.api_client_manager, "configure_role", side_effect=capture_role),
+            mock.patch.object(compiler_route, "ProofVerificationStage", return_value=FakeStage()),
+            mock.patch.object(compiler_route.assistant_proof_search_coordinator, "stop_all", new=mock.AsyncMock()),
+            mock.patch.object(compiler_route.token_tracker, "reset"),
+            mock.patch.object(compiler_route.token_tracker, "start_timer"),
+            mock.patch.object(compiler_route.token_tracker, "stop_timer"),
+        ):
+            await compiler_route._run_compiler_aggregator_proof_check(request, source_reserved=True)
+
+        proof_role = configured_roles["autonomous_proof_formalization_compiler_aggregator"]
+        self.assertEqual(proof_role.provider, "openrouter")
+        self.assertEqual(proof_role.model_id, "rigor-model")
+        self.assertEqual(proof_role.openrouter_provider, "RigorHost")
+        self.assertEqual(proof_role.openrouter_reasoning_effort, "high")
+        self.assertEqual(proof_role.lm_studio_fallback_id, "rigor-fallback")
+        self.assertEqual(proof_role.context_window, 3000)
+        self.assertEqual(proof_role.max_output_tokens, 300)
+        self.assertTrue(proof_role.supercharge_enabled)
+        self.assertEqual(stage_calls["submitter_model"], "rigor-model")
+        self.assertEqual(stage_calls["submitter_context"], 3000)
+        self.assertEqual(stage_calls["submitter_max_tokens"], 300)
 
     async def test_autonomous_rejects_proof_requested_when_lean_disabled_in_desktop_mode(self) -> None:
         system_config.generic_mode = False

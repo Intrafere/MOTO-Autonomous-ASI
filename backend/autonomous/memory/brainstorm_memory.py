@@ -305,10 +305,12 @@ class BrainstormMemory:
             async with aiofiles.open(db_path, 'r', encoding='utf-8') as f:
                 content = await f.read()
             if strip_proofs and content:
-                marker = "=== PROOFS GENERATED FROM THIS BRAINSTORM"
-                idx = content.find(marker)
-                if idx > 0:
-                    content = content[:idx].rstrip()
+                match = re.search(
+                    r"(?m)^=== PROOFS GENERATED FROM THIS BRAINSTORM(?: \(Lean 4 Verified\))? ===\s*$",
+                    content,
+                )
+                if match and match.start() > 0:
+                    content = content[:match.start()].rstrip()
             return content
         except Exception as e:
             logger.error(

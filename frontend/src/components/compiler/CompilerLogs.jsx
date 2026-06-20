@@ -2,7 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LiveActivityFeed from '../LiveActivityFeed';
-import { getActivityClass, getActivityIcon } from '../../utils/activityStyles';
+import {
+  formatContextOverflowActivityMessage,
+  formatAssistantProofPackEventMessage,
+  getActivityClass,
+  getActivityIcon,
+  hasRecentAssistantProofPackDuplicate,
+} from '../../utils/activityStyles';
 import {
   MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
   MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
@@ -25,6 +31,36 @@ const MANUAL_PROOF_EVENTS = [
   'proof_dependency_added',
   'proof_check_complete',
 ];
+
+const compactProofText = (value, maxLength = 1200) => {
+  const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!cleaned) {
+    return '';
+  }
+  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength)}...` : cleaned;
+};
+
+const proofTargetLabel = (data = {}, fallback = 'candidate') => (
+  data.theorem_name || data.proof_label || data.theorem_id || data.proof_id || fallback
+);
+
+const leanProofResponse = (data = {}) => {
+  if (data.lean_response) {
+    return compactProofText(data.lean_response);
+  }
+  if (data.proof_verified === true) {
+    return 'Lean 4 response: proof verified.';
+  }
+  const error = compactProofText(data.error_summary || data.error_output || data.reason, 960);
+  return error ? `Lean 4 response: ${error} - proof not verified.` : '';
+};
+
+const formatLeanProofAttempt = (prefix, data = {}) => {
+  const attempt = data.attempt ? `, attempt ${data.attempt}` : '';
+  const response = leanProofResponse(data);
+  const base = `${prefix}: ${proofTargetLabel(data)}${attempt}`;
+  return response ? `${base} - ${response}` : base;
+};
 
 function CompilerLogs() {
   const [metrics, setMetrics] = useState({
@@ -85,6 +121,15 @@ function CompilerLogs() {
       addEvent({ type: 'compiler_warning', data });
     };
 
+    const handleContextOverflow = (data) => {
+      const roleId = String(data?.role_id || '').toLowerCase();
+      if (roleId && !roleId.startsWith('compiler_')) {
+        return;
+      }
+      addEvent({ type: 'context_overflow_error', data });
+      loadStatus();
+    };
+
     const handleCorruptionDetected = (data) => {
       addEvent({ type: 'model_corruption_detected', data: { message: `Model ${data.model_id} corrupted (${data.failure_count} failures)` } });
     };
@@ -117,6 +162,27 @@ function CompilerLogs() {
       addEvent({ type: eventName, data });
     };
 
+    const handleAssistantProofPackEvent = (eventName, data = {}) => {
+      const workflowMode = String(data.workflow_mode || '');
+      const sourceId = String(data.source_id || '');
+      const sourceType = String(data.source_type || '');
+      const isManualCompilerProof = workflowMode === 'manual_proof_check'
+        && (
+          sourceId === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID
+          || sourceId.startsWith('manual_compiler_')
+          || sourceId.startsWith('compiler_manual_')
+          || sourceType.includes('compiler')
+        );
+      if (workflowMode !== 'compiler' && !isManualCompilerProof) {
+        return;
+      }
+      addEvent({ type: eventName, data });
+    };
+    const handleAssistantProofPackRefreshStarted = (data) => handleAssistantProofPackEvent('assistant_proof_pack_refresh_started', data);
+    const handleAssistantProofPackUpdated = (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data);
+    const handleAssistantProofPackWarning = (data) => handleAssistantProofPackEvent('assistant_proof_pack_warning', data);
+    const handleAssistantProofPackStopped = (data) => handleAssistantProofPackEvent('assistant_proof_pack_stopped', data);
+
     // Handler for critique progress to update stats display
     const handleCritiqueProgress = (data) => {
       setCritiqueStats({
@@ -148,11 +214,16 @@ function CompilerLogs() {
     websocket.on('outline_updated', handleCompilerEvent);
     websocket.on('compiler_error', handleCompilerError);
     websocket.on('compiler_warning', handleCompilerWarning);
+    websocket.on('context_overflow_error', handleContextOverflow);
     websocket.on('model_corruption_detected', handleCorruptionDetected);
     websocket.on('model_recovery_initiated', handleRecoveryInitiated);
     websocket.on('model_recovery_success', handleRecoverySuccess);
     websocket.on('model_recovery_failed', handleRecoveryFailed);
     websocket.on('hung_connection_alert', handleHungConnectionAlert);
+    websocket.on('assistant_proof_pack_refresh_started', handleAssistantProofPackRefreshStarted);
+    websocket.on('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
+    websocket.on('assistant_proof_pack_warning', handleAssistantProofPackWarning);
+    websocket.on('assistant_proof_pack_stopped', handleAssistantProofPackStopped);
 
     // Critique phase events
     websocket.on('critique_phase_started', handleCritiquePhaseStarted);
@@ -187,11 +258,16 @@ function CompilerLogs() {
       websocket.off('outline_updated', handleCompilerEvent);
       websocket.off('compiler_error', handleCompilerError);
       websocket.off('compiler_warning', handleCompilerWarning);
+      websocket.off('context_overflow_error', handleContextOverflow);
       websocket.off('model_corruption_detected', handleCorruptionDetected);
       websocket.off('model_recovery_initiated', handleRecoveryInitiated);
       websocket.off('model_recovery_success', handleRecoverySuccess);
       websocket.off('model_recovery_failed', handleRecoveryFailed);
       websocket.off('hung_connection_alert', handleHungConnectionAlert);
+      websocket.off('assistant_proof_pack_refresh_started', handleAssistantProofPackRefreshStarted);
+      websocket.off('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
+      websocket.off('assistant_proof_pack_warning', handleAssistantProofPackWarning);
+      websocket.off('assistant_proof_pack_stopped', handleAssistantProofPackStopped);
 
       // Critique phase events cleanup
       websocket.off('critique_phase_started', handleCritiquePhaseStarted);
@@ -255,6 +331,9 @@ function CompilerLogs() {
     };
     
     setEvents(prev => {
+      if (hasRecentAssistantProofPackDuplicate(prev, newEvent.type, newEvent.data || {}, fullTimestamp)) {
+        return prev;
+      }
       const updated = [newEvent, ...prev].slice(0, 10000); // Keep last 10k events
       
       // Save to localStorage for persistence
@@ -330,6 +409,12 @@ function CompilerLogs() {
     if (type === 'self_review_appended') {
       return `AI self-review appended (${data.critique_count || 0} accepted critique${data.critique_count === 1 ? '' : 's'})`;
     }
+    if (type === 'assistant_proof_pack_updated') {
+      return formatAssistantProofPackEventMessage(type, data);
+    }
+    if (type === 'assistant_proof_pack_refresh_started' || type === 'assistant_proof_pack_warning' || type === 'assistant_proof_pack_stopped') {
+      return formatAssistantProofPackEventMessage(type, data);
+    }
 
     // Phase transitions
     if (type === 'phase_transition') {
@@ -351,6 +436,9 @@ function CompilerLogs() {
     }
     if (type === 'compiler_decline') {
       return `Declined: ${data.mode || 'unknown'} - ${(data.reasoning || '').substring(0, 60)}...`;
+    }
+    if (type === 'context_overflow_error') {
+      return formatContextOverflowActivityMessage(data);
     }
     if (type === 'paper_updated') {
       return `Paper updated: ${data.word_count?.toLocaleString() || '?'} words`;
@@ -378,34 +466,34 @@ function CompilerLogs() {
       return `Proof candidates found: ${data.count || 0}`;
     }
     if (type === 'proof_attempt_started') {
-      return `Lean proof attempt started: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+      return `Lean proof attempt started: ${proofTargetLabel(data)}`;
     }
     if (type === 'proof_lean_accepted') {
-      return `Lean accepted proof: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+      return `Lean accepted proof: ${proofTargetLabel(data)}`;
     }
     if (type === 'proof_attempt_failed') {
-      return `Proof attempt failed: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+      return formatLeanProofAttempt('Proof attempt failed', data);
     }
     if (type === 'proof_attempts_exhausted') {
-      return `Proof attempts exhausted: ${data.theorem_name || data.proof_label || data.theorem_id || 'candidate'}`;
+      return formatLeanProofAttempt('Proof attempts exhausted', data);
     }
     if (type === 'proof_integrity_rejected') {
-      return `Proof integrity rejected: ${data.reason || data.message || data.theorem_name || 'candidate'}`;
+      return `Proof integrity rejected: ${data.reason || data.message || proofTargetLabel(data)}`;
     }
     if (type === 'proof_verified') {
-      return `Proof verified: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+      return `Proof verified: ${proofTargetLabel(data)}`;
     }
     if (type === 'known_proof_verified') {
-      return `Known proof verified: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+      return `Known proof verified: ${proofTargetLabel(data)}`;
     }
     if (type === 'proof_registration_duplicate') {
-      return `Duplicate proof reused: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+      return `Duplicate proof reused: ${proofTargetLabel(data)}`;
     }
     if (type === 'novel_proof_discovered') {
-      return `Novel proof discovered: ${data.theorem_name || data.proof_label || data.proof_id || 'candidate'}`;
+      return `Novel proof discovered: ${proofTargetLabel(data)}`;
     }
     if (type === 'proof_dependency_added') {
-      return `Proof dependency added: ${data.theorem_name || data.proof_label || data.proof_id || 'verified proof'}`;
+      return `Proof dependency added: ${proofTargetLabel(data, 'verified proof')}`;
     }
     if (type === 'proof_check_complete') {
       return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;

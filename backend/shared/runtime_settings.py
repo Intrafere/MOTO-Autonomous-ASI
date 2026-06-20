@@ -37,6 +37,12 @@ _PROOF_INT_FIELDS = {
     "smt_timeout": (1, 600),
 }
 
+_CONNECTIVITY_BOOL_FIELDS = {
+    "syntheticlib4_enabled",
+    "agent_conversation_memory_enabled",
+    "wolfram_alpha_enabled",
+}
+
 
 def _settings_path() -> Path:
     return Path(system_config.data_dir) / RUNTIME_SETTINGS_FILENAME
@@ -125,6 +131,14 @@ def _free_model_settings_from_manager() -> Dict[str, Any]:
     }
 
 
+def _connectivity_toggles_from_config() -> Dict[str, Any]:
+    return {
+        "syntheticlib4_enabled": bool(system_config.syntheticlib4_enabled),
+        "agent_conversation_memory_enabled": bool(system_config.agent_conversation_memory_enabled),
+        "wolfram_alpha_enabled": bool(system_config.wolfram_alpha_enabled),
+    }
+
+
 def save_proof_runtime_settings() -> None:
     """Persist current non-secret Lean/SMT proof runtime settings."""
     payload = _read_settings()
@@ -137,6 +151,25 @@ def save_free_model_runtime_settings() -> None:
     payload = _read_settings()
     payload["free_model_settings"] = _free_model_settings_from_manager()
     _write_settings(payload)
+
+
+def save_connectivity_runtime_settings() -> None:
+    """Persist current non-secret connectivity feature toggles."""
+    payload = _read_settings()
+    payload["connectivity_toggles"] = _connectivity_toggles_from_config()
+    _write_settings(payload)
+
+
+def get_persisted_connectivity_toggles() -> Dict[str, bool]:
+    """Return persisted connectivity toggles, omitting fields not yet saved."""
+    toggles = _read_settings().get("connectivity_toggles")
+    if not isinstance(toggles, dict):
+        return {}
+    result: Dict[str, bool] = {}
+    for field in _CONNECTIVITY_BOOL_FIELDS:
+        if field in toggles:
+            result[field] = _coerce_bool(toggles[field], bool(getattr(system_config, field)))
+    return result
 
 
 def apply_persisted_runtime_settings() -> None:
@@ -182,3 +215,13 @@ def apply_persisted_runtime_settings() -> None:
             looping=looping_enabled,
             auto_selector=auto_selector_enabled,
         )
+
+    connectivity_toggles = payload.get("connectivity_toggles")
+    if isinstance(connectivity_toggles, dict):
+        for field in _CONNECTIVITY_BOOL_FIELDS:
+            if field in connectivity_toggles:
+                setattr(
+                    system_config,
+                    field,
+                    _coerce_bool(connectivity_toggles[field], bool(getattr(system_config, field))),
+                )

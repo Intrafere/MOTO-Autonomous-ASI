@@ -14,7 +14,7 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
-from backend.aggregator.core.context_allocator import context_allocator
+from backend.aggregator.core.context_allocator import ContextAllocationError, context_allocator
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.prompts.validator_prompts import (
     build_validator_prompt,
@@ -111,7 +111,7 @@ class ValidatorAgent:
             
             return quality_result
             
-        except FreeModelExhaustedError:
+        except (FreeModelExhaustedError, ContextAllocationError):
             raise
         except Exception as e:
             logger.error(f"Validation failed: {e}")
@@ -159,16 +159,16 @@ class ValidatorAgent:
             configured_context = context_allocator.validator_context_window
             
             if actual_prompt_tokens > max_allowed_tokens:
-                logger.error(
-                    f"Validator: Assembled prompt ({actual_prompt_tokens} tokens) exceeds context window "
-                    f"({max_allowed_tokens} tokens after safety margin). This indicates a context allocation bug."
-                )
-                return ValidationResult(
-                    submission_id=submission.submission_id,
-                    decision="reject",
-                    reasoning=f"Internal error: Prompt too large ({actual_prompt_tokens} tokens > {max_allowed_tokens} max)",
-                    summary="Internal context overflow error",
-                    json_valid=False
+                raise ContextAllocationError(
+                    f"Validator context overflow: assembled prompt requires {actual_prompt_tokens:,} tokens, "
+                    f"but the validator can only accept {max_allowed_tokens:,} input tokens "
+                    f"(context window: {configured_context:,}, output reserve: {rag_config.validator_max_output_tokens:,}). "
+                    "A complete and honest validation requires direct context injection. Please condense into a new prompt "
+                    "and restart, or select a validator model with a larger context window.",
+                    required_tokens=actual_prompt_tokens,
+                    available_tokens=max_allowed_tokens,
+                    context_window=configured_context,
+                    output_reserve=rag_config.validator_max_output_tokens,
                 )
             
             logger.debug(
@@ -241,14 +241,23 @@ class ValidatorAgent:
                         await asyncio.sleep(backoff_time)
                         continue
                     else:
-                        # Final retry or non-recoverable error
                         logger.error(f"Validator: Failed to generate validation after {attempt + 1} attempts: {e}")
                         
-                        # Provide context-specific error message
                         if "context" in error_msg.lower():
-                            summary = "LM Studio context window mismatch - check logs"
-                        else:
-                            summary = "Internal error"
+                            raise ContextAllocationError(
+                                f"Validator context overflow or provider context mismatch: the assembled prompt "
+                                f"requires {actual_prompt_tokens:,} tokens and the configured validator input budget "
+                                f"is {max_allowed_tokens:,} tokens (context window: {configured_context:,}, "
+                                f"output reserve: {rag_config.validator_max_output_tokens:,}). The provider still rejected "
+                                "the request as too large, so the loaded/provider context is smaller than configured. "
+                                "A complete and honest validation requires direct context injection. Please condense into "
+                                "a new prompt and restart, select a validator model with a larger context window, or reload "
+                                "the local model with the configured context window.",
+                                required_tokens=actual_prompt_tokens,
+                                available_tokens=max_allowed_tokens,
+                                context_window=configured_context,
+                                output_reserve=rag_config.validator_max_output_tokens,
+                            ) from e
                         
                         # Notify task completed (failed but still completed)
                         if self.task_tracking_callback:
@@ -258,7 +267,7 @@ class ValidatorAgent:
                             submission_id=submission.submission_id,
                             decision="reject",
                             reasoning=f"Quality assessment error: {e}",
-                            summary=summary,
+                            summary="Internal error",
                             json_valid=False
                         )
                         
@@ -428,6 +437,8 @@ class ValidatorAgent:
             
             return result
             
+        except ContextAllocationError:
+            raise
         except Exception as e:
             logger.error(f"Quality assessment failed: {e}")
             return ValidationResult(
@@ -600,20 +611,18 @@ class ValidatorAgent:
             max_allowed_tokens = rag_config.get_available_input_tokens(context_allocator.validator_context_window, rag_config.validator_max_output_tokens)
             
             if actual_prompt_tokens > max_allowed_tokens:
-                logger.error(
-                    f"Batch validator: Prompt ({actual_prompt_tokens} tokens) exceeds context window "
-                    f"({max_allowed_tokens} tokens). Rejecting entire batch."
+                raise ContextAllocationError(
+                    f"Validator context overflow: batch validation prompt requires {actual_prompt_tokens:,} tokens, "
+                    f"but the validator can only accept {max_allowed_tokens:,} input tokens "
+                    f"(context window: {context_allocator.validator_context_window:,}, "
+                    f"output reserve: {rag_config.validator_max_output_tokens:,}). A complete and honest batch validation "
+                    "requires direct context injection. Please condense into a new prompt and restart, or select a "
+                    "validator model with a larger context window.",
+                    required_tokens=actual_prompt_tokens,
+                    available_tokens=max_allowed_tokens,
+                    context_window=context_allocator.validator_context_window,
+                    output_reserve=rag_config.validator_max_output_tokens,
                 )
-                return [
-                    ValidationResult(
-                        submission_id=s.submission_id,
-                        decision="reject",
-                        reasoning="Internal error: Batch prompt too large",
-                        summary="Internal context overflow error",
-                        json_valid=False
-                    )
-                    for s in submissions
-                ]
             
             logger.debug(f"Batch validator prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
@@ -754,9 +763,22 @@ class ValidatorAgent:
             
             return results
             
-        except FreeModelExhaustedError:
+        except (FreeModelExhaustedError, ContextAllocationError):
             raise
         except Exception as e:
+            error_text = str(e)
+            if "context" in error_text.lower():
+                raise ContextAllocationError(
+                    f"Validator context overflow or provider context mismatch during batch validation: "
+                    f"the validator prompt could not be submitted with the configured context window "
+                    f"({context_allocator.validator_context_window:,}) and output reserve "
+                    f"({rag_config.validator_max_output_tokens:,}). A complete and honest batch validation "
+                    "requires direct context injection. Please condense into a new prompt and restart, "
+                    "select a validator model with a larger context window, or reload the local model with "
+                    "the configured context window.",
+                    context_window=context_allocator.validator_context_window,
+                    output_reserve=rag_config.validator_max_output_tokens,
+                ) from e
             logger.error(f"Batch quality assessment failed: {e}", exc_info=True)
             return [
                 ValidationResult(

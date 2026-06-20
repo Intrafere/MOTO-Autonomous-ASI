@@ -1,5 +1,8 @@
 import unittest
+from types import SimpleNamespace
 
+from backend.autonomous.agents import proof_formalization_agent as proof_formalization_module
+from backend.compiler.agents import high_param_submitter as high_param_module
 from backend.compiler.agents.high_param_submitter import (
     HighParamSubmitter,
     _strip_generated_proofs_for_rigor_context,
@@ -11,6 +14,7 @@ from backend.compiler.memory.paper_memory import (
 )
 from backend.compiler.prompts.rigor_prompts import build_rigor_theorem_discovery_prompt
 from backend.shared.config import system_config
+from backend.shared.models import ProofCandidate
 
 
 class RigorPromptSourceContextTests(unittest.IsolatedAsyncioTestCase):
@@ -72,6 +76,63 @@ class RigorPromptSourceContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(submitter.user_prompt, "User prompt sentinel.")
         self.assertNotIn("FULL PROOF LIBRARY", submitter.user_prompt)
+
+    async def test_rigor_formalization_passes_paper_title_to_proof_search_context(self):
+        old_context = system_config.compiler_high_param_context_window
+        old_output = system_config.compiler_high_param_max_output_tokens
+        original_get_paper = high_param_module.paper_memory.get_paper
+        original_validate = high_param_module.validate_full_lean_proof_integrity
+        original_prove = proof_formalization_module.ProofFormalizationAgent.prove_candidate
+        captured = {}
+
+        async def fake_get_paper():
+            return "Current paper body sentinel."
+
+        async def fake_validate(**_kwargs):
+            return SimpleNamespace(
+                valid=True,
+                actual_theorem_statement="",
+                actual_theorem_name="",
+                category="aligned",
+                reason="",
+                downshift_reason="",
+            )
+
+        async def fake_prove_candidate(self, *args, **kwargs):
+            captured["source_title"] = kwargs.get("source_title")
+            return True, "rigor_title_test", "theorem rigor_title_test : True := by trivial", []
+
+        try:
+            system_config.compiler_high_param_context_window = 8000
+            system_config.compiler_high_param_max_output_tokens = 1000
+            high_param_module.paper_memory.get_paper = fake_get_paper
+            high_param_module.validate_full_lean_proof_integrity = fake_validate
+            proof_formalization_module.ProofFormalizationAgent.prove_candidate = fake_prove_candidate
+            submitter = HighParamSubmitter(
+                "model",
+                "User prompt sentinel.",
+                validator_context_window=4000,
+                validator_max_tokens=500,
+            )
+            submitter.set_rigor_proof_source("paper_789", "Rigor Search Title")
+
+            result = await submitter._step_formalize(
+                candidate=ProofCandidate(
+                    theorem_id="rigor_title_test",
+                    statement="True is true.",
+                    formal_sketch="By trivial.",
+                ),
+                theorem_statement="True is true.",
+            )
+        finally:
+            proof_formalization_module.ProofFormalizationAgent.prove_candidate = original_prove
+            high_param_module.validate_full_lean_proof_integrity = original_validate
+            high_param_module.paper_memory.get_paper = original_get_paper
+            system_config.compiler_high_param_context_window = old_context
+            system_config.compiler_high_param_max_output_tokens = old_output
+
+        self.assertIsNotNone(result)
+        self.assertEqual(captured["source_title"], "Rigor Search Title")
 
 
 if __name__ == "__main__":

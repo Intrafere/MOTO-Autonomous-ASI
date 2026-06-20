@@ -29,6 +29,7 @@ _RETRYABLE_OUTPUT_FAILURE_MARKERS = (
 )
 
 _TRANSIENT_MODEL_CALL_MARKERS = (
+    "an error occurred while processing your request",
     "bad gateway",
     "codex connection failed",
     "connecterror",
@@ -41,12 +42,14 @@ _TRANSIENT_MODEL_CALL_MARKERS = (
     "peer closed connection",
     "readerror",
     "remoteprotocolerror",
+    "server_error",
     "service unavailable",
     "temporarily unavailable",
     "upstream connect error",
     "upstream provider timeout",
     "xai grok connection failed",
     "xai grok transient",
+    "you can retry your request",
 )
 
 _TRANSIENT_MODEL_PROVIDER_MARKERS = (
@@ -54,6 +57,20 @@ _TRANSIENT_MODEL_PROVIDER_MARKERS = (
     "grok",
     "xai",
 )
+
+_TRANSIENT_PROVIDER_ERROR_PREFIX = "TRANSIENT PROVIDER ERROR"
+
+
+def format_transient_provider_error(exc: Exception) -> str:
+    """Return a checkpoint-preserving transient provider error message."""
+    message = str(exc or "").strip()
+    if _TRANSIENT_PROVIDER_ERROR_PREFIX in message:
+        return message
+    return (
+        "TRANSIENT PROVIDER ERROR: provider connection failed before usable proof output. "
+        "Preserve the proof checkpoint and retry later."
+        + (f" Original error: {message}" if message else "")
+    )
 
 
 def is_retryable_model_output_error(exc: Exception) -> bool:

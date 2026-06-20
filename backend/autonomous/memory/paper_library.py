@@ -401,12 +401,13 @@ class PaperLibrary:
             empty_appendix = f"{appendix_start}\n{empty_placeholder}\n{appendix_end}"
             stripped = stripped[:start_idx] + empty_appendix + stripped[end_idx:]
 
-        terminal_headers = (
-            "=== PROOFS GENERATED FROM THIS PAPER",
-            "=== PROOFS ATTACHED TO THIS PAPER",
-        )
         header_positions = [
-            idx for header in terminal_headers if (idx := stripped.find(header)) > 0
+            match.start()
+            for match in re.finditer(
+                r"(?m)^=== PROOFS (?:GENERATED FROM|ATTACHED TO) THIS PAPER(?: \(Lean 4 Verified\))? ===\s*$",
+                stripped,
+            )
+            if match.start() > 0
         ]
         if header_positions:
             proof_start = min(header_positions)

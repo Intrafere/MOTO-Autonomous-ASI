@@ -29,11 +29,21 @@ def get_wolfram_tool_guidance() -> str:
     """Return prompt guidance for the construction-only Wolfram tool.
 
     The actual OpenAI-compatible tool schema is registered by
-    HighContextSubmitter.submit_construction. This prompt section is only shown
+    WritingSubmitter.submit_construction. This prompt section is only shown
     when Wolfram is enabled so the model knows the tool exists and when to use
     it.
     """
-    if not system_config.wolfram_alpha_enabled:
+    if not system_config.wolfram_alpha_enabled or not system_config.wolfram_alpha_api_key:
+        return ""
+    try:
+        from backend.shared.wolfram_alpha_client import get_wolfram_client
+    except ImportError:
+        return ""
+    try:
+        client_available = get_wolfram_client() is not None
+    except Exception:
+        client_available = False
+    if not client_available:
         return ""
 
     return """WOLFRAM ALPHA TOOL AVAILABLE (CONSTRUCTION MODE ONLY):

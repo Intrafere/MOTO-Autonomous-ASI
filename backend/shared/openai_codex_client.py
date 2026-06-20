@@ -51,11 +51,13 @@ class OpenAICodexClient:
     REVOKE_URL = "https://auth.openai.com/oauth/revoke"
     CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
     DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
+    DEFAULT_ORIGINATOR = "moto-autonomous-asi"
     DEFAULT_INSTRUCTIONS = "Follow the user's instructions and produce the requested response."
     REFRESH_SKEW_SECONDS = 60
     REASONING_EFFORT_LEVELS = {"xhigh", "high", "medium", "low", "none"}
-    MAX_RETRIES = 3
+    MAX_RETRIES = 4
     RETRY_DELAY = 2.0
+    RETRY_MAX_DELAY = 30.0
     TRANSIENT_COMPLETION_STATUS_CODES = {408, 409, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
     TRANSIENT_COMPLETION_MARKERS = (
         "bad gateway",
@@ -65,9 +67,11 @@ class OpenAICodexClient:
         "incomplete chunked read",
         "peer closed connection",
         "service unavailable",
+        "server_error",
         "temporarily unavailable",
         "upstream connect error",
         "upstream provider timeout",
+        "you can retry",
     )
     KNOWN_MODEL_LIMITS = {
         # OpenAI documents GPT-5.5 in Codex as a 400K-window product. Public
@@ -119,7 +123,7 @@ class OpenAICodexClient:
             "code_challenge_method": "S256",
             "id_token_add_organizations": "true",
             "codex_cli_simplified_flow": "true",
-            "originator": "moto",
+            "originator": cls.DEFAULT_ORIGINATOR,
             "state": state,
         }
         return f"{cls.AUTH_URL}?{urlencode(params)}"
@@ -534,6 +538,14 @@ class OpenAICodexClient:
         )
 
     @classmethod
+    def _max_attempts(cls) -> int:
+        return cls.MAX_RETRIES + 1
+
+    @classmethod
+    def _retry_delay(cls, retry_index: int) -> float:
+        return min(cls.RETRY_MAX_DELAY, cls.RETRY_DELAY * (2 ** max(0, retry_index)))
+
+    @classmethod
     def _reasoning_config(cls, reasoning_effort: Optional[str]) -> Optional[Dict[str, str]]:
         if not reasoning_effort:
             return None
@@ -649,42 +661,47 @@ class OpenAICodexClient:
 
     async def _post_with_retry(self, url: str, **kwargs) -> httpx.Response:
         """POST with retry on transport errors (peer close, read error, connect error)."""
-        for attempt in range(self.MAX_RETRIES):
+        max_attempts = self._max_attempts()
+        for attempt in range(max_attempts):
             try:
                 response = await self.client.post(url, **kwargs)
                 if response.status_code >= 400 and self._is_transient_completion_response(response):
                     error_detail = sanitize_provider_error_text(response.text)
+                    delay = self._retry_delay(attempt)
                     logger.warning(
                         "OpenAI Codex transient completion response (attempt %s/%s): "
-                        "status=%s error=%s",
+                        "status=%s error=%s%s",
                         attempt + 1,
-                        self.MAX_RETRIES,
+                        max_attempts,
                         response.status_code,
                         error_detail,
+                        f"; retrying in {delay:.1f}s" if attempt < max_attempts - 1 else "",
                     )
-                    if attempt < self.MAX_RETRIES - 1:
-                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(delay)
                         continue
-                    raise ValueError(
-                        f"OpenAI Codex connection failed after {self.MAX_RETRIES} attempts: "
+                    raise OpenAICodexRequestError(
+                        f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries: "
                         f"HTTP {response.status_code}: {error_detail}"
                     )
                 return response
-            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+            except httpx.TransportError as e:
                 error_type = type(e).__name__
-                error_detail = repr(e) if not str(e) else str(e)
+                error_detail = sanitize_provider_error_text(str(e) or repr(e))
+                delay = self._retry_delay(attempt)
                 logger.warning(
-                    "OpenAI Codex connection error (attempt %s/%s): [%s] %s",
+                    "OpenAI Codex connection error (attempt %s/%s): [%s] %s%s",
                     attempt + 1,
-                    self.MAX_RETRIES,
+                    max_attempts,
                     error_type,
                     error_detail,
+                    f"; retrying in {delay:.1f}s" if attempt < max_attempts - 1 else "",
                 )
-                if attempt < self.MAX_RETRIES - 1:
-                    await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(delay)
                     continue
-                raise ValueError(
-                    f"OpenAI Codex connection failed after {self.MAX_RETRIES} attempts: "
+                raise OpenAICodexRequestError(
+                    f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries: "
                     f"[{error_type}] {error_detail}"
                 )
 
@@ -725,6 +742,7 @@ class OpenAICodexClient:
                 payload["tool_choice"] = "auto" if tool_choice == "auto" else tool_choice
 
         auth_retry_used = False
+        stream_retries_used = 0
         while True:
             response = await self._post_with_retry(
                 f"{self.CODEX_BASE_URL}/responses",
@@ -751,7 +769,23 @@ class OpenAICodexClient:
                 if self._is_auth_failure_text(str(exc)):
                     raise OpenAICodexAuthError(str(exc)) from exc
                 if self._is_transient_completion_text(str(exc)):
-                    raise ValueError(f"OpenAI Codex connection failed while reading streamed response: {exc}") from exc
+                    if stream_retries_used < self.MAX_RETRIES:
+                        delay = self._retry_delay(stream_retries_used)
+                        stream_retries_used += 1
+                        logger.warning(
+                            "OpenAI Codex transient streamed response (retry %s/%s): %s; "
+                            "retrying in %.1fs",
+                            stream_retries_used,
+                            self.MAX_RETRIES,
+                            sanitize_provider_error_text(str(exc)),
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    raise OpenAICodexRequestError(
+                        f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries "
+                        f"while reading streamed response: {exc}"
+                    ) from exc
                 raise
         content, tool_calls = self._extract_output(data)
         message: Dict[str, Any] = {"role": "assistant", "content": content}

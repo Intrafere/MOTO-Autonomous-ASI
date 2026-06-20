@@ -745,7 +745,7 @@ class ProofDatabase:
         hints_block = format_failure_hints_for_injection(hints)
         if not hints_block:
             return prompt
-        if "=== OPEN LEMMA TARGETS LEAN 4 COULD NOT YET CLOSE ===" in prompt:
+        if "=== OPEN PROOF TARGETS LEAN 4 COULD NOT YET CLOSE ===" in prompt:
             return prompt
         if not prompt:
             return hints_block

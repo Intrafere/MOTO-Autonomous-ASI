@@ -13,7 +13,7 @@ import './settings-common.css';
  * Modal for configuring cloud provider access.
  * 
  * Shows when:
- * 1. User clicks the Cloud Access & Keys header chip
+ * 1. User clicks the OpenRouter/OAuth header row
  * 2. User clicks "Use OpenRouter" on any role but no API key is configured
  * 3. LM Studio is unavailable and user needs cloud access as primary provider
  */
@@ -606,7 +606,7 @@ export default function OpenRouterApiKeyModal({
       >
         <div className="settings-header-row" style={{ marginBottom: '1.5rem' }}>
           <h2 style={{ margin: 0, color: '#fff', fontSize: '1.4rem' }}>
-            Cloud Access & Keys
+            OpenRouter/OAuth
           </h2>
           <button
             onClick={onClose}
@@ -1004,6 +1004,7 @@ export default function OpenRouterApiKeyModal({
             </>
           )}
         </div>
+
         {/* Error Message */}
         {error && (
           <div className="test-result-banner test-result-banner--error" style={{

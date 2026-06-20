@@ -9,6 +9,8 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
+  formatOpenRouterProviderLabel,
+  getOpenRouterProviderTitle,
   getProviderNames,
   getReasoningSupportInfo,
   hasEndpointMetadata,
@@ -39,6 +41,7 @@ const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer 
 
 const ROLE_EDITOR_GROUPS = [
   { key: 'validator', title: 'Validator', roleKeys: ['topic_validator', 'brainstorm_validator'] },
+  { key: 'assistant', title: 'Assistant', roleKeys: ['assistant'] },
   { key: 'final_solver', title: 'Final Proof Solver', roleKeys: ['final_solver'] },
 ];
 
@@ -113,7 +116,7 @@ function ModelSelector({
                 openrouterProvider: null,
                 openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
               })}
-              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
+              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in OpenRouter/OAuth first' : 'Use an OAuth subscription provider'}
             >
               oAuth
             </button>
@@ -169,13 +172,17 @@ function ModelSelector({
         <div className="settings-row">
           <label>Host Provider</label>
           <select
+            className="openrouter-host-provider-select"
             value={config.openrouterProvider || ''}
             disabled={isRunning}
+            title={getOpenRouterProviderTitle(config.openrouterProvider)}
             onChange={(event) => onChange({ ...config, provider, openrouterProvider: event.target.value || null })}
           >
             <option value="">Auto</option>
             {providers.map((providerName) => (
-              <option key={providerName} value={providerName}>{providerName}</option>
+              <option key={providerName} value={providerName} title={getOpenRouterProviderTitle(providerName)}>
+                {formatOpenRouterProviderLabel(providerName)}
+              </option>
             ))}
           </select>
         </div>
@@ -220,16 +227,31 @@ function ModelSelector({
   );
 }
 function RoleEditor(props) {
-  const { title, config, onChange, isRunning, developerModeEnabled = false } = props;
+  const { title, config, onChange, isRunning, developerModeEnabled = false, disabled = false } = props;
+  const controlsDisabled = isRunning || disabled;
   const updateNumber = (key, value, fallback) => {
     const parsed = parseInt(value, 10);
     onChange({ ...config, [key]: Number.isFinite(parsed) && parsed > 0 ? parsed : fallback });
   };
 
   return (
-    <div className={`submitter-config-section${config.provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}>
+    <div
+      className={`submitter-config-section${config.provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
+      aria-disabled={disabled}
+      style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}
+    >
       <h4>{title}</h4>
-      <ModelSelector {...props} />
+      {title === 'Assistant' && (
+        <p className="settings-info">
+          Runs in parallel during topic, brainstorm, path, master-proof edit, and final proof work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators never receive Assistant context.
+        </p>
+      )}
+      {disabled && (
+        <p className="settings-hint">
+          Assistant requires Session History Memory. Enable it from Connectivity to edit or run this role.
+        </p>
+      )}
+      <ModelSelector {...props} isRunning={controlsDisabled} />
       <div className="settings-row">
         <label>Context Window</label>
         <input
@@ -237,7 +259,7 @@ function RoleEditor(props) {
           min={4096}
           step={1024}
           value={config.contextWindow ?? DEFAULT_CONTEXT_WINDOW}
-          disabled={isRunning}
+          disabled={controlsDisabled}
           onChange={(event) => updateNumber('contextWindow', event.target.value, '')}
         />
       </div>
@@ -248,7 +270,7 @@ function RoleEditor(props) {
           min={1000}
           step={1000}
           value={config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS}
-          disabled={isRunning}
+          disabled={controlsDisabled}
           onChange={(event) => updateNumber('maxOutputTokens', event.target.value, '')}
         />
       </div>
@@ -258,7 +280,7 @@ function RoleEditor(props) {
             <input
               type="checkbox"
               checked={Boolean(config.superchargeEnabled)}
-              disabled={isRunning}
+              disabled={controlsDisabled}
               onChange={(event) => onChange({ ...config, superchargeEnabled: event.target.checked })}
             />
             <HelpTooltip
@@ -280,6 +302,7 @@ export default function LeanOJSettings({
   settings,
   onSettingsChange,
   capabilities,
+  connectivityStatus,
   isRunning,
   developerModeEnabled = false,
 }) {
@@ -303,6 +326,10 @@ export default function LeanOJSettings({
   const [rawSettingsMessage, setRawSettingsMessage] = useState('');
   const [guiSettingsBeforeRaw, setGuiSettingsBeforeRaw] = useState(null);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const genericMode = Boolean(capabilities?.genericMode);
+  const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
+  const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
+  const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
 
   useEffect(() => {
     if (!developerModeEnabled && editRawSettings) {
@@ -324,50 +351,62 @@ export default function LeanOJSettings({
         console.error('Failed to load OpenRouter state for Proof Solver:', error);
       }
 
-      try {
-        const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
-        const configured = Boolean(codexStatus.status?.configured);
-        setHasOpenAICodexLogin(configured);
-        if (configured) {
-          const codexModels = await cloudAccessAPI.getOpenAICodexModels();
-          const models = codexModels.models || [];
-          setOpenAICodexModels(models);
-          setHasOpenAICodexLogin(models.length > 0);
-          setOpenAICodexModelError(models.length > 0
-            ? ''
-            : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
-          );
-        } else {
-          setOpenAICodexModelError('');
+      if (openAICodexOauthAvailable) {
+        try {
+          const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+          const configured = Boolean(codexStatus.status?.configured);
+          setHasOpenAICodexLogin(configured);
+          if (configured) {
+            const codexModels = await cloudAccessAPI.getOpenAICodexModels();
+            const models = codexModels.models || [];
+            setOpenAICodexModels(models);
+            setHasOpenAICodexLogin(models.length > 0);
+            setOpenAICodexModelError(models.length > 0
+              ? ''
+              : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
+            );
+          } else {
+            setOpenAICodexModelError('');
+          }
+        } catch (error) {
+          console.error('Failed to load OpenAI Codex state for Proof Solver:', error);
+          setHasOpenAICodexLogin(false);
+          setOpenAICodexModels([]);
+          setOpenAICodexModelError(`OpenAI Codex OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
         }
-      } catch (error) {
-        console.error('Failed to load OpenAI Codex state for Proof Solver:', error);
+      } else {
         setHasOpenAICodexLogin(false);
         setOpenAICodexModels([]);
-        setOpenAICodexModelError(`OpenAI Codex OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
+        setOpenAICodexModelError('');
       }
 
-      try {
-        const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
-        const configured = Boolean(xaiStatus.status?.configured);
-        setHasXAIGrokLogin(configured);
-        if (configured) {
-          const xaiModels = await cloudAccessAPI.getXAIGrokModels();
-          const models = xaiModels.models || [];
-          setXaiGrokModels(models);
-          setHasXAIGrokLogin(models.length > 0);
-          setXaiGrokModelError(models.length > 0
-            ? ''
-            : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
-          );
-        } else {
-          setXaiGrokModelError('');
+      if (xaiGrokOauthAvailable) {
+        try {
+          const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+          const configured = Boolean(xaiStatus.status?.configured);
+          setHasXAIGrokLogin(configured);
+          if (configured) {
+            const xaiModels = await cloudAccessAPI.getXAIGrokModels();
+            const models = xaiModels.models || [];
+            setXaiGrokModels(models);
+            setHasXAIGrokLogin(models.length > 0);
+            setXaiGrokModelError(models.length > 0
+              ? ''
+              : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
+            );
+          } else {
+            setXaiGrokModelError('');
+          }
+        } catch (error) {
+          console.error('Failed to load xAI Grok state for Proof Solver:', error);
+          setHasXAIGrokLogin(false);
+          setXaiGrokModels([]);
+          setXaiGrokModelError(`xAI Grok OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
         }
-      } catch (error) {
-        console.error('Failed to load xAI Grok state for Proof Solver:', error);
+      } else {
         setHasXAIGrokLogin(false);
         setXaiGrokModels([]);
-        setXaiGrokModelError(`xAI Grok OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
+        setXaiGrokModelError('');
       }
 
       if (lmStudioEnabled) {
@@ -386,7 +425,7 @@ export default function LeanOJSettings({
       }
     };
     load();
-  }, [lmStudioEnabled, settings.freeOnly]);
+  }, [lmStudioEnabled, settings.freeOnly, openAICodexOauthAvailable, xaiGrokOauthAvailable]);
 
   useEffect(() => {
     setSelectedProfile(settings.selectedProfile || '');
@@ -613,6 +652,7 @@ export default function LeanOJSettings({
           modelId: config.modelId,
           provider: config.provider,
           openrouterProvider: config.openrouterProvider,
+          openrouterReasoningEffort: config.openrouterReasoningEffort,
           lmStudioFallbackId: config.lmStudioFallbackId,
           contextWindow: config.contextWindow,
           maxOutputTokens: config.maxOutputTokens,
@@ -951,6 +991,7 @@ export default function LeanOJSettings({
               isRunning={isRunning}
               lmStudioEnabled={lmStudioEnabled}
               developerModeEnabled={developerModeEnabled}
+              disabled={group.key === 'assistant' && !assistantMemoryEnabled}
             />
           </div>
         ))}

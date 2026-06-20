@@ -4,20 +4,25 @@ Lean 4 formalization agent with iterative retry loop.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
-from typing import Awaitable, Callable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import get_lean4_client
 from backend.shared.model_error_utils import (
+    format_transient_provider_error,
     is_non_retryable_model_error,
     is_retryable_model_output_error,
     is_transient_model_call_error,
 )
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.proof_search.tool_adapter import execute_search_lean_proofs
+from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
+from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config, system_config
 from backend.autonomous.prompts.proof_prompts import (
@@ -26,6 +31,17 @@ from backend.autonomous.prompts.proof_prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _assistant_workflow_mode_for_role(role_id: str) -> str:
+    normalized = (role_id or "").lower()
+    if "manual" in normalized or "compiler_aggregator" in normalized:
+        return "manual_proof_check"
+    if normalized.startswith("compiler") or normalized.startswith("comp_"):
+        return "compiler"
+    if normalized.startswith("leanoj"):
+        return "leanoj"
+    return "autonomous"
 
 AttemptCallback = Callable[[ProofAttemptFeedback], Awaitable[None]]
 AttemptStartCallback = Callable[[int, str], Awaitable[None]]
@@ -62,8 +78,9 @@ _TRANSIENT_PROVIDER_ERROR = (
 )
 _LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
 _MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX = "MANDATORY FULL SOURCE CONTEXT OVERFLOW"
-
-
+_PROOF_SEARCH_CONTEXT_OMITTED = (
+    "[Proof-search context omitted because it was unavailable or did not fit the configured context budget.]"
+)
 def _is_stop_requested(should_stop: ShouldStopFn) -> bool:
     if should_stop is None:
         return False
@@ -71,6 +88,24 @@ def _is_stop_requested(should_stop: ShouldStopFn) -> bool:
         return bool(should_stop())
     except Exception:
         return False
+
+
+def _format_attempt_feedback_for_assistant(attempts: list[ProofAttemptFeedback], limit: int = 5) -> str:
+    if not attempts:
+        return ""
+    lines: list[str] = []
+    for attempt in attempts[-limit:]:
+        parts = [
+            f"Attempt {attempt.attempt}",
+            f"strategy={attempt.strategy}",
+            f"success={attempt.success}",
+            f"reasoning={attempt.reasoning}",
+            f"lean_error={attempt.error_output}",
+            f"goal_states={attempt.goal_states}",
+        ]
+        lines.append("\n".join(part for part in parts if part and part.split("=", 1)[-1].strip()))
+    text = "\n\n---\n\n".join(lines)
+    return text[:5000] + ("..." if len(text) > 5000 else "")
 
 
 def _is_json_parse_error(exc: Exception) -> bool:
@@ -208,7 +243,74 @@ class ProofFormalizationAgent:
             source_excerpt = source_excerpt[: max(len(source_excerpt) // 2, min_excerpt_length)]
             prompt = prompt_builder(source_excerpt=source_excerpt, **prompt_kwargs)
             prompt_tokens = count_tokens(prompt)
+        if (
+            prompt_tokens > max_input_tokens
+            and prompt_kwargs.get("retrieved_proofs_context")
+            and prompt_kwargs.get("retrieved_proofs_context") != _PROOF_SEARCH_CONTEXT_OMITTED
+        ):
+            prompt_kwargs["retrieved_proofs_context"] = _PROOF_SEARCH_CONTEXT_OMITTED
+            prompt = prompt_builder(source_excerpt=source_excerpt, **prompt_kwargs)
+            prompt_tokens = count_tokens(prompt)
         return prompt, source_excerpt, max_input_tokens, prompt_tokens
+
+    async def _record_syntheticlib4_context_exposure(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        theorem_candidate: ProofCandidate,
+        lean_code: str,
+    ) -> None:
+        """
+        Persist local usage metadata when full SyntheticLib4 code was model-visible.
+
+        This is intentionally conservative: it records `entire_code_used=false`
+        because MOTO cannot prove the generated proof consumed an external proof
+        as a whole dependency unless a later artifact/dependency extractor says so.
+        """
+        used_proofs: list[dict[str, str]] = []
+        for record in records:
+            if record.get("corpus") != "syntheticlib4":
+                continue
+            if not str(record.get("lean_code") or "").strip():
+                continue
+            fingerprint = str(record.get("fingerprint") or record.get("proof_id") or "").strip()
+            statement_hash = str(record.get("theorem_statement_hash") or "").strip()
+            code_hash = str(record.get("lean_code_hash") or "").strip()
+            if not fingerprint:
+                continue
+            used_proofs.append(
+                {
+                    "fingerprint": fingerprint,
+                    "theorem_statement_hash": statement_hash,
+                    "lean_code_hash": code_hash,
+                }
+            )
+        if not used_proofs:
+            return
+
+        artifact_hash = hashlib.sha256(
+            "\n\n".join(
+                [
+                    theorem_candidate.theorem_id,
+                    theorem_candidate.statement,
+                    lean_code or "",
+                ]
+            ).encode("utf-8")
+        ).hexdigest()
+        result = await execute_search_lean_proofs(
+            {
+                "action": "attest_usage",
+                "usage_attestation": {
+                    "retrieval_batch_id": "local_proof_search_prefetch",
+                    "used_proofs": used_proofs,
+                    "entire_code_used": False,
+                    "usage_type": "model_visible_context",
+                    "moto_artifact_hash": artifact_hash,
+                },
+            }
+        )
+        if not result.get("success"):
+            logger.debug("SyntheticLib4 local context-exposure attestation failed: %s", result.get("error"))
 
     async def _run_full_script_attempt(
         self,
@@ -222,6 +324,8 @@ class ProofFormalizationAgent:
         attempt_number: int,
         smt_hint: Optional[SmtHint] = None,
         source_title: str = "",
+        retrieved_proofs_context: str = "",
+        assistant_memory_target_hash: str = "",
     ) -> tuple[str, str, ProofAttemptFeedback]:
         prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
             build_proof_formalization_prompt,
@@ -240,6 +344,7 @@ class ProofFormalizationAgent:
             prompt_relevance_rationale=theorem_candidate.prompt_relevance_rationale,
             novelty_rationale=theorem_candidate.novelty_rationale,
             why_not_standard_known_result=theorem_candidate.why_not_standard_known_result,
+            retrieved_proofs_context=retrieved_proofs_context,
         )
 
         if prompt_tokens > max_input_tokens:
@@ -249,7 +354,9 @@ class ProofFormalizationAgent:
                 reasoning="Mandatory full-source proof context is too large for the configured context window.",
                 error_output=(
                     f"{_MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX}: Prompt too large after shrinking only the focused excerpt "
-                    f"({prompt_tokens} > {max_input_tokens}). Full source content is mandatory "
+                    f"({prompt_tokens} > {max_input_tokens}). Configured total context={self.context_window}, "
+                    f"max output reserve={self.max_output_tokens}, safety buffer={rag_config.context_buffer_tokens}. "
+                    "Full source content is mandatory "
                     "and was not truncated or dropped."
                 ),
                 strategy="full_script",
@@ -269,6 +376,12 @@ class ProofFormalizationAgent:
                 max_tokens=self.max_output_tokens,
                 temperature=0.0,
             )
+            if assistant_memory_target_hash:
+                assistant_proof_search_coordinator.mark_pack_consumed_by_solver(
+                    assistant_memory_target_hash,
+                    role_id=self.role_id,
+                    task_id=task_id,
+                )
             if not response or not response.get("choices"):
                 raise ValueError("Empty response from formalization model.")
 
@@ -312,7 +425,7 @@ class ProofFormalizationAgent:
             if is_retryable_model_output_error(exc):
                 raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
             if is_transient_model_call_error(exc):
-                raise RuntimeError(_TRANSIENT_PROVIDER_ERROR) from exc
+                raise RuntimeError(format_transient_provider_error(exc)) from exc
             is_parse_error = _is_json_parse_error(exc)
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
@@ -358,6 +471,30 @@ class ProofFormalizationAgent:
             theorem_candidate.statement,
             source_content,
         )
+        assistant_snapshot = AssistantTargetSnapshot(
+            workflow_mode=_assistant_workflow_mode_for_role(self.role_id),
+            target_kind="proof_candidate",
+            user_prompt=user_research_prompt,
+            target_statement=theorem_candidate.statement,
+            formal_sketch=theorem_candidate.formal_sketch,
+            proof_attempt_feedback=_format_attempt_feedback_for_assistant(attempts),
+            source_title=source_title,
+            source_type=source_type,
+            source_id=theorem_candidate.origin_source_id,
+            dependency_names=[
+                str(getattr(lemma, "full_name", "") or getattr(lemma, "requested_name", "") or "").strip()
+                for lemma in (theorem_candidate.relevant_lemmas or [])
+                if str(getattr(lemma, "full_name", "") or getattr(lemma, "requested_name", "") or "").strip()
+            ],
+        )
+        assistant_target_hash = assistant_proof_search_coordinator.submit_target(assistant_snapshot)
+        assistant_pack = assistant_proof_search_coordinator.get_latest_pack(assistant_target_hash)
+        retrieved_proofs_context = assistant_pack.to_prompt_context() if assistant_pack else ""
+        retrieved_proof_records: list[dict[str, Any]] = (
+            [support.model_dump(mode="json") for support in assistant_pack.results]
+            if assistant_pack
+            else []
+        )
         theorem_name = ""
 
         next_attempt_number = (
@@ -378,6 +515,17 @@ class ProofFormalizationAgent:
                     theorem_candidate.theorem_id,
                 )
                 break
+            if attempts:
+                assistant_snapshot = assistant_snapshot.model_copy(
+                    update={"proof_attempt_feedback": _format_attempt_feedback_for_assistant(attempts)}
+                )
+                assistant_target_hash = assistant_proof_search_coordinator.submit_target(assistant_snapshot)
+                assistant_pack = assistant_proof_search_coordinator.get_latest_pack(assistant_target_hash)
+                if assistant_pack:
+                    retrieved_proofs_context = assistant_pack.to_prompt_context()
+                    retrieved_proof_records = [
+                        support.model_dump(mode="json") for support in assistant_pack.results
+                    ]
             attempt_number = next_attempt_number + attempt_offset
             if attempt_start_callback and malformed_output_retries == 0:
                 await attempt_start_callback(attempt_number, "full_script")
@@ -392,6 +540,8 @@ class ProofFormalizationAgent:
                 attempt_number=attempt_number,
                 smt_hint=smt_hint,
                 source_title=source_title,
+                retrieved_proofs_context=retrieved_proofs_context,
+                assistant_memory_target_hash=assistant_target_hash if assistant_pack and assistant_pack.results else "",
             )
 
             terminal_malformed_output = False
@@ -417,6 +567,11 @@ class ProofFormalizationAgent:
                 await attempt_callback(feedback)
 
             if feedback.success:
+                await self._record_syntheticlib4_context_exposure(
+                    retrieved_proof_records,
+                    theorem_candidate=theorem_candidate,
+                    lean_code=feedback.lean_code,
+                )
                 return True, theorem_name, feedback.lean_code, attempts
             if _is_lean_workspace_error_feedback(feedback):
                 break
@@ -451,6 +606,30 @@ class ProofFormalizationAgent:
             theorem_candidate.statement,
             source_content,
         )
+        assistant_snapshot = AssistantTargetSnapshot(
+            workflow_mode=_assistant_workflow_mode_for_role(self.role_id),
+            target_kind="proof_candidate",
+            user_prompt=user_research_prompt,
+            target_statement=theorem_candidate.statement,
+            formal_sketch=theorem_candidate.formal_sketch,
+            proof_attempt_feedback=_format_attempt_feedback_for_assistant(attempts),
+            source_title=source_title,
+            source_type=source_type,
+            source_id=theorem_candidate.origin_source_id,
+            dependency_names=[
+                str(getattr(lemma, "full_name", "") or getattr(lemma, "requested_name", "") or "").strip()
+                for lemma in (theorem_candidate.relevant_lemmas or [])
+                if str(getattr(lemma, "full_name", "") or getattr(lemma, "requested_name", "") or "").strip()
+            ],
+        )
+        assistant_target_hash = assistant_proof_search_coordinator.submit_target(assistant_snapshot)
+        assistant_pack = assistant_proof_search_coordinator.get_latest_pack(assistant_target_hash)
+        retrieved_proofs_context = assistant_pack.to_prompt_context() if assistant_pack else ""
+        retrieved_proof_records: list[dict[str, Any]] = (
+            [support.model_dump(mode="json") for support in assistant_pack.results]
+            if assistant_pack
+            else []
+        )
         theorem_name = ""
 
         next_attempt_number = (
@@ -474,6 +653,17 @@ class ProofFormalizationAgent:
             attempt_number = next_attempt_number + attempt_offset
             if attempt_start_callback and malformed_output_retries == 0:
                 await attempt_start_callback(attempt_number, "tactic_script")
+            if attempts:
+                assistant_snapshot = assistant_snapshot.model_copy(
+                    update={"proof_attempt_feedback": _format_attempt_feedback_for_assistant(attempts)}
+                )
+                assistant_target_hash = assistant_proof_search_coordinator.submit_target(assistant_snapshot)
+                assistant_pack = assistant_proof_search_coordinator.get_latest_pack(assistant_target_hash)
+                if assistant_pack:
+                    retrieved_proofs_context = assistant_pack.to_prompt_context()
+                    retrieved_proof_records = [
+                        support.model_dump(mode="json") for support in assistant_pack.results
+                    ]
 
             prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
                 build_proof_tactic_script_prompt,
@@ -492,6 +682,7 @@ class ProofFormalizationAgent:
                 prompt_relevance_rationale=theorem_candidate.prompt_relevance_rationale,
                 novelty_rationale=theorem_candidate.novelty_rationale,
                 why_not_standard_known_result=theorem_candidate.why_not_standard_known_result,
+                retrieved_proofs_context=retrieved_proofs_context,
             )
 
             if prompt_tokens > max_input_tokens:
@@ -501,7 +692,9 @@ class ProofFormalizationAgent:
                     reasoning="Mandatory full-source proof context is too large for the configured context window.",
                     error_output=(
                         f"{_MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX}: Prompt too large after shrinking only the focused excerpt "
-                        f"({prompt_tokens} > {max_input_tokens}). Full source content is mandatory "
+                        f"({prompt_tokens} > {max_input_tokens}). Configured total context={self.context_window}, "
+                        f"max output reserve={self.max_output_tokens}, safety buffer={rag_config.context_buffer_tokens}. "
+                        "Full source content is mandatory "
                         "and was not truncated or dropped."
                     ),
                     strategy="tactic_script",
@@ -524,6 +717,12 @@ class ProofFormalizationAgent:
                     max_tokens=self.max_output_tokens,
                     temperature=0.0,
                 )
+                if assistant_target_hash and assistant_pack and assistant_pack.results:
+                    assistant_proof_search_coordinator.mark_pack_consumed_by_solver(
+                        assistant_target_hash,
+                        role_id=self.role_id,
+                        task_id=task_id,
+                    )
                 if not response or not response.get("choices"):
                     raise ValueError("Empty response from tactic formalization model.")
 
@@ -561,6 +760,8 @@ class ProofFormalizationAgent:
                         attempt_number=attempt_number,
                         smt_hint=smt_hint,
                         source_title=source_title,
+                        retrieved_proofs_context=retrieved_proofs_context,
+                        assistant_memory_target_hash=assistant_target_hash if assistant_pack and assistant_pack.results else "",
                     )
                     if current_theorem_name:
                         theorem_name = current_theorem_name
@@ -583,6 +784,11 @@ class ProofFormalizationAgent:
                     if attempt_callback:
                         await attempt_callback(feedback)
                     if feedback.success:
+                        await self._record_syntheticlib4_context_exposure(
+                            retrieved_proof_records,
+                            theorem_candidate=theorem_candidate,
+                            lean_code=feedback.lean_code,
+                        )
                         return True, theorem_name, feedback.lean_code, attempts
                     if _is_lean_workspace_error_feedback(feedback):
                         break
@@ -616,6 +822,11 @@ class ProofFormalizationAgent:
                     await attempt_callback(feedback)
 
                 if lean_result.success:
+                    await self._record_syntheticlib4_context_exposure(
+                        retrieved_proof_records,
+                        theorem_candidate=theorem_candidate,
+                        lean_code=lean_code,
+                    )
                     return True, theorem_name, lean_code, attempts
                 if _is_lean_workspace_error_feedback(feedback):
                     break
@@ -630,7 +841,7 @@ class ProofFormalizationAgent:
                 if is_retryable_model_output_error(exc):
                     raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
                 if is_transient_model_call_error(exc):
-                    raise RuntimeError(_TRANSIENT_PROVIDER_ERROR) from exc
+                    raise RuntimeError(format_transient_provider_error(exc)) from exc
                 is_parse_error = _is_json_parse_error(exc)
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,

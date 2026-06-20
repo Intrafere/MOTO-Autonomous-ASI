@@ -48,6 +48,7 @@ class WebSocketService {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
+      this.emit('connected', { timestamp: new Date().toISOString() });
       
       // Start ping/pong
       this.startHeartbeat();

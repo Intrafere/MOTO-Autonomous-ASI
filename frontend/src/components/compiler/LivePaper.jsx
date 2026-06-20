@@ -155,6 +155,7 @@ function LivePaper({ capabilities }) {
 
     try {
       await compilerAPI.clearPaper();
+      localStorage.removeItem('compiler_prompt');
       alert('Paper reset successfully. Starting fresh from outline creation.');
       // Refresh paper to show empty state
       loadPaper();

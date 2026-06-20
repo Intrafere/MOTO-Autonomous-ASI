@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { autonomousAPI } from '../../services/api';
+import { autonomousAPI, proofSearchAPI } from '../../services/api';
 import { buildResearchRunGroups, formatRunPromptPreview } from '../../utils/researchRunHistory';
 import { downloadTextFile } from '../../utils/downloadHelpers';
 import './FinalAnswerLibrary.css';
@@ -49,6 +49,19 @@ function getCardClass(proof) {
   return 'proof-card--known';
 }
 
+const PROOF_SEARCH_CORPORA = [
+  { id: 'moto', label: 'MOTO Autonomous' },
+  { id: 'manual', label: 'MOTO Manual' },
+  { id: 'leanoj', label: 'LeanOJ' },
+  { id: 'syntheticlib4', label: 'SyntheticLib4' },
+];
+
+const PROOF_SEARCH_OPTIONS = [
+  { id: 'verified_only', label: 'Verified only' },
+  { id: 'include_partial', label: 'Include partial artifacts' },
+  { id: 'include_failed', label: 'Include failed attempts' },
+];
+
 export default function ProofLibrary({
   proofScope = 'autonomous',
   title = 'Proof Library',
@@ -63,6 +76,16 @@ export default function ProofLibrary({
   const [loadingContentId, setLoadingContentId] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterNovelty, setFilterNovelty] = useState('novel');
+  const [proofSearchOverview, setProofSearchOverview] = useState(null);
+  const [proofSearchCorpora, setProofSearchCorpora] = useState(['moto', 'manual', 'leanoj', 'syntheticlib4']);
+  const [proofSearchVerifiedOnly, setProofSearchVerifiedOnly] = useState(true);
+  const [proofSearchIncludePartial, setProofSearchIncludePartial] = useState(false);
+  const [proofSearchIncludeFailed, setProofSearchIncludeFailed] = useState(false);
+  const [proofSearchResults, setProofSearchResults] = useState([]);
+  const [proofSearchMessage, setProofSearchMessage] = useState('');
+  const [proofSearchLoading, setProofSearchLoading] = useState(false);
+  const [proofSearchExpandedId, setProofSearchExpandedId] = useState(null);
+  const [proofSearchExpandedRecord, setProofSearchExpandedRecord] = useState(null);
 
   const loadProofLibrary = async () => {
     try {
@@ -96,6 +119,24 @@ export default function ProofLibrary({
   useEffect(() => {
     loadProofLibrary();
   }, [filterNovelty, proofScope]);
+
+  useEffect(() => {
+    let cancelled = false;
+    proofSearchAPI.getOverview()
+      .then((overview) => {
+        if (!cancelled) {
+          setProofSearchOverview(overview);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setProofSearchMessage(err.message || 'Proof-search overview unavailable');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filteredProofs = useMemo(() => {
     if (!searchTerm.trim()) return proofs;
@@ -175,6 +216,85 @@ export default function ProofLibrary({
     downloadTextFile(leanCode, filename);
   };
 
+  const toggleProofSearchCorpus = (corpusId) => {
+    setProofSearchCorpora((previous) => {
+      if (previous.includes(corpusId)) {
+        const next = previous.filter((id) => id !== corpusId);
+        return next.length > 0 ? next : previous;
+      }
+      return [...previous, corpusId];
+    });
+  };
+
+  const handleUnifiedProofSearch = async (event) => {
+    event?.preventDefault();
+    setProofSearchLoading(true);
+    setProofSearchMessage('');
+    setProofSearchExpandedId(null);
+    setProofSearchExpandedRecord(null);
+    try {
+      const effectiveVerifiedOnly = proofSearchVerifiedOnly
+        && !proofSearchIncludePartial
+        && !proofSearchIncludeFailed;
+      const response = await proofSearchAPI.search({
+        query: '',
+        corpora: proofSearchCorpora,
+        verified_only: effectiveVerifiedOnly,
+        include_partial: proofSearchIncludePartial,
+        include_failed: proofSearchIncludeFailed,
+        dependency_names: [],
+        novelty_filters: [],
+        module_filters: [],
+        source_filters: [],
+        limit: 7,
+        hydrate_lean_code: false,
+      });
+      setProofSearchResults(response.results || []);
+      setProofSearchMessage(response.weak_result_warning || response.ranking_notes || '');
+    } catch (err) {
+      setProofSearchResults([]);
+      setProofSearchMessage(err.message || 'Proof search failed');
+    } finally {
+      setProofSearchLoading(false);
+    }
+  };
+
+  const handleProofSearchReindex = async () => {
+    setProofSearchLoading(true);
+    setProofSearchMessage('');
+    try {
+      const response = await proofSearchAPI.reindex();
+      setProofSearchOverview(response.overview || null);
+      setProofSearchMessage('Unified proof-search index rebuilt.');
+    } catch (err) {
+      setProofSearchMessage(err.message || 'Proof-search reindex failed');
+    } finally {
+      setProofSearchLoading(false);
+    }
+  };
+
+  const handleExpandProofSearchResult = async (record) => {
+    const id = record.search_id || `${record.corpus}:${record.proof_id}`;
+    if (proofSearchExpandedId === id) {
+      setProofSearchExpandedId(null);
+      setProofSearchExpandedRecord(null);
+      return;
+    }
+    setProofSearchExpandedId(id);
+    setProofSearchExpandedRecord(record);
+    if (record.lean_code) {
+      return;
+    }
+    try {
+      const hydrated = await proofSearchAPI.getProof(record.corpus, record.proof_id, {
+        sessionId: record.session_id || null,
+      });
+      setProofSearchExpandedRecord(hydrated);
+    } catch {
+      setProofSearchExpandedRecord(record);
+    }
+  };
+
   const novelCount = proofs.filter((p) => p.novel).length;
   const totalCount = proofs.length;
 
@@ -220,6 +340,172 @@ export default function ProofLibrary({
           )}
         </div>
       </div>
+
+      <section className="proof-search-panel">
+        <div className="proof-search-panel__header">
+          <div>
+            <h3>Unified Proof Search</h3>
+            <p>
+              Search MOTO proof history, LeanOJ artifacts, and SyntheticLib4 snapshot records through the backend index. Results are capped at 7 combined proofs.
+            </p>
+          </div>
+          <div className="proof-search-panel__stats">
+            <span>{proofSearchOverview?.total_records ?? 0} indexed</span>
+            <span>{proofSearchOverview?.result_cap ?? 7} result cap</span>
+          </div>
+        </div>
+
+        <form className="proof-search-form" onSubmit={handleUnifiedProofSearch}>
+          <fieldset className="proof-search-checklist">
+            <legend>Search Checklist</legend>
+            <div className="proof-search-checklist__grid">
+              {PROOF_SEARCH_CORPORA.map((corpus) => (
+                <label key={corpus.id} className="proof-search-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={proofSearchCorpora.includes(corpus.id)}
+                    onChange={() => toggleProofSearchCorpus(corpus.id)}
+                  />
+                  <span>{corpus.label}</span>
+                </label>
+              ))}
+              {PROOF_SEARCH_OPTIONS.map((option) => {
+                if (option.id === 'verified_only') {
+                  return (
+                    <label key={option.id} className="proof-search-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={proofSearchVerifiedOnly}
+                        onChange={(event) => setProofSearchVerifiedOnly(event.target.checked)}
+                      />
+                      <span>{option.label}</span>
+                    </label>
+                  );
+                }
+                if (option.id === 'include_partial') {
+                  return (
+                    <label key={option.id} className="proof-search-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={proofSearchIncludePartial}
+                        onChange={(event) => {
+                          setProofSearchIncludePartial(event.target.checked);
+                          if (event.target.checked) setProofSearchVerifiedOnly(false);
+                        }}
+                      />
+                      <span>{option.label}</span>
+                    </label>
+                  );
+                }
+                return (
+                  <label key={option.id} className="proof-search-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={proofSearchIncludeFailed}
+                      onChange={(event) => {
+                        setProofSearchIncludeFailed(event.target.checked);
+                        if (event.target.checked) setProofSearchVerifiedOnly(false);
+                      }}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                );
+              })}
+            </div>
+            {(proofSearchIncludePartial || proofSearchIncludeFailed) && proofSearchVerifiedOnly && (
+              <p className="proof-search-checklist__note">
+                Partial or failed artifact searches automatically disable verified-only filtering for the request.
+              </p>
+            )}
+          </fieldset>
+          <div className="proof-search-actions">
+            <button type="submit" className="refresh-button" disabled={proofSearchLoading}>
+              {proofSearchLoading ? 'Searching...' : 'Search Proofs'}
+            </button>
+            <button
+              type="button"
+              className="refresh-button refresh-button--secondary"
+              onClick={handleProofSearchReindex}
+              disabled={proofSearchLoading}
+            >
+              Rebuild Index
+            </button>
+          </div>
+        </form>
+
+        {proofSearchMessage && (
+          <div className="proof-search-message">
+            {proofSearchMessage}
+          </div>
+        )}
+
+        {proofSearchResults.length > 0 && (
+          <div className="proof-search-results">
+            {proofSearchResults.map((record) => {
+              const id = record.search_id || `${record.corpus}:${record.proof_id}`;
+              const isExpanded = proofSearchExpandedId === id;
+              const expandedRecord = isExpanded ? (proofSearchExpandedRecord || record) : record;
+              return (
+                <div key={id} className="proof-search-result-card">
+                  <button
+                    type="button"
+                    className="proof-search-result-card__summary"
+                    onClick={() => handleExpandProofSearchResult(record)}
+                  >
+                    <div>
+                      <h4>{record.theorem_name || record.display_title || record.proof_id}</h4>
+                      <p>{truncate(record.theorem_statement, 260)}</p>
+                    </div>
+                    <span>{isExpanded ? '\u25B2' : '\u25BC'}</span>
+                  </button>
+                  <div className="proof-search-result-card__meta">
+                    <span>{record.corpus}</span>
+                    <span>{record.corpus_scope || record.release_id || 'current'}</span>
+                    <span>{record.source_kind}</span>
+                    {record.lean_code_hash && <span>Code hash: {record.lean_code_hash}</span>}
+                  </div>
+                  {isExpanded && (
+                    <div className="proof-expanded-content proof-search-expanded">
+                      <div className="proof-detail-section">
+                        <h4>Description</h4>
+                        <p>{expandedRecord.proof_description || expandedRecord.formal_sketch || 'No description available.'}</p>
+                      </div>
+                      <div className="proof-detail-section">
+                        <h4>Imports</h4>
+                        <p>{(expandedRecord.imports || []).join(', ') || 'None listed'}</p>
+                      </div>
+                      <div className="proof-detail-section">
+                        <h4>Dependencies</h4>
+                        <p>{(expandedRecord.dependency_names || []).join(', ') || 'None listed'}</p>
+                      </div>
+                      <div className="proof-detail-section">
+                        <h4>Hashes</h4>
+                        <p>
+                          Statement: {expandedRecord.theorem_statement_hash || 'none'}
+                          <br />
+                          Lean code: {expandedRecord.lean_code_hash || 'none'}
+                        </p>
+                      </div>
+                      {expandedRecord.lean_code ? (
+                        <div className="proof-detail-section">
+                          <h4>Lean 4 Source Code</h4>
+                          <pre className="proof-code-block proof-lean-code">
+                            {expandedRecord.lean_code}
+                          </pre>
+                        </div>
+                      ) : (
+                        <div className="proof-search-message">
+                          This result is metadata-only. Hydration did not return full Lean code for this record.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       <div className="library-controls">
         <input

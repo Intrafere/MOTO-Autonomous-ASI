@@ -6,6 +6,8 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
+  formatOpenRouterProviderLabel,
+  getOpenRouterProviderTitle,
   getProviderNames,
   getReasoningSupportInfo,
   normalizeOpenRouterReasoningEffort,
@@ -488,7 +490,9 @@ export default function BoostControlModal({
             <div className="boost-form-group">
               <label>Provider</label>
               <select
+                className="openrouter-host-provider-select"
                 value={selectedProvider}
+                title={getOpenRouterProviderTitle(selectedProvider)}
                 onChange={async (e) => {
                   const providerName = e.target.value;
                   setSelectedProvider(providerName);
@@ -506,8 +510,8 @@ export default function BoostControlModal({
               >
                 <option value="">Default (OpenRouter chooses)</option>
                 {providers.map(provider => (
-                  <option key={provider} value={provider}>
-                    {provider}
+                  <option key={provider} value={provider} title={getOpenRouterProviderTitle(provider)}>
+                    {formatOpenRouterProviderLabel(provider)}
                   </option>
                 ))}
               </select>

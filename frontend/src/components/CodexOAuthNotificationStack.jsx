@@ -150,7 +150,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
           cursor: 'pointer',
         }}
       >
-        Open Cloud Access & Keys
+        Open OpenRouter/OAuth
       </button>
 
       <style>{`

@@ -15,6 +15,7 @@ from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 from backend.shared.config import system_config
 from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.models import LeanOJStartRequest
+from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.workflow_start_guard import workflow_start_guard
 
 logger = logging.getLogger(__name__)
@@ -246,6 +247,10 @@ def _validate_start_role_limits(request: LeanOJStartRequest) -> None:
     _validate_role_limits("Topic validator", request.topic_validator)
     _validate_role_limits("Brainstorm validator", request.brainstorm_validator)
     _validate_role_limits("Final proof solver", request.final_solver)
+    _validate_role_limits(
+        "Assistant",
+        request.assistant if (request.assistant.model_id or "").strip() else request.topic_validator,
+    )
     for index, submitter in enumerate(request.brainstorm_submitters, start=1):
         _validate_role_limits(f"Brainstorm submitter {index}", submitter)
 
@@ -285,6 +290,10 @@ async def stop_leanoj():
     """Stop the active Proof Solver run."""
     try:
         await leanoj_coordinator.stop()
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="leanoj_stopped",
+        )
         return {
             "success": True,
             "message": "Proof Solver stopped",
@@ -302,6 +311,10 @@ async def clear_leanoj(confirm: bool = False):
         raise HTTPException(status_code=400, detail="Confirmation required. Use ?confirm=true to clear Proof Solver progress.")
     try:
         await leanoj_coordinator.clear()
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="leanoj_cleared",
+        )
         return {
             "success": True,
             "message": "Proof Solver progress cleared",

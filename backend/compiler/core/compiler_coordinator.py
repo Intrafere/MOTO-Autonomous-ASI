@@ -17,11 +17,19 @@ from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouter
 from backend.shared.brainstorm_proof_gate import BRAINSTORM_LEAN_PROOF_MARKER
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import parse_json
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
-from backend.compiler.agents.high_context_submitter import HighContextSubmitter
+from backend.shared.context_overflow import (
+    CONTEXT_OVERFLOW_RESOLUTION,
+    CONTEXT_OVERFLOW_STOP_MESSAGE,
+    CONTEXT_OVERFLOW_STOP_REASON,
+)
+from backend.compiler.agents.writer_submitter import WritingSubmitter
 from backend.compiler.agents.high_param_submitter import HighParamSubmitter
-from backend.compiler.agents.critique_submitter import CritiqueSubmitterAgent
 from backend.compiler.validation.compiler_validator import CompilerValidator, normalize_unicode_hyphens, find_with_normalized_hyphens
 from backend.compiler.memory.outline_memory import outline_memory, OUTLINE_ANCHOR
 from backend.compiler.memory.paper_memory import (
@@ -41,6 +49,20 @@ logger = logging.getLogger(__name__)
 
 CRITIQUE_ATTEMPT_TARGET = 3
 MAX_RIGOR_CYCLES_PER_LOOP = 5
+
+
+def _is_rigor_model_call_failure(exc: Exception) -> bool:
+    """Return true for provider/config failures that must not become proof declines."""
+    message = str(exc or "").lower()
+    return (
+        isinstance(exc, OpenRouterInvalidResponseError)
+        or is_non_retryable_model_error(exc)
+        or is_transient_model_call_error(exc)
+        or "model output incomplete" in message
+        or "transient provider error" in message
+        or "upstream provider timeout" in message
+        or "response missing 'choices'" in message
+    )
 
 
 async def _cancel_and_drain_task(task: asyncio.Task) -> None:
@@ -69,7 +91,7 @@ LEAN_PROOF_EDIT_DENIAL_REASON = (
 
 def _classify_submitter_error(err: BaseException) -> tuple[str, str]:
     """
-    Classify an exception raised by a HighContextSubmitter.submit_* call.
+    Classify an exception raised by a WritingSubmitter.submit_* call.
 
     Distinguishes true context / prompt-size overflows (which are meaningful
     "decline to submit" signals) from upstream transport / API failures
@@ -89,7 +111,13 @@ def _classify_submitter_error(err: BaseException) -> tuple[str, str]:
     if isinstance(err, OpenRouterInvalidResponseError):
         return ("API transport error", "API transport error")
 
-    if "prompt too large" in msg_lower or "tokens > " in msg_lower:
+    if (
+        "prompt too large" in msg_lower
+        or "tokens > " in msg_lower
+        or "exceeds context limit" in msg_lower
+        or "exceeds available input budget" in msg_lower
+        or "exceeds the configured input budget" in msg_lower
+    ):
         return ("Context overflow", "Context overflow")
 
     if msg_lower.startswith("openrouter api error") or msg_lower.startswith("openrouter connection failed") or msg_lower.startswith("openrouter rate limit"):
@@ -108,13 +136,15 @@ class CompilerCoordinator:
     """
     
     def __init__(self):
-        self.high_context_submitter: Optional[HighContextSubmitter] = None
+        self.writer_submitter: Optional[WritingSubmitter] = None
         self.high_param_submitter: Optional[HighParamSubmitter] = None
         self.validator: Optional[CompilerValidator] = None
         
         self.is_running = False
         self.current_mode = "idle"
         self.outline_accepted = False
+        self.fatal_error_type: Optional[str] = None
+        self.fatal_error_message: str = ""
         
         # Stats
         self.total_submissions = 0
@@ -146,7 +176,7 @@ class CompilerCoordinator:
         self.allow_mathematical_proofs: bool = True
         
         # Critique phase state (post-body peer review)
-        self.critique_submitter = None  # CritiqueSubmitterAgent instance
+        self.critique_submitter = None  # Rigor & Proofs submitter reused for critique generation
         self.critique_aggregator = None  # Coordinator instance for critique workflow
         self.in_critique_phase = False
         self.critique_acceptances = 0
@@ -177,7 +207,7 @@ class CompilerCoordinator:
         self,
         compiler_prompt: str,
         validator_model: str,
-        high_context_model: str,
+        writer_model: str,
         high_param_model: str,
         critique_submitter_model: str,
         skip_aggregator_db: bool = False,
@@ -186,23 +216,23 @@ class CompilerCoordinator:
         validator_openrouter_provider: Optional[str] = None,
         validator_openrouter_reasoning_effort: str = "auto",
         validator_lm_studio_fallback: Optional[str] = None,
-        # OpenRouter provider config for high-context submitter
-        high_context_provider: str = "lm_studio",
-        high_context_openrouter_provider: Optional[str] = None,
-        high_context_openrouter_reasoning_effort: str = "auto",
-        high_context_lm_studio_fallback: Optional[str] = None,
-        # OpenRouter provider config for high-param submitter
+        # OpenRouter provider config for writing submitter
+        writer_provider: str = "lm_studio",
+        writer_openrouter_provider: Optional[str] = None,
+        writer_openrouter_reasoning_effort: str = "auto",
+        writer_lm_studio_fallback: Optional[str] = None,
+        # OpenRouter provider config for Rigor & Proofs submitter
         high_param_provider: str = "lm_studio",
         high_param_openrouter_provider: Optional[str] = None,
         high_param_openrouter_reasoning_effort: str = "auto",
         high_param_lm_studio_fallback: Optional[str] = None,
-        # OpenRouter provider config for critique submitter
+        # Deprecated critique compatibility fields, mirrored from Rigor & Proofs
         critique_submitter_provider: str = "lm_studio",
         critique_submitter_openrouter_provider: Optional[str] = None,
         critique_submitter_openrouter_reasoning_effort: str = "auto",
         critique_submitter_lm_studio_fallback: Optional[str] = None,
         validator_supercharge_enabled: bool = False,
-        high_context_supercharge_enabled: bool = False,
+        writer_supercharge_enabled: bool = False,
         high_param_supercharge_enabled: bool = False,
         critique_submitter_supercharge_enabled: bool = False,
         allow_mathematical_proofs: bool = True
@@ -213,26 +243,23 @@ class CompilerCoordinator:
         Args:
             compiler_prompt: User's compiler-directing prompt
             validator_model: Model for validator
-            high_context_model: Model for high-context submitter
-            high_param_model: Model for high-param submitter
+            writer_model: Model for writing submitter
+            high_param_model: Model for Rigor & Proofs submitter
             critique_submitter_model: Model for critique generation
             skip_aggregator_db: If True, don't load Part 1 aggregator database (for autonomous mode)
             validator_provider: Provider for validator ("lm_studio" or "openrouter")
             validator_openrouter_provider: OpenRouter host provider for validator
             validator_openrouter_reasoning_effort: OpenRouter reasoning effort for validator
             validator_lm_studio_fallback: LM Studio fallback model for validator
-            high_context_provider: Provider for high-context submitter
-            high_context_openrouter_provider: OpenRouter host provider for high-context submitter
-            high_context_openrouter_reasoning_effort: OpenRouter reasoning effort for high-context submitter
-            high_context_lm_studio_fallback: LM Studio fallback model for high-context submitter
-            high_param_provider: Provider for high-param submitter
-            high_param_openrouter_provider: OpenRouter host provider for high-param submitter
-            high_param_openrouter_reasoning_effort: OpenRouter reasoning effort for high-param submitter
-            high_param_lm_studio_fallback: LM Studio fallback model for high-param submitter
-            critique_submitter_provider: Provider for critique submitter
-            critique_submitter_openrouter_provider: OpenRouter host provider for critique submitter
-            critique_submitter_openrouter_reasoning_effort: OpenRouter reasoning effort for critique submitter
-            critique_submitter_lm_studio_fallback: LM Studio fallback model for critique submitter
+            writer_provider: Provider for writing submitter
+            writer_openrouter_provider: OpenRouter host provider for writing submitter
+            writer_openrouter_reasoning_effort: OpenRouter reasoning effort for writing submitter
+            writer_lm_studio_fallback: LM Studio fallback model for writing submitter
+            high_param_provider: Provider for Rigor & Proofs submitter
+            high_param_openrouter_provider: OpenRouter host provider for Rigor & Proofs submitter
+            high_param_openrouter_reasoning_effort: OpenRouter reasoning effort for Rigor & Proofs submitter
+            high_param_lm_studio_fallback: LM Studio fallback model for Rigor & Proofs submitter
+            critique_submitter_*: Deprecated compatibility aliases mirrored from Rigor & Proofs
         """
         logger.info("Initializing compiler coordinator...")
         
@@ -243,29 +270,31 @@ class CompilerCoordinator:
         self.validator_model = validator_model
         self.validator_context_window = system_config.compiler_validator_context_window
         self.validator_max_tokens = system_config.compiler_validator_max_output_tokens
-        self.critique_submitter_model = critique_submitter_model
+        # Deprecated critique role fields are compatibility aliases. Critique
+        # generation now runs on the Rigor & Proofs submitter settings.
+        self.critique_submitter_model = high_param_model
         
         # Store OpenRouter provider configs for all roles
         self.validator_provider = validator_provider
         self.validator_openrouter_provider = validator_openrouter_provider
         self.validator_openrouter_reasoning_effort = validator_openrouter_reasoning_effort
         self.validator_lm_studio_fallback = validator_lm_studio_fallback
-        self.high_context_provider = high_context_provider
-        self.high_context_openrouter_provider = high_context_openrouter_provider
-        self.high_context_openrouter_reasoning_effort = high_context_openrouter_reasoning_effort
-        self.high_context_lm_studio_fallback = high_context_lm_studio_fallback
+        self.writer_provider = writer_provider
+        self.writer_openrouter_provider = writer_openrouter_provider
+        self.writer_openrouter_reasoning_effort = writer_openrouter_reasoning_effort
+        self.writer_lm_studio_fallback = writer_lm_studio_fallback
         self.high_param_provider = high_param_provider
         self.high_param_openrouter_provider = high_param_openrouter_provider
         self.high_param_openrouter_reasoning_effort = high_param_openrouter_reasoning_effort
         self.high_param_lm_studio_fallback = high_param_lm_studio_fallback
-        self.critique_submitter_provider = critique_submitter_provider
-        self.critique_submitter_openrouter_provider = critique_submitter_openrouter_provider
-        self.critique_submitter_openrouter_reasoning_effort = critique_submitter_openrouter_reasoning_effort
-        self.critique_submitter_lm_studio_fallback = critique_submitter_lm_studio_fallback
+        self.critique_submitter_provider = high_param_provider
+        self.critique_submitter_openrouter_provider = high_param_openrouter_provider
+        self.critique_submitter_openrouter_reasoning_effort = high_param_openrouter_reasoning_effort
+        self.critique_submitter_lm_studio_fallback = high_param_lm_studio_fallback
         self.validator_supercharge_enabled = validator_supercharge_enabled
-        self.high_context_supercharge_enabled = high_context_supercharge_enabled
+        self.writer_supercharge_enabled = writer_supercharge_enabled
         self.high_param_supercharge_enabled = high_param_supercharge_enabled
-        self.critique_submitter_supercharge_enabled = critique_submitter_supercharge_enabled
+        self.critique_submitter_supercharge_enabled = high_param_supercharge_enabled
         self.allow_mathematical_proofs = bool(allow_mathematical_proofs)
         
         # Reset workflow state for fresh start
@@ -351,27 +380,27 @@ class CompilerCoordinator:
             logger.info("Skipping Part 1 aggregator database load (autonomous mode)")
         
         # Create agents
-        self.high_context_submitter = HighContextSubmitter(
-            high_context_model, 
+        self.writer_submitter = WritingSubmitter(
+            writer_model,
             compiler_prompt,
             websocket_broadcaster=self.websocket_broadcaster,
             proof_database_store=proof_database if self.autonomous_mode else None,
         )
-        await self.high_context_submitter.initialize()
+        await self.writer_submitter.initialize()
         # Set up task tracking callback for workflow panel integration
-        self.high_context_submitter.set_task_tracking_callback(self._handle_task_event)
-        # Configure API client manager for high-context submitter (OpenRouter/LM Studio routing)
+        self.writer_submitter.set_task_tracking_callback(self._handle_task_event)
+        # Configure API client manager for writing submitter (OpenRouter/LM Studio routing)
         api_client_manager.configure_role(
-            role_id="compiler_high_context",
+            role_id="compiler_writer",
             config=ModelConfig(
-                provider=self.high_context_provider,
-                model_id=high_context_model,
-                openrouter_provider=self.high_context_openrouter_provider,
-                openrouter_reasoning_effort=self.high_context_openrouter_reasoning_effort,
-                lm_studio_fallback_id=self.high_context_lm_studio_fallback,
-                context_window=system_config.compiler_high_context_context_window,
-                max_output_tokens=system_config.compiler_high_context_max_output_tokens,
-                supercharge_enabled=self.high_context_supercharge_enabled
+                provider=self.writer_provider,
+                model_id=writer_model,
+                openrouter_provider=self.writer_openrouter_provider,
+                openrouter_reasoning_effort=self.writer_openrouter_reasoning_effort,
+                lm_studio_fallback_id=self.writer_lm_studio_fallback,
+                context_window=system_config.compiler_writer_context_window,
+                max_output_tokens=system_config.compiler_writer_max_output_tokens,
+                supercharge_enabled=self.writer_supercharge_enabled
             )
         )
         
@@ -395,7 +424,7 @@ class CompilerCoordinator:
         await self.high_param_submitter.initialize()
         # Set up task tracking callback for workflow panel integration
         self.high_param_submitter.set_task_tracking_callback(self._handle_task_event)
-        # Configure API client manager for high-param submitter (OpenRouter/LM Studio routing)
+        # Configure API client manager for Rigor & Proofs submitter (OpenRouter/LM Studio routing)
         api_client_manager.configure_role(
             role_id="compiler_high_param",
             config=ModelConfig(
@@ -489,7 +518,7 @@ class CompilerCoordinator:
             from backend.shared.boost_manager import boost_manager
             
             # Get actual sequence counters from agents
-            hc_seq = self.high_context_submitter.task_sequence if self.high_context_submitter else 0
+            writer_seq = self.writer_submitter.task_sequence if self.writer_submitter else 0
             hp_seq = self.high_param_submitter.task_sequence if self.high_param_submitter else 0
             val_seq = self.validator.task_sequence if self.validator else 0
             
@@ -497,13 +526,13 @@ class CompilerCoordinator:
             tasks = []
             
             if not self.outline_accepted:
-                # Outline creation phase: HC -> V -> HC -> V ...
+                # Outline creation phase: writer -> validator -> writer -> validator ...
                 for i in range(20):
                     if i % 2 == 0:
-                        task_id = f"comp_hc_{hc_seq:03d}"
-                        role = "High-Context"
+                        task_id = f"comp_writer_{writer_seq:03d}"
+                        role = "Writing Submitter"
                         mode = "Outline Creation"
-                        hc_seq += 1
+                        writer_seq += 1
                     else:
                         task_id = f"comp_val_{val_seq:03d}"
                         role = "Validator"
@@ -521,21 +550,21 @@ class CompilerCoordinator:
             else:
                 # Construction cycle pattern
                 cycle_pattern = [
-                    ("hc", "High-Context", "Construction"),
+                    ("writer", "Writing Submitter", "Construction"),
                     ("val", "Validator", "Construction Review"),
-                    ("hc", "High-Context", "Construction"),
+                    ("writer", "Writing Submitter", "Construction"),
                     ("val", "Validator", "Construction Review"),
-                    ("hc", "High-Context", "Construction"),
+                    ("writer", "Writing Submitter", "Construction"),
                     ("val", "Validator", "Construction Review"),
-                    ("hc", "High-Context", "Construction"),
+                    ("writer", "Writing Submitter", "Construction"),
                     ("val", "Validator", "Construction Review"),
-                    ("hc", "High-Context", "Outline Update"),
+                    ("writer", "Writing Submitter", "Outline Update"),
                     ("val", "Validator", "Outline Review"),
-                    ("hc", "High-Context", "Paper Review"),
+                    ("writer", "Writing Submitter", "Paper Review"),
                     ("val", "Validator", "Review Validation"),
-                    ("hc", "High-Context", "Paper Review"),
+                    ("writer", "Writing Submitter", "Paper Review"),
                     ("val", "Validator", "Review Validation"),
-                    ("hp", "High-Param", "Rigor Enhancement"),
+                    ("hp", "Rigor & Proofs", "Rigor Enhancement"),
                     ("val", "Validator", "Rigor Review"),
                 ]
                 
@@ -543,9 +572,9 @@ class CompilerCoordinator:
                     pattern_idx = i % len(cycle_pattern)
                     agent_type, role, mode = cycle_pattern[pattern_idx]
                     
-                    if agent_type == "hc":
-                        task_id = f"comp_hc_{hc_seq:03d}"
-                        hc_seq += 1
+                    if agent_type == "writer":
+                        task_id = f"comp_writer_{writer_seq:03d}"
+                        writer_seq += 1
                     elif agent_type == "hp":
                         task_id = f"comp_hp_{hp_seq:03d}"
                         hp_seq += 1
@@ -611,7 +640,7 @@ class CompilerCoordinator:
         
         Args:
             event_type: "started" or "completed"
-            task_id: The task ID (e.g., "comp_hc_001", "comp_hp_002", "comp_val_003")
+            task_id: The task ID (e.g., "comp_writer_001", "comp_hp_002", "comp_val_003")
         """
         if event_type == "started":
             try:
@@ -700,6 +729,8 @@ class CompilerCoordinator:
             return
         
         self.is_running = True
+        self.fatal_error_type = None
+        self.fatal_error_message = ""
         logger.info("Starting compiler...")
         
         # Reset free model manager state for fresh start
@@ -771,6 +802,22 @@ class CompilerCoordinator:
         
         await self._broadcast("compiler_stopped", {"message": "Compiler stopped"})
         logger.info("Compiler stopped")
+
+    async def _handle_context_overflow(self, error: BaseException, *, role_id: str, mode: Optional[str] = None) -> None:
+        """Stop the compiler when mandatory direct context cannot fit."""
+        self.fatal_error_type = CONTEXT_OVERFLOW_STOP_REASON
+        self.fatal_error_message = str(error)
+        self.is_running = False
+        payload = {
+            "role_id": role_id,
+            "mode": mode or self.current_mode,
+            "reason": CONTEXT_OVERFLOW_STOP_REASON,
+            "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
+            "error_detail": str(error),
+            "resolution": CONTEXT_OVERFLOW_RESOLUTION,
+        }
+        logger.error("Compiler context overflow in %s: %s", role_id, error)
+        await self._broadcast("context_overflow_error", payload)
     
     async def _main_workflow(self) -> None:
         """Main compiler workflow loop."""
@@ -832,6 +879,21 @@ class CompilerCoordinator:
             await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
             if self.is_running:
                 self._main_task = asyncio.create_task(self._main_workflow())
+        except ValueError as e:
+            is_context_overflow = (
+                "mandatory full source context" in str(e).lower()
+                or _classify_submitter_error(e)[0] == "Context overflow"
+            )
+            if not is_context_overflow:
+                logger.error(f"Compiler workflow error: {e}", exc_info=True)
+                self.is_running = False
+                await self._broadcast("compiler_error", {
+                    "error": "Compiler workflow encountered an internal error",
+                    "mode": self.current_mode,
+                    "total_submissions": self.total_submissions
+                })
+                return
+            await self._handle_context_overflow(e, role_id="compiler_rigor")
         except Exception as e:
             logger.error(f"Compiler workflow error: {e}", exc_info=True)
             self.is_running = False
@@ -915,9 +977,18 @@ INVALID:
             
             # Generate outline (creation or refinement)
             try:
-                submission = await self.high_context_submitter.submit_outline_create()
+                submission = await self.writer_submitter.submit_outline_create()
             except FreeModelExhaustedError:
                 raise
+            except ValueError as e:
+                label, _ = _classify_submitter_error(e)
+                if label == "Context overflow":
+                    await self._handle_context_overflow(e, role_id="compiler_writer", mode="outline_create")
+                    return
+                logger.error(f"Iteration {iteration}: Outline submission failed with error: {e} - retrying")
+                await asyncio.sleep(5)
+                iteration -= 1
+                continue
             except Exception as e:
                 logger.error(f"Iteration {iteration}: Outline submission failed with error: {e} - retrying")
                 await asyncio.sleep(5)
@@ -1091,7 +1162,7 @@ INVALID:
         rejection_feedback = None  # Store rejection feedback for retry
         
         while self.is_running and not initial_portion_accepted:
-            # High-context submitter writes first portion
+            # Writing submitter writes the first portion.
             submission = None
             attempt += 1
             backoff_time = min(2 ** (attempt - 1), 16)  # 1s, 2s, 4s, 8s, 16s max
@@ -1110,7 +1181,7 @@ INVALID:
                     except Exception as exc:
                         logger.debug("Unable to load initial brainstorm context for construction: %s", exc)
                 
-                submission = await self.high_context_submitter.submit_construction(
+                submission = await self.writer_submitter.submit_construction(
                     is_first_portion=True,
                     section_phase=section_phase,
                     rejection_feedback=rejection_feedback,
@@ -1138,6 +1209,9 @@ INVALID:
                 raise
             except (ValueError, OpenRouterInvalidResponseError) as e:
                 label, reason_prefix = _classify_submitter_error(e)
+                if label == "Context overflow":
+                    await self._handle_context_overflow(e, role_id="compiler_writer", mode="construction")
+                    return
                 logger.error(f"Construction {label.lower()} in initial loop (attempt {attempt}): {e}")
                 await self._broadcast("compiler_rejection", {
                     "mode": "construction",
@@ -1275,7 +1349,7 @@ INVALID:
     def _track_submission_wolfram_calls(self, submission: CompilerSubmission) -> None:
         """Record accepted construction-mode Wolfram tool calls in paper credits.
 
-        HighContextSubmitter stores the full Wolfram audit trail on
+        WritingSubmitter stores the full Wolfram audit trail on
         `submission.metadata["wolfram_calls"]`. PaperModelTracker only tracks a
         count (and accepts the query for logging), so we bridge the two here
         after the paper operation has been accepted.
@@ -1398,7 +1472,7 @@ INVALID:
         
         submission = None
         try:
-            submission = await self.high_context_submitter.submit_construction(
+            submission = await self.writer_submitter.submit_construction(
                 is_first_portion=False,
                 section_phase=section_phase,
                 rejection_feedback=rejection_feedback,
@@ -1407,6 +1481,9 @@ INVALID:
             )
         except (ValueError, OpenRouterInvalidResponseError) as e:
             label, reason_prefix = _classify_submitter_error(e)
+            if label == "Context overflow":
+                await self._handle_context_overflow(e, role_id="compiler_writer", mode="construction")
+                return False, CONTEXT_OVERFLOW_STOP_MESSAGE
             logger.error(f"Construction {label.lower()}: {e}")
             self.construction_rejections += 1
             overflow_reason = f"{reason_prefix}: {e}"
@@ -1982,7 +2059,14 @@ INVALID:
         self.current_mode = "outline_update"
         
         try:
-            submission = await self.high_context_submitter.submit_outline_update()
+            submission = await self.writer_submitter.submit_outline_update()
+        except ValueError as e:
+            label, _ = _classify_submitter_error(e)
+            if label == "Context overflow":
+                await self._handle_context_overflow(e, role_id="compiler_writer", mode="outline_update")
+                return False
+            logger.error(f"Outline update submission failed with error: {e} - skipping this cycle")
+            return False
         except Exception as e:
             logger.error(f"Outline update submission failed with error: {e} - skipping this cycle")
             return False
@@ -2089,9 +2173,12 @@ INVALID:
         
         submission = None
         try:
-            submission = await self.high_context_submitter.submit_review(review_focus=review_focus)
+            submission = await self.writer_submitter.submit_review(review_focus=review_focus)
         except (ValueError, OpenRouterInvalidResponseError) as e:
             label, reason_prefix = _classify_submitter_error(e)
+            if label == "Context overflow":
+                await self._handle_context_overflow(e, role_id="compiler_writer", mode="review")
+                return False
             logger.error(f"{review_label.capitalize()} {label.lower()}: {e}")
             self.review_declines += 1
             await compiler_rejection_log.add_decline("review", f"{reason_prefix}: {e}")
@@ -2293,6 +2380,12 @@ INVALID:
                 self.high_param_submitter.set_source_material_context(source_context, source_label)
             lean_result = await self.high_param_submitter.submit_rigor_lean_theorem()
         except ValueError as exc:
+            if (
+                "mandatory full source context" in str(exc).lower()
+                or _classify_submitter_error(exc)[0] == "Context overflow"
+                or _is_rigor_model_call_failure(exc)
+            ):
+                raise
             logger.error(f"Rigor lean flow error: {exc}")
             self.rigor_declines += 1
             await compiler_rejection_log.add_decline("rigor", f"LLM error: {exc}")
@@ -2301,6 +2394,8 @@ INVALID:
             )
             return False
         except Exception as exc:
+            if _is_rigor_model_call_failure(exc):
+                raise
             logger.error(f"Rigor lean flow raised: {exc}", exc_info=True)
             self.rigor_declines += 1
             await compiler_rejection_log.add_decline(
@@ -2860,39 +2955,20 @@ INVALID:
 
         logger.info(f"Critique memory initialized for {paper_id}")
         
-        # Create critique submitter agent
-        self.critique_submitter = CritiqueSubmitterAgent(
-            model=self.critique_submitter_model,
-            context_window=system_config.compiler_critique_submitter_context_window,
-            max_tokens=system_config.compiler_critique_submitter_max_tokens,
-            submitter_id=1
-        )
-        
-        # Initialize rejection memory
-        await self.critique_submitter.initialize()
+        if not self.high_param_submitter:
+            logger.error("Cannot start critique phase: Rigor & Proofs submitter is not initialized")
+            await self._end_critique_phase(self_review_appended=False)
+            return
+
+        self.critique_submitter = self.high_param_submitter
         
         # Clear rejection feedback from previous critique phases (fresh start)
-        await self.critique_submitter.rejection_memory.reset()
+        await self.critique_submitter.reset_critique_rejection_memory()
         logger.info("Cleared critique rejection feedback for fresh start")
         
-        logger.info(f"Critique submitter created with model: {self.critique_submitter.model}")
-        
-        # Set up task tracking callback for workflow panel integration
-        self.critique_submitter.set_task_tracking_callback(self._handle_task_event)
-        
-        # Configure API client manager for critique submitter (OpenRouter/LM Studio routing)
-        api_client_manager.configure_role(
-            role_id="compiler_critique_submitter",
-            config=ModelConfig(
-                provider=self.critique_submitter_provider,
-                model_id=self.critique_submitter_model,
-                openrouter_provider=self.critique_submitter_openrouter_provider,
-                openrouter_reasoning_effort=self.critique_submitter_openrouter_reasoning_effort,
-                lm_studio_fallback_id=self.critique_submitter_lm_studio_fallback,
-                context_window=system_config.compiler_critique_submitter_context_window,
-                max_output_tokens=system_config.compiler_critique_submitter_max_tokens,
-                supercharge_enabled=self.critique_submitter_supercharge_enabled
-            )
+        logger.info(
+            "Critique generation using Rigor & Proofs submitter model: %s",
+            self.critique_submitter.model_name,
         )
         
         # Configure API client manager for critique validator (uses same settings as compiler_validator)
@@ -2955,8 +3031,8 @@ INVALID:
             from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
 
             max_input_tokens = rag_config.get_available_input_tokens(
-                system_config.compiler_critique_submitter_context_window,
-                system_config.compiler_critique_submitter_max_tokens
+                system_config.compiler_high_param_context_window,
+                system_config.compiler_high_param_max_output_tokens
             )
 
             direct_injected_context = "\n\n".join(
@@ -3157,7 +3233,7 @@ INVALID:
                         
                         # Store rejection feedback for learning
                         if validation_result and validation_result.summary:
-                            await self.critique_submitter.handle_rejection(
+                            await self.critique_submitter.handle_critique_rejection(
                                 summary=validation_result.summary,
                                 content=submission.content
                             )
@@ -3225,8 +3301,7 @@ INVALID:
             prompt = ''.join(parts)
             
             # Generate task ID
-            task_id = f"critique_val_{self.critique_submitter.task_sequence:03d}"
-            self.critique_submitter.task_sequence += 1
+            task_id = self.critique_submitter.next_critique_task_id("critique_val")
             
             # Call validator
             response = await api_client_manager.generate_completion(
@@ -3268,6 +3343,8 @@ INVALID:
             return result
             
         except Exception as e:
+            if _is_rigor_model_call_failure(e):
+                raise
             logger.error(f"Error validating critique: {e}", exc_info=True)
             return None
     
@@ -3303,8 +3380,7 @@ INVALID:
             prompt = ''.join(parts)
             
             # Call validator
-            task_id = f"critique_cleanup_{self.critique_submitter.task_sequence:03d}"
-            self.critique_submitter.task_sequence += 1
+            task_id = self.critique_submitter.next_critique_task_id("critique_cleanup")
             
             response = await api_client_manager.generate_completion(
                 task_id=task_id,

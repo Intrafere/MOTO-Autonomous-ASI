@@ -4,6 +4,7 @@ Middleware for CORS and error handling.
 import hmac
 import os
 import re
+import time
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +34,8 @@ DEFAULT_ORIGINS = [
 DESKTOP_API_TOKEN_HEADER = "X-Moto-Desktop-Token"
 UNSAFE_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DESKTOP_PUBLIC_PROOF_EXPORT_RE = re.compile(r"^/api/proofs/[^/]+/certificate(?:\.lean)?$")
+STALE_DESKTOP_TAB_LOG_INTERVAL_SECONDS = 300
+_stale_desktop_tab_log_state: dict[tuple[str, str], tuple[float, int]] = {}
 
 
 def _is_desktop_public_export(method: str, path: str) -> bool:
@@ -50,6 +53,31 @@ def _origin_from_url(value: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         return ""
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _log_desktop_auth_rejection(request: Request, exc: ProxyAuthError) -> None:
+    """Log stale-tab token misses without flooding desktop logs."""
+    if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+        logger.warning("Rejected desktop request %s %s: %s", request.method, request.url.path, exc.detail)
+        return
+
+    key = (request.method, request.url.path)
+    now = time.monotonic()
+    last_log_at, suppressed = _stale_desktop_tab_log_state.get(key, (0.0, 0))
+
+    if now - last_log_at < STALE_DESKTOP_TAB_LOG_INTERVAL_SECONDS:
+        _stale_desktop_tab_log_state[key] = (last_log_at, suppressed + 1)
+        return
+
+    suffix = f" Suppressed {suppressed} repeat stale-tab probe(s) for this route." if suppressed else ""
+    logger.info(
+        "Ignored desktop request without the current MOTO tab token: %s %s. "
+        "This is usually a harmless stale browser tab from an older launch; returning 401.%s",
+        request.method,
+        request.url.path,
+        suffix,
+    )
+    _stale_desktop_tab_log_state[key] = (now, 0)
 
 
 def _validate_desktop_token(request: Request, allowed_origins: list[str]) -> None:
@@ -185,7 +213,7 @@ def setup_middleware(app: FastAPI) -> None:
             try:
                 _validate_desktop_token(request, origins)
             except ProxyAuthError as exc:
-                logger.warning("Rejected desktop request %s %s: %s", request.method, request.url.path, exc.detail)
+                _log_desktop_auth_rejection(request, exc)
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
         return await call_next(request)

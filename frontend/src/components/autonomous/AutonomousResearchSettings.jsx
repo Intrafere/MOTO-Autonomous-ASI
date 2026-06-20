@@ -1,7 +1,7 @@
 /**
  * AutonomousResearchSettings - Settings panel for autonomous research mode.
  * Supports configurable multi-submitter brainstorm aggregation (1-10 submitters).
- * Compiler settings (high-context, high-param) remain separate.
+ * Compiler settings expose Writing and Rigor & Proofs roles.
  * Now supports per-role OpenRouter model selection with provider and fallback options.
  */
 import React, { useState, useEffect } from 'react';
@@ -15,6 +15,8 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
+  formatOpenRouterProviderLabel,
+  getOpenRouterProviderTitle,
   getProviderNames,
   getReasoningSupportInfo,
   hasEndpointMetadata,
@@ -29,12 +31,12 @@ import {
   XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
 import {
-  AUTONOMOUS_SETTINGS_STORAGE_KEY,
   AUTONOMOUS_PROFILES_STORAGE_KEY,
   RECOMMENDED_PROFILE_KEYS,
   RECOMMENDED_PROFILES,
   applyAutonomousProfileSelection,
   getStoredAutonomousSettings,
+  persistAutonomousProfiles,
   persistAutonomousSettings,
   settingsToAutonomousConfig,
 } from '../../utils/autonomousProfiles';
@@ -60,6 +62,7 @@ const DEFAULT_SUBMITTER_CONFIG = {
 const RAW_VIEW_EXIT_WARNING = 'Switching back to the GUI view will restore your last GUI settings/profile and discard raw-only changes. Continue?';
 const formatRawSettings = (value) => JSON.stringify(value, null, 2);
 const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer attempts, then run a 5th same-model call to choose or synthesize the best final answer. It uses 5x the API calls, so it is about 5x slower and 5x more costly, but can produce more intelligent answers.';
+const LEGACY_WRITER_PROFILE_KEY = ['high', 'Context'].join('');
 
 // ModelSelector component - extracted outside to prevent recreation on every render
 const ModelSelector = ({
@@ -137,7 +140,7 @@ const ModelSelector = ({
               }}
               disabled={isRunning || configuredOAuthProviders.length === 0}
               style={configuredOAuthProviders.length === 0 ? { color: '#666' } : undefined}
-              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
+              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in OpenRouter/OAuth first' : 'Use an OAuth subscription provider'}
             >
               oAuth
             </button>
@@ -193,13 +196,17 @@ const ModelSelector = ({
         <div className="settings-row">
           <label>Host Provider (optional)</label>
           <select
+            className="openrouter-host-provider-select"
             value={openrouterProv || ''}
             onChange={(e) => onOpenrouterProviderChange(e.target.value || null)}
             disabled={isRunning}
+            title={getOpenRouterProviderTitle(openrouterProv)}
           >
             <option value="">Auto (let OpenRouter choose)</option>
             {providers.map(p => (
-              <option key={p} value={p}>{p}</option>
+              <option key={p} value={p} title={getOpenRouterProviderTitle(p)}>
+                {formatOpenRouterProviderLabel(p)}
+              </option>
             ))}
           </select>
         </div>
@@ -269,6 +276,7 @@ const RoleConfig = ({
   lmStudioEnabled,
   developerModeEnabled = false,
   showProofStrengthBadge = false,
+  disabled = false,
 }) => {
   const storedProvider = localConfig[`${rolePrefix}_provider`] || 'lm_studio';
   const provider = lmStudioEnabled ? storedProvider : 'openrouter';
@@ -281,7 +289,11 @@ const RoleConfig = ({
   const superchargeEnabled = Boolean(localConfig[`${rolePrefix}_supercharge_enabled`]);
 
   return (
-    <div className={`submitter-config-section${provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}>
+    <div
+      className={`submitter-config-section${provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
+      aria-disabled={disabled}
+      style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}
+    >
       <h5 className={provider === 'openrouter' ? 'card-title--orange' : ''}>
         <span className="role-title-with-badges">
           <span>{title}</span>
@@ -290,6 +302,11 @@ const RoleConfig = ({
         {provider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
       </h5>
       {hint && <p className="settings-hint">{hint}</p>}
+      {disabled && (
+        <p className="settings-hint">
+          Assistant requires Session History Memory. Enable it from Connectivity to edit or run this role.
+        </p>
+      )}
 
       <ModelSelector
         provider={provider}
@@ -310,7 +327,7 @@ const RoleConfig = ({
         hasOpenRouterKey={hasOpenRouterKey}
         hasOpenAICodexLogin={hasOpenAICodexLogin}
         hasXAIGrokLogin={hasXAIGrokLogin}
-        isRunning={isRunning}
+        isRunning={isRunning || disabled}
         lmStudioEnabled={lmStudioEnabled}
       />
 
@@ -321,7 +338,7 @@ const RoleConfig = ({
           value={contextWindow}
           onChange={(e) => handleChange(`${rolePrefix}_context_window`, e.target.value)}
           onBlur={(e) => handleNumericBlur(`${rolePrefix}_context_window`, e.target.value)}
-          disabled={isRunning}
+          disabled={isRunning || disabled}
           min={4096}
           max={50000000}
           step={1024}
@@ -335,7 +352,7 @@ const RoleConfig = ({
           value={maxTokens}
           onChange={(e) => handleChange(`${rolePrefix}_max_tokens`, e.target.value)}
           onBlur={(e) => handleNumericBlur(`${rolePrefix}_max_tokens`, e.target.value)}
-          disabled={isRunning}
+          disabled={isRunning || disabled}
           min={1000}
           max={50000000}
           step={1000}
@@ -349,7 +366,7 @@ const RoleConfig = ({
               type="checkbox"
               checked={superchargeEnabled}
               onChange={(e) => handleChange(`${rolePrefix}_supercharge_enabled`, e.target.checked)}
-              disabled={isRunning}
+              disabled={isRunning || disabled}
             />
             <HelpTooltip
               label="Learn about Supercharge"
@@ -372,6 +389,7 @@ const AutonomousResearchSettings = ({
   onConfigChange,
   models,
   capabilities,
+  connectivityStatus,
   isRunning,
   developerModeEnabled = false,
 }) => {
@@ -403,12 +421,6 @@ const AutonomousResearchSettings = ({
   const [rawSettingsMessage, setRawSettingsMessage] = useState('');
   const [guiSettingsBeforeRaw, setGuiSettingsBeforeRaw] = useState(null);
 
-  // Wolfram Alpha settings (shared with compiler)
-  const [wolframEnabled, setWolframEnabled] = useState(false);
-  const [wolframApiKey, setWolframApiKey] = useState('');
-  const [hasStoredWolframKey, setHasStoredWolframKey] = useState(false);
-  const [wolframTestResult, setWolframTestResult] = useState('');
-  const [testingWolfram, setTestingWolfram] = useState(false);
   const [proofStatus, setProofStatus] = useState(null);
   const [proofSettingsEnabled, setProofSettingsEnabled] = useState(false);
   const [proofSettingsTimeout, setProofSettingsTimeout] = useState('600');
@@ -428,6 +440,9 @@ const AutonomousResearchSettings = ({
   const [defaultCritiquePrompt, setDefaultCritiquePrompt] = useState('');
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
   const genericMode = Boolean(capabilities?.genericMode);
+  const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
+  const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
+  const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
   const showLean4Settings = Boolean(lmStudioEnabled && proofStatus?.lean4_path && !genericMode);
 
   useEffect(() => {
@@ -478,16 +493,25 @@ const AutonomousResearchSettings = ({
     validator_context_window: DEFAULT_CONTEXT_WINDOW,
     validator_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
     validator_supercharge_enabled: false,
-    // High-Context
-    high_context_provider: 'lm_studio',
-    high_context_model: '',
-    high_context_openrouter_provider: null,
-    high_context_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-    high_context_lm_studio_fallback: null,
-    high_context_context_window: DEFAULT_CONTEXT_WINDOW,
-    high_context_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-    high_context_supercharge_enabled: false,
-    // High-Param
+    // Assistant
+    assistant_provider: config.assistant_provider || config.validator_provider || 'lm_studio',
+    assistant_model: config.assistant_model || config.validator_model || '',
+    assistant_openrouter_provider: config.assistant_openrouter_provider || config.validator_openrouter_provider || null,
+    assistant_openrouter_reasoning_effort: config.assistant_openrouter_reasoning_effort || config.validator_openrouter_reasoning_effort || DEFAULT_OPENROUTER_REASONING_EFFORT,
+    assistant_lm_studio_fallback: config.assistant_lm_studio_fallback || config.validator_lm_studio_fallback || null,
+    assistant_context_window: config.assistant_context_window || config.validator_context_window || DEFAULT_CONTEXT_WINDOW,
+    assistant_max_tokens: config.assistant_max_tokens || config.validator_max_tokens || DEFAULT_MAX_OUTPUT_TOKENS,
+    assistant_supercharge_enabled: Boolean(config.assistant_supercharge_enabled),
+    // Writing
+    writer_provider: 'lm_studio',
+    writer_model: '',
+    writer_openrouter_provider: null,
+    writer_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    writer_lm_studio_fallback: null,
+    writer_context_window: DEFAULT_CONTEXT_WINDOW,
+    writer_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    writer_supercharge_enabled: false,
+    // Rigor & Proofs
     high_param_provider: 'lm_studio',
     high_param_model: '',
     high_param_openrouter_provider: null,
@@ -496,15 +520,6 @@ const AutonomousResearchSettings = ({
     high_param_context_window: DEFAULT_CONTEXT_WINDOW,
     high_param_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
     high_param_supercharge_enabled: false,
-    // Critique Submitter
-    critique_submitter_provider: 'lm_studio',
-    critique_submitter_model: '',
-    critique_submitter_openrouter_provider: null,
-    critique_submitter_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
-    critique_submitter_lm_studio_fallback: null,
-    critique_submitter_context_window: DEFAULT_CONTEXT_WINDOW,
-    critique_submitter_max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-    critique_submitter_supercharge_enabled: false,
     ...config
   });
 
@@ -513,6 +528,16 @@ const AutonomousResearchSettings = ({
     if (!profile) return profile;
     
     const normalized = { ...profile };
+    const legacyWriter = normalized[LEGACY_WRITER_PROFILE_KEY];
+    if (
+      legacyWriter
+      && (!normalized.writer || !String(normalized.writer.modelId || '').trim())
+    ) {
+      normalized.writer = { ...(normalized.writer || {}), ...legacyWriter };
+    }
+    if (legacyWriter) {
+      delete normalized[LEGACY_WRITER_PROFILE_KEY];
+    }
     
     // Normalize submitters: fix blank submitter 3
     if (normalized.submitters && Array.isArray(normalized.submitters)) {
@@ -538,7 +563,7 @@ const AutonomousResearchSettings = ({
       });
     }
     
-    // Normalize other roles (validator, highContext, highParam, critique) - remove legacy modelPattern
+    // Normalize visible roles and drop deprecated standalone critique profile data.
     const normalizeRole = (role) => {
       if (!role) return role;
       const norm = { ...role };
@@ -547,9 +572,12 @@ const AutonomousResearchSettings = ({
     };
     
     normalized.validator = normalizeRole(normalized.validator);
-    normalized.highContext = normalizeRole(normalized.highContext);
+    normalized.writer = normalizeRole(normalized.writer);
+    if (!normalized.highParam?.modelId && normalized.critique?.modelId) {
+      normalized.highParam = normalizeRole(normalized.critique);
+    }
     normalized.highParam = normalizeRole(normalized.highParam);
-    normalized.critique = normalizeRole(normalized.critique);
+    delete normalized.critique;
     
     return normalized;
   };
@@ -570,7 +598,7 @@ const AutonomousResearchSettings = ({
           setUserProfiles(normalized);
           // Save normalized profiles back to localStorage if any changes were made
           if (JSON.stringify(normalized) !== JSON.stringify(profiles)) {
-            localStorage.setItem(AUTONOMOUS_PROFILES_STORAGE_KEY, JSON.stringify(normalized));
+            persistAutonomousProfiles(normalized);
             console.log('[Profile Normalization] Profiles updated and saved to localStorage');
           }
         } catch (err) {
@@ -608,45 +636,47 @@ const AutonomousResearchSettings = ({
       } catch (err) {
         console.error('Failed to check OpenRouter key:', err);
       }
-      try {
-        const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
-        const configured = Boolean(codexStatus.status?.configured);
-        setHasOpenAICodexLogin(configured);
-        if (configured) {
-          fetchOpenAICodexModels();
-        } else {
-          setOpenAICodexModelError('');
+      if (openAICodexOauthAvailable) {
+        try {
+          const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+          const configured = Boolean(codexStatus.status?.configured);
+          setHasOpenAICodexLogin(configured);
+          if (configured) {
+            fetchOpenAICodexModels();
+          } else {
+            setOpenAICodexModelError('');
+          }
+        } catch (err) {
+          console.error('Failed to check OpenAI Codex login:', err);
+          setHasOpenAICodexLogin(false);
+          setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
         }
-      } catch (err) {
-        console.error('Failed to check OpenAI Codex login:', err);
+      } else {
         setHasOpenAICodexLogin(false);
-        setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+        setOpenAICodexModels([]);
+        setOpenAICodexModelError('');
       }
-      try {
-        const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
-        const configured = Boolean(xaiStatus.status?.configured);
-        setHasXAIGrokLogin(configured);
-        if (configured) {
-          fetchXAIGrokModels();
-        } else {
-          setXaiGrokModelError('');
+      if (xaiGrokOauthAvailable) {
+        try {
+          const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+          const configured = Boolean(xaiStatus.status?.configured);
+          setHasXAIGrokLogin(configured);
+          if (configured) {
+            fetchXAIGrokModels();
+          } else {
+            setXaiGrokModelError('');
+          }
+        } catch (err) {
+          console.error('Failed to check xAI Grok login:', err);
+          setHasXAIGrokLogin(false);
+          setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
         }
-      } catch (err) {
-        console.error('Failed to check xAI Grok login:', err);
+      } else {
         setHasXAIGrokLogin(false);
-        setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+        setXaiGrokModels([]);
+        setXaiGrokModelError('');
       }
       
-      try {
-        const wolframStatus = await api.getWolframStatus();
-        setHasStoredWolframKey(Boolean(wolframStatus.has_key));
-        if (wolframStatus.enabled) {
-          setWolframEnabled(true);
-        }
-      } catch (err) {
-        console.error('Failed to load Wolfram Alpha status:', err);
-      }
-
       // Try to fetch fresh LM Studio models
       if (lmStudioEnabled) {
         try {
@@ -704,18 +734,23 @@ const AutonomousResearchSettings = ({
     if (localConfig.validator_provider === 'openrouter' && localConfig.validator_model) {
       fetchProvidersForModel(localConfig.validator_model);
     }
-    
-    // Fetch providers for high-context
-    if (localConfig.high_context_provider === 'openrouter' && localConfig.high_context_model) {
-      fetchProvidersForModel(localConfig.high_context_model);
+
+    // Fetch providers for Assistant
+    if (localConfig.assistant_provider === 'openrouter' && localConfig.assistant_model) {
+      fetchProvidersForModel(localConfig.assistant_model);
     }
     
-    // Fetch providers for high-param
+    // Fetch providers for writer
+    if (localConfig.writer_provider === 'openrouter' && localConfig.writer_model) {
+      fetchProvidersForModel(localConfig.writer_model);
+    }
+    
+    // Fetch providers for Rigor & Proofs
     if (localConfig.high_param_provider === 'openrouter' && localConfig.high_param_model) {
       fetchProvidersForModel(localConfig.high_param_model);
     }
     
-    // Fetch providers for critique submitter
+    // Fetch providers for deprecated critique compatibility fields
     if (localConfig.critique_submitter_provider === 'openrouter' && localConfig.critique_submitter_model) {
       fetchProvidersForModel(localConfig.critique_submitter_model);
     }
@@ -732,11 +767,14 @@ const AutonomousResearchSettings = ({
       freeOnly,
       freeModelLooping,
       freeModelAutoSelector,
+      allowMathematicalProofs: config?.allow_mathematical_proofs ?? true,
+      allowResearchPapers: config?.allow_research_papers ?? true,
       tier3Enabled,
+      creativityEmphasisBoostEnabled: config?.creativity_emphasis_boost_enabled ?? false,
       modelProviders,
       selectedProfile,
     };
-    localStorage.setItem(AUTONOMOUS_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    persistAutonomousSettings(settings);
   }, [isLoadedFromStorage, numSubmitters, submitterConfigs, localConfig, freeOnly, freeModelLooping, freeModelAutoSelector, tier3Enabled, modelProviders, selectedProfile]);
 
   useEffect(() => {
@@ -759,7 +797,7 @@ const AutonomousResearchSettings = ({
     });
 
     const normalizedLocalConfig = { ...localConfig };
-    ['validator', 'high_context', 'high_param', 'critique_submitter'].forEach((rolePrefix) => {
+    ['validator', 'assistant', 'writer', 'high_param', 'critique_submitter'].forEach((rolePrefix) => {
       const providerKey = `${rolePrefix}_provider`;
       const modelKey = `${rolePrefix}_model`;
       const openRouterProviderKey = `${rolePrefix}_openrouter_provider`;
@@ -860,6 +898,12 @@ const AutonomousResearchSettings = ({
   };
 
   const fetchOpenAICodexModels = async () => {
+    if (!openAICodexOauthAvailable) {
+      setOpenAICodexModels([]);
+      setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError('');
+      return;
+    }
     try {
       const result = await cloudAccessAPI.getOpenAICodexModels();
       const models = result.models || [];
@@ -878,6 +922,12 @@ const AutonomousResearchSettings = ({
   };
 
   const fetchXAIGrokModels = async () => {
+    if (!xaiGrokOauthAvailable) {
+      setXaiGrokModels([]);
+      setHasXAIGrokLogin(false);
+      setXaiGrokModelError('');
+      return;
+    }
     try {
       const result = await cloudAccessAPI.getXAIGrokModels();
       const models = result.models || [];
@@ -1035,10 +1085,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
   const handleChange = (field, value) => {
     const numericFields = [
-      'validator_context_window', 'high_context_context_window', 
-      'high_param_context_window', 'critique_submitter_context_window',
-      'validator_max_tokens', 'high_context_max_tokens', 
-      'high_param_max_tokens', 'critique_submitter_max_tokens'
+      'validator_context_window', 'writer_context_window',
+      'high_param_context_window', 'critique_submitter_context_window', 'assistant_context_window',
+      'validator_max_tokens', 'writer_max_tokens',
+      'high_param_max_tokens', 'critique_submitter_max_tokens', 'assistant_max_tokens'
     ];
 
     let newValue = value;
@@ -1062,10 +1112,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   // Handler for when user finishes editing a numeric field (blur event)
   const handleNumericBlur = (field, value) => {
     const numericFields = [
-      'validator_context_window', 'high_context_context_window', 
-      'high_param_context_window', 'critique_submitter_context_window',
-      'validator_max_tokens', 'high_context_max_tokens', 
-      'high_param_max_tokens', 'critique_submitter_max_tokens'
+      'validator_context_window', 'writer_context_window',
+      'high_param_context_window', 'critique_submitter_context_window', 'assistant_context_window',
+      'validator_max_tokens', 'writer_max_tokens',
+      'high_param_max_tokens', 'critique_submitter_max_tokens', 'assistant_max_tokens'
     ];
     
     if (numericFields.includes(field)) {
@@ -1350,51 +1400,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setTimeout(() => setCritiquePromptSaved(false), 2000);
   };
   
-  // Wolfram Alpha handlers (shared with compiler)
-  const handleTestWolframConnection = async () => {
-    if (!wolframApiKey.trim()) {
-      setWolframTestResult('Please enter an API key');
-      return;
-    }
-    
-    setTestingWolfram(true);
-    setWolframTestResult('Testing...');
-    
-    try {
-      const response = await api.testWolframQuery({
-        query: 'What is 2+2?',
-        api_key: wolframApiKey
-      });
-      
-      if (response.success) {
-        setWolframTestResult(`✓ Success! Result: ${response.result}`);
-        await api.setWolframApiKey(wolframApiKey);
-        setHasStoredWolframKey(true);
-        setWolframEnabled(true);
-      } else {
-        setWolframTestResult('✗ Failed: ' + response.message);
-      }
-    } catch (err) {
-      setWolframTestResult('✗ Error: ' + err.message);
-    } finally {
-      setTestingWolfram(false);
-      setTimeout(() => setWolframTestResult(''), 5000);
-    }
-  };
-  
-  const handleClearWolframKey = async () => {
-    try {
-      await api.clearWolframApiKey();
-      setWolframApiKey('');
-      setWolframEnabled(false);
-      setHasStoredWolframKey(false);
-      setWolframTestResult('Key cleared');
-      setTimeout(() => setWolframTestResult(''), 3000);
-    } catch (err) {
-      console.error('Failed to clear Wolfram Alpha key:', err);
-    }
-  };
-
   const handleSaveProofSettings = async () => {
     const parsedTimeout = parseInt(proofSettingsTimeout, 10);
     const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 600;
@@ -1501,15 +1506,25 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         maxOutputTokens: localConfig.validator_max_tokens,
         superchargeEnabled: Boolean(localConfig.validator_supercharge_enabled)
       },
-      highContext: {
-        modelId: localConfig.high_context_model,
-        provider: localConfig.high_context_provider,
-        openrouterProvider: localConfig.high_context_openrouter_provider,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.high_context_openrouter_reasoning_effort),
-        lmStudioFallbackId: localConfig.high_context_lm_studio_fallback,
-        contextWindow: localConfig.high_context_context_window,
-        maxOutputTokens: localConfig.high_context_max_tokens,
-        superchargeEnabled: Boolean(localConfig.high_context_supercharge_enabled)
+      assistant: {
+        modelId: localConfig.assistant_model || localConfig.validator_model,
+        provider: localConfig.assistant_provider || localConfig.validator_provider,
+        openrouterProvider: localConfig.assistant_openrouter_provider,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.assistant_openrouter_reasoning_effort),
+        lmStudioFallbackId: localConfig.assistant_lm_studio_fallback,
+        contextWindow: localConfig.assistant_context_window || localConfig.validator_context_window,
+        maxOutputTokens: localConfig.assistant_max_tokens || localConfig.validator_max_tokens,
+        superchargeEnabled: Boolean(localConfig.assistant_supercharge_enabled)
+      },
+      writer: {
+        modelId: localConfig.writer_model,
+        provider: localConfig.writer_provider,
+        openrouterProvider: localConfig.writer_openrouter_provider,
+        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.writer_openrouter_reasoning_effort),
+        lmStudioFallbackId: localConfig.writer_lm_studio_fallback,
+        contextWindow: localConfig.writer_context_window,
+        maxOutputTokens: localConfig.writer_max_tokens,
+        superchargeEnabled: Boolean(localConfig.writer_supercharge_enabled)
       },
       highParam: {
         modelId: localConfig.high_param_model,
@@ -1520,22 +1535,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         contextWindow: localConfig.high_param_context_window,
         maxOutputTokens: localConfig.high_param_max_tokens,
         superchargeEnabled: Boolean(localConfig.high_param_supercharge_enabled)
-      },
-      critique: {
-        modelId: localConfig.critique_submitter_model,
-        provider: localConfig.critique_submitter_provider,
-        openrouterProvider: localConfig.critique_submitter_openrouter_provider,
-        openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(localConfig.critique_submitter_openrouter_reasoning_effort),
-        lmStudioFallbackId: localConfig.critique_submitter_lm_studio_fallback,
-        contextWindow: localConfig.critique_submitter_context_window,
-        maxOutputTokens: localConfig.critique_submitter_max_tokens,
-        superchargeEnabled: Boolean(localConfig.critique_submitter_supercharge_enabled)
       }
     };
 
     const updatedProfiles = { ...userProfiles, [profileKey]: newProfile };
-    setUserProfiles(updatedProfiles);
-    localStorage.setItem(AUTONOMOUS_PROFILES_STORAGE_KEY, JSON.stringify(updatedProfiles));
+    const persistedProfiles = persistAutonomousProfiles(updatedProfiles);
+    setUserProfiles(persistedProfiles);
     setSelectedProfile(profileKey);
     setShowSaveDialog(false);
     setNewProfileName('');
@@ -1561,8 +1566,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
     const updatedProfiles = { ...userProfiles };
     delete updatedProfiles[profileKey];
-    setUserProfiles(updatedProfiles);
-    localStorage.setItem(AUTONOMOUS_PROFILES_STORAGE_KEY, JSON.stringify(updatedProfiles));
+    const persistedProfiles = persistAutonomousProfiles(updatedProfiles);
+    setUserProfiles(persistedProfiles);
     
     if (selectedProfile === profileKey) {
       setSelectedProfile('');
@@ -1917,7 +1922,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : ''}>
               <span className="role-title-with-badges">
                 <span>{idx === 0 ? 'Submitter 1 (Main Submitter)' : `Submitter ${idx + 1}`}</span>
-                {idx === 0 && <ProofStrengthBadge />}
               </span>
               {effectiveProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
             </h5>
@@ -2028,19 +2032,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />
-      </div>
-
-      {/* Paper Compilation (Tier 2) - Compiler Settings */}
-      <div className="settings-group">
-        <h4>Paper Compilation (Tier 2 - Compiler)</h4>
-        <p className="settings-info">
-          Separate compiler submitters for paper construction and rigor enhancement.
-        </p>
 
         <RoleConfig
-          title="High-Context Submitter"
-          hint="Handles outline, construction, and review modes."
-          rolePrefix="high_context"
+          title="Assistant"
+          hint="Runs in parallel during brainstorming, writing, proof work, and final-answer work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases do not receive Assistant context."
+          rolePrefix="assistant"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
           handleModelChange={handleModelChange}
@@ -2058,12 +2054,43 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           hasXAIGrokLogin={hasXAIGrokLogin}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
-          showProofStrengthBadge
+          disabled={!assistantMemoryEnabled}
+        />
+      </div>
+
+      {/* Paper Compilation (Tier 2) - Compiler Settings */}
+      <div className="settings-group">
+        <h4>Paper Compilation (Tier 2 - Compiler)</h4>
+        <p className="settings-info">
+          Separate compiler submitters for paper construction and Rigor & Proofs work.
+        </p>
+
+        <RoleConfig
+          title="Writing Submitter"
+          hint="Handles outline, construction, and review modes."
+          rolePrefix="writer"
+          localConfig={localConfig}
+          handleProviderChange={handleProviderChange}
+          handleModelChange={handleModelChange}
+          handleOpenRouterProviderChange={handleOpenRouterProviderChange}
+          handleChange={handleChange}
+          handleNumericBlur={handleNumericBlur}
+          isRunning={isRunning}
+          lmStudioModels={lmStudioModels}
+          openRouterModels={openRouterModels}
+          openAICodexModels={openAICodexModels}
+          xaiGrokModels={xaiGrokModels}
+          modelProviders={modelProviders}
+          hasOpenRouterKey={hasOpenRouterKey}
+          hasOpenAICodexLogin={hasOpenAICodexLogin}
+          hasXAIGrokLogin={hasXAIGrokLogin}
+          lmStudioEnabled={lmStudioEnabled}
+          developerModeEnabled={developerModeEnabled}
         />
 
         <RoleConfig
-          title="High-Parameter Submitter"
-          hint="Handles mathematical rigor enhancement."
+          title="Rigor & Proofs Submitter"
+          hint="Handles Lean/proof work, rigor theorem discovery, and critique generation."
           rolePrefix="high_param"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}
@@ -2085,28 +2112,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           showProofStrengthBadge
         />
 
-        <RoleConfig
-          title="Critique Submitter"
-          hint="Handles post-body peer review feedback for the AI self-review section."
-          rolePrefix="critique_submitter"
-          localConfig={localConfig}
-          handleProviderChange={handleProviderChange}
-          handleModelChange={handleModelChange}
-          handleOpenRouterProviderChange={handleOpenRouterProviderChange}
-          handleChange={handleChange}
-          handleNumericBlur={handleNumericBlur}
-          isRunning={isRunning}
-          lmStudioModels={lmStudioModels}
-          openRouterModels={openRouterModels}
-          openAICodexModels={openAICodexModels}
-          xaiGrokModels={xaiGrokModels}
-          modelProviders={modelProviders}
-          hasOpenRouterKey={hasOpenRouterKey}
-          hasOpenAICodexLogin={hasOpenAICodexLogin}
-          hasXAIGrokLogin={hasXAIGrokLogin}
-          lmStudioEnabled={lmStudioEnabled}
-          developerModeEnabled={developerModeEnabled}
-        />
       </div>
 
       <div className="settings-group">
@@ -2137,12 +2142,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               </div>
             )}
 
-            {/* Wolfram Alpha Integration */}
             <div className="settings-subsection">
               <div className="settings-subsection-header">
                 <h5 className="settings-subsection-title">Integrations</h5>
                 <p className="settings-subsection-description">
-                  Optional external verification tools used by rigor mode.
+                  Optional desktop proof runtime controls. Wolfram Alpha access is managed from the top-right connectivity panel.
                 </p>
               </div>
 
@@ -2316,102 +2320,21 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     >
                       {savingProofSettings ? 'Saving...' : 'Save Proof Settings'}
                     </button>
+                    {proofSettingsMessage && !proofSettingsMessage.startsWith('Failed') && (
+                      <span className="status-success-text settings-inline-save-message">
+                        {proofSettingsMessage}
+                      </span>
+                    )}
                   </div>
 
-                  {proofSettingsMessage && (
-                    <div className={`test-result-banner ${proofSettingsMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
+                  {proofSettingsMessage && proofSettingsMessage.startsWith('Failed') && (
+                    <div className="test-result-banner test-result-banner--error">
                       {proofSettingsMessage}
                     </div>
                   )}
                 </div>
               )}
 
-              <h4 className="form-group--compact">Wolfram Alpha Integration (Optional)</h4>
-              <small className="hint-text">
-                Enable Wolfram Alpha API for computational verification in rigor mode. When selecting your key select "full results" for your key type, then copy your APP ID and save it here. This key is also shared with the manual compiler mode.
-                Get your API key from <a href="https://products.wolframalpha.com/api" target="_blank" rel="noopener noreferrer">developer.wolframalpha.com</a>
-              </small>
-
-              <label className="settings-checkbox-label settings-checkbox-label--stacked">
-                <input
-                  type="checkbox"
-                  checked={wolframEnabled}
-                  onChange={async (e) => {
-                    const checked = e.target.checked;
-                    if (!checked) {
-                      await handleClearWolframKey();
-                    } else {
-                      setWolframEnabled(true);
-                    }
-                  }}
-                />
-                <span className="settings-option-copy">
-                  <span className="settings-option-title">Enable Wolfram Alpha Verification in Rigor Mode</span>
-                  <span className="settings-option-description">
-                    Lets rigor mode request computational verification for equations, properties, and theorem checks.
-                  </span>
-                </span>
-              </label>
-
-              {wolframEnabled && (
-                <div className="indented-section">
-                  <div className="form-group">
-                    <label>Wolfram Alpha API Key:</label>
-                    <input
-                      type="password"
-                      value={wolframApiKey}
-                      onChange={(e) => setWolframApiKey(e.target.value)}
-                      placeholder={
-                        hasStoredWolframKey && !wolframApiKey
-                          ? (
-                            genericMode
-                              ? 'Loaded in the current backend session. Enter a new App ID to replace it.'
-                              : 'Stored securely on backend. Enter a new App ID to replace it.'
-                          )
-                          : 'Enter your Wolfram Alpha App ID'
-                      }
-                      className="input-dark"
-                    />
-                    {hasStoredWolframKey && !wolframApiKey && (
-                      <small className="hint-text">
-                        {genericMode
-                          ? 'A Wolfram Alpha key is already loaded in the current backend session.'
-                          : 'A Wolfram Alpha key is already stored securely on the backend for this machine.'}
-                      </small>
-                    )}
-                  </div>
-
-                  <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-                    <button
-                      className="btn-success-sm"
-                      onClick={handleTestWolframConnection}
-                      disabled={testingWolfram}
-                      style={testingWolfram ? { cursor: 'wait', opacity: 0.6 } : undefined}
-                    >
-                      {testingWolfram ? 'Testing...' : 'Test Connection'}
-                    </button>
-
-                    <button
-                      className="btn-ghost"
-                      onClick={handleClearWolframKey}
-                    >
-                      Clear Key
-                    </button>
-                  </div>
-
-                  {wolframTestResult && (
-                    <div className={`test-result-banner ${wolframTestResult.includes('✓') ? 'test-result-banner--success' : 'test-result-banner--error'}`}>
-                      {wolframTestResult}
-                    </div>
-                  )}
-
-                  <small className="hint-text">
-                    In rigor mode, the AI can request Wolfram Alpha verification of mathematical claims.
-                    This enables computational checking of theorems, solving equations, and verifying properties.
-                    This setting is shared with the manual compiler mode.
-                  </small>
-                </div>
-              )}
             </div>
 
             {/* Tier 3 Final Answer Toggle */}
@@ -2466,7 +2389,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     )}
                   </div>
                   <p className="settings-subsection-description">
-                    Optional prompt customization for the user-facing paper critique mode only. This does not affect the internal critique submitter used during autonomous research.
+                    Optional prompt customization for the user-facing paper critique mode only. This does not affect internal post-body critique generation, which uses Rigor & Proofs Submitter.
                   </p>
                 </div>
                 <span className={`collapse-chevron${critiquePromptExpanded ? ' collapse-chevron--open' : ''}`}>▼</span>
@@ -2495,9 +2418,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     </button>
 
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      {critiquePromptSaved && (
-                        <span className="status-success-text">✓ Saved!</span>
-                      )}
+                      <span className={`status-success-text status-success-text--reserved${critiquePromptSaved ? '' : ' status-success-text--hidden'}`}>
+                        ✓ Saved!
+                      </span>
                       <button
                         className="btn-accent-purple"
                         onClick={handleSaveCritiquePrompt}

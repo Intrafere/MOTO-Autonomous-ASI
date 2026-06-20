@@ -105,7 +105,7 @@ class HighParamRigorProofRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_rigor_registration_uses_configured_paper_source(self) -> None:
         old_token_budgets = _set_compiler_test_token_budgets()
         submitter = HighParamSubmitter(
-            model_name="high-param-model",
+            model_name="rigor-model",
             user_prompt="Write a proof-rich paper.",
             validator_model="validator-model",
             validator_context_window=4000,
@@ -157,7 +157,7 @@ class HighParamRigorProofRegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_rigor_success_broadcasts_counted_proof_completion(self) -> None:
         old_token_budgets = _set_compiler_test_token_budgets()
         submitter = HighParamSubmitter(
-            model_name="high-param-model",
+            model_name="rigor-model",
             user_prompt="Write a proof-rich paper.",
             validator_model="validator-model",
             validator_context_window=4000,

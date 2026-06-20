@@ -7,6 +7,7 @@ export default function AggregatorInterface({
   config,
   setConfig,
   capabilities,
+  connectivityStatus,
   anyWorkflowRunning = false,
   onWorkflowRunningChange = null,
   developerModeEnabled = false,
@@ -101,6 +102,7 @@ export default function AggregatorInterface({
         supercharge_enabled: developerModeEnabled && Boolean(s.superchargeEnabled)
       }));
 
+      const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled !== false;
       await api.startAggregator({
         user_prompt: config.userPrompt,
         submitter_configs: formattedConfigs,
@@ -114,6 +116,22 @@ export default function AggregatorInterface({
         validator_context_size: config.validatorContextSize,
         validator_max_output_tokens: config.validatorMaxOutput,
         validator_supercharge_enabled: developerModeEnabled && Boolean(config.validatorSuperchargeEnabled),
+        assistant_provider: assistantMemoryEnabled
+          ? (lmStudioEnabled ? (config.assistantProvider || config.validatorProvider || 'lm_studio') : 'openrouter')
+          : (lmStudioEnabled ? (config.validatorProvider || 'lm_studio') : 'openrouter'),
+        assistant_model: assistantMemoryEnabled ? (config.assistantModel || config.validatorModel) : '',
+        assistant_openrouter_provider: assistantMemoryEnabled
+          ? (config.assistantOpenrouterProvider || null)
+          : null,
+        assistant_openrouter_reasoning_effort: assistantMemoryEnabled
+          ? (config.assistantOpenrouterReasoningEffort || config.validatorOpenrouterReasoningEffort || 'auto')
+          : 'auto',
+        assistant_lm_studio_fallback: assistantMemoryEnabled && lmStudioEnabled
+          ? (config.assistantLmStudioFallback || config.validatorLmStudioFallback || null)
+          : null,
+        assistant_context_size: assistantMemoryEnabled ? (config.assistantContextSize || config.validatorContextSize) : 0,
+        assistant_max_output_tokens: assistantMemoryEnabled ? (config.assistantMaxOutput || config.validatorMaxOutput) : 0,
+        assistant_supercharge_enabled: assistantMemoryEnabled && developerModeEnabled && Boolean(config.assistantSuperchargeEnabled),
         uploaded_files: config.uploadedFiles,
       });
       setIsRunning(true);

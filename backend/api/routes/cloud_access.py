@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from backend.shared.config import rag_config, system_config
 from backend.shared.openai_codex_client import OpenAICodexAuthError, openai_codex_client
+from backend.shared.provider_notification_store import list_provider_notifications
 from backend.shared.xai_grok_client import XAIGrokAuthError, xai_grok_client
 
 router = APIRouter(prefix="/api/cloud-access", tags=["cloud-access"])
@@ -367,6 +368,15 @@ async def get_cloud_access_status() -> Dict[str, Any]:
                 "desktop_only": True,
             },
         },
+    }
+
+
+@router.get("/provider-notifications")
+async def get_provider_notifications() -> Dict[str, Any]:
+    """Return recent non-secret provider/OAuth notifications missed by live WebSocket clients."""
+    return {
+        "success": True,
+        "notifications": await asyncio.to_thread(list_provider_notifications),
     }
 
 

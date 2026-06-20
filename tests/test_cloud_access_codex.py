@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import tempfile
 from unittest import IsolatedAsyncioTestCase, mock
 
 from fastapi import HTTPException
@@ -9,13 +10,132 @@ from keyring.errors import PasswordDeleteError
 from backend.api.routes import cloud_access as cloud_access_route
 from backend.api.routes import features as features_route
 from backend.shared import secret_store
-from backend.shared.openai_codex_client import OpenAICodexAuthError, OpenAICodexClient
+from backend.shared.api_client_manager import oauth_live_activity_error_message
+from backend.shared.config import system_config
+from backend.shared.openai_codex_client import (
+    OpenAICodexAuthError,
+    OpenAICodexClient,
+    OpenAICodexRequestError,
+)
+from backend.shared.provider_notification_store import list_provider_notifications, record_provider_notification
 from backend.shared.xai_grok_client import XAIGrokClient, XAIGrokRequestError
 
 
 def _jwt(payload: dict) -> str:
     encoded = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii").rstrip("=")
     return f"header.{encoded}.sig"
+
+
+class ProviderNotificationStoreTests(IsolatedAsyncioTestCase):
+    async def test_provider_notifications_persist_for_route_hydration(self) -> None:
+        old_data_dir = system_config.data_dir
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_config.data_dir = temp_dir
+            try:
+                stored = record_provider_notification(
+                    "openai_codex_oauth_error",
+                    {
+                        "role_id": "autonomous_proof_formalization_brainstorm",
+                        "model": "gpt-5.5",
+                        "provider": "openai_codex_oauth",
+                        "provider_label": "OpenAI Codex",
+                        "reason": "unrecoverable_codex_error",
+                        "message": "Check your OpenAI Codex OAuth connection, sign in again, and retry.",
+                        "error_summary": "server_error for Bearer secret-value",
+                        "oauth_error_message": "server_error for Bearer secret-value",
+                    },
+                )
+
+                self.assertEqual(stored["event_type"], "openai_codex_oauth_error")
+                self.assertEqual(stored["provider"], "openai_codex_oauth")
+                self.assertIn("[redacted]", stored["error_summary"])
+                self.assertIn("[redacted]", stored["oauth_error_message"])
+
+                listed = list_provider_notifications()
+                self.assertEqual(len(listed), 1)
+                self.assertEqual(listed[0]["id"], stored["id"])
+
+                route_payload = await cloud_access_route.get_provider_notifications()
+                self.assertTrue(route_payload["success"])
+                self.assertEqual(route_payload["notifications"][0]["id"], stored["id"])
+            finally:
+                system_config.data_dir = old_data_dir
+
+    async def test_grok_provider_notifications_persist_for_route_hydration(self) -> None:
+        old_data_dir = system_config.data_dir
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_config.data_dir = temp_dir
+            try:
+                stored = record_provider_notification(
+                    "oauth_provider_error",
+                    {
+                        "role_id": "autonomous_proof_formalization_brainstorm",
+                        "model": "grok-4.3",
+                        "provider": "xai_grok_oauth",
+                        "provider_label": "xAI Grok",
+                        "reason": "unrecoverable_xai_grok_error",
+                        "message": "Check your xAI Grok OAuth connection, sign in again, and retry.",
+                        "error_summary": "subscription error for Bearer secret-value",
+                        "oauth_error_message": "subscription error for Bearer secret-value",
+                    },
+                )
+
+                self.assertEqual(stored["event_type"], "oauth_provider_error")
+                self.assertEqual(stored["provider"], "xai_grok_oauth")
+                self.assertEqual(stored["provider_label"], "xAI Grok")
+                self.assertIn("[redacted]", stored["error_summary"])
+                self.assertIn("[redacted]", stored["oauth_error_message"])
+
+                route_payload = await cloud_access_route.get_provider_notifications()
+                self.assertTrue(route_payload["success"])
+                self.assertEqual(route_payload["notifications"][0]["id"], stored["id"])
+                self.assertEqual(route_payload["notifications"][0]["provider"], "xai_grok_oauth")
+            finally:
+                system_config.data_dir = old_data_dir
+
+    async def test_provider_notification_oauth_error_message_is_capped(self) -> None:
+        old_data_dir = system_config.data_dir
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_config.data_dir = temp_dir
+            try:
+                stored = record_provider_notification(
+                    "openai_codex_oauth_error",
+                    {
+                        "provider": "openai_codex_oauth",
+                        "role_id": "autonomous_proof_identification_manual_brainstorm",
+                        "reason": "unrecoverable_codex_error",
+                        "oauth_error_message": "x" * 400,
+                    },
+                )
+
+                self.assertLessEqual(len(stored["oauth_error_message"]), 250)
+                self.assertTrue(stored["oauth_error_message"].endswith("..."))
+            finally:
+                system_config.data_dir = old_data_dir
+
+
+class OAuthLiveActivityErrorTests(IsolatedAsyncioTestCase):
+    async def test_codex_context_length_message_is_extracted_for_live_activity(self) -> None:
+        message = oauth_live_activity_error_message(
+            RuntimeError(
+                'OpenAI Codex completion failed: {"code": "context_length_exceeded", '
+                '"message": "Your input exceeds the context window of this model. Please adjust your input and try again."}'
+            )
+        )
+
+        self.assertEqual(
+            message,
+            "context_length_exceeded: Your input exceeds the context window of this model. Please adjust your input and try again.",
+        )
+        self.assertLessEqual(len(message), 250)
+
+    async def test_grok_plain_error_is_capped_for_live_activity(self) -> None:
+        message = oauth_live_activity_error_message(
+            RuntimeError("xAI Grok completion failed: " + ("subscription quota exceeded " * 30))
+        )
+
+        self.assertLessEqual(len(message), 250)
+        self.assertTrue(message.endswith("..."))
 
 
 class OpenAICodexClientTests(IsolatedAsyncioTestCase):
@@ -34,7 +154,7 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertIn("api.connectors.read", url)
         self.assertIn("api.connectors.invoke", url)
         self.assertIn("codex_cli_simplified_flow=true", url)
-        self.assertIn("originator=moto", url)
+        self.assertIn("originator=moto-autonomous-asi", url)
         self.assertIn("state=state-1", url)
 
     def test_token_payload_extracts_safe_status_fields(self) -> None:
@@ -327,6 +447,79 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(fake_http.calls, 2)
         self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
 
+    async def test_generate_completion_stops_after_four_exponential_codex_retries(self) -> None:
+        client = OpenAICodexClient()
+
+        class FakeResponse:
+            status_code = 503
+            text = "server_error: upstream provider timeout; you can retry your request"
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, url, json=None, headers=None):
+                self.calls += 1
+                return FakeResponse()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
+            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None) as sleep_mock,
+        ):
+            with self.assertRaisesRegex(OpenAICodexRequestError, "after 4 retries"):
+                await client.generate_completion(
+                    model="gpt-5.5",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+
+        self.assertEqual(fake_http.calls, 5)
+        sleep_mock.assert_has_awaits([mock.call(2.0), mock.call(4.0), mock.call(8.0), mock.call(16.0)])
+
+    async def test_generate_completion_retries_transient_codex_stream_failure(self) -> None:
+        client = OpenAICodexClient()
+
+        class FakeResponse:
+            def __init__(self, text):
+                self.status_code = 200
+                self.text = text
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, url, json=None, headers=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return FakeResponse(
+                        'data: {"type":"response.failed","error":{"code":"server_error",'
+                        '"message":"Upstream provider timeout. You can retry your request."}}\n\n'
+                    )
+                return FakeResponse(
+                    json_module.dumps({
+                        "id": "resp_retry",
+                        "output_text": "recovered",
+                        "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                    })
+                )
+
+        json_module = json
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
+            mock.patch("backend.shared.openai_codex_client.asyncio.sleep", return_value=None) as sleep_mock,
+        ):
+            response = await client.generate_completion(
+                model="gpt-5.5",
+                messages=[{"role": "user", "content": "user"}],
+            )
+
+        self.assertEqual(fake_http.calls, 2)
+        sleep_mock.assert_awaited_once_with(2.0)
+        self.assertEqual(response["choices"][0]["message"]["content"], "recovered")
+
     async def test_generate_completion_retries_with_newer_stored_token_after_revocation(self) -> None:
         client = OpenAICodexClient()
         old_tokens = {"access_token": "old-access", "refresh_token": "refresh"}
@@ -452,7 +645,7 @@ class XAIGrokClientTests(IsolatedAsyncioTestCase):
         self.assertIn("grok-cli%3Aaccess", url)
         self.assertIn("api%3Aaccess", url)
         self.assertIn("plan=generic", url)
-        self.assertIn("referrer=moto", url)
+        self.assertIn("referrer=moto-autonomous-asi", url)
         self.assertIn("state=state-1", url)
         self.assertIn("nonce=nonce-1", url)
 
@@ -600,6 +793,36 @@ class XAIGrokClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(fake_http.payload["response_format"]["type"], "json_object")
         self.assertEqual(fake_http.payload["reasoning_effort"], "high")
         self.assertEqual(response["choices"][0]["message"]["content"], "hello")
+
+    async def test_generate_completion_stops_after_four_exponential_xai_retries(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeResponse:
+            status_code = 503
+            text = "server_error: upstream provider timeout; you can retry your request"
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, url, json=None, headers=None):
+                self.calls += 1
+                return FakeResponse()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with (
+            mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}),
+            mock.patch("backend.shared.xai_grok_client.asyncio.sleep", return_value=None) as sleep_mock,
+        ):
+            with self.assertRaisesRegex(XAIGrokRequestError, "after 4 retries"):
+                await client.generate_completion(
+                    model="grok-4.3",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+
+        self.assertEqual(fake_http.calls, 5)
+        sleep_mock.assert_has_awaits([mock.call(2.0), mock.call(4.0), mock.call(8.0), mock.call(16.0)])
 
 
 class FeaturesContractTests(IsolatedAsyncioTestCase):

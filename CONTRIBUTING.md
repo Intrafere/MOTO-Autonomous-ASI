@@ -277,7 +277,7 @@ Test with various model combinations:
 - Medium models (30B-40B)
 - Large models (70B+)
 - OpenRouter models (GPT-4, Claude, etc.)
-- OpenAI Codex models through `Cloud Access & Keys` when touching cloud credential/provider routing
+- OpenAI Codex models through `OpenRouter/OAuth` when touching cloud credential/provider routing
 
 ### Load Testing
 

@@ -1,0 +1,9 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "error": {
+    "code": "membership_inactive",
+    "message": "SyntheticLib4 membership is inactive.",
+    "retryable": false,
+    "http_status": 402
+  }
+}

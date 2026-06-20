@@ -211,30 +211,30 @@ class SystemConfig(BaseSettings):
     
     # Compiler settings (Phase 2). Set from explicit user/provider settings at runtime.
     compiler_validator_context_window: int = 0
-    compiler_high_context_context_window: int = 0
-    compiler_high_param_context_window: int = 0
-    compiler_critique_submitter_context_window: int = 0
+    compiler_writer_context_window: int = 0
+    compiler_high_param_context_window: int = 0  # Rigor & Proofs submitter
+    compiler_critique_submitter_context_window: int = 0  # Deprecated alias mirrored from Rigor & Proofs
     
     # Compiler output token limits (user-configurable)
     compiler_validator_max_output_tokens: int = 0
-    compiler_high_context_max_output_tokens: int = 0
-    compiler_high_param_max_output_tokens: int = 0
-    compiler_critique_submitter_max_tokens: int = 0
+    compiler_writer_max_output_tokens: int = 0
+    compiler_high_param_max_output_tokens: int = 0  # Rigor & Proofs submitter
+    compiler_critique_submitter_max_tokens: int = 0  # Deprecated alias mirrored from Rigor & Proofs
     
     # Compiler model selections (set at runtime by API)
-    compiler_critique_submitter_model: str = ""  # Set by user in GUI
+    compiler_critique_submitter_model: str = ""  # Deprecated alias mirrored from Rigor & Proofs
     
     # Autonomous Research settings (Part 3)
     # Context windows (separate for each role, set from user settings)
     autonomous_submitter_context_window: int = 0
     autonomous_validator_context_window: int = 0
-    autonomous_high_context_context_window: int = 0
+    autonomous_writer_context_window: int = 0
     autonomous_high_param_context_window: int = 0
     
     # Autonomous output token limits (user-configurable)
     autonomous_submitter_max_tokens: int = 0
     autonomous_validator_max_tokens: int = 0
-    autonomous_high_context_max_tokens: int = 0
+    autonomous_writer_max_tokens: int = 0
     autonomous_high_param_max_tokens: int = 0
     
     # Autonomous workflow settings
@@ -246,6 +246,11 @@ class SystemConfig(BaseSettings):
     # Wolfram Alpha integration (optional)
     wolfram_alpha_enabled: bool = False
     wolfram_alpha_api_key: Optional[str] = None
+
+    # Optional proof-search and memory connectivity toggles. These are
+    # user-facing runtime switches, not credential/snapshot deletion flags.
+    syntheticlib4_enabled: bool = True
+    agent_conversation_memory_enabled: bool = True
 
     # Lean 4 proof verification integration (optional)
     lean4_enabled: bool = Field(

@@ -126,7 +126,7 @@ export default function StartupProviderSetupModal({
               <ol style={{ margin: '0 0 1rem 1.1rem', padding: 0, color: '#d7d7e8', lineHeight: '1.55' }}>
                 <li>Use a supported subscription login such as OpenAI Codex or xAI Grok/SuperGrok for chat/model roles.</li>
                 <li>Set up OpenRouter or LM Studio first so RAG embeddings are available.</li>
-                <li>After startup, add OAuth from Cloud Access & Keys and select it in role settings.</li>
+                <li>After startup, add OAuth from OpenRouter/OAuth and select it in role settings.</li>
               </ol>
               <button
                 type="button"

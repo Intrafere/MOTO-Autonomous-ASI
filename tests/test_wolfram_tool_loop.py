@@ -1,8 +1,8 @@
 import json
 import unittest
 
-from backend.compiler.agents import high_context_submitter as submitter_module
-from backend.compiler.agents.high_context_submitter import HighContextSubmitter
+from backend.compiler.agents import writer_submitter as submitter_module
+from backend.compiler.agents.writer_submitter import WritingSubmitter
 from backend.shared import wolfram_alpha_client as wolfram_module
 from backend.shared.config import system_config
 
@@ -29,17 +29,17 @@ def _tool_call(call_id: str, query: str) -> dict:
 
 class WolframToolLoopTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self._original_context_window = system_config.compiler_high_context_context_window
-        self._original_max_output_tokens = system_config.compiler_high_context_max_output_tokens
-        system_config.compiler_high_context_context_window = 8192
-        system_config.compiler_high_context_max_output_tokens = 1024
+        self._original_context_window = system_config.compiler_writer_context_window
+        self._original_max_output_tokens = system_config.compiler_writer_max_output_tokens
+        system_config.compiler_writer_context_window = 8192
+        system_config.compiler_writer_max_output_tokens = 1024
 
     def tearDown(self) -> None:
-        system_config.compiler_high_context_context_window = self._original_context_window
-        system_config.compiler_high_context_max_output_tokens = self._original_max_output_tokens
+        system_config.compiler_writer_context_window = self._original_context_window
+        system_config.compiler_writer_max_output_tokens = self._original_max_output_tokens
 
     async def test_tool_loop_executes_query_and_returns_final_json(self) -> None:
-        submitter = HighContextSubmitter(model_name="test-model", user_prompt="Write.")
+        submitter = WritingSubmitter(model_name="test-model", user_prompt="Write.")
         fake_client = FakeWolframClient()
         broadcasts = []
 
@@ -82,7 +82,7 @@ class WolframToolLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(broadcasts[0][0], "compiler_wolfram_call")
 
     async def test_single_turn_multiple_tool_calls_cannot_exceed_budget(self) -> None:
-        submitter = HighContextSubmitter(model_name="test-model", user_prompt="Write.")
+        submitter = WritingSubmitter(model_name="test-model", user_prompt="Write.")
         fake_client = FakeWolframClient()
         responses = [
             {

@@ -7,7 +7,7 @@ export const CLOUD_ACCESS_PROVIDERS = [
     label: 'OpenAI Codex',
     shortLabel: 'Codex',
     loginLabel: 'OpenAI Codex OAuth',
-    unavailableTitle: 'Set OpenAI Codex login in Cloud Access & Keys first',
+    unavailableTitle: 'Set OpenAI Codex login in OpenRouter/OAuth first',
     modelErrorLabel: 'OpenAI Codex OAuth',
   },
   {
@@ -15,7 +15,7 @@ export const CLOUD_ACCESS_PROVIDERS = [
     label: 'xAI Grok',
     shortLabel: 'Grok',
     loginLabel: 'xAI Grok OAuth',
-    unavailableTitle: 'Set xAI Grok login in Cloud Access & Keys first',
+    unavailableTitle: 'Set xAI Grok login in OpenRouter/OAuth first',
     modelErrorLabel: 'xAI Grok OAuth',
   },
 ];

@@ -39,11 +39,32 @@ class ModelErrorUtilsTests(unittest.TestCase):
         self.assertTrue(is_transient_model_call_error(exc))
         self.assertFalse(is_non_retryable_model_error(exc))
 
+    def test_codex_server_error_with_missing_fallback_is_transient(self) -> None:
+        exc = RuntimeError(
+            "OpenAI Codex failed for role 'autonomous_proof_formalization_brainstorm' "
+            "and no LM Studio fallback is configured: OpenAI Codex completion failed: "
+            '{"code":"server_error","message":"An error occurred while processing your request. '
+            "You can retry your request." + '"}'
+        )
+
+        self.assertTrue(is_transient_model_call_error(exc))
+        self.assertFalse(is_non_retryable_model_error(exc))
+
     def test_xai_grok_gateway_timeout_with_missing_fallback_is_transient(self) -> None:
         exc = RuntimeError(
             "xAI Grok failed for role 'autonomous_proof_formalization_brainstorm' "
             "and no LM Studio fallback is configured: xAI Grok connection failed after 3 attempts: "
             "HTTP 503: upstream provider timeout"
+        )
+
+        self.assertTrue(is_transient_model_call_error(exc))
+        self.assertFalse(is_non_retryable_model_error(exc))
+
+    def test_xai_grok_server_error_with_missing_fallback_is_transient(self) -> None:
+        exc = RuntimeError(
+            "xAI Grok connection failed after 3 attempts: HTTP 500: "
+            '{"code":"server_error","message":"An error occurred while processing your request. '
+            "You can retry your request." + '"}'
         )
 
         self.assertTrue(is_transient_model_call_error(exc))

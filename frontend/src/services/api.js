@@ -79,6 +79,25 @@ async function extractErrorMessage(response, fallbackMessage) {
   if (typeof detail === 'string' && detail.trim()) {
     return `${prefix}: ${detail.trim()}`;
   }
+  if (Array.isArray(detail)) {
+    const formattedDetails = detail
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return String(item || '').trim();
+        }
+        const location = Array.isArray(item.loc)
+          ? item.loc.filter((part) => part !== 'body').join('.')
+          : '';
+        const message = String(item.msg || item.message || '').trim();
+        const type = String(item.type || '').trim();
+        return [location, message || type].filter(Boolean).join(': ');
+      })
+      .filter(Boolean)
+      .join('; ');
+    if (formattedDetails) {
+      return `${prefix}: ${formattedDetails}`;
+    }
+  }
   if (detail != null) {
     try {
       return `${prefix}: ${JSON.stringify(detail)}`;
@@ -182,6 +201,12 @@ export const api = {
   async getStatus() {
     const response = await fetch(`${API_BASE}/aggregator/status`);
     if (!response.ok) throw new Error('Failed to get status');
+    return response.json();
+  },
+
+  async getAggregatorPrompt() {
+    const response = await fetch(`${API_BASE}/aggregator/prompt`);
+    if (!response.ok) throw new Error('Failed to get aggregator prompt');
     return response.json();
   },
 
@@ -323,6 +348,12 @@ export const compilerAPI = {
     return { data: await response.json() };
   },
 
+  async getPrompt() {
+    const response = await fetch(`${API_BASE}/compiler/prompt`);
+    if (!response.ok) throw new Error('Failed to get compiler prompt');
+    return { data: await response.json() };
+  },
+
   // Get paper
   async getPaper() {
     const response = await fetch(`${API_BASE}/compiler/paper`);
@@ -428,10 +459,7 @@ export const autonomousAPI = {
       body: JSON.stringify(config),
     });
     if (!response.ok) {
-      const errorData = await response.json();
-      const error = new Error('Failed to start autonomous research');
-      error.details = errorData.detail;
-      throw error;
+      await throwFromResponse(response, 'Failed to start autonomous research');
     }
     return response.json();
   },
@@ -451,6 +479,12 @@ export const autonomousAPI = {
       method: 'POST',
     });
     if (!response.ok) throw new Error('Failed to clear autonomous research data');
+    return response.json();
+  },
+
+  async getPrompt() {
+    const response = await fetch(`${API_BASE}/auto-research/prompt`);
+    if (!response.ok) throw new Error('Failed to get autonomous research prompt');
     return response.json();
   },
 
@@ -1274,6 +1308,24 @@ export const workflowAPI = {
   },
 };
 
+export const connectivityAPI = {
+  async getStatus() {
+    const response = await fetch(`${API_BASE}/connectivity/status`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get connectivity status');
+    return response.json();
+  },
+
+  async updateToggles(toggles) {
+    const response = await fetch(`${API_BASE}/connectivity/toggles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(toggles),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to update connectivity toggles');
+    return response.json();
+  },
+};
+
 // OpenRouter API (for per-role model selection)
 export const openRouterAPI = {
   // Check if LM Studio is available
@@ -1379,6 +1431,12 @@ export const cloudAccessAPI = {
     return response.json();
   },
 
+  async getProviderNotifications() {
+    const response = await fetch(`${API_BASE}/cloud-access/provider-notifications`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get provider notifications');
+    return response.json();
+  },
+
   async startOpenAICodexLogin(redirectUri = null) {
     const response = await fetch(`${API_BASE}/cloud-access/openai-codex/oauth/start`, {
       method: 'POST',
@@ -1466,6 +1524,160 @@ export const cloudAccessAPI = {
       method: 'DELETE',
     });
     if (!response.ok) await throwFromResponse(response, 'Failed to clear xAI Grok login');
+    return response.json();
+  },
+};
+
+export const syntheticLib4API = {
+  async getStatus() {
+    const response = await fetch(`${API_BASE}/syntheticlib4/status`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get SyntheticLib4 status');
+    return response.json();
+  },
+
+  async startAuth(redirectUri = null) {
+    const response = await fetch(`${API_BASE}/syntheticlib4/auth/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ redirect_uri: redirectUri }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to start SyntheticLib4 auth');
+    return response.json();
+  },
+
+  async exchangeAuth({ code = '', state = '', redirectUrl = '', redirectUri = null } = {}) {
+    const response = await fetch(`${API_BASE}/syntheticlib4/auth/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code,
+        state,
+        redirect_url: redirectUrl,
+        redirect_uri: redirectUri,
+      }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to complete SyntheticLib4 auth');
+    return response.json();
+  },
+
+  async setApiKey(apiKey) {
+    const response = await fetch(`${API_BASE}/syntheticlib4/api-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to set SyntheticLib4 API key');
+    return response.json();
+  },
+
+  async clearAuth() {
+    const response = await fetch(`${API_BASE}/syntheticlib4/auth`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to clear SyntheticLib4 auth');
+    return response.json();
+  },
+
+  async getReleases(channel = null) {
+    const params = new URLSearchParams();
+    if (channel) params.append('channel', channel);
+    const response = await fetch(`${API_BASE}/syntheticlib4/releases${params.toString() ? '?' + params.toString() : ''}`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to fetch SyntheticLib4 releases');
+    return response.json();
+  },
+
+  async refresh() {
+    const response = await fetch(`${API_BASE}/syntheticlib4/refresh`, {
+      method: 'POST',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to refresh SyntheticLib4 snapshot');
+    return response.json();
+  },
+
+  async importLocalSnapshot({ sourceName, channel = 'stable' } = {}) {
+    const response = await fetch(`${API_BASE}/syntheticlib4/import-local-snapshot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_name: sourceName, channel }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to import SyntheticLib4 local snapshot');
+    return response.json();
+  },
+
+  async reindex() {
+    const response = await fetch(`${API_BASE}/syntheticlib4/reindex`, {
+      method: 'POST',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to rebuild SyntheticLib4 proof index');
+    return response.json();
+  },
+
+  async retrieveBatch(request = {}) {
+    const response = await fetch(`${API_BASE}/syntheticlib4/retrieve-batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to retrieve SyntheticLib4 proof batch');
+    return response.json();
+  },
+
+  async listAccountProofs({ cursor = null, limit = 50, releaseId = null, channel = null } = {}) {
+    const params = new URLSearchParams();
+    if (cursor) params.append('cursor', cursor);
+    if (limit) params.append('limit', String(limit));
+    if (releaseId) params.append('release_id', releaseId);
+    if (channel) params.append('channel', channel);
+    const response = await fetch(`${API_BASE}/syntheticlib4/account/proofs${params.toString() ? '?' + params.toString() : ''}`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to list SyntheticLib4 account proofs');
+    return response.json();
+  },
+
+  async searchAccountProofs({ query = '', module = '', noveltyRank = '', cursor = null, limit = 50 } = {}) {
+    const params = new URLSearchParams();
+    if (query) params.append('q', query);
+    if (module) params.append('module', module);
+    if (noveltyRank) params.append('novelty_rank', noveltyRank);
+    if (cursor) params.append('cursor', cursor);
+    if (limit) params.append('limit', String(limit));
+    const response = await fetch(`${API_BASE}/syntheticlib4/account/proofs/search${params.toString() ? '?' + params.toString() : ''}`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to search SyntheticLib4 account proofs');
+    return response.json();
+  },
+};
+
+export const proofSearchAPI = {
+  async getOverview() {
+    const response = await fetch(`${API_BASE}/proof-search/overview`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to load proof-search overview');
+    return response.json();
+  },
+
+  async search(request) {
+    const response = await fetch(`${API_BASE}/proof-search/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request || {}),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Proof search failed');
+    return response.json();
+  },
+
+  async getProof(source, proofId, { sessionId = null } = {}) {
+    const params = new URLSearchParams();
+    if (sessionId) params.append('session_id', sessionId);
+    const response = await fetch(
+      `${API_BASE}/proof-search/proofs/${encodeURIComponent(source)}/${encodeURIComponent(proofId)}${params.toString() ? '?' + params.toString() : ''}`
+    );
+    if (!response.ok) await throwFromResponse(response, 'Failed to hydrate proof-search record');
+    return response.json();
+  },
+
+  async reindex() {
+    const response = await fetch(`${API_BASE}/proof-search/reindex`, {
+      method: 'POST',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to rebuild proof-search index');
     return response.json();
   },
 };

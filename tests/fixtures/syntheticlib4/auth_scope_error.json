@@ -1,0 +1,9 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "error": {
+    "code": "insufficient_scope",
+    "message": "SyntheticLib4 token is missing a required proof-read scope.",
+    "retryable": false,
+    "http_status": 403
+  }
+}

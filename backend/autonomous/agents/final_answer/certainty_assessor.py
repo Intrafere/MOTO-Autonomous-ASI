@@ -16,6 +16,10 @@ from typing import Optional, List, Dict, Any, Callable
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
@@ -30,6 +34,17 @@ from backend.autonomous.memory.final_answer_memory import final_answer_memory
 from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _is_tier3_model_call_failure(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return (
+        is_non_retryable_model_error(exc)
+        or is_transient_model_call_error(exc)
+        or "upstream provider timeout" in message
+        or "response missing 'choices'" in message
+        or "no api key" in message
+    )
 
 
 class CertaintyAssessor:
@@ -51,12 +66,16 @@ class CertaintyAssessor:
         submitter_model: str,
         validator_model: str,
         context_window: int = 0,
-        max_output_tokens: int = 0
+        max_output_tokens: int = 0,
+        validator_context_window: Optional[int] = None,
+        validator_max_output_tokens: Optional[int] = None,
     ):
         self.submitter_model = submitter_model
         self.validator_model = validator_model
         self.context_window = context_window
         self.max_output_tokens = max_output_tokens
+        self.validator_context_window = validator_context_window or context_window
+        self.validator_max_output_tokens = validator_max_output_tokens or max_output_tokens
         
         # Task tracking for workflow panel and boost integration
         self.task_sequence: int = 0
@@ -74,6 +93,13 @@ class CertaintyAssessor:
     def _calculate_max_input_tokens(self) -> int:
         """Calculate available tokens for input prompt."""
         return rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+
+    def _calculate_validator_max_input_tokens(self) -> int:
+        """Calculate available tokens for validator prompts."""
+        return rag_config.get_available_input_tokens(
+            self.validator_context_window,
+            self.validator_max_output_tokens,
+        )
     
     async def assess_certainty(
         self,
@@ -171,6 +197,13 @@ class CertaintyAssessor:
                 all_papers
             )
             
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
+
             # Validate prompt size
             prompt_tokens = count_tokens(prompt)
             max_input = self._calculate_max_input_tokens()
@@ -180,8 +213,6 @@ class CertaintyAssessor:
                               "Proceeding with abstract-only assessment.")
                 return []
             
-            # Generate task ID
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             if self.task_tracking_callback:
@@ -224,6 +255,8 @@ class CertaintyAssessor:
         except FreeModelExhaustedError:
             raise
         except Exception as e:
+            if _is_tier3_model_call_failure(e):
+                raise
             logger.error(f"CertaintyAssessor: Error requesting expansion: {e}")
             return []
     
@@ -386,8 +419,13 @@ USER'S RESEARCH QUESTION:
                     logger.error("CertaintyAssessor: Cannot fit even summary-only prompt")
                     return None
             
-            # Generate task ID
             task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
+
             self.task_sequence += 1
             
             if self.task_tracking_callback:
@@ -428,6 +466,8 @@ USER'S RESEARCH QUESTION:
         except FreeModelExhaustedError:
             raise
         except Exception as e:
+            if _is_tier3_model_call_failure(e):
+                raise
             logger.error(f"CertaintyAssessor: Error generating assessment: {e}")
             return None
     
@@ -453,7 +493,7 @@ USER'S RESEARCH QUESTION:
             
             # Validate prompt size
             prompt_tokens = count_tokens(prompt)
-            max_input = self._calculate_max_input_tokens()
+            max_input = self._calculate_validator_max_input_tokens()
             
             if prompt_tokens > max_input:
                 logger.error(f"CertaintyAssessor: Validation prompt too large ({prompt_tokens} > {max_input})")
@@ -473,7 +513,7 @@ USER'S RESEARCH QUESTION:
                 role_id=f"{self.role_id}_validator",
                 model=self.validator_model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_output_tokens,
+                max_tokens=self.validator_max_output_tokens,
                 temperature=0.0
             )
             
@@ -500,6 +540,8 @@ USER'S RESEARCH QUESTION:
         except FreeModelExhaustedError:
             raise
         except Exception as e:
+            if _is_tier3_model_call_failure(e):
+                raise
             logger.error(f"CertaintyAssessor: Error validating assessment: {e}")
             return False, str(e)
 

@@ -94,7 +94,9 @@ backend/data/auto_research_topic_rejections.txt
 backend/data/auto_api_log.txt
 backend/data/aggregator_results.txt
 backend/data/manual_aggregator_prompt.txt
+backend/data/manual_compiler_prompt.txt
 backend/data/runtime_settings.json
+backend/data/provider_notifications.json
 
 backend/data/chroma_db/*
 !backend/data/chroma_db/.gitkeep
@@ -102,6 +104,7 @@ backend/data/chroma_db/*
 backend/data/boost_api_log.txt
 backend/data/boost_state.json
 backend/data/model_cache.json
+backend/data/proof_search/
 backend/data/paper_version_*.txt
 backend/data/critique_feedback_*.txt
 backend/data/critique_rejection_feedback.txt
@@ -136,11 +139,14 @@ randomlog.txt
 randomlog*.txt
 leanoj_master_proof_*.lean.txt
 commits_pending.txt
+current_prompt.md
 recovered_manual_aggregator_prompt.txt
 PicksTheorem_FinalSkeleton.lean
 CLASSICALPICKS.LEAN
 
 # Private/local planning notes that should not be published
+PENDING_TESTS
+(old) SyntheticLib Upgrade Plans/
 HARDOJ_AWS_COMPUTE_DONATION_OUTLINE.md
 LEANOJ_MASTER_PROOF_WRITER_REMAINDER.md
 LEANOJ_PROBLEM_11_PROMPT.md

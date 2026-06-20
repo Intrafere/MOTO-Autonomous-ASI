@@ -8,12 +8,12 @@ Supports two modes:
 
 This is the CRUCIAL MECHANISM that enables COMPOUNDING KNOWLEDGE across research cycles.
 By selecting reference papers before brainstorming, submitters can:
-- Build upon proven mathematical frameworks from prior papers
+- Build upon promising mathematical frameworks from prior AI-generated papers while independently re-checking their claims
 - Avoid re-exploring territory already covered in depth
-- Identify novel connections between new topics and established results
+- Identify novel connections between new topics and previously explored results
 - Accelerate convergence on valuable insights by standing on prior work
 """
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 def get_reference_title_text(paper: Dict[str, Any]) -> str:
@@ -59,9 +59,9 @@ DIRECT-SOLUTION PREFERENCE:
 WHY THIS MATTERS - COMPOUNDING KNOWLEDGE:
 This is the crucial mechanism that allows the system to compound knowledge across research cycles.
 By selecting reference papers BEFORE brainstorming, you can:
-- Build upon proven mathematical frameworks from prior papers
+- Build upon promising mathematical frameworks from prior AI-generated papers, while independently re-checking their claims
 - Avoid re-exploring territory already covered in depth
-- Identify novel connections between your new topic and established results
+- Identify novel connections between your new topic and previously explored results
 - Accelerate convergence on valuable insights by standing on prior work
 
 THRESHOLD: "VERY USEFUL FOR BRAINSTORMING"
@@ -518,7 +518,8 @@ def build_reference_selection_prompt(
     brainstorm_summary: str,
     expanded_papers: List[Dict[str, Any]],
     mode: str = "initial",
-    max_papers: int = 6
+    max_papers: int = 6,
+    retrieved_context: Optional[str] = None,
 ) -> str:
     """
     Build the final reference selection prompt (Step 2: full papers).
@@ -549,12 +550,17 @@ def build_reference_selection_prompt(
         "\n---\n"
     ]
     
-    # Add expanded papers with full content and outlines
-    parts.append("EXPANDED PAPERS (Full Content):\n")
+    # Add expanded papers with full content and outlines. When expanded papers
+    # overflow the prompt, callers may pass metadata plus a separate retrieved
+    # evidence block; keep real paper IDs visible so selection never targets a
+    # synthetic combined paper.
+    parts.append("EXPANDED PAPERS (Full Content or Metadata + Retrieved Evidence):\n")
     for p in expanded_papers:
         parts.append(f"\n{'=' * 60}")
         parts.append(f"\nPaper ID: {p.get('paper_id', 'Unknown')}")
         parts.append(f"\nTitle: {get_reference_title_text(p)}")
+        if p.get("abstract"):
+            parts.append(f"\nAbstract: {p.get('abstract')}")
         parts.append(f"\nWord Count: {p.get('word_count', 0)}")
         parts.append(f"\n{'=' * 60}")
         
@@ -565,6 +571,17 @@ def build_reference_selection_prompt(
             parts.append(f"\n{'-' * 60}\n")
         
         parts.append(f"\n\nFULL PAPER CONTENT:\n{p.get('content', '[Content not available]')}\n")
+
+    if retrieved_context:
+        parts.append("\n---\n")
+        parts.append(
+            "RAG-RETRIEVED FULL-PAPER EVIDENCE FROM THE EXPANDED REAL PAPER IDS ABOVE:\n"
+        )
+        parts.append(retrieved_context)
+        parts.append(
+            "\n\nUse this evidence only to choose among the real Paper IDs listed above. "
+            "Do not select synthetic IDs."
+        )
     
     parts.append("\n---\n")
     parts.append(f"REMINDER: You can select up to {max_papers} papers maximum for this selection.")

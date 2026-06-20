@@ -212,12 +212,17 @@ class CompletionReviewerAgent:
             prompt_tokens = count_tokens(prompt)
             max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
             
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
+
             if prompt_tokens > max_input_tokens:
                 logger.error(f"CompletionReviewer: Prompt ({prompt_tokens} tokens) exceeds input limit ({max_input_tokens})")
                 return None
             
-            # Generate task ID for tracking
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)

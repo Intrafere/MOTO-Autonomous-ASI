@@ -32,6 +32,11 @@ import WorkflowPanel from './components/WorkflowPanel';
 import BoostControlModal from './components/BoostControlModal';
 import StartupProviderSetupModal from './components/StartupProviderSetupModal';
 import OpenRouterApiKeyModal from './components/OpenRouterApiKeyModal';
+import ConnectivityPanel from './components/ConnectivityPanel';
+import SyntheticLib4AccessModal from './components/SyntheticLib4AccessModal';
+import WolframAlphaAccessModal from './components/WolframAlphaAccessModal';
+import LMStudioConnectivityModal from './components/LMStudioConnectivityModal';
+import AgentConversationMemoryModal from './components/AgentConversationMemoryModal';
 import OpenRouterPrivacyWarningModal from './components/OpenRouterPrivacyWarningModal';
 import CritiqueNotificationStack from './components/CritiqueNotificationStack';
 import ProofNotificationStack from './components/autonomous/ProofNotificationStack';
@@ -40,7 +45,7 @@ import CodexOAuthNotificationStack from './components/CodexOAuthNotificationStac
 import UpdateNotificationBanner from './components/UpdateNotificationBanner';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import { websocket } from './services/websocket';
-import { api, autonomousAPI, cloudAccessAPI, compilerAPI, leanojAPI, openRouterAPI } from './services/api';
+import { api, autonomousAPI, cloudAccessAPI, compilerAPI, connectivityAPI, leanojAPI, openRouterAPI } from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
   RECOMMENDED_PROFILE_KEY,
@@ -60,8 +65,20 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
 } from './utils/openRouterSelection';
 import { CLOUD_ACCESS_PROVIDERS, isCloudAccessProvider } from './utils/oauthProviders';
+import {
+  formatContextOverflowActivityMessage,
+  formatAssistantProofPackEventMessage,
+  hasRecentAssistantProofPackDuplicate,
+} from './utils/activityStyles';
+import {
+  canStorePromptDraftInLocalStorage,
+  readPromptDraftSync,
+  removePromptDraft,
+  savePromptDraft,
+} from './utils/promptDraftStorage';
 
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
+const AGGREGATOR_PROMPT_STORAGE_KEY = 'aggregator_user_prompt';
 const DEPRECATED_SCREEN_STATE_STORAGE_KEYS = [
   'appMode',
   'singlePaperWriterExpanded',
@@ -71,11 +88,18 @@ const DEPRECATED_SCREEN_STATE_STORAGE_KEYS = [
   'leanojActiveTab',
 ];
 const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'];
-const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'high_context', 'high_param', 'critique_submitter'];
+const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'assistant', 'writer', 'high_param'];
 const HIGH_SCORE_CRITIQUE_THRESHOLD = 6.25;
 const SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY = 'seenHighScoreCritiqueNotifications';
+const DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS_STORAGE_KEY = 'dismissedOAuthProviderNotifications';
 const MAX_SEEN_HIGH_SCORE_CRITIQUES = 500;
+const MAX_DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS = 500;
 const MAX_LIVE_ACTIVITY_EVENTS = 5000;
+const AUTONOMOUS_LIVE_ACTIVITY_STORAGE_KEY = 'autonomous_live_activity_events';
+const LEANOJ_LIVE_ACTIVITY_STORAGE_KEY = 'leanoj_live_activity_events';
+const MAX_PERSISTED_ACTIVITY_STRING_LENGTH = 2000;
+const MAX_PERSISTED_ACTIVITY_ARRAY_ITEMS = 20;
+const MAX_PERSISTED_ACTIVITY_OBJECT_KEYS = 60;
 const MAX_PROOF_NOTIFICATIONS = 20;
 const UPDATE_NOTICE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_CAPABILITIES = Object.freeze({
@@ -158,6 +182,97 @@ function persistSeenHighScoreCritiques(seenSet) {
   }
 }
 
+function readDismissedOAuthProviderNotifications() {
+  if (typeof window === 'undefined') {
+    return new Set();
+  }
+
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS_STORAGE_KEY);
+    const values = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(values) ? values.filter(value => typeof value === 'string') : []);
+  } catch (error) {
+    console.warn('Could not read dismissed OAuth provider notifications:', error);
+    return new Set();
+  }
+}
+
+function persistDismissedOAuthProviderNotifications(seenSet) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    const values = Array.from(seenSet).slice(-MAX_DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS);
+    window.localStorage.setItem(DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS_STORAGE_KEY, JSON.stringify(values));
+  } catch (error) {
+    console.warn('Could not save dismissed OAuth provider notifications:', error);
+  }
+}
+
+function getProviderNotificationKey(data = {}) {
+  if (data.id) {
+    return String(data.id);
+  }
+  const provider = data.provider || 'oauth';
+  const roleId = data.role_id || provider;
+  const reason = data.reason || 'provider_error';
+  const createdAt = data.created_at || data._serverTimestamp || data.timestamp || '';
+  return [provider, roleId, reason, createdAt].map(value => String(value || '')).join(':');
+}
+
+function buildOAuthProviderNotification(data = {}, fallbackProvider = 'oauth') {
+  const provider = data.provider || fallbackProvider;
+  const roleId = data.role_id || provider;
+  const reason = data.reason || 'unrecoverable_oauth_error';
+  const notificationKey = getProviderNotificationKey({ ...data, provider, role_id: roleId, reason });
+  const isCodex = provider === 'openai_codex_oauth';
+  return {
+    id: `oauth_provider_${notificationKey}`,
+    notification_key: notificationKey,
+    provider,
+    provider_label: data.provider_label || (isCodex ? 'OpenAI Codex' : 'OAuth provider'),
+    role_id: roleId,
+    model: data.model,
+    reason,
+    message: data.message || `Check your ${isCodex ? 'OpenAI Codex' : 'OAuth provider'} connection, sign in again, and retry.`,
+    timestamp: data.created_at || data._serverTimestamp || data.timestamp || new Date().toISOString(),
+  };
+}
+
+function addOAuthProviderNotification(setNotifications, data = {}, fallbackProvider = 'oauth') {
+  const notification = buildOAuthProviderNotification(data, fallbackProvider);
+  if (readDismissedOAuthProviderNotifications().has(notification.notification_key)) {
+    return;
+  }
+  setNotifications(prev => {
+    if (prev.some(item => item.notification_key === notification.notification_key)) {
+      return prev;
+    }
+    return [...prev, notification].slice(-3);
+  });
+}
+
+function truncateOAuthActivityDetail(value, maxChars = 250) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (text.length <= maxChars) return text;
+  if (maxChars <= 3) return text.slice(0, maxChars);
+  return `${text.slice(0, maxChars - 3)}...`;
+}
+
+function buildOAuthActivityMessage(data = {}, fallbackProviderLabel = 'OAuth provider') {
+  const providerLabel = data.provider_label || fallbackProviderLabel;
+  const roleId = data.role_id || 'a role';
+  const detail = truncateOAuthActivityDetail(
+    data.oauth_error_message || data.error_message || data.error_summary,
+  );
+  if (detail) {
+    return `${providerLabel} OAuth failed for ${roleId}: ${detail}`;
+  }
+  return `${providerLabel} OAuth failed for ${roleId}; check your OAuth connection and sign in again.`;
+}
+
 const createDefaultAggregatorSubmitterConfigs = () => (
   [1, 2, 3].map((submitterId) => ({
     submitterId,
@@ -171,6 +286,48 @@ const createDefaultAggregatorSubmitterConfigs = () => (
     superchargeEnabled: false,
   }))
 );
+
+function readAggregatorStorage(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.error(`Failed to parse ${key}:`, error);
+    return null;
+  }
+}
+
+function buildAggregatorConfigFromStorage() {
+  const settings = readAggregatorStorage('aggregator_settings') || {};
+  const legacy = readAggregatorStorage('aggregatorConfig') || {};
+  const promptDraft = readPromptDraftSync(AGGREGATOR_PROMPT_STORAGE_KEY);
+  const promptSource = typeof settings.userPrompt === 'string' && settings.userPrompt.trim().length > 0
+    ? settings
+    : legacy;
+
+  return {
+    userPrompt: promptDraft || promptSource.userPrompt || '',
+    submitterConfigs: settings.submitterConfigs || legacy.submitterConfigs || createDefaultAggregatorSubmitterConfigs(),
+    validatorModel: settings.validatorModel || legacy.validatorModel || '',
+    validatorProvider: settings.validatorProvider || legacy.validatorProvider || 'lm_studio',
+    validatorOpenrouterProvider: settings.validatorOpenrouterProvider || legacy.validatorOpenrouterProvider || null,
+    validatorOpenrouterReasoningEffort: settings.validatorOpenrouterReasoningEffort || legacy.validatorOpenrouterReasoningEffort || 'auto',
+    validatorLmStudioFallback: settings.validatorLmStudioFallback || legacy.validatorLmStudioFallback || null,
+    validatorContextSize: settings.validatorContextSize ?? legacy.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
+    validatorMaxOutput: settings.validatorMaxOutput ?? legacy.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    validatorSuperchargeEnabled: Boolean(settings.validatorSuperchargeEnabled ?? legacy.validatorSuperchargeEnabled),
+    assistantModel: settings.assistantModel ?? legacy.assistantModel ?? '',
+    assistantProvider: settings.assistantProvider ?? legacy.assistantProvider ?? settings.validatorProvider ?? legacy.validatorProvider ?? 'lm_studio',
+    assistantOpenrouterProvider: settings.assistantOpenrouterProvider ?? legacy.assistantOpenrouterProvider ?? null,
+    assistantOpenrouterReasoningEffort: settings.assistantOpenrouterReasoningEffort ?? legacy.assistantOpenrouterReasoningEffort ?? settings.validatorOpenrouterReasoningEffort ?? legacy.validatorOpenrouterReasoningEffort ?? 'auto',
+    assistantLmStudioFallback: settings.assistantLmStudioFallback ?? legacy.assistantLmStudioFallback ?? null,
+    assistantContextSize: settings.assistantContextSize ?? legacy.assistantContextSize ?? settings.validatorContextSize ?? legacy.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
+    assistantMaxOutput: settings.assistantMaxOutput ?? legacy.assistantMaxOutput ?? settings.validatorMaxOutput ?? legacy.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    assistantSuperchargeEnabled: Boolean(settings.assistantSuperchargeEnabled ?? legacy.assistantSuperchargeEnabled),
+    creativityEmphasisBoostEnabled: Boolean(settings.creativityEmphasisBoostEnabled ?? legacy.creativityEmphasisBoostEnabled),
+    uploadedFiles: [],
+  };
+}
 
 function normalizeLoadedLmStudioModelId(modelId = '') {
   return String(modelId).replace(/:\d+$/, '');
@@ -248,6 +405,9 @@ function normalizeRuntimeModelConfig(config = {}, lmStudioEnabled) {
 function normalizeAggregatorConfigForCapabilities(config, lmStudioEnabled) {
   const originalValidatorProvider = config.validatorProvider || 'lm_studio';
   const shouldResetValidator = !lmStudioEnabled && originalValidatorProvider !== 'openrouter';
+  const originalAssistantProvider = config.assistantProvider || config.validatorProvider || 'lm_studio';
+  const shouldResetAssistant = !lmStudioEnabled && originalAssistantProvider !== 'openrouter';
+  const hasAssistantModelField = Object.prototype.hasOwnProperty.call(config, 'assistantModel');
 
   return {
     ...config,
@@ -261,6 +421,15 @@ function normalizeAggregatorConfigForCapabilities(config, lmStudioEnabled) {
       : (config.validatorOpenrouterProvider || null),
     validatorOpenrouterReasoningEffort: config.validatorOpenrouterReasoningEffort || 'auto',
     validatorLmStudioFallback: lmStudioEnabled ? (config.validatorLmStudioFallback || null) : null,
+    assistantProvider: normalizeRuntimeProvider(config.assistantProvider || config.validatorProvider, lmStudioEnabled),
+    assistantModel: shouldResetAssistant
+      ? ''
+      : (hasAssistantModelField ? (config.assistantModel || '') : (config.validatorModel || '')),
+    assistantOpenrouterProvider: shouldResetAssistant
+      ? null
+      : (config.assistantOpenrouterProvider || null),
+    assistantOpenrouterReasoningEffort: config.assistantOpenrouterReasoningEffort || config.validatorOpenrouterReasoningEffort || 'auto',
+    assistantLmStudioFallback: lmStudioEnabled ? (config.assistantLmStudioFallback || null) : null,
   };
 }
 
@@ -292,6 +461,98 @@ function normalizeAutonomousConfigForCapabilities(config, lmStudioEnabled) {
   return nextConfig;
 }
 
+function readPersistedLiveActivity(storageKey) {
+  try {
+    const savedEvents = localStorage.getItem(storageKey);
+    if (!savedEvents) {
+      return [];
+    }
+    const parsed = JSON.parse(savedEvents);
+    return Array.isArray(parsed)
+      ? parsed.filter((event) => event && typeof event === 'object').slice(-MAX_LIVE_ACTIVITY_EVENTS)
+      : [];
+  } catch (error) {
+    console.error(`Failed to load ${storageKey}:`, error);
+    return [];
+  }
+}
+
+function compactPersistedActivityValue(value, depth = 0) {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    return value.length > MAX_PERSISTED_ACTIVITY_STRING_LENGTH
+      ? `${value.slice(0, MAX_PERSISTED_ACTIVITY_STRING_LENGTH)}...`
+      : value;
+  }
+  if (depth >= 3) {
+    return '[omitted]';
+  }
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, MAX_PERSISTED_ACTIVITY_ARRAY_ITEMS)
+      .map((item) => compactPersistedActivityValue(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, MAX_PERSISTED_ACTIVITY_OBJECT_KEYS)
+        .map(([key, nestedValue]) => [key, compactPersistedActivityValue(nestedValue, depth + 1)])
+    );
+  }
+  return String(value);
+}
+
+function compactLiveActivityEvent(event) {
+  if (!event || typeof event !== 'object') {
+    return null;
+  }
+  return {
+    event: event.event || event.type || '',
+    type: event.type,
+    timestamp: event.timestamp || event.fullTimestamp || '',
+    fullTimestamp: event.fullTimestamp,
+    message: typeof event.message === 'string'
+      ? compactPersistedActivityValue(event.message)
+      : '',
+    data: compactPersistedActivityValue(event.data || {}),
+  };
+}
+
+function persistLiveActivity(storageKey, events) {
+  let lastError = null;
+  try {
+    const boundedEvents = Array.isArray(events)
+      ? events
+        .slice(-MAX_LIVE_ACTIVITY_EVENTS)
+        .map(compactLiveActivityEvent)
+        .filter(Boolean)
+      : [];
+    if (boundedEvents.length === 0) {
+      localStorage.removeItem(storageKey);
+      return;
+    }
+
+    for (let limit = boundedEvents.length; limit > 0; limit = Math.floor(limit / 2)) {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(boundedEvents.slice(-limit)));
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    localStorage.removeItem(storageKey);
+  } catch (error) {
+    lastError = error;
+  }
+
+  if (lastError) {
+    console.error(`Failed to save ${storageKey}:`, lastError);
+  }
+}
+
 function App() {
   const [appMode, setAppMode] = useState('autonomous');
   const [autonomousActiveTab, setAutonomousActiveTab] = useState('auto-interface');
@@ -313,11 +574,15 @@ function App() {
   
   // Boost modal state
   const [showBoostModal, setShowBoostModal] = useState(false);
-  const [showApiBoostTooltip, setShowApiBoostTooltip] = useState(false);
   
   // OpenRouter API Key modal state
   const [showOpenRouterKeyModal, setShowOpenRouterKeyModal] = useState(false);
   const [openRouterKeyReason, setOpenRouterKeyReason] = useState('setup');
+  const [showSyntheticLib4Modal, setShowSyntheticLib4Modal] = useState(false);
+  const [showWolframModal, setShowWolframModal] = useState(false);
+  const [showLmStudioModal, setShowLmStudioModal] = useState(false);
+  const [showAgentMemoryModal, setShowAgentMemoryModal] = useState(false);
+  const [connectivityStatus, setConnectivityStatus] = useState(null);
   
   // LM Studio availability state (for determining default provider)
   const [lmStudioAvailable, setLmStudioAvailable] = useState(true);
@@ -443,74 +708,44 @@ function App() {
   // Initialize config from localStorage or use defaults
   // CRITICAL: Read from 'aggregator_settings' (used by AggregatorSettings component)
   const [config, setConfig] = useState(() => {
-    // Try to load from the settings component key first
-    const settingsConfig = localStorage.getItem('aggregator_settings');
-    if (settingsConfig) {
-      try {
-        const settings = JSON.parse(settingsConfig);
-        return {
-          userPrompt: settings.userPrompt || '',
-          submitterConfigs: settings.submitterConfigs || createDefaultAggregatorSubmitterConfigs(),
-          validatorModel: settings.validatorModel || '',
-          validatorProvider: settings.validatorProvider || 'lm_studio',
-          validatorOpenrouterProvider: settings.validatorOpenrouterProvider || null,
-          validatorOpenrouterReasoningEffort: settings.validatorOpenrouterReasoningEffort || 'auto',
-          validatorLmStudioFallback: settings.validatorLmStudioFallback || null,
-          validatorContextSize: settings.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
-          validatorMaxOutput: settings.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS,
-          validatorSuperchargeEnabled: Boolean(settings.validatorSuperchargeEnabled),
-          creativityEmphasisBoostEnabled: Boolean(settings.creativityEmphasisBoostEnabled),
-          uploadedFiles: [],
-        };
-      } catch (e) {
-        console.error('Failed to parse aggregator_settings:', e);
-      }
-    }
-    
-    // Fallback to old key for backward compatibility
-    const savedConfig = localStorage.getItem('aggregatorConfig');
-    if (savedConfig) {
-      try {
-        const parsed = JSON.parse(savedConfig);
-        return {
-          userPrompt: parsed.userPrompt || '',
-          submitterConfigs: parsed.submitterConfigs || createDefaultAggregatorSubmitterConfigs(),
-          validatorModel: parsed.validatorModel || '',
-          validatorProvider: parsed.validatorProvider || 'lm_studio',
-          validatorOpenrouterProvider: parsed.validatorOpenrouterProvider || null,
-          validatorOpenrouterReasoningEffort: parsed.validatorOpenrouterReasoningEffort || 'auto',
-          validatorLmStudioFallback: parsed.validatorLmStudioFallback || null,
-          validatorContextSize: parsed.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW,
-          validatorMaxOutput: parsed.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS,
-          validatorSuperchargeEnabled: Boolean(parsed.validatorSuperchargeEnabled),
-          creativityEmphasisBoostEnabled: Boolean(parsed.creativityEmphasisBoostEnabled),
-          uploadedFiles: [],
-        };
-      } catch (e) {
-        console.error('Failed to parse saved config:', e);
-      }
-    }
-    return {
-      userPrompt: '',
-      submitterConfigs: createDefaultAggregatorSubmitterConfigs(),
-      validatorModel: '',
-      validatorProvider: 'lm_studio',
-      validatorOpenrouterProvider: null,
-      validatorOpenrouterReasoningEffort: 'auto',
-      validatorLmStudioFallback: null,
-      validatorContextSize: DEFAULT_CONTEXT_WINDOW,
-      validatorMaxOutput: DEFAULT_MAX_OUTPUT_TOKENS,
-      validatorSuperchargeEnabled: false,
-      creativityEmphasisBoostEnabled: false,
-      uploadedFiles: [],
-    };
+    return buildAggregatorConfigFromStorage();
   });
+  const aggregatorPromptClearedRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const hydrateAggregatorPrompt = async () => {
+      try {
+        const data = await api.getAggregatorPrompt();
+        const persistedPrompt = data?.prompt || '';
+        if (!persistedPrompt.trim() || cancelled || aggregatorPromptClearedRef.current) {
+          return;
+        }
+        setConfig((prev) => (
+          prev.userPrompt?.trim()
+            ? prev
+            : { ...prev, userPrompt: persistedPrompt }
+        ));
+      } catch (error) {
+        console.debug('Could not hydrate manual Aggregator prompt:', error);
+      }
+    };
+
+    hydrateAggregatorPrompt();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Save config to localStorage whenever it changes (excluding transient data)
   // CRITICAL: Save to BOTH keys to maintain backward compatibility
   useEffect(() => {
+    savePromptDraft(AGGREGATOR_PROMPT_STORAGE_KEY, config.userPrompt);
+    const localStoragePrompt = canStorePromptDraftInLocalStorage(config.userPrompt)
+      ? config.userPrompt
+      : '';
     const configToSave = {
-      userPrompt: config.userPrompt,
+      userPrompt: localStoragePrompt,
       submitterConfigs: config.submitterConfigs,
       validatorModel: config.validatorModel,
       validatorProvider: config.validatorProvider,
@@ -520,18 +755,32 @@ function App() {
       validatorContextSize: config.validatorContextSize,
       validatorMaxOutput: config.validatorMaxOutput,
       validatorSuperchargeEnabled: config.validatorSuperchargeEnabled,
+      assistantModel: config.assistantModel,
+      assistantProvider: config.assistantProvider,
+      assistantOpenrouterProvider: config.assistantOpenrouterProvider,
+      assistantOpenrouterReasoningEffort: config.assistantOpenrouterReasoningEffort,
+      assistantLmStudioFallback: config.assistantLmStudioFallback,
+      assistantContextSize: config.assistantContextSize,
+      assistantMaxOutput: config.assistantMaxOutput,
+      assistantSuperchargeEnabled: config.assistantSuperchargeEnabled,
       creativityEmphasisBoostEnabled: config.creativityEmphasisBoostEnabled,
     };
-    // Save to both old and new keys
-    localStorage.setItem('aggregatorConfig', JSON.stringify(configToSave));
-    localStorage.setItem('aggregator_settings', JSON.stringify(configToSave));
-  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorOpenrouterReasoningEffort, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput, config.validatorSuperchargeEnabled, config.creativityEmphasisBoostEnabled]);
+    try {
+      // Save to both old and new keys.
+      localStorage.setItem('aggregatorConfig', JSON.stringify(configToSave));
+      localStorage.setItem('aggregator_settings', JSON.stringify(configToSave));
+    } catch (error) {
+      console.warn('Could not persist Aggregator settings to localStorage:', error);
+    }
+  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorOpenrouterReasoningEffort, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput, config.validatorSuperchargeEnabled, config.assistantModel, config.assistantProvider, config.assistantOpenrouterProvider, config.assistantOpenrouterReasoningEffort, config.assistantLmStudioFallback, config.assistantContextSize, config.assistantMaxOutput, config.assistantSuperchargeEnabled, config.creativityEmphasisBoostEnabled]);
 
   // Autonomous mode state
   const [autonomousRunning, setAutonomousRunning] = useState(false);
   const [autonomousStopping, setAutonomousStopping] = useState(false);
   const [autonomousStatus, setAutonomousStatus] = useState(null);
-  const [autonomousActivity, setAutonomousActivity] = useState([]);
+  const [autonomousActivity, setAutonomousActivity] = useState(() => (
+    readPersistedLiveActivity(AUTONOMOUS_LIVE_ACTIVITY_STORAGE_KEY)
+  ));
   const [brainstorms, setBrainstorms] = useState([]);
   const [papers, setPapers] = useState([]);
   const [autonomousStats, setAutonomousStats] = useState(null);
@@ -539,7 +788,9 @@ function App() {
   // LeanOJ mode state
   const [leanojRunning, setLeanojRunning] = useState(false);
   const [leanojStatus, setLeanojStatus] = useState(null);
-  const [leanojActivity, setLeanojActivity] = useState([]);
+  const [leanojActivity, setLeanojActivity] = useState(() => (
+    readPersistedLiveActivity(LEANOJ_LIVE_ACTIVITY_STORAGE_KEY)
+  ));
   const [leanojSettings, setLeanojSettings] = useState(() => getStoredLeanOJSettings());
   const [leanojProofRefreshToken, setLeanojProofRefreshToken] = useState(0);
   
@@ -569,6 +820,14 @@ function App() {
   // Credit exhaustion notification state (persistent until dismissed)
   const [creditExhaustionNotifications, setCreditExhaustionNotifications] = useState([]);
   const [codexOAuthNotifications, setCodexOAuthNotifications] = useState([]);
+
+  useEffect(() => {
+    persistLiveActivity(AUTONOMOUS_LIVE_ACTIVITY_STORAGE_KEY, autonomousActivity);
+  }, [autonomousActivity]);
+
+  useEffect(() => {
+    persistLiveActivity(LEANOJ_LIVE_ACTIVITY_STORAGE_KEY, leanojActivity);
+  }, [leanojActivity]);
 
   // Live refs used by websocket listeners (which are registered once)
   const autonomousRunningRef = useRef(autonomousRunning);
@@ -622,31 +881,43 @@ function App() {
         validator_provider: autonomousConfig.validator_provider,
         validator_model: autonomousConfig.validator_model,
         validator_openrouter_provider: autonomousConfig.validator_openrouter_provider,
+        validator_openrouter_reasoning_effort: autonomousConfig.validator_openrouter_reasoning_effort,
         validator_lm_studio_fallback: autonomousConfig.validator_lm_studio_fallback,
         validator_context_window: autonomousConfig.validator_context_window,
         validator_max_tokens: autonomousConfig.validator_max_tokens,
         validator_supercharge_enabled: autonomousConfig.validator_supercharge_enabled,
-        high_context_provider: autonomousConfig.high_context_provider,
-        high_context_model: autonomousConfig.high_context_model,
-        high_context_openrouter_provider: autonomousConfig.high_context_openrouter_provider,
-        high_context_lm_studio_fallback: autonomousConfig.high_context_lm_studio_fallback,
-        high_context_context_window: autonomousConfig.high_context_context_window,
-        high_context_max_tokens: autonomousConfig.high_context_max_tokens,
-        high_context_supercharge_enabled: autonomousConfig.high_context_supercharge_enabled,
+        assistant_provider: autonomousConfig.assistant_provider,
+        assistant_model: autonomousConfig.assistant_model,
+        assistant_openrouter_provider: autonomousConfig.assistant_openrouter_provider,
+        assistant_openrouter_reasoning_effort: autonomousConfig.assistant_openrouter_reasoning_effort,
+        assistant_lm_studio_fallback: autonomousConfig.assistant_lm_studio_fallback,
+        assistant_context_window: autonomousConfig.assistant_context_window,
+        assistant_max_tokens: autonomousConfig.assistant_max_tokens,
+        assistant_supercharge_enabled: autonomousConfig.assistant_supercharge_enabled,
+        writer_provider: autonomousConfig.writer_provider,
+        writer_model: autonomousConfig.writer_model,
+        writer_openrouter_provider: autonomousConfig.writer_openrouter_provider,
+        writer_openrouter_reasoning_effort: autonomousConfig.writer_openrouter_reasoning_effort,
+        writer_lm_studio_fallback: autonomousConfig.writer_lm_studio_fallback,
+        writer_context_window: autonomousConfig.writer_context_window,
+        writer_max_tokens: autonomousConfig.writer_max_tokens,
+        writer_supercharge_enabled: autonomousConfig.writer_supercharge_enabled,
         high_param_provider: autonomousConfig.high_param_provider,
         high_param_model: autonomousConfig.high_param_model,
         high_param_openrouter_provider: autonomousConfig.high_param_openrouter_provider,
+        high_param_openrouter_reasoning_effort: autonomousConfig.high_param_openrouter_reasoning_effort,
         high_param_lm_studio_fallback: autonomousConfig.high_param_lm_studio_fallback,
         high_param_context_window: autonomousConfig.high_param_context_window,
         high_param_max_tokens: autonomousConfig.high_param_max_tokens,
         high_param_supercharge_enabled: autonomousConfig.high_param_supercharge_enabled,
-        critique_submitter_provider: autonomousConfig.critique_submitter_provider,
-        critique_submitter_model: autonomousConfig.critique_submitter_model,
-        critique_submitter_openrouter_provider: autonomousConfig.critique_submitter_openrouter_provider,
-        critique_submitter_lm_studio_fallback: autonomousConfig.critique_submitter_lm_studio_fallback,
-        critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
-        critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
-        critique_submitter_supercharge_enabled: autonomousConfig.critique_submitter_supercharge_enabled,
+        critique_submitter_provider: autonomousConfig.high_param_provider,
+        critique_submitter_model: autonomousConfig.high_param_model,
+        critique_submitter_openrouter_provider: autonomousConfig.high_param_openrouter_provider,
+        critique_submitter_openrouter_reasoning_effort: autonomousConfig.high_param_openrouter_reasoning_effort,
+        critique_submitter_lm_studio_fallback: autonomousConfig.high_param_lm_studio_fallback,
+        critique_submitter_context_window: autonomousConfig.high_param_context_window,
+        critique_submitter_max_tokens: autonomousConfig.high_param_max_tokens,
+        critique_submitter_supercharge_enabled: autonomousConfig.high_param_supercharge_enabled,
       },
       allowMathematicalProofs: autonomousConfig.allow_mathematical_proofs ?? existingSettings.allowMathematicalProofs ?? true,
       allowResearchPapers: autonomousConfig.allow_research_papers ?? existingSettings.allowResearchPapers ?? true,
@@ -784,9 +1055,31 @@ function App() {
     };
   }, []);
 
+  const refreshConnectivityStatus = useCallback(async () => {
+    try {
+      const status = await connectivityAPI.getStatus();
+      setConnectivityStatus(status);
+      return status;
+    } catch (error) {
+      console.debug('Failed to fetch connectivity status:', error);
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     syncProviderAvailability();
-  }, [syncProviderAvailability]);
+    refreshConnectivityStatus();
+  }, [syncProviderAvailability, refreshConnectivityStatus]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      refreshConnectivityStatus();
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [refreshConnectivityStatus]);
 
   // Fetch update notices on mount, then every 4 hours until one is shown or dismissed.
   useEffect(() => {
@@ -1014,6 +1307,35 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateProviderNotifications = async () => {
+      try {
+        const payload = await cloudAccessAPI.getProviderNotifications();
+        if (cancelled) {
+          return;
+        }
+        (payload.notifications || []).forEach((notification) => {
+          addOAuthProviderNotification(
+            setCodexOAuthNotifications,
+            notification,
+            notification.provider || 'oauth',
+          );
+        });
+      } catch (error) {
+        console.warn('Failed to hydrate provider notifications:', error);
+      }
+    };
+
+    hydrateProviderNotifications();
+    const unsubscribe = websocket.on('connected', hydrateProviderNotifications);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
   // Autonomous WebSocket event listeners
   useEffect(() => {
     const unsubscribers = [];
@@ -1021,8 +1343,27 @@ function App() {
     // Helper to add activity with limit (prevents unbounded array growth causing UI freeze)
     // Helper to get timestamp from server or fallback to client time
     const getTimestamp = (data) => data?._serverTimestamp || new Date().toISOString();
+    const isSameAssistantRecallTarget = (left = {}, right = {}) => (
+      (left.workflow_mode || '') === (right.workflow_mode || '') &&
+      (left.target_kind || '') === (right.target_kind || '') &&
+      (left.workflow_phase || '') === (right.workflow_phase || '') &&
+      (left.source_type || '') === (right.source_type || '') &&
+      (left.source_id || '') === (right.source_id || '')
+    );
     const addActivity = (event) => {
-      setAutonomousActivity(prev => [...prev, event].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+      setAutonomousActivity(prev => {
+        if (hasRecentAssistantProofPackDuplicate(prev, event.event, event.data || {}, event.timestamp)) {
+          return prev;
+        }
+        if (event.event === 'assistant_proof_pack_updated') {
+          const withoutPriorRecall = prev.filter((existing) => (
+            existing.event !== 'assistant_proof_pack_updated' ||
+            !isSameAssistantRecallTarget(existing.data || {}, event.data || {})
+          ));
+          return [...withoutPriorRecall, event].slice(-MAX_LIVE_ACTIVITY_EVENTS);
+        }
+        return [...prev, event].slice(-MAX_LIVE_ACTIVITY_EVENTS);
+      });
     };
     const formatHungConnectionMessage = (data = {}) => {
       const model = data.model || 'model';
@@ -1431,6 +1772,31 @@ function App() {
       });
     }));
 
+    const handleAutonomousAssistantEvent = (eventName, data) => {
+      const workflowMode = String(data.workflow_mode || '');
+      if (!['autonomous', 'aggregator', 'compiler'].includes(workflowMode)) {
+        return;
+      }
+      if (!autonomousRunningRef.current) {
+        return;
+      }
+      addActivity({
+        event: eventName,
+        timestamp: getTimestamp(data),
+        message: formatAssistantProofPackEventMessage(eventName, data),
+        data
+      });
+    };
+    unsubscribers.push(websocket.on('assistant_proof_pack_refresh_started', (data) => {
+      handleAutonomousAssistantEvent('assistant_proof_pack_refresh_started', data);
+    }));
+    unsubscribers.push(websocket.on('assistant_proof_pack_updated', (data) => {
+      handleAutonomousAssistantEvent('assistant_proof_pack_updated', data);
+    }));
+    unsubscribers.push(websocket.on('assistant_proof_pack_warning', (data) => {
+      handleAutonomousAssistantEvent('assistant_proof_pack_warning', data);
+    }));
+
     unsubscribers.push(websocket.on('proof_check_started', (data) => {
       setProofRefreshToken((prev) => prev + 1);
     }));
@@ -1600,11 +1966,16 @@ function App() {
       });
     }));
     
-    unsubscribers.push(websocket.on('auto_research_started', () => {
-      setAutonomousActivity([]);
+    unsubscribers.push(websocket.on('auto_research_started', (data = {}) => {
       setAutonomousRunning(true);
       setAnyWorkflowRunning(true);
       setAutonomousStopping(false);
+      addActivity({
+        event: 'auto_research_started',
+        timestamp: getTimestamp(data),
+        message: 'Autonomous research started',
+        data
+      });
     }));
     
     unsubscribers.push(websocket.on('auto_research_resumed', (data) => {
@@ -1628,11 +1999,17 @@ function App() {
       }).catch(console.error);
     }));
     
-    unsubscribers.push(websocket.on('auto_research_stopped', () => {
+    unsubscribers.push(websocket.on('auto_research_stopped', (data = {}) => {
       setAutonomousRunning(false);
       setAutonomousStopping(false);
       setAnyWorkflowRunning(false);
       autonomousTierRef.current = null;
+      addActivity({
+        event: 'auto_research_stopped',
+        timestamp: getTimestamp(data),
+        message: data.message || `Research stopped. Total: ${data.final_stats?.total_papers_completed || 0} papers`,
+        data
+      });
     }));
     
     // Tier 3 events
@@ -1862,6 +2239,24 @@ function App() {
       });
     }));
 
+    unsubscribers.push(websocket.on('context_overflow_error', (data) => {
+      console.error('Context overflow:', data);
+      const message = formatContextOverflowActivityMessage(data);
+      const roleId = String(data?.role_id || '').toLowerCase();
+      const workflowMode = String(data?.workflow_mode || '').toLowerCase();
+      const event = {
+        event: 'context_overflow_error',
+        timestamp: getTimestamp(data),
+        message,
+        data
+      };
+      if (workflowMode === 'leanoj' || roleId.startsWith('leanoj_')) {
+        addLeanOJActivityFromGlobalAlert(event);
+      } else if (autonomousRunningRef.current || shouldAddHungAlertToAutonomousFeed(data)) {
+        addActivity(event);
+      }
+    }));
+
     unsubscribers.push(websocket.on('account_credits_exhausted', (data) => {
       console.error('Account credits exhausted:', data);
       addActivity({
@@ -1932,28 +2327,10 @@ function App() {
       addActivity({
         event: 'openai_codex_oauth_error',
         timestamp: getTimestamp(data),
-        message: `OpenAI Codex OAuth failed for ${data.role_id || 'a role'}; check your OAuth connection and sign in again.`,
-        ...data
+        ...data,
+        message: buildOAuthActivityMessage(data, 'OpenAI Codex'),
       });
-      setCodexOAuthNotifications(prev => {
-        const roleId = data.role_id || 'openai_codex_oauth';
-        const reason = data.reason || 'unrecoverable_codex_error';
-        const provider = data.provider || 'openai_codex_oauth';
-        if (prev.some(n => n.provider === provider && n.role_id === roleId && n.reason === reason)) return prev;
-        return [
-          ...prev,
-          {
-            id: `codex_oauth_${roleId}_${Date.now()}`,
-            provider,
-            provider_label: data.provider_label || 'OpenAI Codex',
-            role_id: roleId,
-            model: data.model,
-            reason,
-            message: data.message || 'Check your OpenAI Codex OAuth connection, sign in again, and retry.',
-            timestamp: getTimestamp(data)
-          }
-        ].slice(-3);
-      });
+      addOAuthProviderNotification(setCodexOAuthNotifications, data, 'openai_codex_oauth');
     }));
 
     unsubscribers.push(websocket.on('oauth_provider_error', (data) => {
@@ -1962,28 +2339,10 @@ function App() {
       addActivity({
         event: 'oauth_provider_error',
         timestamp: getTimestamp(data),
-        message: `${providerLabel} OAuth failed for ${data.role_id || 'a role'}; check your OAuth connection and sign in again.`,
-        ...data
+        ...data,
+        message: buildOAuthActivityMessage(data, providerLabel),
       });
-      setCodexOAuthNotifications(prev => {
-        const provider = data.provider || 'oauth';
-        const roleId = data.role_id || provider;
-        const reason = data.reason || 'unrecoverable_oauth_error';
-        if (prev.some(n => n.provider === provider && n.role_id === roleId && n.reason === reason)) return prev;
-        return [
-          ...prev,
-          {
-            id: `oauth_${provider}_${roleId}_${Date.now()}`,
-            provider,
-            provider_label: providerLabel,
-            role_id: roleId,
-            model: data.model,
-            reason,
-            message: data.message || `Check your ${providerLabel} OAuth connection, sign in again, and retry.`,
-            timestamp: getTimestamp(data)
-          }
-        ].slice(-3);
-      });
+      addOAuthProviderNotification(setCodexOAuthNotifications, data, data.provider || 'oauth');
     }));
 
     unsubscribers.push(websocket.on('leanoj_provider_paused', (data) => {
@@ -2182,15 +2541,18 @@ function App() {
       );
     };
     const addLeanOJActivity = (event, data = {}, message = '') => {
-      setLeanojActivity(prev => [
-        ...prev,
-        {
-          event,
-          timestamp: getTimestamp(data),
-          message: message || data.message || data.reasoning || data.decision || data.phase || 'Proof Solver update',
-          data,
-        },
-      ].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+      const nextEvent = {
+        event,
+        timestamp: getTimestamp(data),
+        message: message || data.message || data.reasoning || data.decision || data.phase || 'Proof Solver update',
+        data,
+      };
+      setLeanojActivity(prev => {
+        if (hasRecentAssistantProofPackDuplicate(prev, event, data, nextEvent.timestamp)) {
+          return prev;
+        }
+        return [...prev, nextEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS);
+      });
     };
     const summarizeLeanOJText = (text = '', limit = 220) => {
       const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
@@ -2330,10 +2692,22 @@ function App() {
         setLeanojRunning(true);
         addLeanOJActivity('leanoj_started', data, 'Proof Solver started');
       }],
+      ['assistant_proof_pack_refresh_started', (data) => {
+        if (data.workflow_mode !== 'leanoj') return;
+        addLeanOJActivity('assistant_proof_pack_refresh_started', data, formatAssistantProofPackEventMessage('assistant_proof_pack_refresh_started', data));
+      }],
+      ['assistant_proof_pack_updated', (data) => {
+        if (data.workflow_mode !== 'leanoj') return;
+        addLeanOJActivity('assistant_proof_pack_updated', data, formatAssistantProofPackEventMessage('assistant_proof_pack_updated', data));
+      }],
+      ['assistant_proof_pack_warning', (data) => {
+        if (data.workflow_mode !== 'leanoj') return;
+        addLeanOJActivity('assistant_proof_pack_warning', data, formatAssistantProofPackEventMessage('assistant_proof_pack_warning', data));
+      }],
       ['leanoj_stopped', (data) => {
         setLeanojRunning(false);
         setAnyWorkflowRunning(false);
-        addLeanOJActivity('leanoj_stopped', data, 'Proof Solver stopped');
+        addLeanOJActivity('leanoj_stopped', data, data?.message || 'Proof Solver stopped');
         leanojAPI.getStatus().then(setLeanojStatus).catch(console.error);
       }],
       ['leanoj_status_updated', (data) => setLeanojStatus(data)],
@@ -2508,6 +2882,7 @@ function App() {
         supercharge_enabled: superchargeAllowed && Boolean(cfg.superchargeEnabled || cfg.supercharge_enabled)
       })) || [];
 
+      const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled !== false;
       await autonomousAPI.start({
         user_research_prompt: researchPrompt,
         submitter_configs: submitterConfigs,
@@ -2526,21 +2901,21 @@ function App() {
         validator_context_window: autonomousConfig.validator_context_window,
         validator_max_tokens: autonomousConfig.validator_max_tokens,
         validator_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.validator_supercharge_enabled),
-        // High-context submitter config with OpenRouter support
-        high_context_provider: normalizeRuntimeProvider(
-          autonomousConfig.high_context_provider,
+        // Writing submitter config with OpenRouter support
+        writer_provider: normalizeRuntimeProvider(
+          autonomousConfig.writer_provider,
           lmStudioEnabled
         ),
-        high_context_model: autonomousConfig.high_context_model,
-        high_context_openrouter_provider: autonomousConfig.high_context_openrouter_provider,
-        high_context_openrouter_reasoning_effort: autonomousConfig.high_context_openrouter_reasoning_effort || 'auto',
-        high_context_lm_studio_fallback: lmStudioEnabled
-          ? autonomousConfig.high_context_lm_studio_fallback
+        writer_model: autonomousConfig.writer_model,
+        writer_openrouter_provider: autonomousConfig.writer_openrouter_provider,
+        writer_openrouter_reasoning_effort: autonomousConfig.writer_openrouter_reasoning_effort || 'auto',
+        writer_lm_studio_fallback: lmStudioEnabled
+          ? autonomousConfig.writer_lm_studio_fallback
           : null,
-        high_context_context_window: autonomousConfig.high_context_context_window,
-        high_context_max_tokens: autonomousConfig.high_context_max_tokens,
-        high_context_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_context_supercharge_enabled),
-        // High-param submitter config with OpenRouter support
+        writer_context_window: autonomousConfig.writer_context_window,
+        writer_max_tokens: autonomousConfig.writer_max_tokens,
+        writer_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.writer_supercharge_enabled),
+        // Rigor & Proofs Submitter config with OpenRouter support
         high_param_provider: normalizeRuntimeProvider(
           autonomousConfig.high_param_provider,
           lmStudioEnabled
@@ -2554,30 +2929,50 @@ function App() {
         high_param_context_window: autonomousConfig.high_param_context_window,
         high_param_max_tokens: autonomousConfig.high_param_max_tokens,
         high_param_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
-        // Critique submitter config with OpenRouter support
+        // Deprecated critique fields mirror Rigor & Proofs for compatibility.
         critique_submitter_provider: normalizeRuntimeProvider(
-          autonomousConfig.critique_submitter_provider,
+          autonomousConfig.high_param_provider,
           lmStudioEnabled
         ),
-        critique_submitter_model: autonomousConfig.critique_submitter_model,
-        critique_submitter_openrouter_provider: autonomousConfig.critique_submitter_openrouter_provider,
-        critique_submitter_openrouter_reasoning_effort: autonomousConfig.critique_submitter_openrouter_reasoning_effort || 'auto',
+        critique_submitter_model: autonomousConfig.high_param_model,
+        critique_submitter_openrouter_provider: autonomousConfig.high_param_openrouter_provider,
+        critique_submitter_openrouter_reasoning_effort: autonomousConfig.high_param_openrouter_reasoning_effort || 'auto',
         critique_submitter_lm_studio_fallback: lmStudioEnabled
-          ? autonomousConfig.critique_submitter_lm_studio_fallback
+          ? autonomousConfig.high_param_lm_studio_fallback
           : null,
-        critique_submitter_context_window: autonomousConfig.critique_submitter_context_window,
-        critique_submitter_max_tokens: autonomousConfig.critique_submitter_max_tokens,
-        critique_submitter_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.critique_submitter_supercharge_enabled),
+        critique_submitter_context_window: autonomousConfig.high_param_context_window,
+        critique_submitter_max_tokens: autonomousConfig.high_param_max_tokens,
+        critique_submitter_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
+        assistant_provider: assistantMemoryEnabled
+          ? normalizeRuntimeProvider(
+              autonomousConfig.assistant_provider || autonomousConfig.validator_provider,
+              lmStudioEnabled
+            )
+          : normalizeRuntimeProvider(autonomousConfig.validator_provider, lmStudioEnabled),
+        assistant_model: assistantMemoryEnabled ? (autonomousConfig.assistant_model || autonomousConfig.validator_model) : '',
+        assistant_openrouter_provider: assistantMemoryEnabled
+          ? (autonomousConfig.assistant_openrouter_provider || autonomousConfig.validator_openrouter_provider)
+          : null,
+        assistant_openrouter_reasoning_effort: assistantMemoryEnabled
+          ? (autonomousConfig.assistant_openrouter_reasoning_effort || autonomousConfig.validator_openrouter_reasoning_effort || 'auto')
+          : 'auto',
+        assistant_lm_studio_fallback: assistantMemoryEnabled && lmStudioEnabled
+          ? (autonomousConfig.assistant_lm_studio_fallback || autonomousConfig.validator_lm_studio_fallback)
+          : null,
+        assistant_context_window: assistantMemoryEnabled ? (autonomousConfig.assistant_context_window || autonomousConfig.validator_context_window) : 0,
+        assistant_max_tokens: assistantMemoryEnabled ? (autonomousConfig.assistant_max_tokens || autonomousConfig.validator_max_tokens) : 0,
+        assistant_supercharge_enabled: assistantMemoryEnabled && superchargeAllowed && Boolean(autonomousConfig.assistant_supercharge_enabled),
         allow_mathematical_proofs: !capabilities.genericMode && (autonomousConfig.allow_mathematical_proofs ?? true),
         allow_research_papers: autonomousConfig.allow_research_papers ?? true,
         tier3_enabled: autonomousConfig.tier3_enabled ?? false
       });
       setAutonomousRunning(true);
       setAutonomousStopping(false);
-      setAutonomousActivity([]);
       setAnyWorkflowRunning(true);
+      return true;
     } catch (error) {
       alert(`Failed to start autonomous research: ${error.details || error.message}`);
+      return false;
     }
   };
 
@@ -2649,13 +3044,20 @@ function App() {
     brainstorm_validator: normalizeLeanOJRoleForCapabilities(request.brainstorm_validator),
     path_decider: normalizeLeanOJRoleForCapabilities(request.path_decider || request.final_solver),
     final_solver: normalizeLeanOJRoleForCapabilities(request.final_solver),
+    assistant: connectivityStatus?.skills?.agent_conversation_memory?.enabled === false
+      ? {
+          ...normalizeLeanOJRoleForCapabilities(request.topic_validator),
+          model_id: '',
+          openrouter_provider: null,
+          lm_studio_fallback_id: null,
+        }
+      : normalizeLeanOJRoleForCapabilities(request.assistant || request.topic_validator),
   });
 
   const handleLeanOJStart = async (request) => {
     try {
       await leanojAPI.start(normalizeLeanOJRequestForCapabilities(request));
       setLeanojRunning(true);
-      setLeanojActivity([]);
       const status = await leanojAPI.getStatus();
       setLeanojStatus(status);
       setLeanojProofRefreshToken((prev) => prev + 1);
@@ -2683,10 +3085,16 @@ function App() {
     }
     try {
       const result = await leanojAPI.clear();
+      const nextSettings = persistLeanOJSettings({
+        ...leanojSettings,
+        prompt: '',
+        leanTemplate: '',
+      });
       setLeanojRunning(false);
       setAnyWorkflowRunning(false);
       setLeanojActivity([]);
       setLeanojStatus(result.status || null);
+      setLeanojSettings(nextSettings);
       setLeanojProofRefreshToken((prev) => prev + 1);
     } catch (error) {
       alert(`Failed to clear Proof Solver progress: ${error.message}`);
@@ -2824,7 +3232,15 @@ function App() {
   };
 
   const handleDismissCodexOAuthNotification = (notificationId) => {
-    setCodexOAuthNotifications(prev => prev.filter(n => n.id !== notificationId));
+    setCodexOAuthNotifications(prev => {
+      const notification = prev.find(n => n.id === notificationId);
+      if (notification?.notification_key) {
+        const dismissed = readDismissedOAuthProviderNotifications();
+        dismissed.add(notification.notification_key);
+        persistDismissedOAuthProviderNotifications(dismissed);
+      }
+      return prev.filter(n => n.id !== notificationId);
+    });
   };
 
   const handleOpenCloudAccessFromCodexNotification = () => {
@@ -3046,6 +3462,36 @@ function App() {
     setHasOpenRouterKey(true);
     setHasCloudAccess(true);
     console.log('OpenRouter API key set successfully');
+    refreshConnectivityStatus();
+  };
+
+  const handleConnectivityToggle = async (toggles) => {
+    try {
+      const nextStatus = await connectivityAPI.updateToggles(toggles);
+      setConnectivityStatus(nextStatus);
+      if (toggles.agent_conversation_memory_enabled === false) {
+        setConfig((prev) => ({
+          ...prev,
+          assistantProvider: prev.validatorProvider || 'lm_studio',
+          assistantModel: '',
+          assistantOpenrouterProvider: null,
+          assistantOpenrouterReasoningEffort: prev.validatorOpenrouterReasoningEffort || 'auto',
+          assistantLmStudioFallback: null,
+        }));
+        setAutonomousConfig((prev) => ({
+          ...prev,
+          assistant_provider: prev.validator_provider || 'lm_studio',
+          assistant_model: '',
+          assistant_openrouter_provider: null,
+          assistant_openrouter_reasoning_effort: prev.validator_openrouter_reasoning_effort || 'auto',
+          assistant_lm_studio_fallback: null,
+        }));
+      }
+      return nextStatus;
+    } catch (error) {
+      console.error('Failed to update connectivity toggles:', error);
+      return null;
+    }
   };
 
   const mainTabs = [
@@ -3095,17 +3541,6 @@ function App() {
     }
   }, [autonomousConfig.tier3_enabled, autonomousActiveTab]);
 
-  // Sync with WorkflowPanel collapse state (stored in localStorage)
-  useEffect(() => {
-    const handleStorageChange = () => {
-      const savedState = localStorage.getItem('workflow_panel_collapsed');
-      setWorkflowPanelCollapsed(savedState !== 'false');
-    };
-    
-    const interval = setInterval(handleStorageChange, 500);
-    return () => clearInterval(interval);
-  }, []);
-
   // Check if any workflow is running
   useEffect(() => {
     const checkWorkflowStatus = async () => {
@@ -3128,26 +3563,6 @@ function App() {
     const interval = setInterval(checkWorkflowStatus, 5000);
     return () => clearInterval(interval);
   }, []);
-
-  const cloudAccessChipClass = hasOpenRouterKey === true
-    ? 'header-status-chip--ready'
-    : hasCloudAccess === false
-      ? 'header-status-chip--inactive'
-      : 'header-status-chip--pending';
-  const cloudAccessChipTitle = hasOpenRouterKey === true
-    ? 'OpenRouter is configured and can provide cloud models plus RAG embedding fallback.'
-    : hasCloudAccess === true
-      ? 'OAuth login is configured for model roles. Add OpenRouter or use LM Studio embeddings before starting workflows.'
-      : hasCloudAccess === false
-        ? 'Configure Cloud Access & Keys'
-        : 'Checking cloud access status...';
-  const cloudAccessChipLabel = hasOpenRouterKey === true
-    ? 'Cloud Access & Keys ✓'
-    : hasCloudAccess === true
-      ? 'Cloud Access & Keys (OAuth add-on)'
-      : hasCloudAccess === false
-        ? 'Cloud Access & Keys'
-        : 'Cloud Access…';
 
   return (
     <div className={`app ${workflowPanelCollapsed ? 'workflow-panel-collapsed' : 'workflow-panel-expanded'}`}>
@@ -3177,89 +3592,26 @@ function App() {
         />
       )}
       
-      {/* CRITICAL: Boost buttons are ETERNAL - they NEVER disappear */}
-      {/* These buttons are fixed-position, high z-index, and unconditionally rendered */}
-      {/* They are visible at program launch and stay visible forever */}
-      {/* Slide with WorkflowPanel collapse/expand animation */}
       <div className={`app-header ${workflowPanelCollapsed ? 'panel-collapsed' : ''}`}>
-        <div className="mode-switch-control">
-          <label className="mode-switch-label" htmlFor="app-mode-select">
-            Change Mode
-          </label>
-          <select
-            id="app-mode-select"
-            className="mode-switch-select"
-            value={appMode}
-            onChange={(e) => handleModeChange(e.target.value)}
-          >
-            <option value="autonomous">Autonomous S.T.E.M. ASI</option>
-            <option value="manual">Advanced Manual S.T.E.M. ASI</option>
-            {developerModeEnabled && (
-              <option value="leanoj">LeanOJ Proof Solver</option>
-            )}
-          </select>
-        </div>
-        <div className="boost-control-row">
-          <div className="help-tooltip-anchor">
-            <button
-              type="button"
-              className="help-tooltip-btn"
-              aria-label="Learn about API Boost"
-              onMouseEnter={() => setShowApiBoostTooltip(true)}
-              onMouseLeave={() => setShowApiBoostTooltip(false)}
-              onFocus={() => setShowApiBoostTooltip(true)}
-              onBlur={() => setShowApiBoostTooltip(false)}
-            >
-              ?
-            </button>
-            {showApiBoostTooltip && (
-              <div className="help-tooltip-popup">
-                Use this mode to change your model selections mid-run. It is a good way to use your free daily OpenRouter credits without interrupting your research run. For the easiest setup, select your free model and enable "Use boost as next API call when available." Some free models may be more rate-limited on OpenRouter than others.
-              </div>
-            )}
-          </div>
-          <button
-            className="boost-btn"
-            onClick={() => setShowBoostModal(true)}
-            title="Configure API Boost"
-          >
-            API Boost
-          </button>
-        </div>
-        <button
-          className={`header-status-chip ${cloudAccessChipClass}`}
-          onClick={() => {
+        <ConnectivityPanel
+          appMode={appMode}
+          developerModeEnabled={developerModeEnabled}
+          connectivityStatus={connectivityStatus}
+          capabilities={capabilities}
+          anyWorkflowRunning={anyWorkflowRunning}
+          onModeChange={handleModeChange}
+          onOpenOpenRouterOAuth={() => {
             setOpenRouterKeyReason('setup');
             setShowOpenRouterKeyModal(true);
           }}
-          title={cloudAccessChipTitle}
-        >
-          {cloudAccessChipLabel}
-        </button>
-        {capabilities.lmStudioEnabled ? (
-          <span
-            className={`header-status-chip ${
-              lmStudioAvailable ? 'header-status-chip--ready' : 'header-status-chip--inactive'
-            }`}
-            title={lmStudioAvailable
-              ? `LM Studio is online (${lmStudioStatus.model_count || 0} model${(lmStudioStatus.model_count || 0) === 1 ? '' : 's'} loaded)`
-              : (lmStudioStatus.error || 'LM Studio server is not reachable at 127.0.0.1:1234')}
-          >
-            {lmStudioAvailable ? 'LM Studio ✓' : 'LM Studio Offline'}
-          </span>
-        ) : capabilities.genericMode && (
-          <span className="header-status-chip header-status-chip--hosted">
-            Hosted Web Mode
-          </span>
-        )}
-        {developerModeEnabled && (
-          <span
-            className="header-status-chip header-status-chip--ready"
-            title="Developer mode settings are enabled. Raw JSON editors are available in settings pages."
-          >
-            Developer Mode
-          </span>
-        )}
+          onOpenLmStudio={() => setShowLmStudioModal(true)}
+          onOpenSyntheticLib4={() => setShowSyntheticLib4Modal(true)}
+          onOpenAgentMemory={() => setShowAgentMemoryModal(true)}
+          onOpenWolfram={() => setShowWolframModal(true)}
+          onToggleSyntheticLib4={(enabled) => handleConnectivityToggle({ syntheticlib4_enabled: enabled })}
+          onToggleAgentMemory={(enabled) => handleConnectivityToggle({ agent_conversation_memory_enabled: enabled })}
+          onToggleWolfram={(enabled) => handleConnectivityToggle({ wolfram_alpha_enabled: enabled })}
+        />
       </div>
       
       <div className={`tabs ${appMode === 'manual' ? 'tabs-manual' : ''} ${appMode === 'leanoj' ? 'tabs-leanoj' : ''} ${shimmerAccentsEnabled ? 'tabs-shimmer-enabled' : ''}`}>
@@ -3424,6 +3776,9 @@ function App() {
               capabilities={capabilities}
               api={{ 
                 getAutonomousPaper: autonomousAPI.getAutonomousPaper,
+                getCurrentSession: autonomousAPI.getCurrentSession,
+                getPrunedPaperHistory: autonomousAPI.getPrunedPaperHistory,
+                getPrunedHistoryPaper: autonomousAPI.getPrunedHistoryPaper,
                 deletePaper: autonomousAPI.deletePaper,
                 deleteAllPrunedPapers: autonomousAPI.deleteAllPrunedPapers
               }}
@@ -3512,6 +3867,7 @@ function App() {
               onSkipBrainstorm={handleLeanOJSkipBrainstorm}
               onForceBrainstorm={handleLeanOJForceBrainstorm}
               developerModeEnabled={developerModeEnabled}
+              assistantMemoryEnabled={connectivityStatus?.skills?.agent_conversation_memory?.enabled !== false}
             />
           )}
           {activeTab === 'leanoj-brainstorms' && (
@@ -3547,6 +3903,7 @@ function App() {
               config={config}
               setConfig={setConfig}
               capabilities={capabilities}
+              connectivityStatus={connectivityStatus}
               anyWorkflowRunning={anyWorkflowRunning}
               onWorkflowRunningChange={setAnyWorkflowRunning}
               developerModeEnabled={developerModeEnabled}
@@ -3554,12 +3911,29 @@ function App() {
           )}
           {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
           {activeTab === 'aggregator-logs' && <AggregatorLogs />}
-          {activeTab === 'aggregator-results' && <LiveResults />}
+          {activeTab === 'aggregator-results' && (
+            <LiveResults
+              onClearPrompt={() => {
+                aggregatorPromptClearedRef.current = true;
+                removePromptDraft(AGGREGATOR_PROMPT_STORAGE_KEY);
+                try {
+                  const emptyPromptConfig = { ...buildAggregatorConfigFromStorage(), userPrompt: '' };
+                  localStorage.setItem('aggregatorConfig', JSON.stringify(emptyPromptConfig));
+                  localStorage.setItem('aggregator_settings', JSON.stringify(emptyPromptConfig));
+                } catch {
+                  localStorage.removeItem('aggregatorConfig');
+                  localStorage.removeItem('aggregator_settings');
+                }
+                setConfig((prev) => ({ ...prev, userPrompt: '' }));
+              }}
+            />
+          )}
           
           {activeTab === 'compiler-interface' && (
             <CompilerInterface
               activeTab={activeTab}
               capabilities={capabilities}
+              connectivityStatus={connectivityStatus}
               anyWorkflowRunning={anyWorkflowRunning}
               onWorkflowRunningChange={setAnyWorkflowRunning}
               developerModeEnabled={developerModeEnabled}
@@ -3596,6 +3970,7 @@ function App() {
           onConfigChange={setAutonomousConfig}
           models={models}
           capabilities={capabilities}
+          connectivityStatus={connectivityStatus}
           isRunning={autonomousRunning}
           developerModeEnabled={developerModeEnabled}
         />
@@ -3606,6 +3981,7 @@ function App() {
           settings={leanojSettings}
           onSettingsChange={setLeanojSettings}
           capabilities={capabilities}
+          connectivityStatus={connectivityStatus}
           isRunning={leanojRunning}
           developerModeEnabled={developerModeEnabled}
         />
@@ -3616,6 +3992,7 @@ function App() {
           config={config}
           setConfig={setConfig}
           capabilities={capabilities}
+          connectivityStatus={connectivityStatus}
           developerModeEnabled={developerModeEnabled}
         />
       )}
@@ -3623,6 +4000,7 @@ function App() {
       {activeTab === 'compiler-settings' && (
         <CompilerSettings
           capabilities={capabilities}
+          connectivityStatus={connectivityStatus}
           developerModeEnabled={developerModeEnabled}
         />
       )}
@@ -3630,7 +4008,12 @@ function App() {
       {/* WorkflowPanel is ETERNAL - always visible for boost controls */}
       {/* The panel shows workflow tasks when running, but boost controls are ALWAYS accessible */}
       {/* Users can configure boost (set next count, toggle categories) at any time */}
-      <WorkflowPanel isRunning={anyWorkflowRunning} />
+      <WorkflowPanel
+        isRunning={anyWorkflowRunning}
+        onOpenBoostSettings={() => setShowBoostModal(true)}
+        collapsed={workflowPanelCollapsed}
+        onCollapseChange={setWorkflowPanelCollapsed}
+      />
       
       {/* Disclaimer Modal - Shows on every app load */}
       {showDisclaimer && (
@@ -3721,6 +4104,39 @@ function App() {
         onCloudAccessChanged={handleCloudAccessChanged}
         reason={openRouterKeyReason}
         capabilities={capabilities}
+      />
+
+      <LMStudioConnectivityModal
+        isOpen={showLmStudioModal}
+        onClose={() => setShowLmStudioModal(false)}
+        status={lmStudioStatus}
+        capabilities={capabilities}
+        onRefresh={syncProviderAvailability}
+      />
+
+      <SyntheticLib4AccessModal
+        isOpen={showSyntheticLib4Modal}
+        onClose={() => setShowSyntheticLib4Modal(false)}
+        connectivityStatus={connectivityStatus}
+        onConnectivityChanged={setConnectivityStatus}
+        anyWorkflowRunning={anyWorkflowRunning}
+      />
+
+      <AgentConversationMemoryModal
+        isOpen={showAgentMemoryModal}
+        onClose={() => setShowAgentMemoryModal(false)}
+        connectivityStatus={connectivityStatus}
+        onConnectivityChanged={setConnectivityStatus}
+        anyWorkflowRunning={anyWorkflowRunning}
+      />
+
+      <WolframAlphaAccessModal
+        isOpen={showWolframModal}
+        onClose={() => setShowWolframModal(false)}
+        connectivityStatus={connectivityStatus}
+        onConnectivityChanged={setConnectivityStatus}
+        capabilities={capabilities}
+        anyWorkflowRunning={anyWorkflowRunning}
       />
       
       {/* OpenRouter Privacy Warning Modal */}

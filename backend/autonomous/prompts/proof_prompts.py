@@ -11,9 +11,9 @@ from backend.shared.models import MathlibLemmaHint, ProofAttemptFeedback, SmtHin
 PROOF_FRAMING_CONTEXT = """[PROOF FRAMING CONTEXT -- This research prompt targets formal mathematical proof.
 All proof work must serve the user's research prompt. Submissions should pursue
 theorems, lemmas, and formalizations that directly help answer, support, or advance
-that prompt. Seek public/citable novel knowledge first: major discoveries,
-mathematical discoveries, novel variants, and only then prompt-critical novel
-formalizations absent from standard references or Mathlib.
+that prompt. Seek the most impactful new or novel proof targets possible: direct
+solutions to the user's prompt first, then proof targets that materially advance
+a solution path.
 The Lean 4 proof assistant is available for formal verification. Do not build
 a general known-knowledge base. Standard identities, routine helper lemmas,
 irrelevant curiosities, and well-known Mathlib/textbook results are NOT valuable
@@ -87,8 +87,9 @@ def _format_attempt_history(prior_attempts: Iterable[ProofAttemptFeedback]) -> s
             rejection_banner = (
                 "!! PLACEHOLDER REJECTION !! This prior attempt was rejected "
                 "because it used `sorry` / `admit` (or an equivalent placeholder). "
-                "Do NOT submit another placeholder proof. Either prove the goal "
-                "fully, or return a narrower lemma you can actually close."
+                "Do NOT submit another placeholder proof, and do NOT replace "
+                "the target with a narrower, easier, routine, or merely "
+                "supporting lemma. Attempt the same high-impact target faithfully."
             )
         block = [
             f"ATTEMPT {attempt.attempt}:",
@@ -150,6 +151,11 @@ def _format_smt_hint(smt_hint: SmtHint | None) -> str:
     return "\n".join(sections)
 
 
+def _format_retrieved_proof_context(retrieved_proofs_context: str = "") -> str:
+    text = (retrieved_proofs_context or "").strip()
+    return text if text else "[No retrieved proof-search context provided.]"
+
+
 def _format_candidate_novelty_context(
     expected_novelty_tier: str = "",
     prompt_relevance_rationale: str = "",
@@ -177,7 +183,9 @@ LEAN4_COMMON_PITFALLS = """COMMON LEAN 4 PITFALLS TO AVOID:
 - NEVER use `sorry` or `admit` in the proof body. MOTO rejects any proof
   that contains `sorry` or `admit` anywhere, even though Lean would only
   emit a warning. A proof with `sorry` is not a proof. If you cannot close
-  every goal, return a narrower lemma that you CAN fully prove.
+  every goal, do NOT replace the target with a narrower, easier, routine, or
+  merely supporting lemma. Attempt the same high-impact target faithfully and
+  let Lean feedback expose the real blocker.
 - NEVER introduce new `axiom` declarations that exist only to make the
   target theorem trivial. Axiomatizing the concepts in the statement
   (e.g. `axiom Protocol : Type`, `axiom IC ... : ℝ`) and then proving the
@@ -221,8 +229,8 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
         return ""
 
     lines = [
-        "=== OPEN LEMMA TARGETS LEAN 4 COULD NOT YET CLOSE ===",
-        "[These are recent proof attempts that failed. Prefer brainstorms that generate missing lemmas, stronger assumptions, or cleaner formal theorem statements only when they directly support the user's research prompt.]",
+        "=== OPEN PROOF TARGETS LEAN 4 COULD NOT YET CLOSE ===",
+        "[These are recent high-impact proof attempts that failed. Use them only to repair or retry the same prompt-solving target with stronger assumptions, clearer theorem statements, or corrected formalization strategy. Do NOT downshift to supporting lemmas, routine helpers, or easy local facts.]",
         "",
     ]
     for index, hint in enumerate(hints, start=1):
@@ -256,9 +264,9 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
             placeholder_note = (
                 "Note: the previous formalization attempt was rejected because "
                 "it used `sorry`/`admit` or axiomatized the theorem's concepts "
-                "to make the goal trivial. Prefer brainstorms that state a "
-                "narrower, concretely provable lemma that still supports the "
-                "user's research prompt instead of the full claim."
+                "to make the goal trivial. Prefer brainstorms that repair the "
+                "real blocker for the same high-impact target. Do NOT downshift "
+                "to a narrower, easier, routine, or merely supporting lemma."
             )
         lines.extend(
             [
@@ -266,13 +274,13 @@ def format_failure_hints_for_injection(failure_hints: Iterable[Any]) -> str:
                 f"Expected novelty tier: {expected_novelty_tier or '[unknown]'}",
                 f"Novelty rationale: {_truncate_text(novelty_rationale or '[not recorded]', 200)}",
                 f"Lean 4 failure summary: {_truncate_text(error_summary or '[no summary available]', 200)}",
-                f"Suggested lemma targets: {', '.join(suggested_targets[:6]) if suggested_targets else '[none identified]'}",
+                f"Lean blocker clues: {', '.join(suggested_targets[:6]) if suggested_targets else '[none identified]'}",
             ]
         )
         if placeholder_note:
             lines.append(placeholder_note)
         lines.append("---")
-    lines.append("=== END OPEN LEMMA TARGETS ===")
+    lines.append("=== END OPEN PROOF TARGETS ===")
     return "\n".join(lines)
 
 
@@ -378,17 +386,17 @@ def build_proof_identification_prompt(
 
 This is NOT a known-knowledge-base construction task. Do not collect standard facts just because they are true, useful, formalizable, or prompt-adjacent. Lean 4 verification cost is reserved for candidates that could become public, citable prompt-relevant knowledge rather than run-local firsts.
 
-Above all, list first any claims that aggressively attempt to solve the USER RESEARCH PROMPT itself. A BRAINSTORM TOPIC, when present, is source metadata that helps interpret context; it must never broaden eligibility to proofs that are merely brainstorm-related. After direct solution attempts, include only genuinely novel supporting subgoals that visibly build toward solving the USER RESEARCH PROMPT.
+Above all, list first any claims that aggressively attempt to solve the USER RESEARCH PROMPT itself. A BRAINSTORM TOPIC, when present, is source metadata that helps interpret context; it must never broaden eligibility to proofs that are merely brainstorm-related. Do not extract supporting subgoals as proof targets; a candidate must itself be a high-impact prompt-solving theorem.
 {proof_round_context}
 
 MOTO's goal is to push the frontier of mathematical knowledge in service of the user's stated problem. You are the gatekeeper that decides which theorems are worth the cost of formal verification. Be ambitious, but do not chase unrelated mathematical curiosities: a proof candidate must be useful for the user's prompt, not merely non-trivial in isolation.
 
-NOVELTY PRIORITY ORDER (extract in this order):
-1. major_mathematical_discovery: exceptional breakthroughs that appear to resolve an important prompt-relevant problem or create unusually powerful new theory.
-2. mathematical_discovery: new theorems, bounds, reductions, impossibility results, structural facts, or connections not present in standard references or Mathlib.
-3. novel_variant: meaningful reformulations of known mathematics that change hypotheses, strengthen conclusions, expose a new bridge, or use a genuinely new proof strategy toward the prompt.
-4. novel_formulation: prompt-critical formulations or Lean 4 formalizations whose exact theorem/formulation is not present in standard references or Mathlib and would be independently publishable/citable; this is lower priority than mathematical novelty.
-5. Supporting lemmas only when they are necessary stepping stones toward one of the higher-priority novel targets above. Do not extract routine helper lemmas as standalone proof goals.
+TARGET SELECTION:
+- Seek the most impactful new or novel proof targets possible for the USER RESEARCH PROMPT.
+- Prefer proof targets that directly solve the prompt, rule out an impossible prompt, establish a decisive reduction, prove a new obstruction, or otherwise make major progress on the requested problem.
+- Supporting lemmas, routine helper lemmas, local facts, and trivial/easy proofs are NEVER valid proof targets, even as a fallback or last resort.
+- Do not settle for a minor reformulation, local formalization, or easy-to-prove fact.
+- If a target is selected, the downstream formalization agent will receive multiple Lean 4 attempts with compiler feedback. Choose ambitious high-impact targets instead of tiny safe targets selected only because they are easy.
 
 WHAT TO REJECT (never extract these):
 - Mathematically interesting claims that do not materially help the USER RESEARCH PROMPT
@@ -401,10 +409,10 @@ WHAT TO REJECT (never extract these):
 - Routine algebraic manipulations with no conceptual content
 
 Rules:
-- Return TRUE only when at least one prompt-relevant theorem candidate is expected to be novel under the priority order above.
+- Return TRUE only when at least one prompt-relevant theorem candidate is expected to be new or novel enough to be worth Lean 4 verification.
 - Return FALSE if the source contains no theorem that would materially help answer, support, or advance the USER RESEARCH PROMPT.
-- Order candidates by novelty-first prompt-solving value: direct USER RESEARCH PROMPT solutions first, then major discoveries, mathematical discoveries, novel variants, citable novel formulations/formalizations absent from standard references and Mathlib, then necessary supporting lemmas that build toward those prompt-solving targets. This ordering is not a cap.
-- Return every prompt-relevant theorem that is novel enough to be worth attempting.
+- Order candidates by impact on the USER RESEARCH PROMPT: direct solutions or decisive impossibility results first, then the strongest reductions, obstructions, or structural theorems that themselves make major progress on the requested problem. This ordering is not a cap.
+- Return every prompt-relevant theorem that is impactful enough to be worth attempting.
 - For each candidate, set expected_novelty_tier to one of: major_mathematical_discovery, mathematical_discovery, novel_variant, novel_formulation.
 - For each candidate, include prompt_relevance_rationale, novelty_rationale, and why_not_standard_known_result. The prompt_relevance_rationale must explicitly say whether the candidate directly solves the USER RESEARCH PROMPT or how it builds toward solving it. If you cannot explain that, or cannot explain why it is not merely standard known mathematics, reject it.
 - Welcome bold or speculative claims only when they are prompt-relevant -- if the source proposes something ambitious that might be provable with the right formalization, extract it. The downstream formalization agent will handle narrowing if needed.
@@ -546,11 +554,13 @@ def build_proof_formalization_prompt(
     prompt_relevance_rationale: str = "",
     novelty_rationale: str = "",
     why_not_standard_known_result: str = "",
+    retrieved_proofs_context: str = "",
 ) -> str:
     """Build the Lean 4 formalization prompt for one theorem."""
     attempt_history = _format_attempt_history(prior_attempts)
     relevant_lemmas_block = _format_relevant_lemmas(relevant_lemmas)
     smt_hint_block = _format_smt_hint(smt_hint)
+    retrieved_proofs_block = _format_retrieved_proof_context(retrieved_proofs_context)
     candidate_novelty_block = _format_candidate_novelty_context(
         expected_novelty_tier=expected_novelty_tier,
         prompt_relevance_rationale=prompt_relevance_rationale,
@@ -587,7 +597,7 @@ Requirements:
   proofs (e.g. axiomatizing the theorem's own concepts and then closing
   with `sorry`) will be rejected even if Lean compiles them with only a
   warning.
-- If the theorem seems invalid or underspecified, still make the strongest faithful formalization attempt you can from the provided source. If the full theorem cannot be proved, prove a narrower concrete lemma that is faithful to the source -- do NOT return a `sorry`-closed stub.
+- If the theorem seems invalid or underspecified, still make the strongest faithful formalization attempt you can from the provided source. If the full theorem cannot be proved, do NOT replace it with a narrower, easier, routine, trivial, local, or merely supporting lemma. Submit only a faithful attempt at the selected high-impact target and let Lean feedback expose the real blocker.
 - The full source content is mandatory authoritative context. Use the focused
   excerpt only as a navigation aid for the selected theorem, not as a
   replacement for the full brainstorm or paper.
@@ -627,6 +637,11 @@ OPTIONAL SMT GUIDANCE:
 If SMT guidance is present, treat it as a hint only. Lean 4 must still prove the theorem directly.
 If one of the suggested tactics is genuinely appropriate, you may use it. Do not force it when it does not fit the goal.
 
+SYNTHETIC / LOCAL VERIFIED PROOF SEARCH RESULTS:
+{retrieved_proofs_block}
+
+Use retrieved proofs only as optional proof-pattern/dependency guidance for the TARGET THEOREM. Do not replace the selected theorem with a routine helper, a standard known result, or an unrelated retrieved theorem.
+
 {LEAN4_COMMON_PITFALLS}
 
 PRIOR ATTEMPT HISTORY:
@@ -651,11 +666,13 @@ def build_proof_tactic_script_prompt(
     prompt_relevance_rationale: str = "",
     novelty_rationale: str = "",
     why_not_standard_known_result: str = "",
+    retrieved_proofs_context: str = "",
 ) -> str:
     """Build a tactic-oriented Lean 4 prompt for one theorem."""
     attempt_history = _format_attempt_history(prior_attempts)
     relevant_lemmas_block = _format_relevant_lemmas(relevant_lemmas)
     smt_hint_block = _format_smt_hint(smt_hint)
+    retrieved_proofs_block = _format_retrieved_proof_context(retrieved_proofs_context)
     candidate_novelty_block = _format_candidate_novelty_context(
         expected_novelty_tier=expected_novelty_tier,
         prompt_relevance_rationale=prompt_relevance_rationale,
@@ -697,7 +714,7 @@ Requirements:
   `sorry`/`admit` will be rejected even if Lean compiles it.
 - Include needed assumptions in the theorem header. Do NOT axiomatize the
   concepts inside the theorem statement just to make the goal trivial.
-- If the theorem is underspecified, make the strongest faithful formalization attempt you can from the source. If you cannot close every goal, return a narrower concrete lemma instead of a `sorry`-closed stub.
+- If the theorem is underspecified, make the strongest faithful formalization attempt you can from the source. If you cannot close every goal, do NOT replace it with a narrower, easier, routine, trivial, local, or merely supporting lemma. Submit only a faithful attempt at the selected high-impact target and let Lean feedback expose the real blocker.
 - The full source content is mandatory authoritative context. Use the focused
   excerpt only as a navigation aid for the selected theorem, not as a
   replacement for the full brainstorm or paper.
@@ -736,6 +753,11 @@ OPTIONAL SMT GUIDANCE:
 
 If SMT guidance is present, treat it as a hint only. Lean 4 must still verify the theorem directly.
 Suggested tactics are optional and should only be used when they genuinely match the goal.
+
+SYNTHETIC / LOCAL VERIFIED PROOF SEARCH RESULTS:
+{retrieved_proofs_block}
+
+Use retrieved proofs only as optional proof-pattern/dependency guidance for the TARGET THEOREM. Do not replace the selected theorem with a routine helper, a standard known result, or an unrelated retrieved theorem.
 
 {LEAN4_COMMON_PITFALLS}
 
@@ -830,10 +852,10 @@ def build_proof_statement_alignment_prompt(
 
 Lean 4 already verified that the code is logically valid. Your task is NOT to
 reject the proof. Your task is to identify whether the Lean-accepted theorem
-matches the intended candidate, or whether MOTO should preserve it as a narrower
-supporting lemma under the actual statement proved by the code.
+matches the intended candidate, or whether MOTO should preserve it under the
+actual statement proved by the code.
 
-If the code proves only a weakened, narrower, or supporting result, set
+If the code proves only a weakened, narrower, routine, trivial, or unrelated result, set
 `matches_intended` to false and write `actual_theorem_statement` as the strongest
 accurate natural-language description of what Lean verified. If the code is a
 routine identity, `True`, or unrelated lemma, still describe the actual theorem
@@ -859,8 +881,8 @@ LEAN 4-ACCEPTED CODE:
 
 Classification examples:
 - Same/equivalent claim: `matches_intended=true`, actual statement can match the intended candidate.
-- Narrower useful lemma: `matches_intended=false`, actual statement should name the narrower lemma and explain how it relates.
+- Different/weakened theorem: `matches_intended=false`, actual statement should name what Lean actually proved and explain how it relates.
 - Trivial/unrelated theorem: `matches_intended=false`, actual statement should honestly describe the trivial/unrelated theorem so novelty ranking can classify it as not novel.
 
-{_json_only_footer('{"matches_intended": false, "actual_theorem_name": "lean_declaration_name_if_identifiable", "actual_theorem_statement": "the actual theorem Lean verified", "relationship_to_candidate": "narrower_supporting_lemma|equivalent|unrelated|trivial|uncertain", "downshift_reason": "why this should be stored under the actual statement instead of the intended candidate", "reasoning": "brief explanation"}')}
+{_json_only_footer('{"matches_intended": false, "actual_theorem_name": "lean_declaration_name_if_identifiable", "actual_theorem_statement": "the actual theorem Lean verified", "relationship_to_candidate": "weakened|equivalent|unrelated|trivial|uncertain", "downshift_reason": "why this should be stored under the actual statement instead of the intended candidate", "reasoning": "brief explanation"}')}
 """

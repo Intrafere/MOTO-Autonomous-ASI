@@ -1,7 +1,7 @@
 /**
  * PaperLibrary - Displays grid of completed papers.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './AutonomousResearch.css';
 import LatexRenderer from '../LatexRenderer';
 import {
@@ -27,7 +27,12 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
   const [deleteAllPrunedConfirm, setDeleteAllPrunedConfirm] = useState(false);
   const [deletingAllPruned, setDeletingAllPruned] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [currentPrunedPapers, setCurrentPrunedPapers] = useState([]);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
+  const getAutonomousPaper = api?.getAutonomousPaper;
+  const getCurrentSession = api?.getCurrentSession;
+  const getPrunedPaperHistory = api?.getPrunedPaperHistory;
+  const getPrunedHistoryPaper = api?.getPrunedHistoryPaper;
   
   // Critique modal state
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
@@ -40,6 +45,48 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
     queueManualProofCheck,
   } = useProofCheckRuntime();
 
+  const loadCurrentPrunedPapers = useCallback(async () => {
+    if (!getPrunedPaperHistory) {
+      setCurrentPrunedPapers([]);
+      return;
+    }
+
+    try {
+      const sessionInfo = getCurrentSession
+        ? await getCurrentSession()
+        : { is_active: false, session_id: null };
+      const activeSessionId = sessionInfo?.is_active && sessionInfo?.session_id
+        ? sessionInfo.session_id
+        : 'legacy';
+      const prunedHistory = await getPrunedPaperHistory();
+      const currentSessionPruned = (prunedHistory.papers || [])
+        .filter((paper) => paper.session_id === activeSessionId);
+
+      setCurrentPrunedPapers(currentSessionPruned);
+    } catch (error) {
+      console.error('Failed to load current pruned papers:', error);
+      setCurrentPrunedPapers([]);
+    }
+  }, [getCurrentSession, getPrunedPaperHistory]);
+
+  useEffect(() => {
+    loadCurrentPrunedPapers();
+  }, [archivedCount, loadCurrentPrunedPapers]);
+
+  const visiblePapers = useMemo(() => {
+    const activePapers = (papers || []).map((paper) => ({ ...paper, is_pruned: false }));
+    const activeIds = new Set(activePapers.map((paper) => paper.paper_id));
+    const prunedPapers = currentPrunedPapers
+      .filter((paper) => !activeIds.has(paper.paper_id))
+      .map((paper) => ({ ...paper, is_pruned: true }));
+
+    return [...activePapers, ...prunedPapers].sort((a, b) => {
+      const aTime = new Date(a.created_at || a.pruned_at || 0).getTime();
+      const bTime = new Date(b.created_at || b.pruned_at || 0).getTime();
+      return bTime - aTime;
+    });
+  }, [papers, currentPrunedPapers]);
+
   useEffect(() => {
     const unsubscribeNovelProof = websocket.on('novel_proof_discovered', async (data) => {
       if (
@@ -51,7 +98,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       }
 
       try {
-        const refreshed = await api.getAutonomousPaper(expandedId);
+        const refreshed = await getAutonomousPaper(expandedId);
         setExpandedContent({
           content: refreshed.content,
           outline: refreshed.outline,
@@ -63,9 +110,10 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
     });
 
     return () => unsubscribeNovelProof();
-  }, [expandedId, api]);
+  }, [expandedId, getAutonomousPaper]);
 
-  const handleCardClick = async (paperId) => {
+  const handleCardClick = async (paper) => {
+    const paperId = paper.paper_id;
     if (expandedId === paperId) {
       setExpandedId(null);
       setExpandedContent(null);
@@ -76,7 +124,9 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
     setLoading(true);
 
     try {
-      const data = await api.getAutonomousPaper(paperId);
+      const data = paper.is_pruned && getPrunedHistoryPaper
+        ? await getPrunedHistoryPaper(paper.session_id || 'legacy', paperId)
+        : await getAutonomousPaper(paperId);
       setExpandedContent({
         content: data.content,
         outline: data.outline,
@@ -100,7 +150,8 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
     try {
       await api.deletePaper(paperId);
       setDeleteConfirm(null);
-      onRefresh();
+      await onRefresh();
+      await loadCurrentPrunedPapers();
     } catch (error) {
       console.error('Failed to delete paper:', error);
       alert(`Failed to delete paper: ${error.message}`);
@@ -115,7 +166,8 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
     try {
       await api.deleteAllPrunedPapers();
       setDeleteAllPrunedConfirm(false);
-      onRefresh();
+      setCurrentPrunedPapers([]);
+      await onRefresh();
     } catch (error) {
       console.error('Failed to delete pruned papers:', error);
       alert(`Failed to delete pruned papers: ${error.message}`);
@@ -137,7 +189,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       return;
     }
     
-    const filename = sanitizeFilename(`${paper.paper_id}_${paper.title}`);
+    const filename = sanitizeFilename(`${paper.is_pruned ? 'pruned_' : ''}${paper.paper_id}_${paper.title}`);
     const content = expandedContent.content || '';
     const outline = expandedContent.outline || '';
     
@@ -171,7 +223,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       return;
     }
 
-    const filename = sanitizeFilename(`${paper.paper_id}_${paper.title}`);
+    const filename = sanitizeFilename(`${paper.is_pruned ? 'pruned_' : ''}${paper.paper_id}_${paper.title}`);
     const metadata = {
       title: expandedContent.title || paper.title,
       wordCount: paper.word_count,
@@ -222,7 +274,10 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
     setCritiqueModalOpen(true);
   };
 
-  if (!papers || papers.length === 0) {
+  const activePaperCount = visiblePapers.filter((paper) => !paper.is_pruned).length;
+  const prunedPaperCount = visiblePapers.filter((paper) => paper.is_pruned).length;
+
+  if (visiblePapers.length === 0) {
     return (
       <div className="paper-library">
         <div className="paper-library-header">
@@ -275,7 +330,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
     <div className="paper-library">
       <div className="paper-library-header">
         <h3>
-          Paper Library ({papers.length} Papers)
+          Paper Library ({activePaperCount} Active{prunedPaperCount > 0 ? `, ${prunedPaperCount} Pruned` : ''})
           <span className="help-tooltip-anchor help-tooltip-anchor--inline">
             <button
               type="button"
@@ -354,14 +409,19 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       )}
 
       <div className="paper-grid">
-        {papers.map((paper) => (
+        {visiblePapers.map((paper) => (
           <div
             key={paper.paper_id}
-            className={`paper-card ${expandedId === paper.paper_id ? 'expanded' : ''}`}
-            onClick={() => handleCardClick(paper.paper_id)}
+            className={`paper-card ${paper.is_pruned ? 'paper-card--pruned' : ''} ${expandedId === paper.paper_id ? 'expanded' : ''}`}
+            onClick={() => handleCardClick(paper)}
           >
             <div className="paper-card-header">
-              <span className="paper-card-id">{paper.paper_id}</span>
+              <div className="paper-card-identifiers">
+                <span className="paper-card-id">{paper.paper_id}</span>
+                {paper.is_pruned && (
+                  <span className="paper-pruned-badge">Pruned Paper</span>
+                )}
+              </div>
               <span className="paper-word-count">{paper.word_count?.toLocaleString()} words</span>
             </div>
 
@@ -391,6 +451,12 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
               {truncateAbstract(paper.abstract)}
             </div>
 
+            {paper.is_pruned && (
+              <div className="paper-pruned-note">
+                {paper.pruned_note || 'This paper was removed from model context and preserved for download.'}
+              </div>
+            )}
+
             <div className="paper-card-meta">
               <span>Source: {paper.source_brainstorm_ids?.join(', ') || 'N/A'}</span>
               <span>{formatDate(paper.created_at)}</span>
@@ -405,7 +471,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
             {expandedId === paper.paper_id && (
               <>
                 <div className="paper-actions">
-                  {(() => {
+                  {!paper.is_pruned && (() => {
                     const proofCheckState = getSourceState('paper', paper.paper_id);
                     const proofCheckLabel = proofCheckState?.status === 'queued'
                       ? 'Queueing Proof Check...'
@@ -445,25 +511,27 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
                     Download Raw
                   </button>
 
-                  <button
-                    className="btn-critique"
-                    onClick={(e) => handleOpenCritique(e, paper)}
-                    title="Ask validator to critique this paper"
-                    style={{
-                      background: 'linear-gradient(135deg, #1eff1c 0%, #0fcc0d 100%)',
-                      border: 'none',
-                      color: '#0b2e0b',
-                      padding: '0.35rem 0.7rem',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontWeight: '500',
-                      fontSize: '0.75rem'
-                    }}
-                  >
-                    ⭐ Critique
-                  </button>
+                  {!paper.is_pruned && (
+                    <button
+                      className="btn-critique"
+                      onClick={(e) => handleOpenCritique(e, paper)}
+                      title="Ask validator to critique this paper"
+                      style={{
+                        background: 'linear-gradient(135deg, #1eff1c 0%, #0fcc0d 100%)',
+                        border: 'none',
+                        color: '#0b2e0b',
+                        padding: '0.35rem 0.7rem',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontWeight: '500',
+                        fontSize: '0.75rem'
+                      }}
+                    >
+                      ⭐ Critique
+                    </button>
+                  )}
                   
-                  {deleteConfirm === paper.paper_id ? (
+                  {!paper.is_pruned && (deleteConfirm === paper.paper_id ? (
                     <div className="delete-confirm-inline" onClick={(e) => e.stopPropagation()}>
                       <span>Prune this paper from model context?</span>
                       <button 
@@ -489,7 +557,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
                     >
                       Prune
                     </button>
-                  )}
+                  ))}
                 </div>
                 <div className="paper-full-content">
                   {loading ? (

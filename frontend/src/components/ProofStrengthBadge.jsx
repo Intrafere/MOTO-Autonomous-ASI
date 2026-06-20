@@ -1,9 +1,9 @@
 import React from 'react';
 import './settings-common.css';
 
-const LEADERBOARD_TOOLTIP = 'This company\'s state-of-the-art model has been seen in MOTO testing to solve complex mathematical proofs and perform well in Submitter 1 (Main Submitter), High-Context Submitter, and High-Parameter Submitter, the three primary proof-creation roles.';
+const LEADERBOARD_TOOLTIP = 'This company\'s state-of-the-art model has been seen in MOTO testing to solve complex mathematical proofs and perform well in brainstorm submitters, Writing Submitter, and Rigor & Proofs Submitter.';
 
-const ROLE_TOOLTIP = 'These are the three roles that submit proofs: Submitter 1 (Main Submitter), High-Context Submitter, and High-Parameter Submitter. For the best chance of creating novel proofs, use models comparable to those marked PS in the Highlighted Models list.';
+const ROLE_TOOLTIP = 'Rigor & Proofs Submitter is the explicit proof-solving and formalization role. Brainstorm submitters may still produce proof candidates where applicable, and Writing Submitter builds the surrounding paper context.';
 
 export default function ProofStrengthBadge({ variant = 'role', className = '' }) {
   const tooltip = variant === 'leaderboard' ? LEADERBOARD_TOOLTIP : ROLE_TOOLTIP;

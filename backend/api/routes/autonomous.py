@@ -26,10 +26,12 @@ from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
 from backend.shared.boost_logger import boost_logger
+from backend.shared.config import system_config
 from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.shared.response_extraction import extract_message_text
+from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 
 logger = logging.getLogger(__name__)
 
@@ -772,40 +774,76 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                 validator_model=request.validator_model,
                 validator_context_window=request.validator_context_window,
                 validator_max_tokens=request.validator_max_tokens,
-                high_context_model=request.high_context_model,
-                high_context_context_window=request.high_context_context_window,
-                high_context_max_tokens=request.high_context_max_tokens,
+                writer_model=request.writer_model,
+                writer_context_window=request.writer_context_window,
+                writer_max_tokens=request.writer_max_tokens,
                 high_param_model=request.high_param_model,
                 high_param_context_window=request.high_param_context_window,
                 high_param_max_tokens=request.high_param_max_tokens,
-                critique_submitter_model=request.critique_submitter_model,
-                critique_submitter_context_window=request.critique_submitter_context_window,
-                critique_submitter_max_tokens=request.critique_submitter_max_tokens,
+                critique_submitter_model=request.high_param_model,
+                critique_submitter_context_window=request.high_param_context_window,
+                critique_submitter_max_tokens=request.high_param_max_tokens,
                 # OpenRouter provider configs for each role
                 validator_provider=request.validator_provider,
                 validator_openrouter_provider=request.validator_openrouter_provider,
                 validator_openrouter_reasoning_effort=request.validator_openrouter_reasoning_effort,
                 validator_lm_studio_fallback=request.validator_lm_studio_fallback,
-                high_context_provider=request.high_context_provider,
-                high_context_openrouter_provider=request.high_context_openrouter_provider,
-                high_context_openrouter_reasoning_effort=request.high_context_openrouter_reasoning_effort,
-                high_context_lm_studio_fallback=request.high_context_lm_studio_fallback,
+                writer_provider=request.writer_provider,
+                writer_openrouter_provider=request.writer_openrouter_provider,
+                writer_openrouter_reasoning_effort=request.writer_openrouter_reasoning_effort,
+                writer_lm_studio_fallback=request.writer_lm_studio_fallback,
                 high_param_provider=request.high_param_provider,
                 high_param_openrouter_provider=request.high_param_openrouter_provider,
                 high_param_openrouter_reasoning_effort=request.high_param_openrouter_reasoning_effort,
                 high_param_lm_studio_fallback=request.high_param_lm_studio_fallback,
-                critique_submitter_provider=request.critique_submitter_provider,
-                critique_submitter_openrouter_provider=request.critique_submitter_openrouter_provider,
-                critique_submitter_openrouter_reasoning_effort=request.critique_submitter_openrouter_reasoning_effort,
-                critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback,
+                critique_submitter_provider=request.high_param_provider,
+                critique_submitter_openrouter_provider=request.high_param_openrouter_provider,
+                critique_submitter_openrouter_reasoning_effort=request.high_param_openrouter_reasoning_effort,
+                critique_submitter_lm_studio_fallback=request.high_param_lm_studio_fallback,
+                assistant_provider=(
+                    request.assistant_provider
+                    if request.assistant_model
+                    else request.validator_provider
+                ),
+                assistant_model=request.assistant_model or request.validator_model,
+                assistant_openrouter_provider=(
+                    request.assistant_openrouter_provider
+                    if request.assistant_model
+                    else request.validator_openrouter_provider
+                ),
+                assistant_openrouter_reasoning_effort=(
+                    request.assistant_openrouter_reasoning_effort
+                    if request.assistant_model
+                    else request.validator_openrouter_reasoning_effort
+                ),
+                assistant_lm_studio_fallback=(
+                    request.assistant_lm_studio_fallback
+                    if request.assistant_model
+                    else request.validator_lm_studio_fallback
+                ),
+                assistant_context_window=(
+                    request.assistant_context_window
+                    if request.assistant_model
+                    else request.validator_context_window
+                ),
+                assistant_max_tokens=(
+                    request.assistant_max_tokens
+                    if request.assistant_model
+                    else request.validator_max_tokens
+                ),
                 tier3_enabled=request.tier3_enabled,
                 creativity_emphasis_boost_enabled=request.creativity_emphasis_boost_enabled,
                 allow_mathematical_proofs=effective_allow_mathematical_proofs,
                 allow_research_papers=request.allow_research_papers,
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
-                high_context_supercharge_enabled=request.high_context_supercharge_enabled,
+                writer_supercharge_enabled=request.writer_supercharge_enabled,
                 high_param_supercharge_enabled=request.high_param_supercharge_enabled,
-                critique_submitter_supercharge_enabled=request.critique_submitter_supercharge_enabled
+                critique_submitter_supercharge_enabled=request.high_param_supercharge_enabled,
+                assistant_supercharge_enabled=(
+                    request.assistant_supercharge_enabled
+                    if request.assistant_model
+                    else request.validator_supercharge_enabled
+                ),
             )
 
             # Start in background with a retained task handle so Stop can cancel it.
@@ -842,6 +880,10 @@ async def stop_autonomous_research():
             }
         
         await autonomous_coordinator.stop()
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="autonomous_stopped",
+        )
         
         # Get final stats
         stats = await research_metadata.get_stats()
@@ -882,6 +924,10 @@ async def clear_autonomous_research(confirm: bool = False):
         
         try:
             await autonomous_coordinator.clear_all_data()
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="autonomous_cleared",
+            )
             logger.info("Autonomous research data clear completed successfully")
             
             return {
@@ -914,6 +960,34 @@ async def clear_autonomous_research(confirm: bool = False):
             status_code=500, 
             detail="Failed to clear autonomous research data"
         )
+
+
+@router.get("/prompt")
+async def get_prompt():
+    """Get the durable Autonomous Research prompt for restart recovery."""
+    try:
+        if session_manager.is_session_active:
+            prompt = await research_metadata.get_base_user_prompt()
+            if prompt.strip():
+                return {"prompt": prompt}
+
+        interrupted_session = await session_manager.find_interrupted_session(
+            system_config.auto_sessions_base_dir
+        )
+        if interrupted_session:
+            workflow_state = interrupted_session.get("workflow_state") or {}
+            return {
+                "prompt": (
+                    interrupted_session.get("user_prompt")
+                    or workflow_state.get("base_user_research_prompt")
+                    or ""
+                )
+            }
+
+        return {"prompt": await research_metadata.get_base_user_prompt()}
+    except Exception as e:
+        logger.error(f"Failed to get autonomous research prompt: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/status")
@@ -2171,6 +2245,10 @@ async def clear_tier3_data(confirm: bool = False):
             )
         
         await final_answer_memory.clear()
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="tier3_cleared",
+        )
         
         # Also clear any final answer critiques
         from backend.shared.critique_memory import clear_critiques

@@ -7,8 +7,9 @@ import logging
 from pathlib import Path
 import aiofiles
 
-from backend.shared.models import AggregatorStartRequest, SystemStatus, ModelInfo
+from backend.shared.models import AggregatorStartRequest, SystemStatus, ModelInfo, ModelConfig
 from backend.shared.lm_studio_client import lm_studio_client
+from backend.shared.openrouter_client import OpenRouterClient
 from backend.shared.config import system_config, rag_config
 from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.token_tracker import token_tracker
@@ -16,6 +17,8 @@ from backend.shared.path_safety import resolve_path_within_root, validate_single
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.manual_proof_context import get_manual_proof_context_lock
 from backend.shared.workflow_start_guard import workflow_start_guard
+from backend.shared.api_client_manager import api_client_manager
+from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.event_log import event_log
@@ -104,6 +107,42 @@ def _require_valid_role_limits(context_window: int, max_output_tokens: int, labe
         )
 
 
+async def _require_openrouter_host_provider_available(
+    *,
+    label: str,
+    provider: str,
+    model_id: str,
+    host_provider: Optional[str],
+) -> None:
+    """Reject stale pinned OpenRouter host providers before starting work."""
+    if provider != "openrouter" or not model_id or not host_provider:
+        return
+    if not rag_config.openrouter_api_key:
+        return
+
+    client = OpenRouterClient(rag_config.openrouter_api_key)
+    try:
+        endpoints = await client.get_model_endpoints(model_id)
+    finally:
+        await client.close()
+
+    available_hosts = {
+        endpoint.get("provider_name")
+        for endpoint in endpoints
+        if isinstance(endpoint, dict) and endpoint.get("provider_name")
+    }
+    if host_provider not in available_hosts:
+        hosts_text = ", ".join(sorted(available_hosts)) if available_hosts else "none"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{label} OpenRouter host provider '{host_provider}' is not currently "
+                f"available for model '{model_id}'. Set Host Provider to Auto or choose "
+                f"one of the currently available hosts: {hosts_text}."
+            ),
+        )
+
+
 def _get_start_conflict() -> Optional[str]:
     """Return a user-facing conflict message if another workflow is active."""
     if coordinator.is_running:
@@ -175,6 +214,9 @@ async def start_aggregator(request: AggregatorStartRequest):
             if conflict:
                 raise HTTPException(status_code=400, detail=conflict)
 
+            if not request.user_prompt.strip():
+                raise HTTPException(status_code=400, detail="Aggregator user prompt is required.")
+
             # Validate submitter configs
             num_submitters = len(request.submitter_configs)
             if not (system_config.min_submitters <= num_submitters <= system_config.max_submitters):
@@ -187,9 +229,25 @@ async def start_aggregator(request: AggregatorStartRequest):
                 request.validator_max_output_tokens,
                 "Validator",
             )
+            effective_assistant_context_size = (
+                request.assistant_context_size
+                if request.assistant_model
+                else request.validator_context_size
+            )
+            effective_assistant_max_output_tokens = (
+                request.assistant_max_output_tokens
+                if request.assistant_model
+                else request.validator_max_output_tokens
+            )
+            _require_valid_role_limits(
+                effective_assistant_context_size,
+                effective_assistant_max_output_tokens,
+                "Assistant",
+            )
             for config in request.submitter_configs:
                 label = "Main submitter" if config.submitter_id == 1 else f"Submitter {config.submitter_id}"
                 _require_valid_role_limits(config.context_window, config.max_output_tokens, label)
+            await save_manual_aggregator_prompt(request.user_prompt)
             await require_embedding_provider_ready()
 
             # Update validator context window configuration
@@ -225,6 +283,71 @@ async def start_aggregator(request: AggregatorStartRequest):
                 redact_log_text(request.validator_context_size, 40),
                 redact_log_text(request.validator_max_output_tokens, 40),
             )
+            assistant_model = request.assistant_model or request.validator_model
+            assistant_provider = (
+                request.assistant_provider
+                if request.assistant_model
+                else request.validator_provider
+            )
+            assistant_openrouter_provider = (
+                request.assistant_openrouter_provider
+                if request.assistant_model
+                else request.validator_openrouter_provider
+            )
+            assistant_reasoning_effort = (
+                request.assistant_openrouter_reasoning_effort
+                if request.assistant_model
+                else request.validator_openrouter_reasoning_effort
+            )
+            assistant_fallback = (
+                request.assistant_lm_studio_fallback
+                if request.assistant_model
+                else request.validator_lm_studio_fallback
+            )
+            assistant_context_size = (
+                effective_assistant_context_size
+            )
+            assistant_max_output_tokens = (
+                effective_assistant_max_output_tokens
+            )
+            assistant_supercharge_enabled = (
+                request.assistant_supercharge_enabled
+                if request.assistant_model
+                else request.validator_supercharge_enabled
+            )
+            for config in request.submitter_configs:
+                label = "Main submitter" if config.submitter_id == 1 else f"Submitter {config.submitter_id}"
+                await _require_openrouter_host_provider_available(
+                    label=label,
+                    provider=config.provider,
+                    model_id=config.model_id,
+                    host_provider=config.openrouter_provider,
+                )
+            await _require_openrouter_host_provider_available(
+                label="Validator",
+                provider=request.validator_provider,
+                model_id=request.validator_model,
+                host_provider=request.validator_openrouter_provider,
+            )
+            await _require_openrouter_host_provider_available(
+                label="Assistant",
+                provider=assistant_provider,
+                model_id=assistant_model,
+                host_provider=assistant_openrouter_provider,
+            )
+            api_client_manager.configure_role(
+                "aggregator_assistant",
+                ModelConfig(
+                    provider=assistant_provider,
+                    model_id=assistant_model,
+                    openrouter_provider=assistant_openrouter_provider,
+                    openrouter_reasoning_effort=assistant_reasoning_effort,
+                    lm_studio_fallback_id=assistant_fallback,
+                    context_window=assistant_context_size,
+                    max_output_tokens=assistant_max_output_tokens,
+                    supercharge_enabled=assistant_supercharge_enabled,
+                ),
+            )
 
             # Initialize coordinator with per-submitter configs (includes OpenRouter provider fields)
             await coordinator.initialize(
@@ -242,8 +365,6 @@ async def start_aggregator(request: AggregatorStartRequest):
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
                 creativity_emphasis_boost_enabled=request.creativity_emphasis_boost_enabled,
             )
-            await save_manual_aggregator_prompt(request.user_prompt)
-
             # Start coordinator
             token_tracker.reset()
             token_tracker.start_timer()
@@ -272,6 +393,10 @@ async def stop_aggregator():
     """Stop the aggregator system."""
     try:
         await coordinator.stop()
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="aggregator_stopped",
+        )
         token_tracker.stop_timer()
         return {"status": "stopped", "message": "Aggregator system stopped"}
     except Exception as e:
@@ -287,6 +412,16 @@ async def get_status():
         return status
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/prompt")
+async def get_prompt():
+    """Get the durable manual Aggregator prompt."""
+    try:
+        return {"prompt": await load_manual_aggregator_prompt()}
+    except Exception as e:
+        logger.error(f"Failed to get manual Aggregator prompt: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -349,6 +484,10 @@ async def clear_all_submissions():
                 reason="manual_aggregator_clear_all",
             )
             await coordinator.clear_all_submissions()
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="aggregator_cleared",
+            )
             await clear_manual_aggregator_prompt()
         
         return {

@@ -1,0 +1,9 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "error": {
+    "code": "service_unavailable",
+    "message": "SyntheticLib4 mock service is temporarily unavailable.",
+    "retryable": true,
+    "http_status": 503
+  }
+}
