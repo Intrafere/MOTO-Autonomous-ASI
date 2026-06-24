@@ -12,7 +12,7 @@ Autonomous Research mode agents use the same role prefixes as their parent roles
   Certainty Assessor, Format Selector, Volume Organizer → agg_sub1 (Submitter 1)
 - Topic Validator, Redundancy Checker → agg_val (Agg Validator)
 - Brainstorm aggregation submitters/validator → agg_sub1..10, agg_val (via Coordinator)
-- Paper compilation → comp_hc, comp_hp, comp_val, comp_crit (critique_* task IDs alias to comp_crit)
+- Paper compilation → comp_writer, comp_hp, comp_val (critique generation aliases to comp_hp)
 - LeanOJ path-decision calls use `leanoj_path_*` task IDs for workflow display, but belong to the
   Final Solver boost category (`leanoj_final`) because that role owns final-readiness decisions.
 
@@ -47,10 +47,9 @@ CATEGORY_PREFIXES = {
     "agg_sub10": "Submitter 10",
     "agg_val": "Agg Validator",
     # Compiler
-    "comp_hc": "High-Context Model",
-    "comp_hp": "High-Param Model",
+    "comp_writer": "Writing Submitter",
+    "comp_hp": "Rigor & Proofs Submitter",
     "comp_val": "Compiler Validator",
-    "comp_crit": "Critique Submitter",
     # LeanOJ
     "leanoj_topic": "Proof Solver Topic Generator",
     "leanoj_topic_val": "Proof Solver Topic Validator",
@@ -81,12 +80,14 @@ CATEGORY_PREFIXES = {
 }
 
 CATEGORY_ALIASES = {
+    "_".join(("comp", "hc")): "comp_writer",
     # Path decisions are absorbed into the dominant Final Solver role.
     "leanoj_path": "leanoj_final",
-    # Critique phase has legacy task IDs but one user-facing category.
-    "critique_val": "comp_crit",
-    "critique_cleanup": "comp_crit",
-    **{f"critique_sub{i}": "comp_crit" for i in range(1, 11)},
+    # Critique generation is owned by Rigor & Proofs; validation/cleanup stay on Validator.
+    "comp_crit": "comp_hp",
+    "critique_val": "comp_val",
+    "critique_cleanup": "comp_val",
+    **{f"critique_sub{i}": "comp_hp" for i in range(1, 11)},
 }
 
 
@@ -123,7 +124,7 @@ class BoostManager:
         # Counter-based boost mode
         self.boost_next_count: int = 0
         
-        # Category-based boost mode (role prefixes like "agg_sub1", "comp_hc")
+        # Category-based boost mode (role prefixes like "agg_sub1", "comp_writer")
         self.boosted_categories: Set[str] = set()
         
         # Always-prefer boost mode: try boost for every call, fall back on failure
@@ -140,6 +141,20 @@ class BoostManager:
     def _get_state_file() -> str:
         """Return the instance-scoped boost state file."""
         return str(os.path.join(system_config.data_dir, "boost_state.json"))
+
+    @staticmethod
+    def _canonical_category(category: str) -> str:
+        """Map absorbed/legacy category prefixes to their owning role category."""
+        return CATEGORY_ALIASES.get(category, category)
+
+    @classmethod
+    def _canonical_task_id(cls, task_id: str) -> str:
+        """Map exact task IDs with legacy role prefixes to current task IDs."""
+        parts = task_id.rsplit("_", 1)
+        if len(parts) != 2:
+            return cls._canonical_category(task_id)
+        prefix, sequence = parts
+        return f"{cls._canonical_category(prefix)}_{sequence}"
     
     def _load_state(self) -> None:
         """Load persisted boost state from disk."""
@@ -171,7 +186,10 @@ class BoostManager:
                     for category in state.get('boosted_categories', [])
                 }
                 self.boost_always_prefer = state.get('boost_always_prefer', False)
-                self.boosted_task_ids = set(state.get('boosted_task_ids', []))
+                self.boosted_task_ids = {
+                    self._canonical_task_id(task_id)
+                    for task_id in state.get('boosted_task_ids', [])
+                }
                 
                 logger.info(
                     "Loaded boost state: enabled=%s, model=%s, next_count=%s, categories=%s, always_prefer=%s",
@@ -283,6 +301,7 @@ class BoostManager:
         Returns:
             True if task is now boosted, False if unboosted
         """
+        task_id = self._canonical_task_id(task_id)
         async with self._lock:
             if task_id in self.boosted_task_ids:
                 self.boosted_task_ids.remove(task_id)
@@ -316,7 +335,7 @@ class BoostManager:
         return (
             self.boost_config is not None and 
             self.boost_config.enabled and 
-            task_id in self.boosted_task_ids
+            self._canonical_task_id(task_id) in self.boosted_task_ids
         )
     
     async def set_boost_next_count(self, count: int) -> None:
@@ -364,7 +383,7 @@ class BoostManager:
         Toggle boost for an entire category (role prefix).
         
         Args:
-            category: Category prefix (e.g., "agg_sub1", "comp_hc", "agg_val")
+            category: Category prefix (e.g., "agg_sub1", "comp_writer", "agg_val")
             
         Returns:
             True if category is now boosted, False if unboosted
@@ -391,18 +410,13 @@ class BoostManager:
             
             return boosted
 
-    @staticmethod
-    def _canonical_category(category: str) -> str:
-        """Map absorbed/legacy category prefixes to their owning role category."""
-        return CATEGORY_ALIASES.get(category, category)
-    
     def _extract_role_prefix(self, task_id: str) -> str:
         """
         Extract role prefix from task ID.
         
         Examples:
             "agg_sub1_001" -> "agg_sub1"
-            "comp_hc_005" -> "comp_hc"
+            "comp_writer_005" -> "comp_writer"
             "auto_ts_002" -> "auto_ts"
         """
         # Split on last underscore and take everything before it
@@ -445,7 +459,7 @@ class BoostManager:
             return True
         
         # Check exact task ID (legacy per-task mode)
-        if task_id in self.boosted_task_ids:
+        if self._canonical_task_id(task_id) in self.boosted_task_ids:
             return True
         
         return False
@@ -540,12 +554,11 @@ class BoostManager:
             "group": "Aggregator"
         })
         
-        # Compiler (matches CompilerSettings order: Validator, High-Context, High-Param, Critique)
+        # Compiler (matches CompilerSettings order: Validator, Writing Submitter, Rigor & Proofs)
         categories.extend([
             {"id": "comp_val", "label": "Compiler Validator", "group": "Compiler"},
-            {"id": "comp_hc", "label": "High-Context Model", "group": "Compiler"},
-            {"id": "comp_hp", "label": "High-Param Model", "group": "Compiler"},
-            {"id": "comp_crit", "label": "Critique Submitter", "group": "Compiler"},
+            {"id": "comp_writer", "label": "Writing Submitter", "group": "Compiler"},
+            {"id": "comp_hp", "label": "Rigor & Proofs Submitter", "group": "Compiler"},
         ])
 
         categories.extend([
@@ -578,7 +591,7 @@ class BoostManager:
         For example, role_prefix="agg_sub1" matches "agg_sub1_001".
         
         Args:
-            role_prefix: Role prefix (e.g., "agg_sub1", "comp_hc", "auto_ts")
+            role_prefix: Role prefix (e.g., "agg_sub1", "comp_writer", "auto_ts")
             
         Returns:
             True if any task for this role is boosted
@@ -586,8 +599,9 @@ class BoostManager:
         if not self.boost_config or not self.boost_config.enabled:
             return False
         
+        role_prefix = self._canonical_category(role_prefix)
         for task_id in self.boosted_task_ids:
-            if task_id.startswith(role_prefix):
+            if self._canonical_task_id(task_id).startswith(role_prefix):
                 return True
         return False
     
@@ -604,7 +618,7 @@ class BoostManager:
             # e.g., "agg_sub1_001" -> "agg_sub1"
             parts = task_id.rsplit('_', 1)
             if len(parts) == 2:
-                roles.add(parts[0])
+                roles.add(self._canonical_category(parts[0]))
         return roles
     
     def get_next_boosted_task_for_role(self, role_prefix: str) -> Optional[str]:
@@ -612,7 +626,7 @@ class BoostManager:
         Get the next boosted task ID for a role prefix.
         
         Args:
-            role_prefix: Role prefix (e.g., "agg_sub1", "comp_hc")
+            role_prefix: Role prefix (e.g., "agg_sub1", "comp_writer")
             
         Returns:
             Task ID if found, None otherwise
@@ -621,9 +635,10 @@ class BoostManager:
             return None
         
         # Find all matching tasks and return the one with lowest sequence number
+        role_prefix = self._canonical_category(role_prefix)
         matching_tasks = [
-            task_id for task_id in self.boosted_task_ids
-            if task_id.startswith(role_prefix)
+            self._canonical_task_id(task_id) for task_id in self.boosted_task_ids
+            if self._canonical_task_id(task_id).startswith(role_prefix)
         ]
         
         if not matching_tasks:

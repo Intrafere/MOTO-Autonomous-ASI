@@ -19,7 +19,7 @@ const TIER_STYLES = {
     glowColor: 'rgba(226, 232, 240, 0.55)',
     glowInset: 'rgba(255, 255, 255, 0.32)',
     labelColor: '#f8fafc',
-    background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.96), rgba(226, 232, 240, 0.16))',
+    background: 'linear-gradient(135deg, rgb(30, 41, 59), rgb(15, 23, 42), rgb(51, 65, 85))',
     label: 'Congratulations!\nMajor Mathematical Discovery Found!',
     subLabel:
       'Your validator deemed this may be competitive for a major prize or medal in a related field.',

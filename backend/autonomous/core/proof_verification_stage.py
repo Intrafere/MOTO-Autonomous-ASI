@@ -18,7 +18,11 @@ from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.core.proof_registration import register_verified_lean_proof
 from backend.shared.config import system_config
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
-from backend.shared.model_error_utils import is_non_retryable_model_error
+from backend.shared.model_error_utils import (
+    format_transient_provider_error,
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
 from backend.shared.models import ProofAttemptFeedback, ProofAttemptResult, ProofCandidate, ProofStageResult, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.provider_pause import is_provider_credit_pause_error
@@ -1110,6 +1114,37 @@ class ProofVerificationStage:
             if is_non_retryable_model_error(exc):
                 await save_checkpoint("provider_paused")
                 raise
+            if is_transient_model_call_error(exc):
+                await save_checkpoint("error")
+                result.had_error = True
+                result.error_message = format_transient_provider_error(exc)
+                logger.warning(
+                    "Proof verification transient provider failure for %s %s; preserving checkpoint: %s",
+                    source_type,
+                    source_id,
+                    exc,
+                )
+                await self._broadcast(
+                    broadcast_fn,
+                    "proof_check_complete",
+                    {
+                        "source_type": source_type,
+                        "source_id": source_id,
+                        "source_title": source_title,
+                        "trigger": trigger,
+                        "proof_round_index": proof_round_index,
+                        "proof_max_rounds": proof_max_rounds,
+                        "novel_count": result.novel_count,
+                        "verified_count": result.verified_count,
+                        "total_candidates": result.total_candidates,
+                        "message": (
+                            "Proof verification hit a transient provider error after retries; "
+                            "the proof checkpoint was preserved for retry: "
+                            f"{self._summarize_error(str(exc), limit=1800)}"
+                        ),
+                    },
+                )
+                return result
             await save_checkpoint("error")
             result.had_error = True
             result.error_message = str(exc)
@@ -1134,7 +1169,7 @@ class ProofVerificationStage:
                     "total_candidates": result.total_candidates,
                     "message": (
                         "Proof verification encountered an error: "
-                        f"{self._summarize_error(str(exc), limit=960)}"
+                        f"{self._summarize_error(str(exc), limit=1800)}"
                     ),
                 },
             )

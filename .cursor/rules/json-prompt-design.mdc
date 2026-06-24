@@ -165,8 +165,9 @@ CORRECT RESPONSE:
 - Improve validator rigor (currently lacks evaluation depth)
 - Maintain existing prompt assembly order: System → JSON Schema → User Prompt → Context → RAG → Final Instruction
 - **MATH VARIANT**: Mathematical theorem/exposition validation focuses on rigor, logical correctness, and established mathematical principles rather than mandatory citation format. Empirical, artifact, and literature claims still require explicit support/citations or conservative wording where compiler validators enforce claim provenance. Models with web search capabilities are encouraged to use them for verification.
-- **Proof Candidate JSON Contract**: Automated proof identification is novelty-first, not a known-knowledge-base builder. Candidate JSON must use `{"has_provable_theorems": bool, "theorems": [{"theorem_id": str, "statement": str, "formal_sketch": str, "expected_novelty_tier": "major_mathematical_discovery|mathematical_discovery|novel_variant|novel_formulation", "prompt_relevance_rationale": str, "novelty_rationale": str, "why_not_standard_known_result": str}]}`. Every automated proof JSON prompt must treat the USER RESEARCH PROMPT as the primary filter; bounded source-title/brainstorm-topic metadata is context only. Order candidates by direct prompt-solving value first, then prompt-solving discoveries/variants/formalizations that are absent from standard references/Mathlib and independently publishable/citable, then only necessary supporting lemmas for those targets. The three rationale fields must be non-empty or the candidate is skipped before Lean cost. Reject routine helpers, standard/textbook/Mathlib restatements, program-local firsts, single-tactic/routine proof goals, and general verified background-library entries. Never impose an artificial theorem-count cap unless explicitly requested; user-configurable proof concurrency batching limits simultaneous attempts only and must not truncate identified candidates.
-- **Optional `lean_proof` Submission Contract**: Aggregator and LeanOJ brainstorm submitters that choose `submission_type="lean_proof"` should include the same novelty fields (`expected_novelty_tier`, `prompt_relevance_rationale`, `novelty_rationale`, `why_not_standard_known_result`) as ranking context. Submitter-side novelty means public/citable prompt-relevant novelty absent from standard references or Mathlib; program-local firsts do not qualify. The shared Lean proof gate may reject malformed submissions, failed Lean attempts, placeholders, or fake proof devices, but once Lean accepts real proof code it must preserve/register the artifact and let novelty/triviality ranking decide context retention, even for not-novel or downshifted supporting lemmas. In LeanOJ brainstorm flow, a proof-gated `lean_proof` submission is preserved/accepted once Lean and integrity checks pass; validator feedback can classify usefulness/context role but does not veto the verified artifact. LeanOJ final master-proof editing is template-solution-first and may use standard facts inline when they directly solve current obligations, but it must not accumulate a general known-knowledge library in `master_proof.lean`.
+- **Proof Candidate JSON Contract**: Automated proof identification is impact-first, not a known-knowledge-base builder. Candidate JSON must use `{"has_provable_theorems": bool, "theorems": [{"theorem_id": str, "statement": str, "formal_sketch": str, "expected_novelty_tier": "major_mathematical_discovery|mathematical_discovery|novel_variant|novel_formulation", "prompt_relevance_rationale": str, "novelty_rationale": str, "why_not_standard_known_result": str}]}`. Every automated proof JSON prompt must treat the USER RESEARCH PROMPT as the primary filter; bounded source-title/brainstorm-topic metadata is context only. Order candidates by direct impact on the user's prompt: direct solutions or impossibility results first, then decisive reductions, obstructions, and structural theorems that themselves make major progress. The three rationale fields must be non-empty or the candidate is skipped before Lean cost. Reject supporting lemmas, routine helpers, standard/textbook/Mathlib restatements, program-local firsts, minor reformulations/local formalizations, trivial/easy proofs, single-tactic/routine proof goals, and general verified background-library entries. Never impose an artificial theorem-count cap unless explicitly requested; user-configurable proof concurrency batching limits simultaneous attempts only and must not truncate identified candidates.
+- **Assistant Proof-Support Pack Contract**: Assistant is a separate shared non-blocking proof-support role for the active workflow, not a per-submitter role, proof candidate identifier, or validator. Assistant prompt/output schemas should keep the final model-visible pack capped at 7 fully Lean-verified proof supports by default, each with source/provenance, theorem statement/name, relevance/transfer reason, dependencies/imports, code/hash metadata, and target/freshness metadata. Useful packs are reused for two eligible receiver reads before refresh. Assistant skips true no-external-history targets because it only performs proof-memory retrieval for now. Durable run-scoped cooldown backs off repeated zero-useful retrieval and may shut off Assistant for that run; repeated stagnant same-pack retrieval backs off without shutdown. User live activity should show normal Assistant retrieval result summaries only, not skip/backoff/shutdown turns. Assistant may use current solver feedback/rejections/Lean errors as query material, but outputs must state when support is stale/cached and must not broaden proof-candidate eligibility beyond the user's prompt. Partial/failed artifacts are excluded from the final support pack unless a future explicit obstruction-debug mode says otherwise.
+- **Optional `lean_proof` Submission Contract**: Aggregator and LeanOJ brainstorm submitters that choose `submission_type="lean_proof"` should include the same novelty fields (`expected_novelty_tier`, `prompt_relevance_rationale`, `novelty_rationale`, `why_not_standard_known_result`) as ranking context. Submitter-side novelty means public/citable prompt-relevant novelty absent from standard references or Mathlib; program-local firsts do not qualify. The shared Lean proof gate rejects missing/invalid novelty tiers and missing prompt-relevance/novelty/anti-standard-result rationales before Lean cost, in addition to malformed submissions, failed Lean attempts, placeholders, and fake proof devices. Once Lean accepts real proof code, preserve/register the artifact and let novelty/triviality ranking decide context retention, even for not-novel or downshifted actual-theorem artifacts. This preservation rule is not permission to target supporting lemmas. Normal Aggregator validation may reject Lean-verified proof artifacts from the accepted-submission database when the actual theorem is low-impact, trivial, routine, or redundant. LeanOJ brainstorm flow is template-solution-specific: proof-gated `lean_proof` artifacts may be accepted only when useful for exact template obligations. LeanOJ final master-proof editing is template-solution-first and may use standard facts inline when they directly solve current obligations, but it must not accumulate a general known-knowledge library in `master_proof.lean`.
 - **Compiler Outline Injection**: The compiler outline is always fully injected (never truncated, never RAGed) for all modes because it provides the structural framework for document construction and validation.
 - **TEMPERATURE POLICY**: Default all prompts to `temperature=0.0`. Only two exceptions are allowed: Supercharge candidate attempts and parallel brainstorm submitter lanes. Validators, compiler roles, proof/final roles, and JSON retries must stay deterministic.
 - **Supercharge Schema Preservation**: Per-role Supercharge calls generate 4 full answer attempts plus a 5th synthesis answer. Candidate attempts must be sanitized to reusable visible answer text before the 5th call; private thought/channel/control transcript text must never be fed into synthesis, retries, feedback memory, accepted memory, or RAG. The synthesis prompt must place the final instruction after the candidate block, treat candidates as optional working material, and preserve the original task's exact output contract; if the original role expects JSON, the 5th answer must output only valid JSON in that same schema and must not mention Supercharge or candidate attempts.
@@ -189,7 +190,7 @@ CORRECT RESPONSE:
 - **LeanOJ Proof Validation Boundary**: Lean 4 is authoritative formal checking for LeanOJ success, but LLM validators still gate planning decisions, Lean-accepted subproof relevance, and final semantic review. A compiled subproof must not be stored as verified run context unless it matches the requested subproof/role; a compiled final solution must not stop the run unless it preserves the template and the Final Proof Solver confirms it solves the actual prompt rather than a formal loophole.
 - **Aggregator Submitter JSON Retry**: Aggregator submitter retries malformed/non-JSON responses through its standard conversational JSON/LaTeX escaping repair path. The retry preserves sanitized visible failed-output context when useful, but parser exception text inserted into prompts must not replay raw provider output.
 - **Standard LaTeX-Focused Retry**: Retry prompts explain HOW to escape LaTeX properly. **LaTeX IS allowed** - just escape backslashes once (`\mathbb` → `\\mathbb`). DO NOT double-escape. For `old_string`: copy EXACTLY from document, just escape backslashes.
-- **Retry Context Overflow Prevention (CRITICAL)**: Sanitize failed output, then truncate to ~2000 chars before retry. Parser exception messages that are inserted into retry prompts must report failure type/structure only and must not include raw output excerpts. Calculate if retry fits context window. Fall back to simple re-prompt if too large. Set `max_tokens` explicitly (never `None`). NEVER auto-increase beyond user limits. Applies to: `submitter.py`, `validator.py`, `high_context_submitter.py`, `high_param_submitter.py`, `compiler_validator.py`.
+- **Retry Context Overflow Prevention (CRITICAL)**: Sanitize failed output, then truncate to ~2000 chars before retry. Parser exception messages that are inserted into retry prompts must report failure type/structure only and must not include raw output excerpts. Calculate if retry fits context window. Fall back to simple re-prompt if too large. Set `max_tokens` explicitly (never `None`). NEVER auto-increase beyond user limits. Applies to: `submitter.py`, `validator.py`, `writer_submitter.py`, `high_param_submitter.py`, `compiler_validator.py`.
 
 ## Internal Content Warning (Required in Most Research/Writing Prompts)
 
@@ -288,8 +289,7 @@ VALIDATION DECISION RULES:
 A submission should be ACCEPTED if it:
 1. Aggressively attacks the user's WHOLE question as stated, no partial solutions, OR
 2. Addresses the next best necessary piece when a whole-question attack is absolutely not possible in one superintelligence brainstorm, OR
-3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
-4. Presents rigorous mathematical arguments based on established principles
+3. Offers rigorous enabling insights only when they materially strengthen a direct route to the full answer and no stronger direct step is available
 
 A submission should be REJECTED if it:
 1. Is redundant with the existing accepted submissions
@@ -344,10 +344,10 @@ REASONS FOR REMOVAL - A submission should be removed if it:
 5. Contains claims that CONFLICT with established mathematical principles evident in other submissions
 
 REASONS TO KEEP - A submission should be kept if it:
-1. Provides ANY unique information not covered elsewhere
-2. Offers a different perspective or approach even if related to other content
-3. Contains specific mathematical details, proofs, or techniques
-4. Contributes to solution diversity in any meaningful way
+1. Provides unique information that materially strengthens a direct route to the user's full prompt
+2. Offers a different perspective or approach that materially improves the best direct solution path
+3. Contains specific mathematical details, proofs, or techniques necessary for direct prompt progress
+4. Contributes to solution diversity only when that diversity improves credible direct-answer progress
 
 CONSERVATIVE APPROACH:
 - When in doubt, DO NOT recommend removal
@@ -497,8 +497,7 @@ VALIDATION DECISION RULES (for each submission):
 A submission should be ACCEPTED if it:
 1. Aggressively attacks the user's WHOLE question as stated, no partial solutions, OR
 2. Addresses the next best necessary piece when a whole-question attack is absolutely not possible in one superintelligence brainstorm, OR
-3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
-4. Presents rigorous mathematical arguments based on established principles
+3. Offers rigorous enabling insights only when they materially strengthen a direct route to the full answer and no stronger direct step is available
 
 A submission should be REJECTED if it:
 1. Is redundant with the existing accepted submissions
@@ -651,8 +650,7 @@ VALIDATION DECISION RULES (for each submission):
 A submission should be ACCEPTED if it:
 1. Aggressively attacks the user's WHOLE question as stated, no partial solutions, OR
 2. Addresses the next best necessary piece when a whole-question attack is absolutely not possible in one superintelligence brainstorm, OR
-3. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct step is not yet available, OR
-4. Presents rigorous mathematical arguments based on established principles
+3. Offers rigorous enabling insights only when they materially strengthen a direct route to the full answer and no stronger direct step is available
 
 A submission should be REJECTED if it:
 1. Is redundant with the existing accepted submissions
@@ -1066,7 +1064,7 @@ REJECT if: Any criterion fails (especially duplicate section/subsection headers 
 
 ---
 
-## 4. COMPILER-SUBMITTER CONSTRUCTION PROMPTS (PHASE-BASED)
+## 4. WRITING SUBMITTER CONSTRUCTION PROMPTS (PHASE-BASED)
 
 **File:** `backend/compiler/prompts/construction_prompts.py`
 
@@ -1406,7 +1404,7 @@ During autonomous paper compilation, the construction JSON includes an optional 
 
 **Independent Validity Principle**: Each operation must be justified on its own merits. Paper content must not depend on a brainstorm correction. Brainstorm corrections must not depend on paper content.
 
-**Models**: `BrainstormRetroactiveOperation` in `models.py`. Parsed in `high_context_submitter.py`. Handled in `compiler_coordinator._handle_brainstorm_retroactive_operation()`. Validated in `compiler_validator.validate_brainstorm_operation()`.
+**Models**: `BrainstormRetroactiveOperation` in `models.py`. Parsed in `writer_submitter.py`. Handled in `compiler_coordinator._handle_brainstorm_retroactive_operation()`. Validated in `compiler_validator.validate_brainstorm_operation()`.
 
 ---
 
@@ -1690,7 +1688,7 @@ Output your response ONLY as JSON in this exact format:
 
 ## 8. CRITIQUE & SELF-REVIEW PHASE (POST-BODY CONSTRUCTION)
 
-**File:** `backend/compiler/prompts/critique_prompts.py`
+**Owner:** Rigor & Proofs Submitter generation (`backend/compiler/agents/high_param_submitter.py`) with Validator-owned acceptance/cleanup.
 
 ### Overview
 
@@ -1699,12 +1697,11 @@ After the body section is complete (before conclusion), the system enters a **Cr
 ### Workflow
 
 1. **Critique Aggregation** (3 total attempts required):
-   - Single critique submitter generates peer review feedback on body section
+   - Rigor & Proofs Submitter generates peer review feedback on body section; legacy critique role fields are compatibility aliases
    - **Decline Mechanism**: Submitter can assess "no critique needed" when body is academically acceptable (counts toward 3 total attempts)
    - Validator validates critiques/declines (accept/reject with feedback loop)
-   - Pruning occurs on the child Aggregator's run-local 7-acceptance cleanup cadence
    - Target: 3 total attempts (accepted + rejected + declined attempts)
-   - Uses aggregator workflow with critique-specific prompts
+   - Runs inside the compiler critique phase, not as a separate Aggregator workflow
 
 2. **Self-Review Append**:
    - If at least 1 critique is accepted: append accepted critiques as `AI Self-Review and Limitations`
@@ -1738,110 +1735,14 @@ After the body section is complete (before conclusion), the system enters a **Cr
 - If accepted critiques exist: append `AI Self-Review and Limitations`, then transition to conclusion
 - Rationale: With only 3 attempts, no early termination mechanism is needed
 
-### Complete Prompt Structure - Critique Generation
-
-**Function:** `get_critique_submitter_system_prompt()`
-
-```python
-def get_critique_submitter_system_prompt() -> str:
-    return """You are a peer reviewer generating constructive criticism of a mathematical document's body section.
-
-[... INTERNAL CONTENT WARNING ...]
-
-YOUR TASK:
-Identify specific issues, errors, gaps, or improvements needed in the body section.
-
-WHAT TO CRITIQUE:
-- Mathematical errors or unsound reasoning
-- Missing proofs or incomplete arguments  
-- Logical gaps or unclear transitions
-- Redundancy or verbosity
-- Structural issues (sections out of order)
-- Missing content per outline
-- Content misaligned with paper title
-
-WHAT NOT TO CRITIQUE:
-- Conclusion/intro/abstract (not written yet)
-- Stylistic preferences
-- Minor formatting issues
-
-Output as JSON:
-{
-  "critique_needed": true or false,
-  "submission": "Detailed critique (empty string if critique_needed=false)",
-  "reasoning": "Why critique is/isn't needed"
-}
-
-Examples:
-- Critique needed: {"critique_needed": true, "submission": "Section III has flawed proof...", "reasoning": "Critical error"}
-- Decline: {"critique_needed": false, "submission": "", "reasoning": "Body is academically acceptable, no substantive issues"}
-  (Note: Counts as 1 attempt toward 10 total)
-"""
-```
-
-### Complete Prompt Structure - Critique Validation
-
-**Function:** `get_critique_validator_system_prompt()`
-
-```python
-def get_critique_validator_system_prompt() -> str:
-    return """You are validating peer review critiques.
-
-[... INTERNAL CONTENT WARNING ...]
-
-YOUR TASK:
-Decide if critique identifies legitimate issue that would improve the paper.
-
-ACCEPT if:
-- Identifies real mathematical error
-- Points out missing content per outline
-- Identifies structural issues
-- Is specific and actionable
-
-REJECT if:
-- Vague or unhelpful
-- Redundant with existing critiques
-- Stylistic preference
-- Incorrect (body is fine)
-
-Output as JSON:
-{
-  "decision": "accept or reject",
-  "reasoning": "Detailed explanation",
-  "summary": "Brief summary if rejected (max 750 chars)"
-}
-"""
-```
-
-### Assembly in `build_critique_prompt()`
-
-```python
-# Parts assembled in order:
-1. get_critique_submitter_system_prompt()
-2. "\n---\n"
-3. get_critique_json_schema()
-4. "\n---\n"
-5. f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}"  # ALWAYS direct
-6. "\n---\n"
-7. f"CURRENT OUTLINE:\n{current_outline}"  # ALWAYS fully injected
-8. "\n---\n"
-9. f"CURRENT BODY SECTION (to critique):\n{current_body}"  # Direct if fits, RAG if large
-10. "\n---\n"
-11. f"AGGREGATOR DATABASE:\n{aggregator_db}"  # RAG retrieved
-12. if reference_papers: "\n---\nREFERENCE PAPERS:\n{reference_papers}"
-13. if existing_critiques: "\n---\nEXISTING ACCEPTED CRITIQUES:\n{existing_critiques}"
-14. if rejection_feedback: "\n---\nYOUR LAST 5 REJECTIONS (Learn from these):\n{rejection_feedback}"
-15. "\n---\n"
-16. "Now generate your critique as JSON:"
-```
-
 ### JSON Schemas
 
 **Critique Submission:**
 ```json
 {
-  "submission": "Detailed critique of specific issue",
-  "reasoning": "Why this is important"
+  "critique_needed": true,
+  "submission": "Specific critique, or empty string when critique_needed=false",
+  "reasoning": "Why critique is or is not needed"
 }
 ```
 
@@ -1869,9 +1770,9 @@ Output as JSON:
 The rigor loop no longer edits paper text directly during discovery/formalization. Each rigor cycle runs four stages, with the coordinator owning inline validator attempts and appendix routing:
 
 **Stage 1: Theorem discovery (unvalidated)** — `build_rigor_theorem_discovery_prompt`
-- High-param submitter reads the full writing context (outline direct-injected, paper direct-injected when it fits, RAG for the rest per the offload priority excluding `compiler_outline.txt` + `compiler_paper.txt`).
+- Rigor & Proofs Submitter reads the full writing context (outline direct-injected, paper direct-injected when it fits, RAG for the rest per the offload priority excluding `compiler_outline.txt` + `compiler_paper.txt`).
 - Sees `EXISTING VERIFIED PROOFS` block (from `proof_database.get_all_proofs()`) so it does not re-propose already-verified theorems.
-- Sees `OPEN LEMMA TARGETS` block (from `proof_database.get_recent_failure_hints()`) as optional retry candidates.
+- Sees `OPEN PROOF TARGETS` block (from `proof_database.get_recent_failure_hints()`) as optional retry candidates for the same high-impact target.
 - Decides whether a user-prompt-relevant theorem is worth attempting. Decline ends the rigor cycle.
 - Discovery is explicitly allowed to construct extension theorems from partial paper work, the current outline, supporting context, or the user prompt when helpful to paper construction and/or the user's goal. It is not limited to exact claims already present in the current paper.
 - Discovery must classify `theorem_origin` as `existing_paper_claim`, `extension_from_partial_work`, or `extension_from_user_prompt`, and must set `placement_preference` to `inline` or `appendix_only`. Extension-derived theorems must use `appendix_only`.
@@ -1879,7 +1780,7 @@ The rigor loop no longer edits paper text directly during discovery/formalizatio
 **Stage 2: Lean 4 formalization** — compiler rigor uses the serial `ProofFormalizationAgent.prove_candidate(max_attempts=5)` path; autonomous proof verification has its own parallel Phase-A pipeline with full-script plus tactic-script attempts
 - Up to 5 Lean 4 attempts with error-feedback chaining (failing tactic + goal states + raw Lean diagnostics fed back into each retry).
 - Emits proof progress events with `source_type="compiler_rigor"` so the existing autonomous-mode proof UI can display the flow. Keep frontend-consumed event names stable; `proof_verified` is reserved for the registered/stored proof event.
-- All-5-fail: candidate is recorded via `proof_database.record_failed_candidate` (becomes a future open lemma target) and the cycle ends as a decline.
+- All-5-fail: candidate is recorded via `proof_database.record_failed_candidate` (becomes a future open high-impact proof target) and the cycle ends as a decline.
 
 **Stage 3: Post-Lean integrity + novelty classification + persistence** — shared `validate_full_lean_proof_integrity` helper from `backend/shared/lean_proof_integrity.py`, then shared `assess_proof_novelty` helper from `backend/autonomous/core/proof_novelty.py`
 - Rejects Lean-accepted proofs that introduce new fake proof devices (`axiom`, `constant`, `opaque`) not present in the source context.
@@ -1906,7 +1807,7 @@ The rigor loop no longer edits paper text directly during discovery/formalizatio
   "source_excerpt": "2-6 sentences of motivating paper/outline/context/user-prompt basis",
   "theorem_origin": "existing_paper_claim | extension_from_partial_work | extension_from_user_prompt",
   "placement_preference": "inline | appendix_only",
-  "retry_existing_failure_id": "theorem_id from OPEN LEMMA TARGETS if retrying, empty otherwise",
+  "retry_existing_failure_id": "theorem_id from OPEN PROOF TARGETS if retrying, empty otherwise",
   "reasoning": "why this theorem is the best target right now OR why no theorem"
 }
 ```
@@ -1971,7 +1872,7 @@ Lean 4 proof:
 - Paper: direct-injected when it fits; otherwise RAG'd under `mode="rigor"` excluding `compiler_outline.txt` + `compiler_paper.txt`.
 - RAG evidence: follows the offload priority (Shared Training DB → Local Submitter DB → Rejection Log → User Upload Files).
 - EXISTING VERIFIED PROOFS block: compact `(proof_id, novel, statement)` tuples from `proof_database.get_all_proofs()`.
-- OPEN LEMMA TARGETS block: recent failure hints from `proof_database.get_recent_failure_hints(limit=5)` (`theorem_id`, statement, Lean error summary, suggested lemma names).
+- OPEN PROOF TARGETS block: recent failure hints from `proof_database.get_recent_failure_hints(limit=5)` (`theorem_id`, statement, Lean error summary, and formalization blocker clues). These are retry context for the same high-impact target, not permission to pursue supporting lemmas.
 
 ### Websocket events surfaced by the rigor flow
 
@@ -1981,9 +1882,9 @@ Compiler rigor progress should be visible through the standard proof/compiler We
 
 ## 10. WOLFRAM ALPHA TOOL (CONSTRUCTION MODE)
 
-**File:** `backend/compiler/agents/high_context_submitter.py`
+**File:** `backend/compiler/agents/writer_submitter.py`
 
-Wolfram Alpha is exposed to the main writer as a real OpenAI-compatible tool only during `HighContextSubmitter.submit_construction` (body / conclusion / introduction / abstract). It is NOT available in `outline_create`, `outline_update`, `review`, or the rigor loop. When `system_config.wolfram_alpha_enabled=false` (or the Wolfram client failed to initialize), the tool is not registered on the LLM call at all and construction collapses to the pre-Build-4 single-shot call.
+Wolfram Alpha is exposed to the main writer as a real OpenAI-compatible tool only during `WritingSubmitter.submit_construction` (body / conclusion / introduction / abstract). It is NOT available in `outline_create`, `outline_update`, `review`, or the rigor loop. When `system_config.wolfram_alpha_enabled=false` (or the Wolfram client failed to initialize), the tool is not registered on the LLM call at all and construction collapses to the pre-Build-4 single-shot call.
 
 ### Tool Schema
 
@@ -2007,7 +1908,7 @@ WOLFRAM_TOOL_SCHEMA = {
 
 ### Budget + Loop Semantics
 
-- **20 Wolfram calls per construction submission**, defined by `WOLFRAM_MAX_CALLS_PER_SUBMISSION` in `high_context_submitter.py`.
+- **20 Wolfram calls per construction submission**, defined by `WOLFRAM_MAX_CALLS_PER_SUBMISSION` in `writer_submitter.py`.
 - The submitter loop: call LLM with tools attached → execute each `tool_calls[]` entry via `wolfram_client.query(...)` → append a `role=tool` turn per call → re-call LLM. Repeat until (a) the LLM returns a non-tool message (final JSON construction submission) or (b) the 20-call budget is exhausted.
 - On budget exhaustion, the coordinator appends a one-time user-role reminder ("You have used all 20 Wolfram Alpha calls for this submission. Finalize your JSON response now.") and re-calls the LLM with `tools=None` so the model must produce a final JSON response.
 - Fallback: if the tool-loop raises, construction falls back to a plain single-shot `generate_completion` call so forward progress is never blocked by tool-loop failures.
@@ -2031,7 +1932,7 @@ Per Wolfram call, the submitter broadcasts:
 {
   "type": "compiler_wolfram_call",
   "data": {
-    "task_id": "comp_hc_007",
+    "task_id": "comp_writer_007",
     "query_redacted": true,
     "purpose_redacted": true,
     "result_redacted": true,
@@ -2049,6 +1950,74 @@ The frontend's `CompilerLogs.jsx` renders redacted Wolfram metadata, not raw que
 ### Backend Tool-Call Plumbing
 
 `api_client_manager.generate_completion`, `OpenRouterClient.generate_completion`, and `LMStudioClient.generate_completion` all accept OpenAI-compatible `tools=[...]` and `tool_choice` kwargs. When a model ignores the tools entirely (returns no `tool_calls`), the submitter's loop cleanly terminates on the first iteration — identical to the single-shot path.
+
+---
+
+## 11. LEAN PROOF SEARCH TOOL
+
+**File:** `backend/shared/proof_search/tool_adapter.py`
+
+`search_lean_proofs` is the shared OpenAI-compatible tool adapter for searching indexed MOTO proof history and SyntheticLib4 proof records. It is retrieval/navigation infrastructure only; it does not validate proofs, alter Lean gates, or replace MOTO proof registration.
+
+### Tool Schema
+
+```python
+SEARCH_LEAN_PROOFS_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_lean_proofs",
+        "description": "Search MOTO local proof history and SyntheticLib4 proof records for prompt-relevant Lean proof patterns. ...",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["overview", "search", "hydrate", "attest_usage"]},
+                "query": {"type": "string"},
+                "goal_statement": {"type": "string"},
+                "lean_template": {"type": "string"},
+                "imports": {"type": "array", "items": {"type": "string"}},
+                "dependency_names": {"type": "array", "items": {"type": "string"}},
+                "corpora": {"type": "array", "items": {"type": "string", "enum": ["moto", "manual", "autonomous", "leanoj", "syntheticlib4"]}},
+                "verified_only": {"type": "boolean"},
+                "include_partial": {"type": "boolean"},
+                "include_failed": {"type": "boolean"},
+                "novelty_filters": {"type": "array", "items": {"type": "string"}},
+                "module_filters": {"type": "array", "items": {"type": "string"}},
+                "source_filters": {"type": "array", "items": {"type": "string"}},
+                "exclude_ids": {"type": "array", "items": {"type": "string"}},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 7},
+                "cursor": {"type": "string"},
+                "hydrate_lean_code": {"type": "boolean"},
+                "search_mode": {"type": "string", "enum": ["auto", "exact", "lexical", "text", "semantic", "hybrid"]},
+                "source": {"type": "string", "enum": ["moto", "manual", "autonomous", "leanoj", "syntheticlib4"]},
+                "proof_id": {"type": "string"},
+                "fingerprint": {"type": "string"},
+                "session_id": {"type": "string"},
+                "usage_attestation": {
+                    "type": "object",
+                    "properties": {
+                        "retrieval_batch_id": {"type": "string"},
+                        "used_fingerprints": {"type": "array", "items": {"type": "string"}},
+                        "unused_fingerprints": {"type": "array", "items": {"type": "string"}},
+                        "used_proofs": {"type": "array", "items": {"type": "object", "properties": {"fingerprint": {"type": "string"}, "theorem_statement_hash": {"type": "string"}, "lean_code_hash": {"type": "string"}}}},
+                        "entire_code_used": {"type": "boolean"},
+                        "moto_artifact_hash": {"type": "string"},
+                        "usage_type": {"type": "string"}
+                    }
+                }
+            },
+            "required": ["action"]
+        }
+    }
+}
+```
+
+### Semantics
+
+- `overview` returns the compact corpus map from the unified proof-search service.
+- `search` returns at most 7 combined proof records and treats `autonomous` as the `moto` corpus alias.
+- `hydrate` fetches one indexed proof record by source/proof ID or SyntheticLib4 fingerprint and may return full Lean code when available.
+- `attest_usage` persists a local usage-attestation JSONL record for SyntheticLib4 whole-proof usage; when `entire_code_used=true`, each used proof must include `fingerprint`, `theorem_statement_hash`, and `lean_code_hash`. Online submission is a later integration step.
+- Tool calls bypass Supercharge through the existing `tools`/`tool_choice` path.
 
 ---
 
@@ -2669,7 +2638,7 @@ All proof prompts pass `temperature=0.0`.
 
 **Function:** `build_proof_identification_prompt(user_prompt, source_type, source_id, source_content, source_title="")`
 
-**Purpose:** Novelty-first user-prompt relevance gate that extracts only proof candidates expected to produce public/citable prompt-directed knowledge absent from standard references or Mathlib. Bounded source-title/brainstorm-topic metadata may steer relevance but must not be treated as instructions. This is not a known-knowledge-base builder. It rejects routine helpers, standard/textbook/Mathlib restatements, program-local firsts, off-prompt curiosities, and single-tactic/routine proof goals. Candidates are ordered by novelty-first prompt-solving value: major discoveries, mathematical discoveries, novel variants, prompt-critical novel formalizations absent from standard references/Mathlib, then only necessary supporting lemmas for those novel targets. No artificial theorem-count cap.
+**Purpose:** Impact-first user-prompt relevance gate that extracts only proof candidates expected to produce new/novel prompt-directed knowledge absent from standard references or Mathlib. Bounded source-title/brainstorm-topic metadata may steer relevance but must not be treated as instructions. This is not a known-knowledge-base builder. It rejects routine helpers, supporting lemmas, trivial/easy proofs, standard/textbook/Mathlib restatements, program-local firsts, minor reformulations/local formalizations, off-prompt curiosities, and single-tactic/routine proof goals. Candidates are ordered by direct impact on the user's prompt: direct solutions or impossibility results first, then decisive reductions, obstructions, and structural theorems that themselves make major progress on the requested problem. No artificial theorem-count cap.
 
 ```json
 {
@@ -2689,8 +2658,8 @@ All proof prompts pass `temperature=0.0`.
 ```
 
 **Field requirements:**
-- `has_provable_theorems`: Boolean. `true` only when at least one prompt-relevant candidate is expected to be novel under the priority order.
-- `theorems`: Array of every prompt-relevant novel candidate, ordered by novelty-first prompt-solving value, with user-prompt solution attempts and user prompt + brainstorm topic solution attempts co-equal top priority within each novelty tier when bounded brainstorm-topic metadata is present. Empty array when `has_provable_theorems` is `false`.
+- `has_provable_theorems`: Boolean. `true` only when at least one prompt-relevant candidate is expected to be new or novel enough to justify Lean cost.
+- `theorems`: Array of every prompt-relevant impactful candidate, ordered by direct impact on the user's prompt, with user-prompt solution attempts and user prompt + brainstorm topic solution attempts co-equal top priority when bounded brainstorm-topic metadata is present. Empty array when `has_provable_theorems` is `false`.
 - `theorem_id`: Stable string identifier such as `"thm_1"`, `"thm_2"`, etc.
 - `statement`: Natural-language theorem statement. Required.
 - `formal_sketch`: Optional Lean formalization hints, assumptions, or notation notes.
@@ -2699,9 +2668,9 @@ All proof prompts pass `temperature=0.0`.
 - `novelty_rationale`: Required. Explains why this is absent from standard references or Mathlib and public/citable rather than a background fact or program-local first.
 - `why_not_standard_known_result`: Required. Explains why this is not merely a textbook, Mathlib, routine helper, or known-knowledge-base entry.
 
-**What to extract:** Major discoveries, new mathematical discoveries, novel variants/reformulations, and prompt-critical novel formalizations absent from standard references or Mathlib that materially help answer, support, or advance the USER RESEARCH PROMPT. Supporting lemmas are extracted only when necessary stepping stones toward one of those higher-priority novel targets.
+**What to extract:** Direct solutions, impossibility results, decisive reductions, new obstructions, structural theorems, and other high-impact new/novel proof targets absent from standard references or Mathlib that materially help answer, support, or advance the USER RESEARCH PROMPT. Supporting lemmas are not extracted, even as fallback targets.
 
-**What to reject:** Off-prompt mathematical curiosities, routine helper lemmas, local bookkeeping facts, algebra cleanup, coercion/monotonicity facts, standard Mathlib/textbook restatements, general verified background-library entries, results closable by routine proof search or a single tactic (`simp`, `omega`, `norm_num`, `decide`, `aesop`, `rfl`), tautologies, and definitional equalities.
+**What to reject:** Off-prompt mathematical curiosities, routine helper lemmas, minor reformulations/local formalizations, local bookkeeping facts, algebra cleanup, coercion/monotonicity facts, standard Mathlib/textbook restatements, general verified background-library entries, results closable by routine proof search or a single tactic (`simp`, `omega`, `norm_num`, `decide`, `aesop`, `rfl`), tautologies, and definitional equalities.
 
 ---
 
@@ -2771,7 +2740,7 @@ All proof prompts pass `temperature=0.0`.
 - `sorry` / `admit` anywhere → proof rejected, counts as a failed attempt.
 - Axiomatizing the theorem's own concepts to make the goal trivial → rejected.
 - Complete source brainstorm/paper is mandatory direct context; do not silently truncate it or replace it with the focused excerpt.
-- If the full claim cannot be proved, return a narrower concrete lemma rather than a `sorry`-closed stub.
+- If the full claim cannot be proved, do not replace it with a narrower/supporting/trivial lemma; submit the strongest faithful attempt at the selected high-impact target and let Lean feedback expose the blocker.
 - PRESERVE the theorem's non-trivial content — do not simplify into a trivial identity to make it compile.
 
 ---
@@ -2820,7 +2789,7 @@ All proof prompts pass `temperature=0.0`.
 ```
 
 **Field requirements:**
-- `novelty_tier`: One of `not_novel`, `novel_formulation`, `novel_variant`, `mathematical_discovery`, or `major_mathematical_discovery`. Any tier except `not_novel` enters the highest-priority direct-injection block for all subsequent brainstorm/paper submitters via `proof_database.get_novel_proofs_for_injection()`. `not_novel` proofs are stored in the database but not injected.
+- `novelty_tier`: One of `not_novel`, `novel_formulation`, `novel_variant`, `mathematical_discovery`, or `major_mathematical_discovery`. Any tier except `not_novel` enters the highest-priority direct-injection block for all subsequent brainstorm/paper submitters via `proof_database.get_novel_proofs_for_injection()`. `not_novel` proofs are stored in the database but not injected; manual "Try to Prove This" still preserves/appends non-duplicate Lean-verified `not_novel` proofs intentionally for user-visible RALPH-loop state and exact duplicate avoidance.
 - `reasoning`: Always required.
 
 **Novelty tiers:**

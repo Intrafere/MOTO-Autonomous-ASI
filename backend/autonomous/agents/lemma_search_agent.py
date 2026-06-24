@@ -252,10 +252,15 @@ class MathlibLemmaSearchAgent:
             )
             prompt_tokens = count_tokens(prompt)
 
+        task_id = self.get_current_task_id()
+        await api_client_manager.prewarm_assistant_memory_context(
+            task_id=task_id,
+            role_id=self.role_id,
+            prompt=prompt,
+        )
         if prompt_tokens > max_input_tokens:
             return []
 
-        task_id = self.get_current_task_id()
         self.task_sequence += 1
 
         try:

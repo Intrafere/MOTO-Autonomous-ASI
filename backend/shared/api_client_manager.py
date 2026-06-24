@@ -11,6 +11,7 @@ Supports four boost modes:
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Dict, Any, List, Optional, Callable
 
@@ -22,7 +23,8 @@ from backend.shared.openrouter_client import (
     RateLimitError,
     FreeModelExhaustedError
 )
-from backend.shared.openai_codex_client import OpenAICodexError, openai_codex_client
+from backend.shared.openai_codex_client import OpenAICodexError, OAuthUsageLimitError, openai_codex_client
+from backend.shared.sakana_fugu_client import SakanaFuguError, sakana_fugu_client
 from backend.shared.xai_grok_client import XAIGrokError, xai_grok_client
 from backend.shared.boost_manager import boost_manager
 from backend.shared.boost_logger import boost_logger
@@ -32,10 +34,105 @@ from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import sanitize_model_output_for_retry_context
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import ModelConfig
+from backend.shared.provider_notification_store import record_provider_notification
+from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
+from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.response_extraction import extract_response_text
 from backend.shared.token_tracker import token_tracker
+from backend.shared.utils import count_tokens
 
 logger = logging.getLogger(__name__)
+
+
+OAUTH_LIVE_ERROR_MAX_CHARS = 1800
+_TRUNCATION_SUFFIX = "..."
+
+
+def _cap_oauth_live_error_text(value: Any, max_chars: int = OAUTH_LIVE_ERROR_MAX_CHARS) -> str:
+    """Return a redacted one-line provider error that is at most max_chars long."""
+    text = redact_log_text(value).strip()
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= len(_TRUNCATION_SUFFIX):
+        return text[:max_chars]
+    return text[: max_chars - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX
+
+
+def _extract_error_message_from_json(value: Any) -> tuple[Optional[str], Optional[str]]:
+    """Extract (code, message) from common provider error JSON shapes."""
+    if not isinstance(value, dict):
+        return None, None
+
+    code = value.get("code")
+    message = value.get("message")
+    if isinstance(message, str) and message.strip():
+        return (str(code).strip() if code is not None else None), message.strip()
+
+    for key in ("error", "response"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            nested_code, nested_message = _extract_error_message_from_json(nested)
+            if nested_message:
+                return nested_code or (str(code).strip() if code is not None else None), nested_message
+
+    return (str(code).strip() if code is not None else None), None
+
+
+def oauth_live_activity_error_message(error: Exception) -> str:
+    """Best-effort visible OAuth provider error summary for live activity."""
+    raw = str(error)
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if 0 <= start < end:
+        try:
+            parsed = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            parsed = None
+        code, message = _extract_error_message_from_json(parsed)
+        if message:
+            detail = f"{code}: {message}" if code else message
+            return _cap_oauth_live_error_text(detail)
+
+    for prefix in (
+        "OpenAI Codex completion failed:",
+        "OpenAI Codex failed:",
+        "xAI Grok completion failed:",
+        "xAI Grok failed:",
+        "Sakana Fugu completion failed:",
+        "Sakana Fugu failed:",
+    ):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            break
+    return _cap_oauth_live_error_text(raw)
+
+
+class OAuthProviderCooldownError(RuntimeError):
+    """Raised when an OAuth provider is cooling down until a provider reset time."""
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        provider_label: str,
+        role_id: str,
+        model: str,
+        resets_at: Optional[int],
+        resets_in_seconds: Optional[int],
+        plan_type: str = "",
+        message: str = "",
+    ) -> None:
+        self.provider = provider
+        self.provider_label = provider_label
+        self.role_id = role_id
+        self.model = model
+        self.resets_at = resets_at
+        self.resets_in_seconds = resets_in_seconds
+        self.plan_type = plan_type
+        base = message or f"{provider_label} usage limit reached"
+        if resets_in_seconds is not None:
+            base = f"{base}; resets in {resets_in_seconds} seconds"
+        super().__init__(base)
 
 
 def _response_shape_for_logging(response: Any) -> str:
@@ -67,6 +164,54 @@ class APIClientManager:
     PARALLEL_BRAINSTORM_SUBMITTER_TEMPERATURES = (
         0.0, 0.1, 0.2, 0.3, 0.4,
         0.5, 0.6, 0.7, 0.8, 0.9,
+    )
+    ASSISTANT_MEMORY_MAX_CODE_CHARS = 1200
+    ASSISTANT_MEMORY_MAX_TARGET_CHARS = 8000
+    ASSISTANT_MEMORY_SUMMARY_CHARS = 1800
+    ASSISTANT_MEMORY_SECTION_BOUNDARIES = (
+        "USER PROMPT",
+        "USER'S RESEARCH PROMPT",
+        "USER RESEARCH PROMPT",
+        "ORIGINAL USER PROMPT",
+        "RESEARCH PROMPT",
+        "RESEARCH GOAL",
+        "USER GOAL",
+        "HIGH-LEVEL RESEARCH PROMPT",
+        "CURRENT BRAINSTORM TOPIC",
+        "BRAINSTORM TOPIC",
+        "TOPIC PROMPT",
+        "CURRENT TOPIC",
+        "LEANOJ PROBLEM",
+        "PROBLEM",
+        "YOUR TASK",
+        "WRITING GOAL",
+        "CURRENT PHASE",
+        "PAPER TITLE",
+        "THEOREM CANDIDATE",
+        "TARGET THEOREM",
+        "CURRENT OUTLINE",
+        "OUTLINE",
+        "VOLUME ORGANIZATION",
+        "CURRENT DOCUMENT PROGRESS",
+        "CURRENT PAPER",
+        "MASTER PROOF",
+        "LEAN TEMPLATE",
+        "CURRENT PROOF DRAFT",
+        "SOURCE CONTENT",
+        "CURRENT ACCEPTED SUBMISSIONS DATABASE",
+        "ACCEPTED SUBMISSIONS",
+        "BRAINSTORM SUMMARY",
+        "VERIFIED PROOF SUMMARIES",
+        "DIRECT PROOF CONTEXT",
+        "SHARED TRAINING",
+        "LOCAL TRAINING",
+        "REJECTION LOG",
+        "RETRIEVED EVIDENCE",
+        "REJECTION FEEDBACK",
+        "RECENT REJECTIONS",
+        "FAILED ATTEMPTS",
+        "LEAN ERRORS",
+        "EXECUTION FEEDBACK",
     )
     
     def __init__(self):
@@ -101,6 +246,12 @@ class APIClientManager:
         
         # Track roles that have already broadcast fallback_failed (prevent GUI log spam)
         self._fallback_failed_notified: set = set()
+
+        # Track OAuth provider usage-limit cooldowns reported by the provider.
+        # Keys are provider identifiers such as "openai_codex_oauth".
+        self._oauth_provider_cooldowns: Dict[str, Dict[str, Any]] = {}
+        self._oauth_cooldown_notified: set[str] = set()
+        self._oauth_cooldown_fallback_roles: set[str] = set()
         
         # Lock for thread-safe state updates
         self._state_lock = asyncio.Lock()
@@ -133,19 +284,56 @@ class APIClientManager:
         error: Exception,
     ) -> None:
         """Notify the UI when a Codex role cannot recover through fallback."""
-        await self._broadcast("openai_codex_oauth_error", {
+        payload = {
             "role_id": role_id,
             "model": model,
             "provider": "openai_codex_oauth",
+            "provider_label": "OpenAI Codex",
             "reason": "unrecoverable_codex_error",
             "recoverable": False,
             "message": (
                 "OpenAI Codex failed and no LM Studio fallback is configured. "
-                "Please check your OpenAI Codex OAuth connection in Cloud Access & Keys, "
+                "Please check your OpenAI Codex OAuth connection in OpenRouter/OAuth, "
                 "sign in again, and retry."
             ),
             "error_summary": redact_log_text(str(error), 700),
-        })
+            "oauth_error_message": oauth_live_activity_error_message(error),
+        }
+        stored_payload = await asyncio.to_thread(
+            record_provider_notification,
+            "openai_codex_oauth_error",
+            payload,
+        )
+        await self._broadcast("openai_codex_oauth_error", stored_payload)
+
+    async def _broadcast_unrecoverable_sakana_fugu_error(
+        self,
+        *,
+        role_id: str,
+        model: str,
+        error: Exception,
+    ) -> None:
+        """Notify the UI when a Sakana Fugu role cannot recover through fallback."""
+        payload = {
+            "role_id": role_id,
+            "model": model,
+            "provider": "sakana_fugu",
+            "provider_label": "Sakana Fugu",
+            "reason": "unrecoverable_sakana_fugu_error",
+            "recoverable": False,
+            "message": (
+                "Sakana Fugu failed and no LM Studio fallback is configured. "
+                "Please check your Sakana Fugu API key in OpenRouter/OAuth and retry."
+            ),
+            "error_summary": redact_log_text(str(error), 700),
+            "oauth_error_message": oauth_live_activity_error_message(error),
+        }
+        stored_payload = await asyncio.to_thread(
+            record_provider_notification,
+            "sakana_fugu_error",
+            payload,
+        )
+        await self._broadcast("sakana_fugu_error", stored_payload)
 
     async def _broadcast_unrecoverable_xai_grok_error(
         self,
@@ -155,7 +343,7 @@ class APIClientManager:
         error: Exception,
     ) -> None:
         """Notify the UI when a Grok OAuth role cannot recover through fallback."""
-        await self._broadcast("oauth_provider_error", {
+        payload = {
             "role_id": role_id,
             "model": model,
             "provider": "xai_grok_oauth",
@@ -164,12 +352,146 @@ class APIClientManager:
             "recoverable": False,
             "message": (
                 "xAI Grok failed and no LM Studio fallback is configured. "
-                "Please check your xAI Grok OAuth connection in Cloud Access & Keys, "
+                "Please check your xAI Grok OAuth connection in OpenRouter/OAuth, "
                 "sign in again, and retry. If xAI reports subscription or credit limits, "
                 "check your SuperGrok/X Premium entitlement."
             ),
             "error_summary": redact_log_text(str(error), 700),
-        })
+            "oauth_error_message": oauth_live_activity_error_message(error),
+        }
+        stored_payload = await asyncio.to_thread(
+            record_provider_notification,
+            "oauth_provider_error",
+            payload,
+        )
+        await self._broadcast("oauth_provider_error", stored_payload)
+
+    @staticmethod
+    def _cooldown_until_from_error(error: OAuthUsageLimitError) -> int:
+        if error.resets_at:
+            return int(error.resets_at)
+        if error.resets_in_seconds:
+            return int(time.time()) + int(error.resets_in_seconds)
+        return int(time.time()) + 3600
+
+    def get_provider_cooldown(self, provider: str) -> Optional[Dict[str, Any]]:
+        """Return active cooldown metadata for a provider, clearing expired entries."""
+        provider_key = str(provider or "").strip()
+        if not provider_key:
+            return None
+        cooldown = self._oauth_provider_cooldowns.get(provider_key)
+        if not cooldown:
+            return None
+        cooldown_until = int(cooldown.get("cooldown_until") or cooldown.get("resets_at") or 0)
+        if cooldown_until and cooldown_until <= int(time.time()):
+            self._oauth_provider_cooldowns.pop(provider_key, None)
+            self._oauth_cooldown_notified = {
+                key for key in self._oauth_cooldown_notified if not key.startswith(f"{provider_key}:")
+            }
+            return None
+        resets_in_seconds = max(1, cooldown_until - int(time.time())) if cooldown_until else None
+        return {**cooldown, "resets_in_seconds": resets_in_seconds}
+
+    def is_provider_cooling_down(self, provider: str) -> bool:
+        return self.get_provider_cooldown(provider) is not None
+
+    async def wait_for_oauth_provider_cooldown(
+        self,
+        error: OAuthProviderCooldownError,
+        *,
+        role_id: str = "",
+    ) -> None:
+        """Sleep until an OAuth provider usage-limit cooldown expires."""
+        provider = str(error.provider or "").strip() or "openai_codex_oauth"
+        active_role = role_id or error.role_id or "unknown"
+        while self.is_provider_cooling_down(provider):
+            cooldown = self.get_provider_cooldown(provider) or {}
+            wait_seconds = cooldown.get("resets_in_seconds")
+            if wait_seconds is None and error.resets_in_seconds is not None:
+                wait_seconds = error.resets_in_seconds
+            if wait_seconds is None and error.resets_at:
+                wait_seconds = max(1, int(error.resets_at) - int(time.time()))
+            wait_seconds = max(1, min(int(wait_seconds or 60), 300))
+            logger.warning(
+                "%s usage-limit cooldown active for role '%s'; waiting %s seconds before retry",
+                error.provider_label or provider,
+                active_role,
+                wait_seconds,
+            )
+            await asyncio.sleep(wait_seconds)
+
+    def _mark_oauth_provider_cooldown(
+        self,
+        error: OAuthUsageLimitError,
+        *,
+        role_id: str,
+        model: str,
+    ) -> Dict[str, Any]:
+        cooldown_until = self._cooldown_until_from_error(error)
+        resets_in_seconds = max(1, cooldown_until - int(time.time()))
+        payload = {
+            "provider": error.provider,
+            "provider_label": error.provider_label,
+            "role_id": role_id,
+            "model": model,
+            "reason": "usage_limit_reached",
+            "recoverable": True,
+            "plan_type": error.plan_type,
+            "resets_at": cooldown_until,
+            "cooldown_until": cooldown_until,
+            "resets_in_seconds": resets_in_seconds,
+            "message": (
+                f"{error.provider_label} usage limit reached for {role_id}. "
+                f"Provider reports reset in {resets_in_seconds} seconds."
+            ),
+            "error_summary": redact_log_text(str(error), 700),
+            "oauth_error_message": oauth_live_activity_error_message(error),
+        }
+        self._oauth_provider_cooldowns[error.provider] = payload
+        return payload
+
+    async def _broadcast_oauth_usage_limit(
+        self,
+        payload: Dict[str, Any],
+        *,
+        fallback_model: str = "",
+    ) -> None:
+        notify_payload = dict(payload)
+        provider_label = notify_payload.get("provider_label", "OAuth provider")
+        role_id = notify_payload.get("role_id", "a role")
+        resets_in_seconds = notify_payload.get("resets_in_seconds")
+        if fallback_model:
+            notify_payload["fallback_model"] = fallback_model
+            notify_payload["message"] = (
+                f"{provider_label} usage limit reached for "
+                f"{role_id}. Using LM Studio fallback model {fallback_model} "
+                f"until the provider reset."
+            )
+        elif notify_payload.get("reason") == "usage_limit_reached":
+            reset_text = (
+                f" Provider reports reset in {resets_in_seconds} seconds."
+                if resets_in_seconds is not None
+                else ""
+            )
+            notify_payload["message"] = (
+                f"{provider_label} usage limit reached for {role_id}."
+                " Roles without fallback will wait until the provider reset."
+                f"{reset_text}"
+            )
+        cooldown_key = (
+            f"{notify_payload.get('provider')}:{notify_payload.get('role_id')}:"
+            f"{notify_payload.get('model')}:{notify_payload.get('cooldown_until')}:"
+            f"{notify_payload.get('fallback_model', '')}"
+        )
+        if cooldown_key in self._oauth_cooldown_notified:
+            return
+        self._oauth_cooldown_notified.add(cooldown_key)
+        stored_payload = await asyncio.to_thread(
+            record_provider_notification,
+            "oauth_provider_usage_limited",
+            notify_payload,
+        )
+        await self._broadcast("oauth_provider_usage_limited", stored_payload)
     
     async def _with_hung_connection_watchdog(
         self,
@@ -463,9 +785,10 @@ class APIClientManager:
                 config = config.model_copy(update={"lm_studio_fallback_id": None})
 
         self._role_model_configs[role_id] = config
+        self._oauth_cooldown_fallback_roles.discard(role_id)
         
         # Set initial fallback state based on provider
-        if config.provider in {"openrouter", "openai_codex_oauth", "xai_grok_oauth"}:
+        if config.provider in {"openrouter", "openai_codex_oauth", "xai_grok_oauth", "sakana_fugu"}:
             self._role_fallback_state[role_id] = config.provider
         else:
             self._role_fallback_state[role_id] = "lm_studio"
@@ -482,8 +805,470 @@ class APIClientManager:
         elif config.provider == "xai_grok_oauth":
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
             logger.info(f"Configured role '{role_id}': provider=xai_grok_oauth, model={config.model_id}{fallback_str}")
+        elif config.provider == "sakana_fugu":
+            fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
+            logger.info(f"Configured role '{role_id}': provider=sakana_fugu, model={config.model_id}{fallback_str}")
         else:
             logger.info(f"Configured role '{role_id}': provider=lm_studio, model={config.model_id}")
+
+    def get_role_config(self, role_id: str) -> Optional[ModelConfig]:
+        """Return a configured role snapshot without exposing mutable internals."""
+        config = self._role_model_configs.get(role_id)
+        return config.model_copy() if config is not None else None
+
+    @classmethod
+    def _assistant_memory_role_is_excluded(cls, role_id: str, task_id: str, prompt: str) -> bool:
+        """Return True for roles that must never receive Assistant memory context."""
+        role_key = f"{role_id} {task_id}".lower()
+        prompt_key = (prompt or "").lower()
+        excluded_markers = (
+            "assistant",
+            "validator",
+            "_val",
+            "validation",
+            "critique",
+            "paper_critic",
+            "redundancy",
+            "checker",
+            "integrity",
+            "gate",
+            "novelty",
+        )
+        if any(marker in role_key for marker in excluded_markers):
+            return True
+        if "self-validation" in prompt_key or "self validation" in prompt_key:
+            return True
+        user_prompt_key = cls._extract_assistant_goal_hint(prompt).lower()
+        if (
+            "topic exploration phase" in user_prompt_key
+            or "paper title exploration phase" in user_prompt_key
+        ):
+            return True
+        if '"critique_needed"' in prompt_key or "critique_needed" in prompt_key:
+            return True
+        if "validate the" in prompt_key and "respond as json" in prompt_key:
+            return True
+        return False
+
+    @staticmethod
+    def _assistant_workflow_mode_for_role(role_id: str) -> str:
+        normalized = (role_id or "").lower()
+        if "manual" in normalized or "compiler_aggregator" in normalized:
+            return "manual_proof_check"
+        if normalized.startswith("leanoj"):
+            return "leanoj"
+        if normalized.startswith("compiler") or normalized.startswith("comp_"):
+            return "compiler"
+        if normalized.startswith("agg") or normalized.startswith("aggregator"):
+            return "aggregator"
+        return "autonomous"
+
+    @staticmethod
+    def _assistant_target_kind_for_role(role_id: str, task_id: str, prompt: str) -> str:
+        role_key = f"{role_id} {task_id}".lower()
+        prompt_key = (prompt or "").lower()
+        if role_id.lower().startswith("aggregator_submitter_"):
+            return "brainstorm_context"
+        if "reference" in role_key:
+            return "reference_selection_context"
+        if "title" in role_key:
+            return "title_context"
+        if "topic" in role_key:
+            return "topic_context"
+        if "completion" in role_key:
+            return "completion_review_context"
+        if "certainty" in role_key or "format_selector" in role_key or "volume_organizer" in role_key:
+            return "final_answer_context"
+        if "path" in role_key:
+            return "path_context"
+        if "final_review" in role_key or "semantic" in role_key:
+            return "semantic_review_context"
+        if "final" in role_key:
+            return "final_solver"
+        if "proof" in role_key or "rigor" in role_key or "high_param" in role_key:
+            return "theorem_discovery"
+        if "outline" in prompt_key or "outline_complete" in prompt_key:
+            return "outline_context"
+        if "current document progress" in prompt_key or "construction" in role_key or "writer" in role_key:
+            return "writing_context"
+        return "brainstorm_context"
+
+    @staticmethod
+    def _assistant_workflow_phase_for_role(role_id: str, task_id: str, prompt: str) -> str:
+        role_key = f"{role_id} {task_id}".lower()
+        prompt_key = (prompt or "").lower()
+        if role_id.lower().startswith("aggregator_submitter_"):
+            return "brainstorm"
+        if "outline" in prompt_key or "outline" in role_key:
+            return "outline"
+        if "construction" in role_key or "current document progress" in prompt_key:
+            return "construction"
+        if "review" in role_key or "red-team" in prompt_key or "red team" in prompt_key:
+            return "review"
+        if "rigor" in role_key or "proof" in role_key or "lemma" in role_key:
+            return "proof"
+        if "reference" in role_key:
+            return "reference_selection"
+        if "title" in role_key:
+            return "title_selection"
+        if "topic" in role_key:
+            return "topic"
+        if "completion" in role_key:
+            return "completion_review"
+        if "final" in role_key or "certainty" in role_key or "format_selector" in role_key or "volume" in role_key:
+            return "final_answer"
+        if "leanoj" in role_key:
+            return "leanoj"
+        return "brainstorm"
+
+    @classmethod
+    def _build_assistant_target_snapshot(cls, role_id: str, task_id: str, prompt: str) -> AssistantTargetSnapshot:
+        workflow_mode = cls._assistant_workflow_mode_for_role(role_id)
+        return cls._build_assistant_target_snapshot_with_overrides(
+            role_id,
+            task_id,
+            prompt,
+            workflow_mode_override=workflow_mode,
+        )
+
+    @classmethod
+    def _build_assistant_target_snapshot_with_overrides(
+        cls,
+        role_id: str,
+        task_id: str,
+        prompt: str,
+        *,
+        workflow_mode_override: Optional[str] = None,
+    ) -> AssistantTargetSnapshot:
+        workflow_mode = workflow_mode_override or cls._assistant_workflow_mode_for_role(role_id)
+        target_kind = cls._assistant_target_kind_for_role(role_id, task_id, prompt)
+        workflow_phase = cls._assistant_workflow_phase_for_role(role_id, task_id, prompt)
+        compact_prompt = cls._compact_assistant_text(prompt, cls.ASSISTANT_MEMORY_MAX_TARGET_CHARS)
+        goal_hint = cls._extract_assistant_goal_hint(prompt)
+        topic_hint = cls._extract_assistant_section(
+            prompt,
+            (
+                "CURRENT BRAINSTORM TOPIC",
+                "BRAINSTORM TOPIC",
+                "TOPIC PROMPT",
+                "CURRENT TOPIC",
+                "LEANOJ PROBLEM",
+                "PROBLEM",
+            ),
+        )
+        writing_goal = cls._extract_assistant_section(
+            prompt,
+            (
+                "YOUR TASK",
+                "WRITING GOAL",
+                "CURRENT PHASE",
+                "PAPER TITLE",
+                "THEOREM CANDIDATE",
+                "TARGET THEOREM",
+            ),
+        )
+        outline_summary = cls._extract_assistant_section(
+            prompt,
+            ("CURRENT OUTLINE", "OUTLINE", "VOLUME ORGANIZATION"),
+        )
+        draft_summary = cls._extract_assistant_section(
+            prompt,
+            (
+                "CURRENT DOCUMENT PROGRESS",
+                "CURRENT PAPER",
+                "MASTER PROOF",
+                "LEAN TEMPLATE",
+                "CURRENT PROOF DRAFT",
+                "SOURCE CONTENT",
+            ),
+        )
+        accepted_summary = cls._extract_assistant_section(
+            prompt,
+            (
+                "CURRENT ACCEPTED SUBMISSIONS DATABASE",
+                "ACCEPTED SUBMISSIONS",
+                "BRAINSTORM SUMMARY",
+                "VERIFIED PROOF SUMMARIES",
+                "DIRECT PROOF CONTEXT",
+                "SHARED TRAINING",
+            ),
+        )
+        rejection_feedback = cls._extract_assistant_section(
+            prompt,
+            (
+                "REJECTION FEEDBACK",
+                "RECENT REJECTIONS",
+                "FAILED ATTEMPTS",
+                "LEAN ERRORS",
+                "EXECUTION FEEDBACK",
+            ),
+        )
+        source_titles = cls._extract_assistant_source_titles(prompt)
+
+        target_statement = goal_hint or topic_hint or writing_goal or f"{workflow_mode}:{target_kind}"
+        is_aggregator_submitter = role_id.lower().startswith("aggregator_submitter_")
+        if is_aggregator_submitter:
+            # All parallel submitters in one brainstorm phase share one Assistant
+            # memory target. Per-lane rejection logs and task IDs are intentionally
+            # excluded so the pack refreshes for the brainstorm state, not each lane.
+            compact_prompt = ""
+            rejection_feedback = ""
+            source_title = f"{workflow_mode}:brainstorm_submitter_pack"
+            source_type = f"{workflow_mode}_brainstorm_submitters"
+            source_id = "shared_brainstorm_pack"
+        else:
+            source_title = f"{role_id} {task_id}".strip()
+            source_type = role_id
+            source_id = task_id
+        return AssistantTargetSnapshot(
+            workflow_mode=workflow_mode,
+            target_kind=target_kind,
+            workflow_phase=workflow_phase,
+            active_mode=workflow_mode,
+            user_prompt=goal_hint or compact_prompt,
+            current_prompt_or_topic=topic_hint,
+            current_submission_or_draft=compact_prompt,
+            accepted_memory_summary=accepted_summary,
+            writing_goal=writing_goal,
+            outline_summary=outline_summary,
+            paper_or_proof_draft_summary=draft_summary,
+            recent_activity_summary=rejection_feedback,
+            rejection_feedback=rejection_feedback,
+            target_statement=target_statement,
+            formal_sketch=compact_prompt,
+            source_title=source_title,
+            source_type=source_type,
+            source_id=source_id,
+            source_titles=source_titles,
+            imports=["Mathlib"],
+        )
+
+    @classmethod
+    def _compact_assistant_text(cls, value: str, max_chars: int) -> str:
+        text = " ".join((value or "").split())
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "..."
+
+    @classmethod
+    def _extract_assistant_goal_hint(cls, prompt: str) -> str:
+        return cls._extract_assistant_section(
+            prompt,
+            (
+                "USER PROMPT",
+                "USER COMPILER-DIRECTING PROMPT",
+                "USER'S RESEARCH PROMPT",
+                "USER RESEARCH PROMPT",
+                "ORIGINAL USER PROMPT",
+                "RESEARCH PROMPT",
+                "RESEARCH GOAL",
+                "USER GOAL",
+                "HIGH-LEVEL RESEARCH PROMPT",
+            ),
+        )
+
+    @classmethod
+    def _extract_assistant_section(cls, prompt: str, headings: tuple[str, ...]) -> str:
+        if not prompt:
+            return ""
+        lines = prompt.splitlines()
+        capture: list[str] = []
+        found = False
+        for line in lines:
+            stripped = line.strip()
+            if not found:
+                matched, remainder = cls._assistant_heading_match(stripped, headings)
+                if not matched:
+                    continue
+                found = True
+                if remainder:
+                    capture.append(remainder)
+                continue
+            if cls._assistant_line_is_boundary(stripped):
+                break
+            capture.append(line)
+        if not found:
+            return ""
+        text = " ".join("\n".join(capture).split())
+        return cls._compact_assistant_text(text, cls.ASSISTANT_MEMORY_SUMMARY_CHARS)
+
+    @classmethod
+    def _assistant_heading_match(cls, line: str, headings: tuple[str, ...]) -> tuple[bool, str]:
+        normalized_line = cls._normalize_assistant_heading(line)
+        for heading in headings:
+            normalized_heading = cls._normalize_assistant_heading(heading)
+            if normalized_line == normalized_heading:
+                return True, ""
+            if normalized_line.startswith(f"{normalized_heading}:"):
+                return True, line.split(":", 1)[1].strip()
+        return False, ""
+
+    @classmethod
+    def _assistant_line_is_boundary(cls, line: str) -> bool:
+        if not line:
+            return False
+        if set(line) == {"-"}:
+            return True
+        matched, _ = cls._assistant_heading_match(line, cls.ASSISTANT_MEMORY_SECTION_BOUNDARIES)
+        return matched
+
+    @staticmethod
+    def _normalize_assistant_heading(value: str) -> str:
+        text = re.sub(r"^\s*#+\s*", "", value or "").strip()
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1].strip()
+        text = text.rstrip(":").strip()
+        return " ".join(text.upper().split())
+
+    @classmethod
+    def _extract_assistant_source_titles(cls, prompt: str) -> list[str]:
+        if not prompt:
+            return []
+        titles: list[str] = []
+        patterns = (
+            r"(?im)^\s*(?:paper|source|reference)\s+title\s*:\s*(.+)$",
+            r"(?im)^\s*title\s*:\s*(.+)$",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, prompt):
+                title = " ".join(match.group(1).split())[:200]
+                if title and title not in titles:
+                    titles.append(title)
+                if len(titles) >= 8:
+                    return titles
+        return titles
+
+    async def _maybe_add_assistant_memory_context(
+        self,
+        *,
+        task_id: str,
+        role_id: str,
+        role_config: Optional[ModelConfig],
+        messages: List[Dict[str, Any]],
+        max_tokens: Optional[int],
+        tools: Optional[List[Dict[str, Any]]],
+        tool_choice: Optional[Any],
+        workflow_mode_override: Optional[str] = None,
+    ) -> tuple[List[Dict[str, Any]], str]:
+        """Append non-blocking Assistant memory to eligible non-validator calls.
+
+        Assistant memory is optional and last-drop. Validators, critique roles,
+        multi-turn tool-call protocol conversations, and retry conversations are
+        intentionally left untouched. Initial single-user messages may still
+        receive memory before tools are offered to the model.
+        """
+        if not system_config.agent_conversation_memory_enabled:
+            return messages, ""
+        if role_config is None:
+            return messages, ""
+        if len(messages) != 1 or messages[0].get("role") != "user":
+            return messages, ""
+
+        prompt = str(messages[0].get("content") or "")
+        if not prompt or "ASSISTANT RETRIEVED " in prompt:
+            return messages, ""
+        if self._assistant_memory_role_is_excluded(role_id, task_id, prompt):
+            return messages, ""
+
+        snapshot = self._build_assistant_target_snapshot_with_overrides(
+            role_id,
+            task_id,
+            prompt,
+            workflow_mode_override=workflow_mode_override,
+        )
+        target_hash = assistant_proof_search_coordinator.submit_target(snapshot)
+        pack = assistant_proof_search_coordinator.get_latest_pack(target_hash)
+        if not pack or not pack.results:
+            return messages, ""
+
+        assistant_context = pack.to_memory_prompt_context(
+            max_code_chars_per_result=self.ASSISTANT_MEMORY_MAX_CODE_CHARS,
+        )
+        augmented_prompt = self._append_assistant_memory_block(prompt, assistant_context)
+        if not self._prompt_fits_role_budget(
+            augmented_prompt,
+            role_config=role_config,
+            explicit_max_tokens=max_tokens,
+            role_id=role_id,
+        ):
+            metadata_only_context = pack.to_memory_prompt_context(max_code_chars_per_result=0)
+            augmented_prompt = self._append_assistant_memory_block(prompt, metadata_only_context)
+            if not self._prompt_fits_role_budget(
+                augmented_prompt,
+                role_config=role_config,
+                explicit_max_tokens=max_tokens,
+                role_id=role_id,
+            ):
+                return messages, ""
+
+        return [{**messages[0], "content": augmented_prompt}], target_hash
+
+    async def prewarm_assistant_memory_context(
+        self,
+        *,
+        task_id: str,
+        role_id: str,
+        prompt: str,
+        workflow_mode_override: Optional[str] = None,
+    ) -> str:
+        """Schedule Assistant memory for an eligible prompt before model-call preflight.
+
+        Many workflows validate mandatory prompt size before calling
+        `generate_completion()`. This helper gives those producer paths the same
+        non-blocking Assistant lifecycle as normal completions, even if the
+        prompt later overflows and no model call is made.
+        """
+        if not system_config.agent_conversation_memory_enabled:
+            return ""
+        async with self._state_lock:
+            role_config = self._role_model_configs.get(role_id)
+        if role_config is None:
+            return ""
+        prompt = str(prompt or "")
+        if not prompt or "ASSISTANT RETRIEVED " in prompt:
+            return ""
+        if self._assistant_memory_role_is_excluded(role_id, task_id, prompt):
+            return ""
+        snapshot = self._build_assistant_target_snapshot_with_overrides(
+            role_id,
+            task_id,
+            prompt,
+            workflow_mode_override=workflow_mode_override,
+        )
+        target_hash = assistant_proof_search_coordinator.submit_target(snapshot)
+        return target_hash
+
+    @staticmethod
+    def _append_assistant_memory_block(prompt: str, assistant_context: str) -> str:
+        return (
+            f"{prompt}\n\n---\n\n"
+            "OPTIONAL ASSISTANT MEMORY CONTEXT:\n"
+            f"{assistant_context}\n\n"
+            "Use the Assistant memory only when it is relevant. It is supporting context, "
+            "not validator feedback, not a requirement to cite, and not a replacement for the user prompt."
+        )
+
+    def _prompt_fits_role_budget(
+        self,
+        prompt: str,
+        *,
+        role_config: ModelConfig,
+        explicit_max_tokens: Optional[int],
+        role_id: str,
+    ) -> bool:
+        try:
+            effective_max_tokens = self._effective_max_tokens(
+                explicit_max_tokens,
+                role_config.max_output_tokens,
+                role_id,
+            )
+            max_input_tokens = rag_config.get_available_input_tokens(
+                role_config.context_window,
+                effective_max_tokens,
+            )
+        except Exception:
+            return False
+        return count_tokens(prompt) <= max_input_tokens
     
     def _determine_boost_mode(self, task_id: str) -> Optional[str]:
         """
@@ -528,13 +1313,26 @@ class APIClientManager:
         **kwargs
     ) -> Dict[str, Any]:
         """Generate a completion, optionally wrapping the role with Supercharge."""
+        disable_supercharge = bool(kwargs.pop("_moto_disable_supercharge", False))
+        assistant_workflow_mode_override = kwargs.pop("_moto_assistant_workflow_mode", None)
         async with self._state_lock:
             role_config = self._role_model_configs.get(role_id)
 
-        supercharge_enabled = bool(getattr(role_config, "supercharge_enabled", False))
+        messages, assistant_memory_target_hash = await self._maybe_add_assistant_memory_context(
+            task_id=task_id,
+            role_id=role_id,
+            role_config=role_config,
+            messages=messages,
+            max_tokens=max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            workflow_mode_override=assistant_workflow_mode_override,
+        )
+
+        supercharge_enabled = bool(getattr(role_config, "supercharge_enabled", False)) and not disable_supercharge
         # Tool-call conversations need exact assistant/tool turn pairing, so keep them single-shot.
         if not supercharge_enabled or tools or tool_choice is not None:
-            return await self._generate_completion_once(
+            response = await self._generate_completion_once(
                 task_id=task_id,
                 role_id=role_id,
                 model=model,
@@ -546,17 +1344,24 @@ class APIClientManager:
                 tool_choice=tool_choice,
                 **kwargs
             )
-
-        return await self._generate_supercharged_completion(
-            task_id=task_id,
-            role_id=role_id,
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=response_format,
-            **kwargs
-        )
+        else:
+            response = await self._generate_supercharged_completion(
+                task_id=task_id,
+                role_id=role_id,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                **kwargs
+            )
+        if assistant_memory_target_hash:
+            assistant_proof_search_coordinator.mark_pack_consumed_by_solver(
+                assistant_memory_target_hash,
+                role_id=role_id,
+                task_id=task_id,
+            )
+        return response
 
     @staticmethod
     def _response_text(response: Dict[str, Any]) -> str:
@@ -728,10 +1533,16 @@ class APIClientManager:
         forced_boost_mode = kwargs.pop("_moto_force_boost_mode", None)
         consume_boost_count = kwargs.pop("_moto_consume_boost_count", True)
         strict_boost = kwargs.pop("_moto_strict_boost", False)
+        reasoning_effort_override = kwargs.pop("_moto_reasoning_effort_override", None)
         requested_model = model
         async with self._state_lock:
             initial_role_config = self._role_model_configs.get(role_id)
         configured_provider = initial_role_config.provider if initial_role_config else None
+        role_reasoning_effort = (
+            reasoning_effort_override
+            if reasoning_effort_override is not None
+            else (initial_role_config.openrouter_reasoning_effort if initial_role_config else None)
+        )
 
         # Check if task should use boost (unified check for all boost modes)
         if forced_boost_mode == "__none__":
@@ -779,7 +1590,11 @@ class APIClientManager:
                             ),
                             response_format=response_format,
                             provider=boost_provider,
-                            reasoning_effort=boost_manager.boost_config.boost_reasoning_effort,
+                            reasoning_effort=(
+                                reasoning_effort_override
+                                if reasoning_effort_override is not None
+                                else boost_manager.boost_config.boost_reasoning_effort
+                            ),
                             tools=tools,
                             tool_choice=tool_choice,
                         ),
@@ -841,7 +1656,11 @@ class APIClientManager:
                         boosted=True,
                         boost_mode=boost_mode,
                         openrouter_provider=boost_provider,
-                        openrouter_reasoning_effort=boost_manager.boost_config.boost_reasoning_effort,
+                        openrouter_reasoning_effort=(
+                            reasoning_effort_override
+                            if reasoning_effort_override is not None
+                            else boost_manager.boost_config.boost_reasoning_effort
+                        ),
                     )
                     
                     # Log the boost call
@@ -1083,6 +1902,20 @@ class APIClientManager:
                 )
                 fallback_state = "openrouter"
                 self._role_fallback_state[role_id] = "openrouter"
+            elif (
+                role_config
+                and role_config.provider == "openai_codex_oauth"
+                and fallback_state == "lm_studio"
+                and role_id in self._oauth_cooldown_fallback_roles
+                and not self.is_provider_cooling_down("openai_codex_oauth")
+            ):
+                logger.info(
+                    "OpenAI Codex cooldown expired for role '%s'; returning role to Codex OAuth.",
+                    role_id,
+                )
+                fallback_state = "openai_codex_oauth"
+                self._role_fallback_state[role_id] = "openai_codex_oauth"
+                self._oauth_cooldown_fallback_roles.discard(role_id)
         
         # If OpenRouter configured and not fallen back, try OpenRouter
         if fallback_state == "openrouter" and role_config:
@@ -1143,9 +1976,10 @@ class APIClientManager:
                             max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
                             response_format=response_format,
                             provider=openrouter_provider,
-                            reasoning_effort=role_config.openrouter_reasoning_effort,
+                            reasoning_effort=role_reasoning_effort,
                             tools=tools,
                             tool_choice=tool_choice,
+                            allow_provider_auto_fallback=role_id.endswith("_assistant"),
                         ),
                         role_id=role_id,
                         model=openrouter_model,
@@ -1154,6 +1988,17 @@ class APIClientManager:
                     
                     # Calculate duration and extract response
                     duration_ms = (time.time() - start_time) * 1000
+                    provider_auto_fallback = None
+                    if isinstance(result, dict):
+                        provider_auto_fallback = result.pop("_moto_openrouter_provider_auto_fallback", None)
+                    if provider_auto_fallback and openrouter_provider:
+                        logger.warning(
+                            "Clearing unavailable OpenRouter host provider '%s' for Assistant role '%s'; future calls will use Auto routing.",
+                            redact_log_text(openrouter_provider, 120),
+                            role_id,
+                        )
+                        role_config.openrouter_provider = None
+                        openrouter_provider = None
                     
                     # Check for missing choices (upstream provider timeout/error)
                     if not result.get("choices"):
@@ -1187,7 +2032,7 @@ class APIClientManager:
                         boosted=False,
                         boost_mode=None,
                         openrouter_provider=openrouter_provider,
-                        openrouter_reasoning_effort=role_config.openrouter_reasoning_effort,
+                        openrouter_reasoning_effort=role_reasoning_effort,
                     )
                     
                     # Log to autonomous API logger if callback set
@@ -1254,7 +2099,7 @@ class APIClientManager:
                         temperature=temperature,
                         max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
                         response_format=response_format,
-                        reasoning_effort=role_config.openrouter_reasoning_effort,
+                        reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
                     )
@@ -1440,45 +2285,43 @@ class APIClientManager:
                         )
                         raise
         
-        if fallback_state == "openai_codex_oauth" and role_config:
-            codex_model = role_config.model_id
+        if fallback_state == "sakana_fugu" and role_config:
+            sakana_model = role_config.model_id
             start_time = time.time()
             try:
-                logger.debug("Role %s using OpenAI Codex OAuth: %s", role_id, codex_model)
+                logger.debug("Role %s using Sakana Fugu: %s", role_id, sakana_model)
                 result = await self._with_hung_connection_watchdog(
-                    openai_codex_client.generate_completion(
-                        model=codex_model,
+                    sakana_fugu_client.generate_completion(
+                        model=sakana_model,
                         messages=messages,
                         temperature=temperature,
                         max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
                         response_format=response_format,
-                        reasoning_effort=role_config.openrouter_reasoning_effort,
+                        reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
                     ),
                     role_id=role_id,
-                    model=codex_model,
-                    provider="OpenAI Codex",
+                    model=sakana_model,
+                    provider="Sakana Fugu",
                 )
                 duration_ms = (time.time() - start_time) * 1000
                 if not result.get("choices"):
                     logger.error(
-                        "OpenAI Codex response missing 'choices' after %.0fms - %s",
+                        "Sakana Fugu response missing 'choices' after %.0fms - %s",
                         duration_ms,
                         _response_shape_for_logging(result),
                     )
-                    raise ValueError(f"OpenAI Codex response missing 'choices' after {duration_ms:.0f}ms")
+                    raise ValueError(f"Sakana Fugu response missing 'choices' after {duration_ms:.0f}ms")
 
-                response_content = ""
+                response_content = extract_response_text(result, context=task_id)
                 tokens_used = None
-                if result.get("choices"):
-                    response_content = extract_response_text(result, context=task_id)
                 if result.get("usage"):
                     tokens_used = result["usage"].get("total_tokens")
                     _pt = result["usage"].get("prompt_tokens")
                     _ct = result["usage"].get("completion_tokens")
                     if _pt is not None and _ct is not None:
-                        token_tracker.track(codex_model, _pt, _ct)
+                        token_tracker.track(sakana_model, _pt, _ct)
                         await self._broadcast("token_usage_updated", token_tracker.get_stats())
 
                 result = self._annotate_response_with_call_metadata(
@@ -1486,12 +2329,12 @@ class APIClientManager:
                     task_id=task_id,
                     role_id=role_id,
                     configured_model=requested_model,
-                    actual_model=codex_model,
+                    actual_model=sakana_model,
                     configured_provider=role_config.provider,
-                    actual_provider="openai_codex_oauth",
+                    actual_provider="sakana_fugu",
                     boosted=False,
                     boost_mode=None,
-                    openrouter_reasoning_effort=role_config.openrouter_reasoning_effort,
+                    openrouter_reasoning_effort=role_reasoning_effort,
                 )
 
                 if self._autonomous_logger_callback:
@@ -1499,8 +2342,8 @@ class APIClientManager:
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
-                        model=codex_model,
-                        provider="openai_codex_oauth",
+                        model=sakana_model,
+                        provider="sakana_fugu",
                         prompt=full_prompt,
                         response=response_content,
                         tokens_used=tokens_used,
@@ -1510,18 +2353,17 @@ class APIClientManager:
                         phase=self._current_autonomous_phase,
                     )
 
-                await self._track_model_usage(codex_model)
+                await self._track_model_usage(sakana_model)
                 return result
-
-            except OpenAICodexError as e:
+            except SakanaFuguError as e:
                 duration_ms = (time.time() - start_time) * 1000
                 if self._autonomous_logger_callback:
                     full_prompt = self._prompt_for_logging(messages)
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
-                        model=codex_model,
-                        provider="openai_codex_oauth",
+                        model=sakana_model,
+                        provider="sakana_fugu",
                         prompt=full_prompt,
                         response="",
                         tokens_used=None,
@@ -1534,19 +2376,19 @@ class APIClientManager:
                     async with self._state_lock:
                         self._role_fallback_state[role_id] = "lm_studio"
                     logger.warning(
-                        "OpenAI Codex failed for role '%s'; falling back to LM Studio model %s",
+                        "Sakana Fugu failed for role '%s'; falling back to LM Studio model %s",
                         role_id,
                         role_config.lm_studio_fallback_id,
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
-                    await self._broadcast_unrecoverable_codex_error(
+                    await self._broadcast_unrecoverable_sakana_fugu_error(
                         role_id=role_id,
-                        model=codex_model,
+                        model=sakana_model,
                         error=e,
                     )
                     raise RuntimeError(
-                        f"OpenAI Codex failed for role '{role_id}' and no LM Studio fallback is configured: {e}"
+                        f"Sakana Fugu failed for role '{role_id}' and no LM Studio fallback is configured: {e}"
                     ) from e
             except Exception as e:
                 duration_ms = (time.time() - start_time) * 1000
@@ -1555,8 +2397,8 @@ class APIClientManager:
                     await self._autonomous_logger_callback(
                         task_id=task_id,
                         role_id=role_id,
-                        model=codex_model,
-                        provider="openai_codex_oauth",
+                        model=sakana_model,
+                        provider="sakana_fugu",
                         prompt=full_prompt,
                         response="",
                         tokens_used=None,
@@ -1569,19 +2411,239 @@ class APIClientManager:
                     async with self._state_lock:
                         self._role_fallback_state[role_id] = "lm_studio"
                     logger.warning(
-                        "OpenAI Codex error for role '%s': %s; falling back to LM Studio model %s",
+                        "Sakana Fugu error for role '%s': %s; falling back to LM Studio model %s",
                         role_id,
                         e,
                         role_config.lm_studio_fallback_id,
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
-                    await self._broadcast_unrecoverable_codex_error(
+                    await self._broadcast_unrecoverable_sakana_fugu_error(
                         role_id=role_id,
-                        model=codex_model,
+                        model=sakana_model,
                         error=e,
                     )
                     raise
+
+        if fallback_state == "openai_codex_oauth" and role_config:
+            codex_model = role_config.model_id
+            active_cooldown = self.get_provider_cooldown("openai_codex_oauth")
+            if active_cooldown:
+                if role_config.lm_studio_fallback_id:
+                    async with self._state_lock:
+                        self._role_fallback_state[role_id] = "lm_studio"
+                        self._oauth_cooldown_fallback_roles.add(role_id)
+                    await self._broadcast_oauth_usage_limit(
+                        {**active_cooldown, "role_id": role_id, "model": codex_model},
+                        fallback_model=role_config.lm_studio_fallback_id,
+                    )
+                    logger.warning(
+                        "OpenAI Codex cooldown active for role '%s'; using LM Studio fallback model %s until reset",
+                        role_id,
+                        role_config.lm_studio_fallback_id,
+                    )
+                    model = role_config.lm_studio_fallback_id
+                else:
+                    await self._broadcast_oauth_usage_limit({**active_cooldown, "role_id": role_id, "model": codex_model})
+                    raise OAuthProviderCooldownError(
+                        provider="openai_codex_oauth",
+                        provider_label="OpenAI Codex",
+                        role_id=role_id,
+                        model=codex_model,
+                        resets_at=active_cooldown.get("cooldown_until") or active_cooldown.get("resets_at"),
+                        resets_in_seconds=active_cooldown.get("resets_in_seconds"),
+                        plan_type=str(active_cooldown.get("plan_type") or ""),
+                        message=str(active_cooldown.get("message") or ""),
+                    )
+            start_time = time.time()
+            use_codex = not (
+                model == role_config.lm_studio_fallback_id
+                and self._role_fallback_state.get(role_id) == "lm_studio"
+            )
+            if use_codex:
+                try:
+                    logger.debug("Role %s using OpenAI Codex OAuth: %s", role_id, codex_model)
+                    result = await self._with_hung_connection_watchdog(
+                        openai_codex_client.generate_completion(
+                            model=codex_model,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
+                            response_format=response_format,
+                            reasoning_effort=role_reasoning_effort,
+                            tools=tools,
+                            tool_choice=tool_choice,
+                        ),
+                        role_id=role_id,
+                        model=codex_model,
+                        provider="OpenAI Codex",
+                    )
+                    duration_ms = (time.time() - start_time) * 1000
+                    if not result.get("choices"):
+                        logger.error(
+                            "OpenAI Codex response missing 'choices' after %.0fms - %s",
+                            duration_ms,
+                            _response_shape_for_logging(result),
+                        )
+                        raise ValueError(f"OpenAI Codex response missing 'choices' after {duration_ms:.0f}ms")
+
+                    response_content = ""
+                    tokens_used = None
+                    if result.get("choices"):
+                        response_content = extract_response_text(result, context=task_id)
+                    if result.get("usage"):
+                        tokens_used = result["usage"].get("total_tokens")
+                        _pt = result["usage"].get("prompt_tokens")
+                        _ct = result["usage"].get("completion_tokens")
+                        if _pt is not None and _ct is not None:
+                            token_tracker.track(codex_model, _pt, _ct)
+                            await self._broadcast("token_usage_updated", token_tracker.get_stats())
+
+                    result = self._annotate_response_with_call_metadata(
+                        result,
+                        task_id=task_id,
+                        role_id=role_id,
+                        configured_model=requested_model,
+                        actual_model=codex_model,
+                        configured_provider=role_config.provider,
+                        actual_provider="openai_codex_oauth",
+                        boosted=False,
+                        boost_mode=None,
+                        openrouter_reasoning_effort=role_reasoning_effort,
+                    )
+
+                    if self._autonomous_logger_callback:
+                        full_prompt = self._prompt_for_logging(messages)
+                        await self._autonomous_logger_callback(
+                            task_id=task_id,
+                            role_id=role_id,
+                            model=codex_model,
+                            provider="openai_codex_oauth",
+                            prompt=full_prompt,
+                            response=response_content,
+                            tokens_used=tokens_used,
+                            duration_ms=duration_ms,
+                            success=True,
+                            error=None,
+                            phase=self._current_autonomous_phase,
+                        )
+
+                    await self._track_model_usage(codex_model)
+                    return result
+
+                except OAuthUsageLimitError as e:
+                    duration_ms = (time.time() - start_time) * 1000
+                    if self._autonomous_logger_callback:
+                        full_prompt = self._prompt_for_logging(messages)
+                        await self._autonomous_logger_callback(
+                            task_id=task_id,
+                            role_id=role_id,
+                            model=codex_model,
+                            provider="openai_codex_oauth",
+                            prompt=full_prompt,
+                            response="",
+                            tokens_used=None,
+                            duration_ms=duration_ms,
+                            success=False,
+                            error=str(e),
+                            phase=self._current_autonomous_phase,
+                        )
+                    cooldown_payload = self._mark_oauth_provider_cooldown(e, role_id=role_id, model=codex_model)
+                    if role_config.lm_studio_fallback_id:
+                        async with self._state_lock:
+                            self._role_fallback_state[role_id] = "lm_studio"
+                            self._oauth_cooldown_fallback_roles.add(role_id)
+                        await self._broadcast_oauth_usage_limit(
+                            cooldown_payload,
+                            fallback_model=role_config.lm_studio_fallback_id,
+                        )
+                        logger.warning(
+                            "OpenAI Codex usage limit reached for role '%s'; falling back to LM Studio model %s until provider reset",
+                            role_id,
+                            role_config.lm_studio_fallback_id,
+                        )
+                        model = role_config.lm_studio_fallback_id
+                    else:
+                        await self._broadcast_oauth_usage_limit(cooldown_payload)
+                        raise OAuthProviderCooldownError(
+                            provider=e.provider,
+                            provider_label=e.provider_label,
+                            role_id=role_id,
+                            model=codex_model,
+                            resets_at=cooldown_payload.get("cooldown_until") or e.resets_at,
+                            resets_in_seconds=cooldown_payload.get("resets_in_seconds") or e.resets_in_seconds,
+                            plan_type=e.plan_type,
+                            message=str(cooldown_payload.get("message") or str(e)),
+                        ) from e
+                except OpenAICodexError as e:
+                    duration_ms = (time.time() - start_time) * 1000
+                    if self._autonomous_logger_callback:
+                        full_prompt = self._prompt_for_logging(messages)
+                        await self._autonomous_logger_callback(
+                            task_id=task_id,
+                            role_id=role_id,
+                            model=codex_model,
+                            provider="openai_codex_oauth",
+                            prompt=full_prompt,
+                            response="",
+                            tokens_used=None,
+                            duration_ms=duration_ms,
+                            success=False,
+                            error=str(e),
+                            phase=self._current_autonomous_phase,
+                        )
+                    if role_config.lm_studio_fallback_id:
+                        async with self._state_lock:
+                            self._role_fallback_state[role_id] = "lm_studio"
+                        logger.warning(
+                            "OpenAI Codex failed for role '%s'; falling back to LM Studio model %s",
+                            role_id,
+                            role_config.lm_studio_fallback_id,
+                        )
+                        model = role_config.lm_studio_fallback_id
+                    else:
+                        await self._broadcast_unrecoverable_codex_error(
+                            role_id=role_id,
+                            model=codex_model,
+                            error=e,
+                        )
+                        raise RuntimeError(
+                            f"OpenAI Codex failed for role '{role_id}' and no LM Studio fallback is configured: {e}"
+                        ) from e
+                except Exception as e:
+                    duration_ms = (time.time() - start_time) * 1000
+                    if self._autonomous_logger_callback:
+                        full_prompt = self._prompt_for_logging(messages)
+                        await self._autonomous_logger_callback(
+                            task_id=task_id,
+                            role_id=role_id,
+                            model=codex_model,
+                            provider="openai_codex_oauth",
+                            prompt=full_prompt,
+                            response="",
+                            tokens_used=None,
+                            duration_ms=duration_ms,
+                            success=False,
+                            error=str(e),
+                            phase=self._current_autonomous_phase,
+                        )
+                    if role_config.lm_studio_fallback_id:
+                        async with self._state_lock:
+                            self._role_fallback_state[role_id] = "lm_studio"
+                        logger.warning(
+                            "OpenAI Codex error for role '%s': %s; falling back to LM Studio model %s",
+                            role_id,
+                            e,
+                            role_config.lm_studio_fallback_id,
+                        )
+                        model = role_config.lm_studio_fallback_id
+                    else:
+                        await self._broadcast_unrecoverable_codex_error(
+                            role_id=role_id,
+                            model=codex_model,
+                            error=e,
+                        )
+                        raise
 
         if fallback_state == "xai_grok_oauth" and role_config:
             xai_model = role_config.model_id
@@ -1595,7 +2657,7 @@ class APIClientManager:
                         temperature=temperature,
                         max_tokens=self._effective_max_tokens(max_tokens, role_config.max_output_tokens, role_id),
                         response_format=response_format,
-                        reasoning_effort=role_config.openrouter_reasoning_effort,
+                        reasoning_effort=role_reasoning_effort,
                         tools=tools,
                         tool_choice=tool_choice,
                     ),
@@ -1634,7 +2696,7 @@ class APIClientManager:
                     actual_provider="xai_grok_oauth",
                     boosted=False,
                     boost_mode=None,
-                    openrouter_reasoning_effort=role_config.openrouter_reasoning_effort,
+                    openrouter_reasoning_effort=role_reasoning_effort,
                 )
 
                 if self._autonomous_logger_callback:

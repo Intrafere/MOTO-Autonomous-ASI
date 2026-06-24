@@ -31,6 +31,10 @@ from backend.shared.token_tracker import token_tracker
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.context_overflow import (
+    CONTEXT_OVERFLOW_STOP_MESSAGE,
+    CONTEXT_OVERFLOW_STOP_REASON,
+)
 from backend.shared.provider_pause import (
     is_provider_credit_pause_error,
     mark_provider_paused,
@@ -116,6 +120,8 @@ class AutonomousCoordinator:
         self._stop_event = asyncio.Event()
         self._main_task: Optional[asyncio.Task] = None
         self._stop_broadcast_sent = False
+        self._fatal_stop_reason: Optional[str] = None
+        self._fatal_stop_message: str = ""
         
         # Configuration (set during initialize)
         self._user_research_prompt: str = ""
@@ -130,17 +136,17 @@ class AutonomousCoordinator:
         self._validator_supercharge_enabled: bool = False
         
         # Compiler models (separate from aggregator submitters)
-        self._high_context_model: str = ""
+        self._writer_model: str = ""
         self._high_param_model: str = ""
-        self._high_context_context: int = 0
+        self._writer_context: int = 0
         self._high_param_context: int = 0
-        self._high_context_max_tokens: int = 0
+        self._writer_max_tokens: int = 0
         self._high_param_max_tokens: int = 0
-        self._high_context_provider: str = "lm_studio"
-        self._high_context_openrouter_provider: Optional[str] = None
-        self._high_context_openrouter_reasoning_effort: str = "auto"
-        self._high_context_lm_studio_fallback: Optional[str] = None
-        self._high_context_supercharge_enabled: bool = False
+        self._writer_provider: str = "lm_studio"
+        self._writer_openrouter_provider: Optional[str] = None
+        self._writer_openrouter_reasoning_effort: str = "auto"
+        self._writer_lm_studio_fallback: Optional[str] = None
+        self._writer_supercharge_enabled: bool = False
         self._high_param_provider: str = "lm_studio"
         self._high_param_openrouter_provider: Optional[str] = None
         self._high_param_openrouter_reasoning_effort: str = "auto"
@@ -154,6 +160,14 @@ class AutonomousCoordinator:
         self._critique_submitter_openrouter_reasoning_effort: str = "auto"
         self._critique_submitter_lm_studio_fallback: Optional[str] = None
         self._critique_submitter_supercharge_enabled: bool = False
+        self._assistant_provider: str = "lm_studio"
+        self._assistant_model: str = ""
+        self._assistant_openrouter_provider: Optional[str] = None
+        self._assistant_openrouter_reasoning_effort: str = "auto"
+        self._assistant_lm_studio_fallback: Optional[str] = None
+        self._assistant_context: int = 0
+        self._assistant_max_tokens: int = 0
+        self._assistant_supercharge_enabled: bool = False
         
         # Agents (initialized during setup)
         self._topic_selector: Optional[TopicSelectorAgent] = None
@@ -233,6 +247,11 @@ class AutonomousCoordinator:
         if self._broadcast_callback:
             # broadcast_event expects (event_type, data) as separate arguments
             await self._broadcast_callback(event, data or {})
+
+    def _mark_context_overflow_stop(self) -> None:
+        """Remember that the next stopped event should explain the fatal overflow."""
+        self._fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
+        self._fatal_stop_message = CONTEXT_OVERFLOW_STOP_MESSAGE
 
     def _track_child_aggregator(self, aggregator: AggregatorCoordinator) -> None:
         """Track local child aggregators so parent phase changes can stop them."""
@@ -324,6 +343,10 @@ class AutonomousCoordinator:
         """Return whether this run may produce Lean/proof outputs."""
         return bool(self._allow_mathematical_proofs and system_config.lean4_enabled)
 
+    def _automatic_proof_max_rounds(self) -> int:
+        """Return automatic proof-round budget for the current output mode."""
+        return 4 if not self._allow_research_papers else 1
+
     async def _save_proofs_only_next_topic_state(self) -> None:
         """Persist a clean topic-selection boundary after a proofs-only cycle."""
         self._state.current_tier = "tier1_aggregation"
@@ -334,28 +357,31 @@ class AutonomousCoordinator:
         self._resume_paper_phase = None
         await self._save_workflow_state(tier="tier1_aggregation", phase="topic_exploration")
 
+    async def _handle_papers_disabled_after_brainstorm(self) -> None:
+        """Finish a proofs-only brainstorm handoff without entering paper compilation."""
+        await self._broadcast("research_papers_disabled_brainstorm_complete", {
+            "topic_id": self._current_topic_id,
+            "message": "Research paper output is disabled; returning to topic selection after brainstorm proof work."
+        })
+        self._brainstorm_paper_count = 0
+        self._current_brainstorm_paper_ids = []
+        self._last_completed_paper_id = None
+        self._current_reference_papers = []
+        self._current_reference_brainstorms = []
+        logger.info("Research paper output disabled; skipping Tier 2 paper compilation")
+        await self._save_proofs_only_next_topic_state()
+
     def _build_proof_runtime_config_snapshot(self) -> Dict[str, Any]:
         """Build the persisted runtime snapshot used by proof routes/manual checks."""
-        first_submitter = self._submitter_configs[0] if self._submitter_configs else None
-        brainstorm_config = ProofRoleConfigSnapshot(
-            provider=first_submitter.provider if first_submitter else "lm_studio",
-            model_id=first_submitter.model_id if first_submitter else self._high_context_model,
-            openrouter_provider=first_submitter.openrouter_provider if first_submitter else self._high_context_openrouter_provider,
-            openrouter_reasoning_effort=first_submitter.openrouter_reasoning_effort if first_submitter else self._high_context_openrouter_reasoning_effort,
-            lm_studio_fallback_id=first_submitter.lm_studio_fallback_id if first_submitter else self._high_context_lm_studio_fallback,
-            context_window=first_submitter.context_window if first_submitter else self._high_context_context,
-            max_output_tokens=first_submitter.max_output_tokens if first_submitter else self._high_context_max_tokens,
-            supercharge_enabled=first_submitter.supercharge_enabled if first_submitter else self._high_context_supercharge_enabled,
-        )
-        paper_config = ProofRoleConfigSnapshot(
-            provider=self._high_context_provider,
-            model_id=self._high_context_model,
-            openrouter_provider=self._high_context_openrouter_provider,
-            openrouter_reasoning_effort=self._high_context_openrouter_reasoning_effort,
-            lm_studio_fallback_id=self._high_context_lm_studio_fallback,
-            context_window=self._high_context_context,
-            max_output_tokens=self._high_context_max_tokens,
-            supercharge_enabled=self._high_context_supercharge_enabled,
+        rigor_config = ProofRoleConfigSnapshot(
+            provider=self._high_param_provider,
+            model_id=self._high_param_model,
+            openrouter_provider=self._high_param_openrouter_provider,
+            openrouter_reasoning_effort=self._high_param_openrouter_reasoning_effort,
+            lm_studio_fallback_id=self._high_param_lm_studio_fallback,
+            context_window=self._high_param_context,
+            max_output_tokens=self._high_param_max_tokens,
+            supercharge_enabled=self._high_param_supercharge_enabled,
         )
         validator_config = ProofRoleConfigSnapshot(
             provider=self._validator_provider,
@@ -367,10 +393,21 @@ class AutonomousCoordinator:
             max_output_tokens=self._validator_max_tokens,
             supercharge_enabled=self._validator_supercharge_enabled,
         )
+        assistant_config = ProofRoleConfigSnapshot(
+            provider=self._assistant_provider,
+            model_id=self._assistant_model or self._validator_model,
+            openrouter_provider=self._assistant_openrouter_provider,
+            openrouter_reasoning_effort=self._assistant_openrouter_reasoning_effort,
+            lm_studio_fallback_id=self._assistant_lm_studio_fallback,
+            context_window=self._assistant_context,
+            max_output_tokens=self._assistant_max_tokens,
+            supercharge_enabled=self._assistant_supercharge_enabled,
+        )
         return ProofRuntimeConfigSnapshot(
-            brainstorm=brainstorm_config,
-            paper=paper_config,
+            brainstorm=rigor_config,
+            paper=rigor_config,
             validator=validator_config,
+            assistant=assistant_config,
         ).model_dump(mode="json")
 
     async def _run_proof_framing_gate(self) -> None:
@@ -518,24 +555,20 @@ class AutonomousCoordinator:
         if not content or not source_id:
             return "complete"
 
-        if source_type == "brainstorm":
-            submitter_model = self._submitter_configs[0].model_id if self._submitter_configs else self._high_context_model
-            submitter_context = self._submitter_configs[0].context_window if self._submitter_configs else self._high_context_context
-            submitter_max_tokens = self._submitter_configs[0].max_output_tokens if self._submitter_configs else self._high_context_max_tokens
-        else:
-            submitter_model = self._high_context_model
-            submitter_context = self._high_context_context
-            submitter_max_tokens = self._high_context_max_tokens
+        submitter_model = self._high_param_model
+        submitter_context = self._high_param_context
+        submitter_max_tokens = self._high_param_max_tokens
 
         async def save_proof_checkpoint(checkpoint: Dict[str, Any]) -> None:
             await research_metadata.save_proof_checkpoint(checkpoint)
 
-        automatic_followup_rounds = (
+        automatic_checkpoint = (
             trigger == "automatic"
             and theorem_candidates is None
             and source_type in {"brainstorm", "paper"}
         )
-        proof_max_rounds = 4 if automatic_followup_rounds else 1
+        proof_max_rounds = self._automatic_proof_max_rounds() if automatic_checkpoint else 1
+        automatic_followup_rounds = automatic_checkpoint and proof_max_rounds > 1
         prior_round_summaries: List[str] = []
 
         def round_trigger_name(round_index: int) -> str:
@@ -925,9 +958,9 @@ class AutonomousCoordinator:
         validator_model: str,
         validator_context_window: int = 0,
         validator_max_tokens: int = 0,
-        high_context_model: str = "",
-        high_context_context_window: int = 0,
-        high_context_max_tokens: int = 0,
+        writer_model: str = "",
+        writer_context_window: int = 0,
+        writer_max_tokens: int = 0,
         high_param_model: str = "",
         high_param_context_window: int = 0,
         high_param_max_tokens: int = 0,
@@ -939,30 +972,39 @@ class AutonomousCoordinator:
         validator_openrouter_provider: Optional[str] = None,
         validator_openrouter_reasoning_effort: str = "auto",
         validator_lm_studio_fallback: Optional[str] = None,
-        # OpenRouter provider configs for high-context submitter
-        high_context_provider: str = "lm_studio",
-        high_context_openrouter_provider: Optional[str] = None,
-        high_context_openrouter_reasoning_effort: str = "auto",
-        high_context_lm_studio_fallback: Optional[str] = None,
-        # OpenRouter provider configs for high-param submitter
+        # OpenRouter provider configs for writing submitter
+        writer_provider: str = "lm_studio",
+        writer_openrouter_provider: Optional[str] = None,
+        writer_openrouter_reasoning_effort: str = "auto",
+        writer_lm_studio_fallback: Optional[str] = None,
+        # OpenRouter provider configs for Rigor & Proofs submitter
         high_param_provider: str = "lm_studio",
         high_param_openrouter_provider: Optional[str] = None,
         high_param_openrouter_reasoning_effort: str = "auto",
         high_param_lm_studio_fallback: Optional[str] = None,
-        # OpenRouter provider configs for critique submitter
+        # Deprecated critique compatibility fields mirror Rigor & Proofs
         critique_submitter_provider: str = "lm_studio",
         critique_submitter_openrouter_provider: Optional[str] = None,
         critique_submitter_openrouter_reasoning_effort: str = "auto",
         critique_submitter_lm_studio_fallback: Optional[str] = None,
+        # OpenRouter provider configs for Assistant proof retrieval/ranking
+        assistant_provider: str = "lm_studio",
+        assistant_model: str = "",
+        assistant_openrouter_provider: Optional[str] = None,
+        assistant_openrouter_reasoning_effort: str = "auto",
+        assistant_lm_studio_fallback: Optional[str] = None,
+        assistant_context_window: int = 0,
+        assistant_max_tokens: int = 0,
         # Tier 3 Final Answer setting
         tier3_enabled: bool = False,
         creativity_emphasis_boost_enabled: bool = False,
         allow_mathematical_proofs: bool = True,
         allow_research_papers: bool = True,
         validator_supercharge_enabled: bool = False,
-        high_context_supercharge_enabled: bool = False,
+        writer_supercharge_enabled: bool = False,
         high_param_supercharge_enabled: bool = False,
-        critique_submitter_supercharge_enabled: bool = False
+        critique_submitter_supercharge_enabled: bool = False,
+        assistant_supercharge_enabled: bool = False,
     ) -> None:
         """Initialize the coordinator with configuration."""
         # Use first submitter config for autonomous agents (topic selector, etc.)
@@ -974,9 +1016,9 @@ class AutonomousCoordinator:
         role_limits = {
             "brainstorm submitter": (first_submitter_context, first_submitter_max_tokens),
             "validator": (validator_context_window, validator_max_tokens),
-            "high-context submitter": (high_context_context_window, high_context_max_tokens),
-            "high-param submitter": (high_param_context_window, high_param_max_tokens),
-            "critique submitter": (critique_submitter_context_window, critique_submitter_max_tokens),
+            "Writing Submitter": (writer_context_window, writer_max_tokens),
+            "Rigor & Proofs submitter": (high_param_context_window, high_param_max_tokens),
+            "assistant": (assistant_context_window, assistant_max_tokens),
         }
         missing_limits = []
         invalid_limits = []
@@ -1008,42 +1050,59 @@ class AutonomousCoordinator:
         
         # Compiler settings (separate from aggregator submitters)
         # Fallback to first submitter model if compiler models not specified
-        self._high_context_model = high_context_model if high_context_model else first_submitter_model
+        self._writer_model = writer_model if writer_model else first_submitter_model
         self._high_param_model = high_param_model if high_param_model else first_submitter_model
-        self._high_context_context = high_context_context_window
+        self._writer_context = writer_context_window
         self._high_param_context = high_param_context_window
-        self._high_context_max_tokens = high_context_max_tokens
+        self._writer_max_tokens = writer_max_tokens
         self._high_param_max_tokens = high_param_max_tokens
-        # Critique submitter fallback: use high_context_model if not specified
-        self._critique_submitter_model = critique_submitter_model if critique_submitter_model else self._high_context_model
-        self._critique_submitter_context = critique_submitter_context_window
-        self._critique_submitter_max_tokens = critique_submitter_max_tokens
+        # Deprecated critique role fields are compatibility aliases. Critique
+        # generation now runs on the Rigor & Proofs submitter settings.
+        self._critique_submitter_model = self._high_param_model
+        self._critique_submitter_context = self._high_param_context
+        self._critique_submitter_max_tokens = self._high_param_max_tokens
         
         # Store OpenRouter provider configs for all roles
         self._validator_provider = validator_provider
         self._validator_openrouter_provider = validator_openrouter_provider
         self._validator_openrouter_reasoning_effort = validator_openrouter_reasoning_effort
         self._validator_lm_studio_fallback = validator_lm_studio_fallback
-        self._high_context_provider = high_context_provider
-        self._high_context_openrouter_provider = high_context_openrouter_provider
-        self._high_context_openrouter_reasoning_effort = high_context_openrouter_reasoning_effort
-        self._high_context_lm_studio_fallback = high_context_lm_studio_fallback
+        self._writer_provider = writer_provider
+        self._writer_openrouter_provider = writer_openrouter_provider
+        self._writer_openrouter_reasoning_effort = writer_openrouter_reasoning_effort
+        self._writer_lm_studio_fallback = writer_lm_studio_fallback
         self._high_param_provider = high_param_provider
         self._high_param_openrouter_provider = high_param_openrouter_provider
         self._high_param_openrouter_reasoning_effort = high_param_openrouter_reasoning_effort
         self._high_param_lm_studio_fallback = high_param_lm_studio_fallback
-        self._critique_submitter_provider = critique_submitter_provider
-        self._critique_submitter_openrouter_provider = critique_submitter_openrouter_provider
-        self._critique_submitter_openrouter_reasoning_effort = critique_submitter_openrouter_reasoning_effort
-        self._critique_submitter_lm_studio_fallback = critique_submitter_lm_studio_fallback
+        self._critique_submitter_provider = self._high_param_provider
+        self._critique_submitter_openrouter_provider = self._high_param_openrouter_provider
+        self._critique_submitter_openrouter_reasoning_effort = self._high_param_openrouter_reasoning_effort
+        self._critique_submitter_lm_studio_fallback = self._high_param_lm_studio_fallback
+        self._assistant_provider = assistant_provider or validator_provider
+        self._assistant_model = assistant_model or validator_model
+        self._assistant_openrouter_provider = (
+            assistant_openrouter_provider if assistant_model else validator_openrouter_provider
+        )
+        self._assistant_openrouter_reasoning_effort = (
+            assistant_openrouter_reasoning_effort if assistant_model else validator_openrouter_reasoning_effort
+        )
+        self._assistant_lm_studio_fallback = (
+            assistant_lm_studio_fallback if assistant_model else validator_lm_studio_fallback
+        )
+        self._assistant_context = assistant_context_window if assistant_model else validator_context_window
+        self._assistant_max_tokens = assistant_max_tokens if assistant_model else validator_max_tokens
+        self._assistant_supercharge_enabled = (
+            assistant_supercharge_enabled if assistant_model else validator_supercharge_enabled
+        )
         self._allow_mathematical_proofs = bool(allow_mathematical_proofs)
         self._allow_research_papers = bool(allow_research_papers)
         self._tier3_enabled = bool(tier3_enabled and self._allow_research_papers)
         self._creativity_emphasis_boost_enabled = creativity_emphasis_boost_enabled
         self._validator_supercharge_enabled = validator_supercharge_enabled
-        self._high_context_supercharge_enabled = high_context_supercharge_enabled
+        self._writer_supercharge_enabled = writer_supercharge_enabled
         self._high_param_supercharge_enabled = high_param_supercharge_enabled
-        self._critique_submitter_supercharge_enabled = critique_submitter_supercharge_enabled
+        self._critique_submitter_supercharge_enabled = self._high_param_supercharge_enabled
         
         logger.info(f"Autonomous coordinator initializing with {len(submitter_configs)} submitters")
         for config in submitter_configs:
@@ -1054,6 +1113,7 @@ class AutonomousCoordinator:
         # This takes precedence over legacy paths and new session creation
         interrupted_session = await session_manager.find_interrupted_session(system_config.auto_sessions_base_dir)
         
+        metadata_prompt = user_research_prompt
         if interrupted_session:
             session_id = interrupted_session["session_id"]
             logger.info(f"Found interrupted session: {session_id}")
@@ -1077,6 +1137,10 @@ class AutonomousCoordinator:
             # Override the user_research_prompt with the one from the interrupted session
             # This ensures we continue with the same research goal
             self._user_research_prompt = interrupted_session["user_prompt"]
+            # The session metadata is already the source of truth on resume.
+            # Loading without a prompt avoids overwriting proof-framed prompt state
+            # with a fresh Start request or base-only browser draft.
+            metadata_prompt = ""
         else:
             # PRIORITY 2: Check for existing legacy data 
             # If legacy data exists, use it instead of creating empty new session
@@ -1111,7 +1175,7 @@ class AutonomousCoordinator:
         # Initialize memory systems
         await brainstorm_memory.initialize()
         await paper_library.initialize()
-        await research_metadata.initialize(user_research_prompt)
+        await research_metadata.initialize(metadata_prompt)
         await proof_database.initialize()
         await autonomous_rejection_logs.initialize()
 
@@ -1162,7 +1226,9 @@ class AutonomousCoordinator:
             model_id=first_submitter_model,
             validator_model_id=validator_model,
             context_window=first_submitter_context,
-            max_output_tokens=first_submitter_max_tokens
+            max_output_tokens=first_submitter_max_tokens,
+            validator_context_window=validator_context_window,
+            validator_max_output_tokens=validator_max_tokens,
         )
         
         self._redundancy_checker = PaperRedundancyChecker(
@@ -1176,21 +1242,27 @@ class AutonomousCoordinator:
             submitter_model=first_submitter_model,
             validator_model=validator_model,
             context_window=first_submitter_context,
-            max_output_tokens=first_submitter_max_tokens
+            max_output_tokens=first_submitter_max_tokens,
+            validator_context_window=validator_context_window,
+            validator_max_output_tokens=validator_max_tokens,
         )
         
         self._format_selector = AnswerFormatSelector(
             submitter_model=first_submitter_model,
             validator_model=validator_model,
             context_window=first_submitter_context,
-            max_output_tokens=first_submitter_max_tokens
+            max_output_tokens=first_submitter_max_tokens,
+            validator_context_window=validator_context_window,
+            validator_max_output_tokens=validator_max_tokens,
         )
         
         self._volume_organizer = VolumeOrganizer(
             submitter_model=first_submitter_model,
             validator_model=validator_model,
             context_window=first_submitter_context,
-            max_output_tokens=first_submitter_max_tokens
+            max_output_tokens=first_submitter_max_tokens,
+            validator_context_window=validator_context_window,
+            validator_max_output_tokens=validator_max_tokens,
         )
         
         # Initialize Tier 3 memory
@@ -1306,33 +1378,51 @@ class AutonomousCoordinator:
             )
         )
 
+        autonomous_assistant_config = ModelConfig(
+            provider=self._assistant_provider,
+            model_id=self._assistant_model,
+            openrouter_model_id=self._assistant_model if self._assistant_provider == "openrouter" else None,
+            openrouter_provider=self._assistant_openrouter_provider,
+            openrouter_reasoning_effort=self._assistant_openrouter_reasoning_effort,
+            lm_studio_fallback_id=self._assistant_lm_studio_fallback,
+            context_window=self._assistant_context,
+            max_output_tokens=self._assistant_max_tokens,
+            supercharge_enabled=self._assistant_supercharge_enabled,
+        )
+        api_client_manager.configure_role("autonomous_assistant", autonomous_assistant_config)
+        # Autonomous topic/title/Tier 1 brainstorm phases use child Aggregator
+        # submitters, and Tier 2 paper writing uses a child Compiler. Alias
+        # both Assistant roles to the run-level Assistant model.
+        api_client_manager.configure_role("aggregator_assistant", autonomous_assistant_config)
+        api_client_manager.configure_role("compiler_assistant", autonomous_assistant_config)
+
         api_client_manager.configure_role(
             "autonomous_proof_identification_brainstorm",
             ModelConfig(
-                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
-                model_id=first_submitter_model,
-                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
-                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
-                openrouter_reasoning_effort=first_reasoning_effort,
-                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
-                context_window=first_submitter_context,
-                max_output_tokens=first_submitter_max_tokens,
-                supercharge_enabled=first_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_lemma_search_brainstorm",
             ModelConfig(
-                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
-                model_id=first_submitter_model,
-                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
-                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
-                openrouter_reasoning_effort=first_reasoning_effort,
-                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
-                context_window=first_submitter_context,
-                max_output_tokens=first_submitter_max_tokens,
-                supercharge_enabled=first_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
@@ -1354,60 +1444,60 @@ class AutonomousCoordinator:
         api_client_manager.configure_role(
             "autonomous_proof_formalization_brainstorm",
             ModelConfig(
-                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
-                model_id=first_submitter_model,
-                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
-                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
-                openrouter_reasoning_effort=first_reasoning_effort,
-                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
-                context_window=first_submitter_context,
-                max_output_tokens=first_submitter_max_tokens,
-                supercharge_enabled=first_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_identification_paper",
             ModelConfig(
-                provider=high_context_provider,
-                model_id=self._high_context_model,
-                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
-                openrouter_provider=high_context_openrouter_provider,
-                openrouter_reasoning_effort=high_context_openrouter_reasoning_effort,
-                lm_studio_fallback_id=high_context_lm_studio_fallback,
-                context_window=self._high_context_context,
-                max_output_tokens=self._high_context_max_tokens,
-                supercharge_enabled=high_context_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_lemma_search_paper",
             ModelConfig(
-                provider=high_context_provider,
-                model_id=self._high_context_model,
-                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
-                openrouter_provider=high_context_openrouter_provider,
-                openrouter_reasoning_effort=high_context_openrouter_reasoning_effort,
-                lm_studio_fallback_id=high_context_lm_studio_fallback,
-                context_window=self._high_context_context,
-                max_output_tokens=self._high_context_max_tokens,
-                supercharge_enabled=high_context_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_formalization_paper",
             ModelConfig(
-                provider=high_context_provider,
-                model_id=self._high_context_model,
-                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
-                openrouter_provider=high_context_openrouter_provider,
-                openrouter_reasoning_effort=high_context_openrouter_reasoning_effort,
-                lm_studio_fallback_id=high_context_lm_studio_fallback,
-                context_window=self._high_context_context,
-                max_output_tokens=self._high_context_max_tokens,
-                supercharge_enabled=high_context_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
@@ -1429,90 +1519,90 @@ class AutonomousCoordinator:
         api_client_manager.configure_role(
             "autonomous_proof_identification_manual_brainstorm",
             ModelConfig(
-                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
-                model_id=first_submitter_model,
-                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
-                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
-                openrouter_reasoning_effort=first_reasoning_effort,
-                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
-                context_window=first_submitter_context,
-                max_output_tokens=first_submitter_max_tokens,
-                supercharge_enabled=first_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_lemma_search_manual_brainstorm",
             ModelConfig(
-                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
-                model_id=first_submitter_model,
-                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
-                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
-                openrouter_reasoning_effort=first_reasoning_effort,
-                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
-                context_window=first_submitter_context,
-                max_output_tokens=first_submitter_max_tokens,
-                supercharge_enabled=first_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_formalization_manual_brainstorm",
             ModelConfig(
-                provider=first_config.provider if hasattr(first_config, 'provider') else "lm_studio",
-                model_id=first_submitter_model,
-                openrouter_model_id=first_config.openrouter_model_id if hasattr(first_config, 'openrouter_model_id') else None,
-                openrouter_provider=first_config.openrouter_provider if hasattr(first_config, 'openrouter_provider') else None,
-                openrouter_reasoning_effort=first_reasoning_effort,
-                lm_studio_fallback_id=first_config.lm_studio_fallback_id if hasattr(first_config, 'lm_studio_fallback_id') else None,
-                context_window=first_submitter_context,
-                max_output_tokens=first_submitter_max_tokens,
-                supercharge_enabled=first_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_identification_manual_paper",
             ModelConfig(
-                provider=high_context_provider,
-                model_id=self._high_context_model,
-                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
-                openrouter_provider=high_context_openrouter_provider,
-                openrouter_reasoning_effort=high_context_openrouter_reasoning_effort,
-                lm_studio_fallback_id=high_context_lm_studio_fallback,
-                context_window=self._high_context_context,
-                max_output_tokens=self._high_context_max_tokens,
-                supercharge_enabled=high_context_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_lemma_search_manual_paper",
             ModelConfig(
-                provider=high_context_provider,
-                model_id=self._high_context_model,
-                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
-                openrouter_provider=high_context_openrouter_provider,
-                openrouter_reasoning_effort=high_context_openrouter_reasoning_effort,
-                lm_studio_fallback_id=high_context_lm_studio_fallback,
-                context_window=self._high_context_context,
-                max_output_tokens=self._high_context_max_tokens,
-                supercharge_enabled=high_context_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
         api_client_manager.configure_role(
             "autonomous_proof_formalization_manual_paper",
             ModelConfig(
-                provider=high_context_provider,
-                model_id=self._high_context_model,
-                openrouter_model_id=self._high_context_model if high_context_provider == "openrouter" else None,
-                openrouter_provider=high_context_openrouter_provider,
-                openrouter_reasoning_effort=high_context_openrouter_reasoning_effort,
-                lm_studio_fallback_id=high_context_lm_studio_fallback,
-                context_window=self._high_context_context,
-                max_output_tokens=self._high_context_max_tokens,
-                supercharge_enabled=high_context_supercharge_enabled
+                provider=high_param_provider,
+                model_id=self._high_param_model,
+                openrouter_model_id=self._high_param_model if high_param_provider == "openrouter" else None,
+                openrouter_provider=high_param_openrouter_provider,
+                openrouter_reasoning_effort=high_param_openrouter_reasoning_effort,
+                lm_studio_fallback_id=high_param_lm_studio_fallback,
+                context_window=self._high_param_context,
+                max_output_tokens=self._high_param_max_tokens,
+                supercharge_enabled=high_param_supercharge_enabled
             )
         )
 
@@ -1658,7 +1748,10 @@ class AutonomousCoordinator:
             self._proof_framing_reasoning = workflow_state.get("proof_framing_reasoning", "")
             self._base_user_research_prompt = await research_metadata.get_base_user_prompt()
             if not self._base_user_research_prompt:
-                self._base_user_research_prompt = self._user_research_prompt
+                self._base_user_research_prompt = (
+                    workflow_state.get("base_user_research_prompt")
+                    or self._user_research_prompt
+                )
             self._user_research_prompt = self._append_proof_framing(self._base_user_research_prompt)
             
             # Restore Tier 3 flags for proper resume
@@ -2213,6 +2306,7 @@ class AutonomousCoordinator:
             "current_paper_id": self._current_paper_id,
             "current_paper_title": self._current_paper_title,
             "paper_phase": phase_to_store,
+            "base_user_research_prompt": self._base_user_research_prompt or self._user_research_prompt,
             "reference_paper_ids": self._current_reference_papers,  # Persist reference papers across restarts
             "reference_brainstorm_ids": self._current_reference_brainstorms,
             "acceptance_count": self._acceptance_count,
@@ -2240,11 +2334,11 @@ class AutonomousCoordinator:
                 "validator_model": self._validator_model,
                 "validator_context_window": self._validator_context,
                 "validator_max_tokens": self._validator_max_tokens,
-                "high_context_model": self._high_context_model,
+                "writer_model": self._writer_model,
                 "high_param_model": self._high_param_model,
-                "high_context_context_window": self._high_context_context,
+                "writer_context_window": self._writer_context,
                 "high_param_context_window": self._high_param_context,
-                "high_context_max_tokens": self._high_context_max_tokens,
+                "writer_max_tokens": self._writer_max_tokens,
                 "high_param_max_tokens": self._high_param_max_tokens
             }
         }
@@ -2293,9 +2387,13 @@ class AutonomousCoordinator:
 
         self._stop_broadcast_sent = True
         stats = await research_metadata.get_stats()
-        await self._broadcast("auto_research_stopped", {
+        payload = {
             "final_stats": stats
-        })
+        }
+        if self._fatal_stop_reason:
+            payload["reason"] = self._fatal_stop_reason
+            payload["message"] = self._fatal_stop_message or CONTEXT_OVERFLOW_STOP_MESSAGE
+        await self._broadcast("auto_research_stopped", payload)
 
     async def start(self) -> None:
         """Start the autonomous research loop."""
@@ -2307,6 +2405,8 @@ class AutonomousCoordinator:
         self._stop_event.clear()
         self._state.is_running = True
         self._stop_broadcast_sent = False
+        self._fatal_stop_reason = None
+        self._fatal_stop_message = ""
         
         # Reset free model manager state for fresh start
         free_model_manager.reset()
@@ -2396,12 +2496,25 @@ class AutonomousCoordinator:
                         if self._stop_event.is_set():
                             break
 
+                        if not candidate_questions.strip():
+                            logger.warning("Topic exploration produced no validated candidates; restarting exploration")
+                            continue
+
                         topic_result = await self._topic_selection_loop(candidate_questions)
 
                         if self._stop_event.is_set():
                             break
 
-                        self._current_reference_papers = await self._pre_brainstorm_reference_selection()
+                        if not topic_result:
+                            logger.warning("Topic selection ended without selecting a topic; restarting topic exploration")
+                            continue
+
+                        self._current_reference_papers = []
+                        self._current_reference_brainstorms = []
+                        if self._allow_research_papers:
+                            self._current_reference_papers = await self._pre_brainstorm_reference_selection()
+                        else:
+                            self._current_reference_brainstorms = await self._pre_brainstorm_reference_brainstorm_selection()
 
                         if self._stop_event.is_set():
                             break
@@ -2414,6 +2527,10 @@ class AutonomousCoordinator:
                             break
 
                         if write_paper:
+                            if not self._allow_research_papers:
+                                await self._handle_papers_disabled_after_brainstorm()
+                                continue
+
                             while not self._stop_event.is_set():
                                 if await self._paper_compilation_workflow():
                                     break
@@ -2568,7 +2685,7 @@ class AutonomousCoordinator:
 
                         if not self._allow_research_papers:
                             logger.info("Research paper output disabled; skipping resumed Tier 2 paper compilation")
-                            await self._save_proofs_only_next_topic_state()
+                            await self._handle_papers_disabled_after_brainstorm()
                             continue
 
                         # A resumed brainstorm MUST produce a paper - retry until success or stop
@@ -2696,6 +2813,10 @@ class AutonomousCoordinator:
                             break
                         
                         if write_paper:
+                            if not self._allow_research_papers:
+                                await self._handle_papers_disabled_after_brainstorm()
+                                continue
+
                             # A completed brainstorm MUST produce a paper - retry until success or stop
                             _resume_paper_attempt = 0
                             while not self._stop_event.is_set():
@@ -2845,12 +2966,20 @@ class AutonomousCoordinator:
                 
                 if self._stop_event.is_set():
                     break
+
+                if not candidate_questions.strip():
+                    logger.warning("Topic exploration produced no validated candidates; restarting exploration")
+                    continue
                 
                 # Phase 1: Topic selection (informed by exploration candidates)
                 topic_result = await self._topic_selection_loop(candidate_questions)
                 
                 if self._stop_event.is_set():
                     break
+
+                if not topic_result:
+                    logger.warning("Topic selection ended without selecting a topic; restarting topic exploration")
+                    continue
                 
                 # Phase 1.5: Pre-brainstorm reference selection.
                 # Paper-enabled runs keep today's paper-reference behavior; proof-only
@@ -2881,17 +3010,7 @@ class AutonomousCoordinator:
                     continue
 
                 if not self._allow_research_papers:
-                    await self._broadcast("research_papers_disabled_brainstorm_complete", {
-                        "topic_id": self._current_topic_id,
-                        "message": "Research paper output is disabled; returning to topic selection after brainstorm proof work."
-                    })
-                    self._brainstorm_paper_count = 0
-                    self._current_brainstorm_paper_ids = []
-                    self._last_completed_paper_id = None
-                    self._current_reference_papers = []
-                    self._current_reference_brainstorms = []
-                    logger.info("Research paper output disabled; skipping Tier 2 paper compilation")
-                    await self._save_proofs_only_next_topic_state()
+                    await self._handle_papers_disabled_after_brainstorm()
                     continue
                 
                 # Phase 3: Paper compilation
@@ -3364,12 +3483,20 @@ class AutonomousCoordinator:
                 
                 if self._stop_event.is_set():
                     break
+
+                if not candidate_questions.strip():
+                    logger.warning("Topic exploration produced no validated candidates; restarting exploration")
+                    continue
                 
                 # Phase 1: Topic selection (informed by exploration candidates)
-                await self._topic_selection_loop(candidate_questions)
+                topic_result = await self._topic_selection_loop(candidate_questions)
                 
                 if self._stop_event.is_set():
                     break
+
+                if not topic_result:
+                    logger.warning("Topic selection ended without selecting a topic; restarting topic exploration")
+                    continue
                 
                 # Phase 1.5: Pre-brainstorm reference selection.
                 self._current_reference_papers = []
@@ -3398,17 +3525,7 @@ class AutonomousCoordinator:
                     continue
 
                 if not self._allow_research_papers:
-                    await self._broadcast("research_papers_disabled_brainstorm_complete", {
-                        "topic_id": self._current_topic_id,
-                        "message": "Research paper output is disabled; returning to topic selection after brainstorm proof work."
-                    })
-                    self._brainstorm_paper_count = 0
-                    self._current_brainstorm_paper_ids = []
-                    self._last_completed_paper_id = None
-                    self._current_reference_papers = []
-                    self._current_reference_brainstorms = []
-                    logger.info("Research paper output disabled; skipping Tier 2 paper compilation")
-                    await self._save_proofs_only_next_topic_state()
+                    await self._handle_papers_disabled_after_brainstorm()
                     continue
                 
                 # Phase 3: Paper compilation
@@ -3538,10 +3655,7 @@ class AutonomousCoordinator:
             shared_training_memory.last_ragged_submission_count = 0
             logger.info("Cleared shared_training_memory in-memory data (will reload from file when needed)")
             
-            stats = await research_metadata.get_stats()
-            await self._broadcast("auto_research_stopped", {
-                "final_stats": stats
-            })
+            await self._broadcast_stopped_once()
             logger.info("Resumed research loop completed")
     
     def get_state(self) -> AutonomousResearchState:
@@ -3592,7 +3706,6 @@ class AutonomousCoordinator:
         await self._enter_topic_exploration_boundary()
         
         TARGET_CANDIDATES = 5
-        MAX_CONSECUTIVE_REJECTIONS = 15
         
         await self._broadcast("topic_exploration_started", {
             "target": TARGET_CANDIDATES,
@@ -3629,6 +3742,7 @@ class AutonomousCoordinator:
         await shared_training_memory.reload_insights_from_current_path()
         
         exploration_aggregator = None
+        exploration_completed = False
         
         try:
             exploration_aggregator = AggregatorCoordinator()
@@ -3653,6 +3767,7 @@ class AutonomousCoordinator:
                 local_rejection_log_dir=str(brainstorm_memory._base_dir),
                 local_rejection_log_template="topic_exploration_submitter_{submitter_id}_rejections.txt",
                 reset_local_rejection_logs_on_start=True,
+                assistant_workflow_mode_override="autonomous",
             )
             
             # Set WebSocket broadcaster so aggregator events flow through
@@ -3665,16 +3780,25 @@ class AutonomousCoordinator:
             
             last_acceptances = 0
             last_rejections = 0
-            consecutive_rejections = 0
             
             while self._running and not self._stop_event.is_set():
                 status = await exploration_aggregator.get_status()
+                if getattr(exploration_aggregator, "fatal_error_type", None) == "context_overflow":
+                    logger.error(
+                        "Topic exploration stopped for context overflow: %s",
+                        getattr(exploration_aggregator, "fatal_error_message", ""),
+                    )
+                    self._mark_context_overflow_stop()
+                    self._stop_event.set()
+                    return ""
+                if not status.is_running:
+                    logger.warning("Topic exploration aggregator stopped unexpectedly")
+                    return ""
                 current_acceptances = status.total_acceptances
                 current_rejections = status.total_rejections
                 
                 # Track new acceptances
                 if current_acceptances > last_acceptances:
-                    consecutive_rejections = 0
                     last_acceptances = current_acceptances
                     
                     await self._broadcast("topic_exploration_progress", {
@@ -3694,20 +3818,23 @@ class AutonomousCoordinator:
                         logger.info(f"TopicExploration: Target of {TARGET_CANDIDATES} candidates reached")
                         break
                 
-                # Track consecutive rejections for safety valve
+                # Track rejections for progress totals. Rejections do not end
+                # exploration; this phase runs until enough candidates are accepted.
                 if current_rejections > last_rejections:
-                    new_rejections = current_rejections - last_rejections
-                    consecutive_rejections += new_rejections
                     last_rejections = current_rejections
-                    
-                    if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
-                        logger.warning(f"TopicExploration: {consecutive_rejections} consecutive rejections - proceeding with {current_acceptances} candidates")
-                        break
                 
                 await asyncio.sleep(2)
             
             # Stop the exploration aggregator
             await exploration_aggregator.stop()
+
+            if last_acceptances < TARGET_CANDIDATES:
+                logger.warning(
+                    "Topic exploration ended before target: %s/%s candidates accepted",
+                    last_acceptances,
+                    TARGET_CANDIDATES,
+                )
+                return ""
             
             # Read accepted candidates from the exploration database
             candidates_text = ""
@@ -3728,12 +3855,19 @@ class AutonomousCoordinator:
                         lines.append("-" * 40)
                     candidates_text = "\n".join(lines)
             
+            if not candidates_text.strip():
+                logger.warning(
+                    "Topic exploration reached target count but no candidate text was available; restarting exploration"
+                )
+                return ""
+
             await self._broadcast("topic_exploration_complete", {
                 "accepted_count": last_acceptances,
                 "total_attempts": last_acceptances + last_rejections
             })
             
             logger.info(f"Topic exploration complete: {last_acceptances} candidates accepted")
+            exploration_completed = True
             
             return candidates_text
             
@@ -3767,8 +3901,9 @@ class AutonomousCoordinator:
                 shared_training_memory.last_ragged_submission_count = 0
             logger.info("Exploration: Restored shared_training_memory state")
             
-            # Clean up exploration database file
-            if exploration_db_path.exists():
+            # Clean up only after the target is reached; interrupted/failed runs
+            # must not masquerade as completed candidate exploration.
+            if exploration_completed and exploration_db_path.exists():
                 try:
                     exploration_db_path.unlink()
                 except OSError as cleanup_exc:
@@ -3834,9 +3969,8 @@ class AutonomousCoordinator:
             else:
                 await self._topic_selector.handle_rejection(submission, validation.reasoning)
                 await research_metadata.increment_stat("topic_selection_rejections")
-                
                 await self._broadcast("topic_selection_rejected", {
-                    "reasoning": validation.reasoning
+                    "reasoning": validation.reasoning,
                 })
                 
                 logger.info(f"Topic selection rejected: {validation.reasoning[:100]}...")
@@ -3890,7 +4024,7 @@ class AutonomousCoordinator:
                     )
                     await self._broadcast("topic_selection_rejected", {
                         "reasoning": f"Cannot continue brainstorm {topic_id} — it is already marked complete. "
-                                     f"Select a new topic or continue an incomplete brainstorm."
+                                     f"Select a new topic or continue an incomplete brainstorm.",
                     })
                     return None
                 
@@ -4074,9 +4208,9 @@ class AutonomousCoordinator:
         
         This is the crucial mechanism that enables compounding knowledge across research cycles.
         By selecting reference papers before brainstorming, submitters can:
-        - Build upon proven mathematical frameworks from prior papers
+        - Build upon promising mathematical frameworks from prior AI-generated papers while independently re-checking their claims
         - Avoid re-exploring territory already covered in depth
-        - Identify novel connections between new topics and established results
+        - Identify novel connections between new topics and previously explored results
         - Accelerate convergence on valuable insights by standing on prior work
         
         Returns:
@@ -4148,8 +4282,8 @@ class AutonomousCoordinator:
         topic_prompt = metadata.topic_prompt if metadata else ""
         max_input_tokens = max(
             1000,
-            int((self._submitter_configs[0].context_window if self._submitter_configs else self._high_context_context) or 0)
-            - int((self._submitter_configs[0].max_output_tokens if self._submitter_configs else self._high_context_max_tokens) or 0)
+            int((self._submitter_configs[0].context_window if self._submitter_configs else self._writer_context) or 0)
+            - int((self._submitter_configs[0].max_output_tokens if self._submitter_configs else self._writer_max_tokens) or 0)
             - 1000,
         )
 
@@ -4178,6 +4312,12 @@ class AutonomousCoordinator:
         while count_tokens(prompt) > max_input_tokens and len(prompt_candidates) > 1:
             prompt_candidates = prompt_candidates[: max(1, len(prompt_candidates) // 2)]
             prompt = build_prompt(prompt_candidates)
+        reference_task_id = self._reference_selector.get_current_task_id() if self._reference_selector else "agg_sub1_000"
+        await api_client_manager.prewarm_assistant_memory_context(
+            task_id=reference_task_id,
+            role_id="autonomous_reference_selector",
+            prompt=prompt,
+        )
         if count_tokens(prompt) > max_input_tokens:
             await self._broadcast("brainstorm_reference_selection_failed", {
                 "topic_id": self._current_topic_id,
@@ -4199,9 +4339,9 @@ class AutonomousCoordinator:
                 response = await api_client_manager.generate_completion(
                     task_id=self._reference_selector.get_current_task_id() if self._reference_selector else "agg_sub1_000",
                     role_id="autonomous_reference_selector",
-                    model=self._submitter_configs[0].model_id if self._submitter_configs else self._high_context_model,
+                    model=self._submitter_configs[0].model_id if self._submitter_configs else self._writer_model,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=self._submitter_configs[0].max_output_tokens if self._submitter_configs else self._high_context_max_tokens,
+                    max_tokens=self._submitter_configs[0].max_output_tokens if self._submitter_configs else self._writer_max_tokens,
                     temperature=0.0,
                 )
                 if self._reference_selector:
@@ -4439,6 +4579,7 @@ class AutonomousCoordinator:
                     f"brainstorm_{brainstorm_memory._safe_topic_id(self._current_topic_id)}"
                     "_submitter_{submitter_id}_rejections.txt"
                 ),
+                assistant_workflow_mode_override="autonomous",
             )
             
             # CRITICAL FIX: Re-ingest existing submissions into RAG after resume
@@ -4541,11 +4682,49 @@ class AutonomousCoordinator:
                     await self._brainstorm_aggregator.stop()
                     return False
 
+                async def handle_manual_override() -> bool:
+                    logger.info("Manual override detected - transitioning to paper writing")
+                    self._manual_paper_writing_triggered = False
+                    await self._brainstorm_aggregator.stop()
+                    proof_status = await self._run_brainstorm_completion_proofs()
+                    return proof_status == "complete"
+
                 # Get current aggregator stats
                 status = await self._brainstorm_aggregator.get_status()
+                if getattr(self._brainstorm_aggregator, "fatal_error_type", None) == "context_overflow":
+                    logger.error(
+                        "Brainstorm aggregation stopped for context overflow: %s",
+                        getattr(self._brainstorm_aggregator, "fatal_error_message", ""),
+                    )
+                    self._mark_context_overflow_stop()
+                    self._stop_event.set()
+                    return False
                 current_acceptances = status.total_acceptances
                 current_rejections = status.total_rejections
                 current_cleanup_removals = status.removals_executed  # Track actual cleanup/pruning removals
+
+                if not status.is_running:
+                    if self._manual_paper_writing_triggered:
+                        return await handle_manual_override()
+
+                    total_acceptances = resume_acceptance_base + current_acceptances
+                    cap_reached = bool(
+                        getattr(self._brainstorm_aggregator, "_acceptance_cap_reached", False)
+                        or self._brainstorm_hard_limit_triggered
+                        or (
+                            getattr(self._brainstorm_aggregator, "max_total_acceptances", None) is not None
+                            and total_acceptances >= getattr(self._brainstorm_aggregator, "max_total_acceptances")
+                        )
+                    )
+                    if cap_reached:
+                        self._acceptance_count = max(self._acceptance_count, total_acceptances)
+                        if not self._brainstorm_hard_limit_triggered:
+                            await self._trigger_brainstorm_hard_limit(self._acceptance_count)
+                        proof_status = await self._run_brainstorm_completion_proofs()
+                        return proof_status == "complete"
+
+                    logger.warning("Brainstorm aggregator stopped unexpectedly")
+                    return False
                 
                 # Track cleanup removals for status display
                 if current_cleanup_removals != self._cleanup_removals:
@@ -4612,11 +4791,7 @@ class AutonomousCoordinator:
                 
                 # Check for manual override trigger (before checking stop event)
                 if self._manual_paper_writing_triggered:
-                    logger.info("Manual override detected - transitioning to paper writing")
-                    self._manual_paper_writing_triggered = False
-                    await self._brainstorm_aggregator.stop()
-                    proof_status = await self._run_brainstorm_completion_proofs()
-                    return proof_status == "complete"
+                    return await handle_manual_override()
                 
                 # Track consecutive rejections and increment total rejections stat
                 if current_rejections > last_rejections:
@@ -5144,6 +5319,10 @@ class AutonomousCoordinator:
             
             if self._stop_event.is_set():
                 return False
+
+            if not candidate_titles.strip():
+                logger.warning("Paper title exploration produced no validated candidates; retrying title exploration")
+                return False
             
             # Step 3: Final title selection (informed by candidate titles)
             paper_title = await self._paper_title_selection(
@@ -5377,7 +5556,6 @@ class AutonomousCoordinator:
         )
         
         TARGET_CANDIDATES = 5
-        MAX_CONSECUTIVE_REJECTIONS = 15
         
         # Build the exploration user prompt for the aggregator
         from backend.autonomous.prompts.paper_title_exploration_prompts import build_title_exploration_user_prompt
@@ -5424,6 +5602,7 @@ class AutonomousCoordinator:
         )
         
         exploration_aggregator = None
+        exploration_completed = False
         
         try:
             # Short-circuit: if we already have enough candidates from a prior run,
@@ -5461,6 +5640,7 @@ class AutonomousCoordinator:
                         "_submitter_{submitter_id}_rejections.txt"
                     ),
                     reset_local_rejection_logs_on_start=True,
+                    assistant_workflow_mode_override="autonomous",
                 )
                 
                 if self._broadcast_callback:
@@ -5475,16 +5655,25 @@ class AutonomousCoordinator:
                 last_aggregator_acceptances = 0
                 last_acceptances = resumed_count
                 last_rejections = 0
-                consecutive_rejections = 0
                 
                 while self._running and not self._stop_event.is_set():
                     status = await exploration_aggregator.get_status()
+                    if getattr(exploration_aggregator, "fatal_error_type", None) == "context_overflow":
+                        logger.error(
+                            "Paper title exploration stopped for context overflow: %s",
+                            getattr(exploration_aggregator, "fatal_error_message", ""),
+                        )
+                        self._mark_context_overflow_stop()
+                        self._stop_event.set()
+                        return ""
+                    if not status.is_running:
+                        logger.warning("Paper title exploration aggregator stopped unexpectedly")
+                        return ""
                     current_aggregator_acceptances = status.total_acceptances
                     current_acceptances = resumed_count + current_aggregator_acceptances
                     current_rejections = status.total_rejections
                     
                     if current_aggregator_acceptances > last_aggregator_acceptances:
-                        consecutive_rejections = 0
                         last_aggregator_acceptances = current_aggregator_acceptances
                         last_acceptances = current_acceptances
                         
@@ -5506,17 +5695,19 @@ class AutonomousCoordinator:
                             break
                     
                     if current_rejections > last_rejections:
-                        new_rejections = current_rejections - last_rejections
-                        consecutive_rejections += new_rejections
                         last_rejections = current_rejections
-                        
-                        if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
-                            logger.warning(f"TitleExploration: {consecutive_rejections} consecutive rejections - proceeding with {current_acceptances} candidates")
-                            break
                     
                     await asyncio.sleep(2)
                 
                 await exploration_aggregator.stop()
+
+                if last_acceptances < TARGET_CANDIDATES:
+                    logger.warning(
+                        "Paper title exploration ended before target: %s/%s candidates accepted",
+                        last_acceptances,
+                        TARGET_CANDIDATES,
+                    )
+                    return ""
             
             # Read accepted candidates from the title candidates database
             candidates_text = ""
@@ -5536,12 +5727,19 @@ class AutonomousCoordinator:
                         lines.append("-" * 40)
                     candidates_text = "\n".join(lines)
             
+            if not candidates_text.strip():
+                logger.warning(
+                    "Paper title exploration reached target count but no candidate text was available; retrying title exploration"
+                )
+                return ""
+
             await self._broadcast("paper_title_exploration_complete", {
                 "accepted_count": last_acceptances,
                 "total_attempts": last_acceptances + last_rejections
             })
             
             logger.info(f"Paper title exploration complete: {last_acceptances} candidates accepted")
+            exploration_completed = True
             
             return candidates_text
             
@@ -5572,7 +5770,7 @@ class AutonomousCoordinator:
                 shared_training_memory.last_ragged_submission_count = 0
             logger.info("TitleExploration: Restored shared_training_memory state")
             
-            if title_db_path.exists():
+            if exploration_completed and title_db_path.exists():
                 try:
                     title_db_path.unlink()
                 except OSError as cleanup_exc:
@@ -5609,8 +5807,8 @@ class AutonomousCoordinator:
         # route sets these, so autonomous mode must do it explicitly.
         system_config.compiler_validator_context_window = self._validator_context
         system_config.compiler_validator_max_output_tokens = self._validator_max_tokens
-        system_config.compiler_high_context_context_window = self._high_context_context
-        system_config.compiler_high_context_max_output_tokens = self._high_context_max_tokens
+        system_config.compiler_writer_context_window = self._writer_context
+        system_config.compiler_writer_max_output_tokens = self._writer_max_tokens
         system_config.compiler_high_param_context_window = self._high_param_context
         system_config.compiler_high_param_max_output_tokens = self._high_param_max_tokens
         system_config.compiler_critique_submitter_context_window = self._critique_submitter_context
@@ -5633,7 +5831,7 @@ class AutonomousCoordinator:
             await self._paper_compiler.initialize(
                 compiler_prompt=self._get_effective_compiler_prompt(paper_title),
                 validator_model=self._validator_model,
-                high_context_model=self._high_context_model,
+                writer_model=self._writer_model,
                 high_param_model=self._high_param_model,
                 critique_submitter_model=self._critique_submitter_model,
                 skip_aggregator_db=True,  # Don't load Part 1 aggregator - use brainstorm DB only
@@ -5642,10 +5840,10 @@ class AutonomousCoordinator:
                 validator_openrouter_provider=self._validator_openrouter_provider,
                 validator_openrouter_reasoning_effort=self._validator_openrouter_reasoning_effort,
                 validator_lm_studio_fallback=self._validator_lm_studio_fallback,
-                high_context_provider=self._high_context_provider,
-                high_context_openrouter_provider=self._high_context_openrouter_provider,
-                high_context_openrouter_reasoning_effort=self._high_context_openrouter_reasoning_effort,
-                high_context_lm_studio_fallback=self._high_context_lm_studio_fallback,
+                writer_provider=self._writer_provider,
+                writer_openrouter_provider=self._writer_openrouter_provider,
+                writer_openrouter_reasoning_effort=self._writer_openrouter_reasoning_effort,
+                writer_lm_studio_fallback=self._writer_lm_studio_fallback,
                 high_param_provider=self._high_param_provider,
                 high_param_openrouter_provider=self._high_param_openrouter_provider,
                 high_param_openrouter_reasoning_effort=self._high_param_openrouter_reasoning_effort,
@@ -5655,7 +5853,7 @@ class AutonomousCoordinator:
                 critique_submitter_openrouter_reasoning_effort=self._critique_submitter_openrouter_reasoning_effort,
                 critique_submitter_lm_studio_fallback=self._critique_submitter_lm_studio_fallback,
                 validator_supercharge_enabled=self._validator_supercharge_enabled,
-                high_context_supercharge_enabled=self._high_context_supercharge_enabled,
+                writer_supercharge_enabled=self._writer_supercharge_enabled,
                 high_param_supercharge_enabled=self._high_param_supercharge_enabled,
                 critique_submitter_supercharge_enabled=self._critique_submitter_supercharge_enabled
             )
@@ -5825,6 +6023,13 @@ class AutonomousCoordinator:
                 
                 # Check if compiler has stopped (error or other reason)
                 if not self._paper_compiler.is_running:
+                    if getattr(self._paper_compiler, "fatal_error_type", None) == CONTEXT_OVERFLOW_STOP_REASON:
+                        logger.error(
+                            "Paper compiler stopped for context overflow: %s",
+                            getattr(self._paper_compiler, "fatal_error_message", ""),
+                        )
+                        self._mark_context_overflow_stop()
+                        self._stop_event.set()
                     logger.warning("Compiler stopped unexpectedly")
                     break
                 
@@ -5872,28 +6077,53 @@ class AutonomousCoordinator:
     
     def _extract_abstract(self, paper_content: str) -> str:
         """Extract abstract text from paper."""
-        # Try to find abstract section
-        abstract_patterns = [
-            r"##\s*Abstract\s*\n(.*?)(?=\n##|\n#|\Z)",
-            r"#\s*Abstract\s*\n(.*?)(?=\n##|\n#|\Z)",
-            r"\*\*Abstract\*\*\s*\n(.*?)(?=\n##|\n#|\n\*\*|\Z)",
-            r"\\(?:section|chapter)\*?\{Abstract\}\s*\n(.*?)(?=\n\\(?:section|chapter)\*?\{|\Z)",
+        def limit_metadata_abstract(abstract_text: str) -> Optional[str]:
+            abstract_text = abstract_text.strip()
+            if not abstract_text or abstract_text.lower() == "abstract":
+                return None
+            return abstract_text[:500] if len(abstract_text) > 500 else abstract_text
+
+        begin_match = re.search(
             r"\\begin\{abstract\}\s*(.*?)\s*\\end\{abstract\}",
-        ]
-        
-        for pattern in abstract_patterns:
-            match = re.search(pattern, paper_content, re.IGNORECASE | re.DOTALL)
-            if match:
-                abstract = match.group(1).strip()
-                # Limit to first 500 chars for metadata
-                return abstract[:500] if len(abstract) > 500 else abstract
-        
-        # Fallback: first paragraph after title
+            paper_content,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if begin_match:
+            abstract = limit_metadata_abstract(begin_match.group(1))
+            if abstract:
+                return abstract
+
+        heading_pattern = re.compile(
+            r"(?im)^\s*(?:#{1,6}\s*)?(?:\*\*)?Abstract(?:\*\*)?\s*$|"
+            r"^\s*\\(?:section|chapter)\*?\{Abstract\}\s*$"
+        )
+        next_section_pattern = re.compile(
+            r"(?im)^\s*(?:#{1,6}\s*)?(?:\*\*)?"
+            r"(?:[IVXLCDM]+\.|\d+\.)?\s*"
+            r"(?:Introduction|Background|Preliminaries|Body|Conclusion|References|Bibliography|Appendix)\b"
+            r"|^\s*\\(?:section|chapter)\*?\{(?!Abstract\})[^}]+\}\s*$"
+        )
+
+        for match in heading_pattern.finditer(paper_content):
+            section_start = match.end()
+            next_match = next_section_pattern.search(paper_content, section_start)
+            section_end = next_match.start() if next_match else len(paper_content)
+            abstract = limit_metadata_abstract(paper_content[section_start:section_end])
+            if abstract:
+                return abstract
+
+        # Fallback: first content line after title/header metadata, skipping section headings.
         lines = paper_content.split('\n')
-        for i, line in enumerate(lines):
-            if line.strip() and not line.startswith('#'):
-                # Found first non-heading line
-                return lines[i].strip()[:500]
+        heading_line_pattern = re.compile(
+            r"^\s*(?:#{1,6}\s*)?(?:\*\*)?"
+            r"(?:Abstract|Introduction|Conclusion|References|Bibliography|Appendix)"
+            r"(?:\*\*)?\s*$",
+            re.IGNORECASE,
+        )
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#') and not heading_line_pattern.match(stripped):
+                return stripped[:500]
         
         return "[Abstract not found]"
     
@@ -7215,6 +7445,10 @@ class AutonomousCoordinator:
         
         if self._stop_event.is_set():
             return None
+
+        if not candidate_titles.strip():
+            logger.warning("Tier 3 title exploration produced no validated candidates; retrying title selection later")
+            return None
         
         # Use the existing title selector with special context + candidate titles
         title = await self._title_selector.select_title(
@@ -7246,8 +7480,8 @@ class AutonomousCoordinator:
         # Same as in _compile_paper_from_brainstorm — compiler modules read from system_config at init.
         system_config.compiler_validator_context_window = self._validator_context
         system_config.compiler_validator_max_output_tokens = self._validator_max_tokens
-        system_config.compiler_high_context_context_window = self._high_context_context
-        system_config.compiler_high_context_max_output_tokens = self._high_context_max_tokens
+        system_config.compiler_writer_context_window = self._writer_context
+        system_config.compiler_writer_max_output_tokens = self._writer_max_tokens
         system_config.compiler_high_param_context_window = self._high_param_context
         system_config.compiler_high_param_max_output_tokens = self._high_param_max_tokens
         system_config.compiler_critique_submitter_context_window = self._critique_submitter_context
@@ -7269,7 +7503,7 @@ class AutonomousCoordinator:
                     f"Known Certainties: {assessment.known_certainties_summary}"
                 ),
                 validator_model=self._validator_model,
-                high_context_model=self._high_context_model,
+                writer_model=self._writer_model,
                 high_param_model=self._high_param_model,
                 critique_submitter_model=self._critique_submitter_model,
                 skip_aggregator_db=True,  # CRITICAL: Don't load any aggregator database
@@ -7278,10 +7512,10 @@ class AutonomousCoordinator:
                 validator_openrouter_provider=self._validator_openrouter_provider,
                 validator_openrouter_reasoning_effort=self._validator_openrouter_reasoning_effort,
                 validator_lm_studio_fallback=self._validator_lm_studio_fallback,
-                high_context_provider=self._high_context_provider,
-                high_context_openrouter_provider=self._high_context_openrouter_provider,
-                high_context_openrouter_reasoning_effort=self._high_context_openrouter_reasoning_effort,
-                high_context_lm_studio_fallback=self._high_context_lm_studio_fallback,
+                writer_provider=self._writer_provider,
+                writer_openrouter_provider=self._writer_openrouter_provider,
+                writer_openrouter_reasoning_effort=self._writer_openrouter_reasoning_effort,
+                writer_lm_studio_fallback=self._writer_lm_studio_fallback,
                 high_param_provider=self._high_param_provider,
                 high_param_openrouter_provider=self._high_param_openrouter_provider,
                 high_param_openrouter_reasoning_effort=self._high_param_openrouter_reasoning_effort,
@@ -7291,7 +7525,7 @@ class AutonomousCoordinator:
                 critique_submitter_openrouter_reasoning_effort=self._critique_submitter_openrouter_reasoning_effort,
                 critique_submitter_lm_studio_fallback=self._critique_submitter_lm_studio_fallback,
                 validator_supercharge_enabled=self._validator_supercharge_enabled,
-                high_context_supercharge_enabled=self._high_context_supercharge_enabled,
+                writer_supercharge_enabled=self._writer_supercharge_enabled,
                 high_param_supercharge_enabled=self._high_param_supercharge_enabled,
                 critique_submitter_supercharge_enabled=self._critique_submitter_supercharge_enabled
             )
@@ -7315,12 +7549,17 @@ class AutonomousCoordinator:
                     # IMPORTANT: Use paper_library.get_paper_path() for session-aware path resolution
                     paper_path = paper_library.get_paper_path(ref_paper_id)
                     if os.path.exists(paper_path):
-                        await rag_manager.add_document(
-                            paper_path,
-                            chunk_sizes=[512],
-                            is_user_file=True  # High priority
-                        )
-                        logger.info(f"Tier 3 reference loaded: {ref_paper_id}")
+                        ref_content = await paper_library.get_paper_content(ref_paper_id, strip_proofs=True)
+                        if ref_content:
+                            await rag_manager.add_text(
+                                ref_content,
+                                f"tier3_reference_paper_{ref_paper_id}.txt",
+                                chunk_sizes=[512],
+                                is_permanent=True,
+                            )
+                            logger.info(f"Tier 3 reference loaded with proof sections stripped: {ref_paper_id}")
+                        else:
+                            logger.warning(f"Tier 3 reference paper was empty after proof stripping: {ref_paper_id}")
             
             # Start compiler
             await self._paper_compiler.start()
@@ -7336,6 +7575,13 @@ class AutonomousCoordinator:
                     break
                 
                 if not self._paper_compiler.is_running:
+                    if getattr(self._paper_compiler, "fatal_error_type", None) == CONTEXT_OVERFLOW_STOP_REASON:
+                        logger.error(
+                            "Tier 3 compiler stopped for context overflow: %s",
+                            getattr(self._paper_compiler, "fatal_error_message", ""),
+                        )
+                        self._mark_context_overflow_stop()
+                        self._stop_event.set()
                     break
                 
                 await asyncio.sleep(3)
@@ -7398,6 +7644,10 @@ class AutonomousCoordinator:
         )
         
         if self._stop_event.is_set():
+            return False
+
+        if not candidate_titles.strip():
+            logger.warning("Volume chapter title exploration produced no validated candidates; retrying chapter later")
             return False
         
         # Select chapter title from candidates

@@ -82,6 +82,12 @@ class ProofIdentificationAgent:
             )
             prompt_tokens = count_tokens(prompt)
 
+        task_id = self.get_current_task_id()
+        await api_client_manager.prewarm_assistant_memory_context(
+            task_id=task_id,
+            role_id=self.role_id,
+            prompt=prompt,
+        )
         if prompt_tokens > max_input_tokens:
             logger.debug(
                 "SMT translation prompt exceeds context window (%s > %s) for theorem %s",
@@ -91,7 +97,6 @@ class ProofIdentificationAgent:
             )
             return ""
 
-        task_id = self.get_current_task_id()
         self.task_sequence += 1
 
         try:
@@ -153,10 +158,18 @@ class ProofIdentificationAgent:
         )
         prompt_tokens = count_tokens(prompt)
         max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+        task_id = self.get_current_task_id()
+        await api_client_manager.prewarm_assistant_memory_context(
+            task_id=task_id,
+            role_id=self.role_id,
+            prompt=prompt,
+        )
         if prompt_tokens > max_input_tokens:
             message = (
                 "Proof identification prompt exceeds the configured context window "
                 f"({prompt_tokens} > {max_input_tokens}) for {source_type} {source_id}. "
+                f"Configured total context={self.context_window}, max output reserve={self.max_output_tokens}, "
+                f"safety buffer={rag_config.context_buffer_tokens}. "
                 "Full source content is mandatory for proof discovery and was not "
                 "truncated or replaced with an excerpt. Increase the proof role "
                 "context window or reduce the source size before retrying."
@@ -164,7 +177,6 @@ class ProofIdentificationAgent:
             logger.warning(message)
             raise ValueError(message)
 
-        task_id = self.get_current_task_id()
         self.task_sequence += 1
 
         try:
@@ -177,35 +189,58 @@ class ProofIdentificationAgent:
                 temperature=0.0,
             )
             if not response or not response.get("choices"):
-                return False, []
+                raise ValueError("Proof identification returned no model choices.")
 
             message = response["choices"][0].get("message", {})
             content = extract_message_text(message)
             if not content:
-                return False, []
+                raise ValueError("Proof identification returned empty model output.")
 
             data = parse_json(content)
             if isinstance(data, list):
-                data = data[0] if data else {}
+                if not data:
+                    raise ValueError("Proof identification returned an empty JSON array.")
+                data = data[0]
+            if not isinstance(data, dict):
+                raise ValueError("Proof identification returned JSON that was not an object.")
+            if "has_provable_theorems" not in data:
+                raise ValueError("Proof identification JSON omitted has_provable_theorems.")
+            if not isinstance(data.get("has_provable_theorems"), bool):
+                raise ValueError("Proof identification has_provable_theorems must be a boolean.")
 
-            has_candidates = bool(data.get("has_provable_theorems", False))
-            raw_theorems = data.get("theorems", []) or []
+            has_candidates = data["has_provable_theorems"]
+            raw_theorems_value = data.get("theorems", [])
+            if raw_theorems_value is None:
+                raw_theorems_value = []
+            if not isinstance(raw_theorems_value, list):
+                raise ValueError("Proof identification theorems must be an array.")
+            if has_candidates and not raw_theorems_value:
+                raise ValueError(
+                    "Proof identification claimed provable theorems but returned no theorem entries."
+                )
+            raw_theorems = raw_theorems_value
             theorem_candidates: List[ProofCandidate] = []
+            malformed_candidate_count = 0
+            non_novel_candidate_count = 0
             for index, theorem in enumerate(raw_theorems, start=1):
                 if not isinstance(theorem, dict):
+                    malformed_candidate_count += 1
                     continue
                 statement = str(theorem.get("statement", "")).strip()
                 if not statement:
+                    malformed_candidate_count += 1
                     continue
                 theorem_id = theorem.get("theorem_id") or theorem.get("id") or f"thm_{index}"
                 expected_novelty_tier = str(theorem.get("expected_novelty_tier", "")).strip().lower()
                 if expected_novelty_tier == "not_novel":
+                    non_novel_candidate_count += 1
                     logger.info(
                         "ProofIdentificationAgent skipped theorem %s because it was marked not_novel.",
                         theorem_id,
                     )
                     continue
                 if expected_novelty_tier not in _NOVEL_PROOF_TIERS:
+                    malformed_candidate_count += 1
                     logger.info(
                         "ProofIdentificationAgent skipped theorem %s because it did not include a valid expected_novelty_tier.",
                         theorem_id,
@@ -223,6 +258,7 @@ class ProofIdentificationAgent:
                     and novelty_rationale
                     and why_not_standard_known_result
                 ):
+                    malformed_candidate_count += 1
                     logger.info(
                         "ProofIdentificationAgent skipped theorem %s because it lacked required prompt-relevance, novelty, or anti-standard-result rationale.",
                         theorem_id,
@@ -240,6 +276,12 @@ class ProofIdentificationAgent:
                     )
                 )
 
+            if has_candidates and not theorem_candidates and malformed_candidate_count:
+                raise ValueError(
+                    "Proof identification claimed provable theorems but returned no valid theorem candidates "
+                    f"({malformed_candidate_count} malformed, {non_novel_candidate_count} not_novel)."
+                )
+
             return has_candidates and bool(theorem_candidates), theorem_candidates
         except FreeModelExhaustedError:
             raise
@@ -252,4 +294,4 @@ class ProofIdentificationAgent:
                 source_id,
                 exc,
             )
-            return False, []
+            raise

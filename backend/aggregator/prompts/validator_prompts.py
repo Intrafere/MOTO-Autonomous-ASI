@@ -15,9 +15,10 @@ EMPIRICAL_PROVENANCE_VALIDATION_RULES = """EMPIRICAL PROVENANCE RULES:
 
 LEAN_VERIFIED_SUBMISSION_RULES = """LEAN 4 VERIFIED SUBMISSION RULES:
 - A submission containing [LEAN 4 VERIFIED BRAINSTORM PROOF] has already passed Lean 4 and MOTO hard integrity checks before this validator call.
-- MOTO may have downshifted the stored theorem statement to the actual Lean-verified supporting lemma when the original candidate was too broad.
-- Do NOT reject such a submission by re-litigating Lean syntax, proof-checker correctness, statement alignment, triviality, routine status, or novelty.
-- Return accept for Lean-verified proof artifacts. Novelty/triviality ranking and duplicate detection decide how long the proof remains in context."""
+- Lean verification only establishes formal validity. It does NOT make a proof useful, novel, or acceptable brainstorm progress.
+- Reject Lean-verified proof artifacts that are trivial, routine, local helper lemmas, standard Mathlib/textbook facts, merely supporting lemmas, weakened/downshifted leftovers, or otherwise not high-impact progress toward the user's prompt.
+- Accept a Lean-verified proof artifact only when the actual theorem statement shown in the submission is itself a high-impact prompt-solving theorem and is non-redundant with the existing database.
+- Do NOT re-litigate Lean syntax or proof-checker correctness; validate usefulness, prompt impact, non-triviality, and redundancy."""
 
 
 def get_validator_system_prompt() -> str:
@@ -79,8 +80,7 @@ A submission should be ACCEPTED if it:
 1. Directly answers the user's whole problem, OR
 2. Addresses a clearly necessary piece of the full problem when a whole-answer route is not possible in one shot, OR
 3. Provides valuable progress that materially advances the full answer, OR
-4. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct or necessary-piece step is not yet available, OR
-5. Presents rigorous mathematical arguments based on established principles
+4. Offers rigorous enabling insights not present in existing accepted submissions ONLY when they materially strengthen a direct route to the full answer and no stronger direct or necessary-piece step is available
 
 A submission should be REJECTED if it:
 1. Is redundant with the existing accepted submissions
@@ -265,8 +265,7 @@ A submission should be ACCEPTED if it:
 1. Directly answers the user's whole problem, OR
 2. Addresses a clearly necessary piece of the full problem when a whole-answer route is not possible in one shot, OR
 3. Provides valuable progress that materially advances the full answer, OR
-4. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct or necessary-piece step is not yet available, OR
-5. Presents rigorous mathematical arguments based on established principles
+4. Offers rigorous enabling insights not present in existing accepted submissions ONLY when they materially strengthen a direct route to the full answer and no stronger direct or necessary-piece step is available
 
 A submission should be REJECTED if it:
 1. Is redundant with the existing accepted submissions
@@ -504,8 +503,7 @@ A submission should be ACCEPTED if it:
 1. Directly answers the user's whole problem, OR
 2. Addresses a clearly necessary piece of the full problem when a whole-answer route is not possible in one shot, OR
 3. Provides valuable progress that materially advances the full answer, OR
-4. Offers rigorous enabling insights not present in existing accepted submissions when a stronger direct or necessary-piece step is not yet available, OR
-5. Presents rigorous mathematical arguments based on established principles
+4. Offers rigorous enabling insights not present in existing accepted submissions ONLY when they materially strengthen a direct route to the full answer and no stronger direct or necessary-piece step is available
 
 A submission should be REJECTED if it:
 1. Is redundant with the existing accepted submissions
@@ -763,10 +761,10 @@ REASONS FOR REMOVAL - A submission should be removed if it:
 
 REASONS TO KEEP - A submission should be kept if it:
 1. Directly answers the user's whole problem or a necessary piece of it better than alternatives
-2. Provides ANY unique information not covered elsewhere
-3. Offers a different perspective or approach even if related to other content
-4. Contains specific mathematical details, proofs, or techniques
-5. Contributes to solution diversity in any meaningful way
+2. Provides unique information that materially strengthens a direct route to the user's full prompt
+3. Offers a different perspective or approach that materially improves the best direct solution path
+4. Contains specific mathematical details, proofs, or techniques that are necessary for direct prompt progress
+5. Contributes to solution diversity only when that diversity improves credible direct-answer progress
 
 CONSERVATIVE APPROACH:
 - When in doubt, DO NOT recommend removal

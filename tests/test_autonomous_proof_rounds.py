@@ -112,19 +112,52 @@ class _ErrorProofStage(_FakeProofStage):
             error_message="retryable proof stage error",
         )
 
-
-def _configured_coordinator(fake_stage):
+def _configured_coordinator(fake_stage, *, allow_research_papers=True):
     coordinator = AutonomousCoordinator()
     coordinator._allow_mathematical_proofs = True
+    coordinator._allow_research_papers = allow_research_papers
     coordinator._user_research_prompt = "Solve the user prompt."
-    coordinator._high_context_model = "proof-model"
-    coordinator._high_context_context = 4000
-    coordinator._high_context_max_tokens = 1000
+    coordinator._writer_model = "proof-model"
+    coordinator._writer_context = 4000
+    coordinator._writer_max_tokens = 1000
+    coordinator._high_param_model = "rigor-model"
+    coordinator._high_param_context = 6000
+    coordinator._high_param_max_tokens = 1500
     coordinator._validator_model = "validator-model"
     coordinator._validator_context = 4000
     coordinator._validator_max_tokens = 1000
     coordinator._proof_verification_stage = fake_stage
     return coordinator
+
+
+class AutonomousAbstractExtractionTests(unittest.TestCase):
+    def test_extract_abstract_from_plain_heading_after_attribution_header(self):
+        coordinator = AutonomousCoordinator()
+
+        abstract = coordinator._extract_abstract(
+            "=" * 80
+            + "\nAUTONOMOUS AI SOLUTION\n\n"
+            + "Paper Title: Example\n"
+            + "=" * 80
+            + "\n\nAbstract\n\n"
+            + "This is the real abstract paragraph. It should be stored, not the heading.\n\n"
+            + "A second abstract paragraph should be preserved before the intro.\n\n"
+            + "I. Introduction\n\nBody starts here."
+        )
+
+        self.assertIn("This is the real abstract paragraph", abstract)
+        self.assertIn("A second abstract paragraph", abstract)
+        self.assertNotEqual(abstract, "Abstract")
+        self.assertNotIn("I. Introduction", abstract)
+
+    def test_extract_abstract_from_markdown_heading(self):
+        coordinator = AutonomousCoordinator()
+
+        abstract = coordinator._extract_abstract(
+            "# Abstract\n\nMarkdown abstract content.\n\n# Introduction\n\nIntro content."
+        )
+
+        self.assertEqual(abstract, "Markdown abstract content.")
 
 
 class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
@@ -212,9 +245,9 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             "goal_supporting_lemma",
         ])
 
-    async def test_automatic_brainstorm_rounds_continue_until_no_candidates(self):
+    async def test_proofs_only_brainstorm_rounds_continue_until_no_candidates(self):
         fake_stage = _FakeProofStage([1, 1, 0, 1])
-        coordinator = _configured_coordinator(fake_stage)
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
 
         await coordinator._run_proof_verification(
             content="Brainstorm source.",
@@ -233,9 +266,9 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             ["automatic", "automatic_round_2", "automatic_round_3"],
         )
 
-    async def test_automatic_paper_rounds_cap_at_four(self):
+    async def test_proofs_only_paper_rounds_cap_at_four(self):
         fake_stage = _FakeProofStage([1, 1, 1, 1, 1])
-        coordinator = _configured_coordinator(fake_stage)
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
 
         await coordinator._run_proof_verification(
             content="Paper source.",
@@ -248,9 +281,42 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_stage.calls[-1]["trigger"], "automatic_round_4")
         self.assertTrue(all(call["proof_max_rounds"] == 4 for call in fake_stage.calls))
 
+    async def test_papers_plus_proofs_automatic_checks_are_single_round(self):
+        for source_type in ("brainstorm", "paper"):
+            fake_stage = _FakeProofStage([1, 1, 1])
+            coordinator = _configured_coordinator(fake_stage, allow_research_papers=True)
+
+            await coordinator._run_proof_verification(
+                content="Source.",
+                source_type=source_type,
+                source_id=f"{source_type}_001",
+                source_title="Source title",
+            )
+
+            self.assertEqual(len(fake_stage.calls), 1)
+            self.assertEqual(fake_stage.calls[0]["trigger"], "automatic")
+            self.assertEqual(fake_stage.calls[0]["proof_round_index"], 1)
+            self.assertEqual(fake_stage.calls[0]["proof_max_rounds"], 1)
+
+    async def test_automatic_proof_check_uses_rigor_and_proofs_budget_for_all_sources(self):
+        for source_type in ("brainstorm", "paper"):
+            fake_stage = _FakeProofStage([0])
+            coordinator = _configured_coordinator(fake_stage)
+
+            await coordinator._run_proof_verification(
+                content="Source.",
+                source_type=source_type,
+                source_id=f"{source_type}_001",
+                source_title="Source title",
+            )
+
+            self.assertEqual(fake_stage.calls[0]["submitter_model"], "rigor-model")
+            self.assertEqual(fake_stage.calls[0]["submitter_context"], 6000)
+            self.assertEqual(fake_stage.calls[0]["submitter_max_tokens"], 1500)
+
     async def test_automatic_rounds_refresh_verified_proof_context(self):
         fake_stage = _FakeProofStage([1, 0])
-        coordinator = _configured_coordinator(fake_stage)
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
 
         await coordinator._run_proof_verification(
             content="Paper source.",
@@ -290,7 +356,7 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
             "total_candidates": 1,
         }
         fake_stage = _FakeProofStage([0])
-        coordinator = _configured_coordinator(fake_stage)
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
 
         await coordinator._run_proof_verification(
             content="Paper source.",
@@ -323,7 +389,7 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
                 return await super().run(**kwargs)
 
         fake_stage = ReservationCheckingStage([1, 0])
-        coordinator = _configured_coordinator(fake_stage)
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
 
         await coordinator._run_proof_verification(
             content="Paper source.",
@@ -363,6 +429,50 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "error_preserved")
         self.assertTrue(coordinator._stop_event.is_set())
         self.assertEqual(coordinator_module.research_metadata.clear_calls, [])
+
+    async def test_proofs_only_handoff_saves_topic_boundary_without_paper_state(self):
+        fake_stage = _FakeProofStage([0])
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
+        coordinator._running = True
+        coordinator._state.current_tier = "tier2_paper_writing"
+        coordinator._current_topic_id = "topic_done"
+        coordinator._current_paper_id = "paper_should_not_resume"
+        coordinator._current_paper_title = "Should Not Resume"
+        coordinator._current_reference_papers = ["paper_ref"]
+        coordinator._current_reference_brainstorms = ["brainstorm_ref"]
+        coordinator._brainstorm_paper_count = 2
+        coordinator._current_brainstorm_paper_ids = ["paper_a"]
+        coordinator._last_completed_paper_id = "paper_a"
+        events = []
+
+        async def capture_event(event, data):
+            events.append((event, data))
+
+        coordinator.set_broadcast_callback(capture_event)
+
+        await coordinator._handle_papers_disabled_after_brainstorm()
+
+        self.assertEqual(coordinator._state.current_tier, "tier1_aggregation")
+        self.assertIsNone(coordinator._current_topic_id)
+        self.assertIsNone(coordinator._current_paper_id)
+        self.assertIsNone(coordinator._current_paper_title)
+        self.assertEqual(coordinator._current_reference_papers, [])
+        self.assertEqual(coordinator._current_reference_brainstorms, [])
+        self.assertEqual(coordinator._brainstorm_paper_count, 0)
+        self.assertEqual(coordinator._current_brainstorm_paper_ids, [])
+        self.assertIsNone(coordinator._last_completed_paper_id)
+        self.assertEqual(events[0][0], "research_papers_disabled_brainstorm_complete")
+        self.assertEqual(
+            coordinator_module.research_metadata.workflow_states[-1]["current_tier"],
+            "tier1_aggregation",
+        )
+        self.assertEqual(
+            coordinator_module.research_metadata.workflow_states[-1]["paper_phase"],
+            "topic_exploration",
+        )
+        self.assertIsNone(
+            coordinator_module.research_metadata.workflow_states[-1]["current_paper_id"]
+        )
 
     async def test_paper_proof_error_does_not_clear_or_retry_checkpoint(self):
         fake_stage = _ErrorProofStage([])

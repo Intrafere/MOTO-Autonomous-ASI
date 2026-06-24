@@ -28,6 +28,7 @@ from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.memory.proof_database import ProofDatabase, manual_proof_database, proof_database
 from backend.autonomous.memory.research_metadata import research_metadata
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
+from backend.compiler.memory.manual_prompt import load_manual_compiler_prompt
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import paper_memory
 from backend.shared.api_client_manager import api_client_manager
@@ -47,6 +48,8 @@ from backend.shared.models import (
 )
 from backend.shared.manual_proof_context import get_manual_proof_context_lock
 from backend.shared.path_safety import resolve_path_within_root
+from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
+from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.runtime_settings import RuntimeSettingsError, save_proof_runtime_settings
 from backend.shared.smt_client import clear_smt_client, get_smt_client
 
@@ -61,6 +64,7 @@ PROOF_SCOPE_MANUAL = "manual"
 _manual_proof_run_lock = asyncio.Lock()
 _LEAN_STATUS_STARTING_LOG_INTERVAL_SECONDS = 60.0
 _last_lean_status_starting_log_at = 0.0
+_ASSISTANT_MANUAL_SOURCE_SUMMARY_CHARS = 8000
 
 
 def _log_lean_status_starting_up(detail: str) -> None:
@@ -128,6 +132,30 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
         or data.get("proof_id")
         or "candidate"
     )
+
+    def _compact(value: object, limit: int = 1200) -> str:
+        cleaned = " ".join(str(value or "").split())
+        if not cleaned:
+            return ""
+        return cleaned[:limit] + ("..." if len(cleaned) > limit else "")
+
+    def _lean_response() -> str:
+        if data.get("lean_response"):
+            return _compact(data.get("lean_response"))
+        if data.get("proof_verified") is True:
+            return "Lean 4 response: proof verified."
+        error = _compact(
+            data.get("error_summary") or data.get("error_output") or data.get("reason"),
+            limit=1800,
+        )
+        return f"Lean 4 response: {error} - proof not verified." if error else ""
+
+    def _attempt_message(prefix: str) -> str:
+        attempt = f", attempt {data.get('attempt')}" if data.get("attempt") else ""
+        response = _lean_response()
+        base = f"{prefix}: {target}{attempt}"
+        return f"{base} - {response}" if response else base
+
     if event_type == "proof_check_started":
         return "Proof check started for the manual Aggregator database"
     if event_type == "proof_check_no_candidates":
@@ -139,9 +167,9 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
     if event_type == "proof_lean_accepted":
         return f"Lean accepted proof: {target}"
     if event_type == "proof_attempt_failed":
-        return f"Proof attempt failed: {target}"
+        return _attempt_message("Proof attempt failed")
     if event_type == "proof_attempts_exhausted":
-        return f"Proof attempts exhausted: {target}"
+        return _attempt_message("Proof attempts exhausted")
     if event_type == "proof_integrity_rejected":
         return f"Proof integrity rejected: {data.get('reason') or data.get('message') or target}"
     if event_type == "proof_verified":
@@ -306,6 +334,21 @@ def _get_request_runtime_snapshot(request: Optional[ProofCheckRequest]) -> Optio
     return snapshot
 
 
+def _role_config_from_model_config(config: Optional[ModelConfig]) -> ProofRoleConfigSnapshot:
+    if config is None:
+        return ProofRoleConfigSnapshot()
+    return ProofRoleConfigSnapshot(
+        provider=config.provider,
+        model_id=config.model_id,
+        openrouter_provider=config.openrouter_provider,
+        openrouter_reasoning_effort=config.openrouter_reasoning_effort,
+        lm_studio_fallback_id=config.lm_studio_fallback_id,
+        context_window=config.context_window,
+        max_output_tokens=config.max_output_tokens,
+        supercharge_enabled=config.supercharge_enabled,
+    )
+
+
 def _get_active_manual_runtime_snapshot(request: ProofCheckRequest) -> Optional[ProofRuntimeConfigSnapshot]:
     """Build proof runtime settings from the active manual mode, never from autonomous presets."""
     if request.source_type == "brainstorm" and request.source_id == MANUAL_AGGREGATOR_SOURCE_ID:
@@ -337,22 +380,25 @@ def _get_active_manual_runtime_snapshot(request: ProofCheckRequest) -> Optional[
             brainstorm=submitter_role,
             paper=submitter_role,
             validator=validator_role,
+            assistant=_role_config_from_model_config(
+                api_client_manager.get_role_config("aggregator_assistant")
+            ),
         )
 
     if request.source_type == "paper" and request.source_id == MANUAL_COMPILER_CURRENT_SOURCE_ID:
-        high_context = compiler_coordinator.high_context_submitter
-        if high_context is None or not getattr(high_context, "model_name", "") or not compiler_coordinator.validator_model:
+        rigor_submitter = compiler_coordinator.high_param_submitter
+        if rigor_submitter is None or not getattr(rigor_submitter, "model_name", "") or not compiler_coordinator.validator_model:
             return None
 
         paper_role = ProofRoleConfigSnapshot(
-            provider=compiler_coordinator.high_context_provider,
-            model_id=high_context.model_name,
-            openrouter_provider=compiler_coordinator.high_context_openrouter_provider,
-            openrouter_reasoning_effort=compiler_coordinator.high_context_openrouter_reasoning_effort,
-            lm_studio_fallback_id=compiler_coordinator.high_context_lm_studio_fallback,
-            context_window=system_config.compiler_high_context_context_window,
-            max_output_tokens=system_config.compiler_high_context_max_output_tokens,
-            supercharge_enabled=compiler_coordinator.high_context_supercharge_enabled,
+            provider=compiler_coordinator.high_param_provider,
+            model_id=rigor_submitter.model_name,
+            openrouter_provider=compiler_coordinator.high_param_openrouter_provider,
+            openrouter_reasoning_effort=compiler_coordinator.high_param_openrouter_reasoning_effort,
+            lm_studio_fallback_id=compiler_coordinator.high_param_lm_studio_fallback,
+            context_window=system_config.compiler_high_param_context_window,
+            max_output_tokens=system_config.compiler_high_param_max_output_tokens,
+            supercharge_enabled=compiler_coordinator.high_param_supercharge_enabled,
         )
         validator_role = ProofRoleConfigSnapshot(
             provider=compiler_coordinator.validator_provider,
@@ -368,6 +414,9 @@ def _get_active_manual_runtime_snapshot(request: ProofCheckRequest) -> Optional[
             brainstorm=paper_role,
             paper=paper_role,
             validator=validator_role,
+            assistant=_role_config_from_model_config(
+                api_client_manager.get_role_config("compiler_assistant")
+            ),
         )
 
     return None
@@ -375,13 +424,14 @@ def _get_active_manual_runtime_snapshot(request: ProofCheckRequest) -> Optional[
 
 async def _get_runtime_snapshot(request: Optional[ProofCheckRequest] = None) -> Optional[ProofRuntimeConfigSnapshot]:
     if request and _is_non_appending_manual_source(request):
+        request_snapshot = _get_request_runtime_snapshot(request)
         # Active manual sources must not borrow autonomous proof settings.
         # Prefer the backend's live manual runtime so stale browser/localStorage
         # snapshots cannot override the roles that actually produced the source.
         active_manual_snapshot = _get_active_manual_runtime_snapshot(request)
         if active_manual_snapshot is not None:
             return active_manual_snapshot
-        return _get_request_runtime_snapshot(request)
+        return request_snapshot
 
     request_snapshot = _get_request_runtime_snapshot(request)
     if request_snapshot is not None:
@@ -436,7 +486,76 @@ def _configure_manual_roles(source_type: str, snapshot: ProofRuntimeConfigSnapsh
         "autonomous_proof_novelty",
         _build_model_config(snapshot.validator),
     )
+    assistant_config = snapshot.assistant if snapshot.assistant.model_id else snapshot.validator
+    api_client_manager.configure_role(
+        "manual_proof_assistant",
+        _build_model_config(assistant_config),
+    )
     return role_config
+
+
+def _compact_manual_assistant_source(content: str) -> str:
+    text = " ".join((content or "").split())
+    if len(text) <= _ASSISTANT_MANUAL_SOURCE_SUMMARY_CHARS:
+        return text
+    return text[:_ASSISTANT_MANUAL_SOURCE_SUMMARY_CHARS].rstrip() + "..."
+
+
+async def _refresh_manual_assistant_memory(
+    *,
+    source_type: str,
+    source_id: str,
+    source_title: str,
+    source_content: str,
+    user_prompt: str,
+) -> None:
+    """Run Try-to-Prove Assistant memory even before proof prompt preflight.
+
+    Manual proof discovery may fail during mandatory-source context validation
+    before it reaches ``api_client_manager.generate_completion()``, so the
+    normal central Assistant injection hook never fires. This preflight refresh
+    keeps the user-triggered proof-check button covered by Assistant memory and
+    leaves a visible log/event trail.
+    """
+    if not system_config.agent_conversation_memory_enabled:
+        logger.info(
+            "Assistant memory preflight skipped for manual proof check %s:%s because Agent Conversation Memory is disabled",
+            source_type,
+            source_id,
+        )
+        return
+
+    snapshot = AssistantTargetSnapshot(
+        workflow_mode="manual_proof_check",
+        target_kind="proof_candidate",
+        workflow_phase="manual_try_to_prove",
+        active_mode="manual_proof_check",
+        user_prompt=user_prompt,
+        current_prompt_or_topic=source_title,
+        current_submission_or_draft=_compact_manual_assistant_source(source_content),
+        writing_goal="User-triggered Try to Prove This proof discovery over the selected source.",
+        paper_or_proof_draft_summary=_compact_manual_assistant_source(source_content),
+        target_statement=user_prompt or source_title or f"{source_type}:{source_id}",
+        formal_sketch=_compact_manual_assistant_source(source_content),
+        source_title=source_title,
+        source_type=f"manual_{source_type}",
+        source_id=source_id,
+        source_titles=[source_title] if source_title else [],
+        imports=["Mathlib"],
+    )
+    logger.info(
+        "Assistant memory preflight starting for manual proof check %s:%s (%s)",
+        source_type,
+        source_id,
+        source_title or "untitled source",
+    )
+    pack = await assistant_proof_search_coordinator.refresh_now(snapshot)
+    logger.info(
+        "Assistant memory preflight complete for manual proof check %s:%s (results=%s)",
+        source_type,
+        source_id,
+        len(pack.results) if pack else 0,
+    )
 
 
 async def _prompt_with_verified_proof_context(
@@ -583,11 +702,12 @@ async def _resolve_manual_compiler_current_source(
     if source_context.strip():
         parts.append(f"PART 1 AGGREGATOR DATABASE CONTEXT:\n{source_context.strip()}")
 
+    persisted_prompt = compiler_coordinator.user_prompt or await load_manual_compiler_prompt()
     user_prompt = await _prompt_with_verified_proof_context(
-        compiler_coordinator.user_prompt or "",
+        persisted_prompt,
         scoped_proof_database,
     )
-    source_title = compiler_coordinator.paper_title or compiler_coordinator.user_prompt or "Manual Compiler Paper"
+    source_title = compiler_coordinator.paper_title or persisted_prompt or "Manual Compiler Paper"
     return "\n\n---\n\n".join(parts), source_title, user_prompt
 
 
@@ -711,6 +831,13 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
                 if _is_manual_aggregator_request(request)
                 else websocket.broadcast_event
             )
+            await _refresh_manual_assistant_memory(
+                source_type=request.source_type,
+                source_id=request.source_id,
+                source_title=source_title,
+                source_content=source_content,
+                user_prompt=user_prompt,
+            )
             await stage.run_manual(
                 content=source_content,
                 source_type=request.source_type,
@@ -748,11 +875,16 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
                 "total_candidates": 0,
                 "message": (
                     "Proof verification encountered an error: "
-                    f"{ProofVerificationStage._summarize_error(str(exc), limit=960)}"
+                    f"{ProofVerificationStage._summarize_error(str(exc), limit=1800)}"
                 ),
             },
         )
         await ProofVerificationStage.release_source(request.source_type, request.source_id)
+    finally:
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="manual_proof_check_complete",
+        )
 
 
 @router.get("")

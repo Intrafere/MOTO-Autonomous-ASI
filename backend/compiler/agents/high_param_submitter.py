@@ -1,5 +1,5 @@
 """
-High-parameter submitter agent for the compiler's rigor loop.
+Rigor & Proofs submitter agent for the compiler's rigor loop.
 
 The rigor loop no longer rewrites paper text. Instead it runs a two-stage
 Lean-4-verified-theorem flow (see RIGOR_LEAN_BUILD_PLAN.md):
@@ -17,7 +17,7 @@ Lean-4-verified-theorem flow (see RIGOR_LEAN_BUILD_PLAN.md):
         and appendix insertion.
 
 The Wolfram sub-mode that used to live here has been removed in Phase 2.
-Wolfram Alpha is now a tool available to HighContextSubmitter.submit_construction
+Wolfram Alpha is now a tool available to WritingSubmitter.submit_construction
 (see Phase 3 of the build plan).
 """
 
@@ -26,15 +26,21 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from backend.autonomous.memory.paper_library import PaperLibrary
+from backend.autonomous.agents.proof_formalization_agent import (
+    _MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX as MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX,
+)
 from backend.autonomous.memory.proof_database import proof_database as autonomous_proof_database
 from backend.compiler.core.compiler_rag_manager import compiler_rag_manager
+from backend.compiler.memory.critique_rejection_memory import CritiqueRejectionMemory
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import (
     paper_memory,
 )
+from backend.compiler.prompts.critique_prompts import build_critique_prompt
 from backend.compiler.prompts.rigor_prompts import (
     build_rigor_placement_prompt,
     build_rigor_theorem_discovery_prompt,
@@ -42,13 +48,19 @@ from backend.compiler.prompts.rigor_prompts import (
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.lm_studio_client import lm_studio_client
+from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
 from backend.shared.models import (
     CompilerSubmission,
     ProofAttemptFeedback,
     ProofCandidate,
+    Submission,
 )
 from backend.shared.utils import count_tokens
 
@@ -60,6 +72,20 @@ _NOVEL_PROOF_TIERS = {
     "novel_variant",
     "novel_formulation",
 }
+
+
+def _is_rigor_model_call_failure(exc: Exception) -> bool:
+    """Return true for provider/config failures that must not become declines."""
+    message = str(exc or "").lower()
+    return (
+        isinstance(exc, OpenRouterInvalidResponseError)
+        or is_non_retryable_model_error(exc)
+        or is_transient_model_call_error(exc)
+        or "model output incomplete" in message
+        or "transient provider error" in message
+        or "upstream provider timeout" in message
+        or "response missing 'choices'" in message
+    )
 
 
 def _normalize_string_field(value) -> str:
@@ -162,7 +188,7 @@ class RigorTheoremResult:
 
 
 class HighParamSubmitter:
-    """High-parameter submitter for the compiler's rigor loop.
+    """Rigor & Proofs submitter for the compiler's rigor loop.
 
     Drives the Lean-4-verified-theorem flow end-to-end: discovery -> 5 Lean
     attempts -> novelty classification -> persist -> initial placement
@@ -211,6 +237,10 @@ class HighParamSubmitter:
         self.task_sequence: int = 0
         self.role_id = "compiler_high_param"
         self.task_tracking_callback: Optional[Callable[[str, str], None]] = None
+        self.critique_task_sequence: int = 0
+        self.critique_submission_count: int = 0
+        self.critique_submitter_id: int = 1
+        self.critique_rejection_memory = CritiqueRejectionMemory()
 
         # Populated by initialize()
         self.context_window: int = system_config.compiler_high_param_context_window
@@ -237,11 +267,13 @@ class HighParamSubmitter:
         self._rigor_proof_source_id = (source_id or "").strip()
         self._rigor_proof_source_title = (source_title or "").strip()
 
-    def _get_direct_source_material_context(self, max_chars: int = 50000) -> str:
-        """Return bounded direct source context; full content remains available via RAG."""
+    def _get_direct_source_material_context(self, max_chars: Optional[int] = None) -> str:
+        """Return direct source context, optionally bounded for diagnostic callers."""
         context = self._source_material_context.strip()
         if not context:
             return ""
+        if max_chars is None:
+            return context
         if len(context) <= max_chars:
             return context
         head = max_chars // 2
@@ -258,7 +290,7 @@ class HighParamSubmitter:
         parts = [
             "CURRENT PAPER UNDER CONSTRUCTION:\n" + (proof_paper or "").strip(),
         ]
-        source_context = self._get_direct_source_material_context(max_chars=30000)
+        source_context = self._get_direct_source_material_context()
         if source_context:
             label = self._source_material_label or "Source brainstorm / paper-writing database"
             parts.append(f"{label.upper()}:\n{source_context}")
@@ -271,17 +303,156 @@ class HighParamSubmitter:
         self.context_window = system_config.compiler_high_param_context_window
         self.max_output_tokens = system_config.compiler_high_param_max_output_tokens
         if int(self.validator_context_window or 0) <= 0 or int(self.validator_max_tokens or 0) <= 0:
-            raise ValueError("High-param validator context and max output settings must be configured.")
+            raise ValueError("Rigor & Proofs validator context and max output settings must be configured.")
         self.available_input_tokens = rag_config.get_available_input_tokens(
             self.context_window, self.max_output_tokens
         )
+        await self.critique_rejection_memory.initialize()
 
         self._initialized = True
-        logger.info(f"High-param submitter initialized with model: {self.model_name}")
+        logger.info(f"Rigor & Proofs submitter initialized with model: {self.model_name}")
         logger.info(
             f"Context budget: {self.available_input_tokens} tokens "
             f"(window: {self.context_window})"
         )
+
+    # ------------------------------------------------------------ critique mode
+
+    async def reset_critique_rejection_memory(self) -> None:
+        """Clear critique feedback before a fresh post-body critique phase."""
+        await self.critique_rejection_memory.reset()
+
+    def next_critique_task_id(self, prefix: str = "critique_sub1") -> str:
+        """Return a critique-phase task ID while keeping rigor task IDs stable."""
+        task_id = f"{prefix}_{self.critique_task_sequence:03d}"
+        self.critique_task_sequence += 1
+        return task_id
+
+    async def submit_critique(
+        self,
+        user_prompt: str,
+        current_body: str,
+        current_outline: str,
+        aggregator_db: str,
+        reference_papers: Optional[str] = None,
+        existing_critiques: Optional[str] = None,
+        accumulated_history: Optional[str] = None,
+    ) -> Optional[Submission]:
+        """Generate post-body critique or a validated decline assessment."""
+        try:
+            rejection_feedback = await self.critique_rejection_memory.get_all_content()
+            prompt = build_critique_prompt(
+                user_prompt=user_prompt,
+                current_body=current_body,
+                current_outline=current_outline,
+                aggregator_db=aggregator_db,
+                reference_papers=reference_papers,
+                critique_feedback=existing_critiques,
+                rejection_feedback=rejection_feedback,
+                accumulated_history=accumulated_history,
+            )
+
+            prompt_tokens = count_tokens(prompt)
+            max_allowed = rag_config.get_available_input_tokens(
+                self.context_window,
+                self.max_output_tokens,
+            )
+            if prompt_tokens > max_allowed:
+                logger.error(
+                    "Critique prompt (%s tokens) exceeds Rigor & Proofs context window "
+                    "(%s tokens available)",
+                    prompt_tokens,
+                    max_allowed,
+                )
+                return None
+
+            task_id = self.next_critique_task_id(f"critique_sub{self.critique_submitter_id}")
+            if self.task_tracking_callback:
+                self.task_tracking_callback("started", task_id)
+
+            response = await api_client_manager.generate_completion(
+                task_id=task_id,
+                role_id=self.role_id,
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=self.max_output_tokens,
+            )
+
+            if self.task_tracking_callback:
+                self.task_tracking_callback("completed", task_id)
+
+            if not response.get("choices") or not response["choices"][0].get("message"):
+                logger.error("Critique: Rigor & Proofs LLM returned empty response structure")
+                return None
+
+            message = response["choices"][0]["message"]
+            llm_output = extract_message_text(message)
+            data = parse_json(llm_output)
+            if data is None:
+                logger.error("Failed to parse critique JSON response")
+                return None
+
+            if isinstance(data, list):
+                logger.warning("Rigor & Proofs critique returned array instead of object - using first element")
+                if not data:
+                    logger.error("Empty array response from Rigor & Proofs critique generation")
+                    return None
+                data = data[0]
+
+            if "critique_needed" not in data:
+                logger.error("Critique response missing 'critique_needed' field")
+                return None
+            if "reasoning" not in data:
+                logger.error("Critique response missing 'reasoning' field")
+                return None
+
+            critique_needed = data.get("critique_needed", True)
+            is_decline = not critique_needed
+            if critique_needed and "submission" not in data:
+                logger.error("Critique response missing 'submission' field when critique_needed=true")
+                return None
+
+            submission = Submission(
+                submission_id=str(uuid.uuid4()),
+                submitter_id=self.critique_submitter_id,
+                content=data.get("submission", ""),
+                reasoning=data.get("reasoning", ""),
+                chunk_size_used=512,
+                timestamp=datetime.now(),
+                is_decline=is_decline,
+            )
+
+            self.critique_submission_count += 1
+            if is_decline:
+                logger.info(
+                    "Rigor & Proofs declined critique (assessment #%s)",
+                    self.critique_submission_count,
+                )
+            else:
+                logger.info(
+                    "Rigor & Proofs generated critique #%s",
+                    self.critique_submission_count,
+                )
+            return submission
+
+        except FreeModelExhaustedError:
+            raise
+        except RuntimeError as exc:
+            if "credits exhausted" in str(exc).lower() or _is_rigor_model_call_failure(exc):
+                raise
+            logger.error("Error generating critique through Rigor & Proofs: %s", exc, exc_info=True)
+            return None
+        except Exception as exc:
+            if _is_rigor_model_call_failure(exc):
+                raise
+            logger.error("Error generating critique through Rigor & Proofs: %s", exc, exc_info=True)
+            return None
+
+    async def handle_critique_rejection(self, summary: str, content: str) -> None:
+        """Store critique rejection feedback for later critique attempts."""
+        await self.critique_rejection_memory.add_rejection(summary, content)
+        logger.info("Critique rejected - Rigor & Proofs feedback stored: %s...", summary[:100])
 
     # -------------------------------------------------------- broadcast helpers
 
@@ -331,7 +502,7 @@ class HighParamSubmitter:
     ) -> str:
         """Retrieve RAG evidence for the rigor prompts.
 
-        Mirrors the HighContextSubmitter.submit_construction budget
+        Mirrors the WritingSubmitter.submit_construction budget
         pattern: outline + paper are direct-injected by the caller, so
         we exclude them from RAG. The remaining budget goes to the
         RAG offload priority (Shared Training DB -> Local Submitter DB
@@ -635,23 +806,22 @@ class HighParamSubmitter:
             self.context_window, self.max_output_tokens
         )
 
-        # Build with empty RAG first to measure the mandatory footprint,
-        # then allocate the rest to RAG. If the direct source context itself
-        # is too large, shrink it before falling back to RAG.
-        while True:
-            base_prompt = await build_rigor_theorem_discovery_prompt(
-                user_prompt=self.user_prompt,
-                current_outline=current_outline,
-                current_paper=current_paper,
-                rag_evidence="",
-                existing_verified_proofs=existing_proofs,
-                recent_failure_hints=failure_hints,
-                source_material_context=source_material_context,
-                source_material_label=self._source_material_label,
+        base_prompt = await build_rigor_theorem_discovery_prompt(
+            user_prompt=self.user_prompt,
+            current_outline=current_outline,
+            current_paper=current_paper,
+            rag_evidence="",
+            existing_verified_proofs=existing_proofs,
+            recent_failure_hints=failure_hints,
+            source_material_context=source_material_context,
+            source_material_label=self._source_material_label,
+        )
+        if count_tokens(base_prompt) > max_allowed:
+            raise ValueError(
+                "Rigor discovery prompt exceeds available input budget with mandatory full source context "
+                f"({count_tokens(base_prompt)} tokens > {max_allowed} tokens). Source material was not "
+                "silently truncated; choose a larger Rigor & Proofs context window or reduce source size."
             )
-            if count_tokens(base_prompt) <= max_allowed or len(source_material_context) <= 4000:
-                break
-            source_material_context = source_material_context[: max(len(source_material_context) // 2, 4000)]
 
         mandatory_tokens = count_tokens(base_prompt)
         query_seed = (self.raw_user_prompt + " " + current_paper[-1500:]).strip()
@@ -706,7 +876,7 @@ class HighParamSubmitter:
 
         Returns (theorem_name, lean_code, attempts, integrity) on success, None on
         all-5-fail. On failure, records the candidate in proof_database so
-        future rigor cycles can see it as an open lemma target.
+        future rigor cycles can see it as an open high-impact proof target.
         """
         current_paper_raw = await paper_memory.get_paper()
         current_paper = _strip_paper_markers_for_llm(current_paper_raw)
@@ -786,8 +956,11 @@ class HighParamSubmitter:
                 max_attempts=5,
                 attempt_callback=_on_attempt_feedback,
                 attempt_start_callback=_on_attempt_started,
+                source_title=self._compiler_source_title(),
             )
         except Exception as exc:
+            if _is_rigor_model_call_failure(exc):
+                raise
             logger.error("Rigor formalization raised (%s); declining cycle", exc, exc_info=True)
             await self._broadcast(
                 "proof_check_complete",
@@ -801,7 +974,10 @@ class HighParamSubmitter:
             return None
 
         if not success:
-            # Record as an open lemma target so the next rigor cycle's
+            last_error = attempts[-1].error_output if attempts else ""
+            if MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX.lower() in last_error.lower():
+                raise ValueError(last_error)
+            # Record as an open proof target so the next rigor cycle's
             # discovery step can optionally retry it.
             try:
                 error_summary = attempts[-1].error_output if attempts else ""
@@ -924,6 +1100,8 @@ class HighParamSubmitter:
             stored = registration.record
             return stored.novel, stored.novelty_reasoning, stored, registration.duplicate
         except Exception as exc:
+            if _is_rigor_model_call_failure(exc):
+                raise
             logger.warning("Novelty assessment failed; rigor proof will not be stored: %s", exc)
             await self._broadcast(
                 "proof_check_complete",
@@ -1090,7 +1268,7 @@ class HighParamSubmitter:
         prompt: str,
         task_label: str,
     ) -> Optional[Any]:
-        """Send `prompt` to the high-param model and return parsed JSON.
+        """Send `prompt` to the Rigor & Proofs model and return parsed JSON.
 
         On a JSON parse failure, issues a single conversational retry that
         feeds the failed output back with a JSON-escape-rules reminder.
@@ -1105,7 +1283,7 @@ class HighParamSubmitter:
                 {"context_length": self.context_window, "model_path": self.model_name},
             )
         except Exception as exc:
-            logger.debug("LM Studio cache warmup skipped for high-param submitter: %s", exc)
+            logger.debug("LM Studio cache warmup skipped for Rigor & Proofs Submitter: %s", exc)
 
         if self.task_tracking_callback:
             self.task_tracking_callback("started", task_id)
@@ -1120,13 +1298,15 @@ class HighParamSubmitter:
                 max_tokens=self.max_output_tokens,
             )
         except Exception as exc:
-            logger.error("High-param LLM call failed (%s): %s", task_label, exc)
+            if _is_rigor_model_call_failure(exc):
+                raise
+            logger.error("Rigor & Proofs LLM call failed (%s): %s", task_label, exc)
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             return None
 
         if not response or not response.get("choices") or not response["choices"][0].get("message"):
-            logger.error("High-param LLM returned empty response (%s)", task_label)
+            logger.error("Rigor & Proofs LLM returned empty response (%s)", task_label)
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             return None
@@ -1134,7 +1314,7 @@ class HighParamSubmitter:
         message = response["choices"][0]["message"]
         llm_output = extract_message_text(message)
         if not llm_output.strip():
-            logger.error("High-param LLM returned empty content (%s)", task_label)
+            logger.error("Rigor & Proofs LLM returned empty content (%s)", task_label)
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             return None
@@ -1146,7 +1326,7 @@ class HighParamSubmitter:
             return parsed
         except Exception as parse_error:
             logger.info(
-                "High-param submitter (%s): initial JSON parse failed, attempting one retry: %s",
+                "Rigor & Proofs Submitter (%s): initial JSON parse failed, attempting one retry: %s",
                 task_label,
                 parse_error,
             )
@@ -1166,15 +1346,27 @@ class HighParamSubmitter:
 
         try:
             truncated_preview = sanitize_model_output_for_retry_context(llm_output, max_chars=2000)
+            retry_messages = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": truncated_preview},
+                {"role": "user", "content": retry_prompt},
+            ]
+            max_input_tokens = rag_config.get_available_input_tokens(
+                self.context_window,
+                self.max_output_tokens,
+            )
+            if sum(count_tokens(str(message.get("content") or "")) for message in retry_messages) > max_input_tokens:
+                retry_messages[1]["content"] = "[failed output omitted because retry context would exceed the model input budget]"
+            if sum(count_tokens(str(message.get("content") or "")) for message in retry_messages) > max_input_tokens:
+                raise ValueError(
+                    f"Rigor & Proofs retry prompt exceeds context limit for {task_label}; "
+                    "the original prompt is already at the configured model budget."
+                )
             retry_response = await api_client_manager.generate_completion(
                 task_id=f"{task_id}_retry",
                 role_id=self.role_id,
                 model=self.model_name,
-                messages=[
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": truncated_preview},
-                    {"role": "user", "content": retry_prompt},
-                ],
+                messages=retry_messages,
                 temperature=0.0,
                 max_tokens=self.max_output_tokens,
             )
@@ -1182,13 +1374,17 @@ class HighParamSubmitter:
                 retry_msg = retry_response["choices"][0]["message"]
                 retry_output = extract_message_text(retry_msg)
                 parsed = parse_json(retry_output)
-                logger.info("High-param submitter (%s): retry succeeded", task_label)
+                logger.info("Rigor & Proofs Submitter (%s): retry succeeded", task_label)
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
                 return parsed
         except Exception as retry_error:
+            if _is_rigor_model_call_failure(retry_error):
+                raise
+            if "retry prompt exceeds context limit" in str(retry_error).lower():
+                raise
             logger.warning(
-                "High-param submitter (%s): retry failed: %s", task_label, retry_error
+                "Rigor & Proofs Submitter (%s): retry failed: %s", task_label, retry_error
             )
 
         if self.task_tracking_callback:

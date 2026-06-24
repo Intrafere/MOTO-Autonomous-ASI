@@ -1,6 +1,6 @@
 # MOTO Autonomous ASI
 ## Autonomous Prototype Superintelligence - Automated Theorem Generation with Lean 4 Math Proof Verification
-**Version: 1.1.0**
+**Version: 1.1.01**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -8,7 +8,7 @@
 
 **A breakthrough in AI automated theorem generation. MOTO is an autonomous research system powered by Intrafere Research Group's new prototype-superintelligence discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/): a combination of reiterative brainstorming, validation, feedback, and pruning that creates prototype-level superintelligence using creative/combinatory multi-model data from nearly any combination of AI models. When enabled, MOTO pairs this exploration with Lean 4 machine-checked proofs for the exact formal theorem statements it successfully proves.**
 
-**MOTO generates novel and publication-worthy research papers, and it can formalize candidate theorems and lemmas in Lean 4 while only storing proofs that Lean 4 accepts as mathematically verified. Lean 4 automation gives the user machine-checked verification for the exact formal statements produced, while informal papers and interpretations should still be reviewed with scrutiny. Unlike programs that may look similar, MOTO finds novel solutions with 0 creative user input required after launch: press start and let it run for hours or days while it autonomously searches for new solution paths. MOTO's Lean 4 architecture was developed before public reports of Google's AlphaProof Nexus and appears to share the broad pattern of iterative proof attempts aided by proof-sketch brainstorming, though AlphaProof Nexus itself is unreleased and not directly comparable from public information. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.**
+MOTO generates novel and publication-worthy research papers, and it can formalize candidate theorems and lemmas in Lean 4 while only storing proofs that Lean 4 accepts as mathematically verified. Lean 4 automation gives the user machine-checked verification for the exact formal statements produced, while informal papers and interpretations should still be reviewed with scrutiny. Unlike programs that may look similar, MOTO finds novel solutions with 0 creative user input required after launch: press start and let it run for hours or days while it autonomously searches for new solution paths. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.
 
 ### The Core Discovery: Top-P Exploration 
 
@@ -28,7 +28,9 @@ Paired with Top-P Exploration — and secondary to it — MOTO has an **optional
 
 **Lean 4 is authoritative.** SMT results are hints only — they never substitute for Lean verification, and any proof that would compile only because of a `sorry` or `admit` is rejected. The pipeline is entirely silent and skipped when `lean4_enabled=False`, so it never blocks brainstorm or paper completion; the default hosted image stays Lean-free and Z3-free. A manual-check endpoint (`POST /api/proofs/check`) also lets you re-run the pipeline on any stored brainstorm or paper after the fact, and the compiler's "rigor mode" reuses the same Lean 4 checker to upgrade lemmas inside a paper as it's being written.
 
-Give the program a try — MOTO is as cool as it sounds. Windows has a one-click launcher and Ubuntu 24.04 now has a repo-root launcher too. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green "< > Code" drop-down menu on the top right of this GitHub page and download the zip file. On Windows, extract it to your desktop and double-click `Click To Launch MOTO.bat`. On Ubuntu 24.04, extract it and run `bash linux-ubuntu-launcher.sh`. Configure cloud access through **Cloud Access & Keys** with an OpenRouter API key, or connect LM Studio for local/faster performance. Desktop **oAuth** logins such as OpenAI Codex or xAI Grok/SuperGrok are supplementary model providers after startup, not a standalone startup path, because RAG embeddings still require OpenRouter, LM Studio, or hosted FastEmbed. xAI Console API keys are separate from Grok subscription OAuth and may consume API credits. Then select your agents in the settings profile - if desired and you are unsure you may use the preselected "fastest" profile.
+MOTO also includes a non-blocking Assistant memory layer. As submitters, writers, proof solvers, and LeanOJ solvers work, MOTO observes the current prompt/phase/target, searches local verified proof history and SyntheticLib4 when enabled, and prepares an up-to-7 memory-support pack. The main workflow never waits for this search; when a relevant pack is ready, it is injected as optional supporting context into later eligible producer calls. Validators and critique phases never receive Assistant memory.
+
+Give the program a try — MOTO is as cool as it sounds. Windows has a one-click launcher and Ubuntu 24.04 now has a repo-root launcher too. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green "< > Code" drop-down menu on the top right of this GitHub page and download the zip file. On Windows, extract it to your desktop and double-click `Click To Launch MOTO.bat`. On Ubuntu 24.04, extract it and run `bash linux-ubuntu-launcher.sh`. Configure provider access through **OpenRouter/OAuth** with an OpenRouter API key, or connect LM Studio for local/faster performance. Desktop **oAuth** logins such as OpenAI Codex or xAI Grok/SuperGrok are supplementary model providers after startup, not a standalone startup path, because RAG embeddings still require OpenRouter, LM Studio, or hosted FastEmbed. xAI Console API keys are separate from Grok subscription OAuth and may consume API credits. Then select your agents in the settings profile - if desired and you are unsure you may use the preselected "fastest" profile.
 
 ***Now you are set up and every time you press launch your home lab is ready for your prompt!*** **Give MOTO the toughest question you can think of and press start to begin YOUR creations!**
 
@@ -43,7 +45,7 @@ MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward (novelty seeki
 ### Key Features
 
 - 🤖 **Autonomous Topic Selection, Brainstorming, and Paper Generation**: AI chooses research avenues based on high-level goals and produces you a final answer with ZERO extra user input. Let MOTO run for days using the best models without touching it, or for a few hours using a faster draft model. How deep you research and how long it takes is left up to you, the user.
-- **Cloud Access & Keys**: Supports local LM Studio models, OpenRouter API-key models, and desktop-only OAuth subscription logins as separate provider paths. Run local LM Studio models offline, use OpenRouter to access many third-party providers, or add OpenAI Codex/ChatGPT or xAI Grok/SuperGrok OAuth for subscription-backed chat/model roles. OAuth is supplementary because RAG embeddings are routed separately through LM Studio, OpenRouter, or hosted FastEmbed.
+- **OpenRouter/OAuth**: Supports local LM Studio models, OpenRouter API-key models, and desktop-only OAuth subscription logins as separate provider paths. Run local LM Studio models offline, use OpenRouter to access many third-party providers, or add OpenAI Codex/ChatGPT or xAI Grok/SuperGrok OAuth for subscription-backed chat/model roles. OAuth is supplementary because RAG embeddings are routed separately through LM Studio, OpenRouter, or hosted FastEmbed.
 - **Optional Automated Theorem Generation (Lean 4)**: When enabled, every brainstorm and paper is run through a parallel proof pipeline that identifies theorem/lemma candidates, searches Mathlib for relevant lemmas, optionally runs Z3/SMT for conservative early-exit hints, then attempts Lean 4 formalization (up to 5 retries per candidate with failure-hint direct injection). Only Lean 4-verified proofs are stored, and novel proofs are fed back into subsequent brainstorming as highest-priority context. Secondary to Top-P Exploration and silent when disabled.
 
 ---
@@ -65,9 +67,9 @@ Before installation, you need:
    - If using OpenRouter, then download and load at least one model (e.g., DeepSeek, Llama, Qwen - older models and some models below 12 billion parameters may struggle; however, it is always worth a try!)
    - **Load the LM Studio RAG agent [optional but HIGHLY recommended for much faster outputs/answers]**: Load the embedding model `nomic-ai/nomic-embed-text-v1.5` in your LM Studio "Developer" tab (server tab) (search for "nomic-ai/nomic-embed-text-v1.5" to download it in the LM Studio downloads center). Please note: you may need to enable "Power User" or "Developer" to see this developer tab - this server will let you load the amount and capacity of simultaneous models that your PC will support. In this developer tab is where you load both your nomic-ai embedding agent and any optional local hosted agents you want to use in the program (e.g., GPT OSS 20b, DeepSeek 32B, etc.). **If you do not download LM Studio and enable the Nomic agent the system will run much slower and cost slightly more due to having to use the paid service OpenRouter for RAG calls.**
    - Start the local server (port 1234)
-4. **If using cloud AI - configure Cloud Access & Keys**:
+4. **If using cloud AI - configure OpenRouter/OAuth**:
    - **OpenRouter API key**: Sign up at OpenRouter.ai and get a paid or free API key to use cloud models from many providers. You can see which models are free by checking the "show only free models" checkbox(es) in MOTO settings.
-   - **oAuth login (desktop only)**: In the `Cloud Access & Keys` overlay, choose the `OAuth` section to sign in through a supported subscription OAuth provider such as OpenAI Codex/ChatGPT or xAI Grok/SuperGrok. This is separate from regular API-key billing, unavailable in hosted/generic mode, and supplementary to an OpenRouter key or LM Studio because OAuth providers do not supply MOTO's RAG embeddings.
+   - **oAuth login (desktop only)**: In the `OpenRouter/OAuth` overlay, choose the `OAuth` section to sign in through a supported subscription OAuth provider such as OpenAI Codex/ChatGPT or xAI Grok/SuperGrok. This is separate from regular API-key billing, unavailable in hosted/generic mode, and supplementary to an OpenRouter key or LM Studio because OAuth providers do not supply MOTO's RAG embeddings.
 5. **On first startup, pick your provider path**: After you acknowledge the disclaimer, MOTO will prompt you to configure OpenRouter or confirm that LM Studio is running with both `nomic-ai/nomic-embed-text-v1.5` and a usable chat model loaded. If you save an OpenRouter key there, the recommended default autonomous profile is applied immediately so you can open Settings and see it already selected. Desktop OAuth logins can also be configured from the header after startup, once the embedding-capable provider path is ready.
 
 #### Optional Lean 4 / SMT Proof Verification Requirements
@@ -88,7 +90,7 @@ Lean 4 proof verification is optional. The launcher prepares it when available, 
 2. Start LM Studio and load your models and "nomic-embed-text-v1.5" agent **and/or** have your OpenRouter API key ready. Desktop OAuth logins are optional add-ons after startup.
 3. **Double-click `Click To Launch MOTO.bat`**
 4. After acknowledging the disclaimer, choose one of the startup setup paths:
-   - Open `Cloud Access & Keys` to enter your OpenRouter API key
+   - Open `OpenRouter/OAuth` to enter your OpenRouter API key
    - Optionally configure an OAuth provider login from the same header overlay after startup (desktop only)
    - Confirm that LM Studio is already running with a loaded model
    - Then open Settings to keep the recommended profile or switch to your saved team profile / another default profile
@@ -138,7 +140,7 @@ bash linux-ubuntu-launcher.sh
 - Dirty or locally mutated repos remain runnable, but they are update-detection-only and are not eligible for automatic update-apply behavior.
 - If launcher-managed backend/frontend services from this install are still running, the updater warns and skips update-apply until those services are closed.
 - If GitHub `main` is reachable but `moto-update-manifest.json` is not published there yet, the launcher falls back to branch-head comparison and keeps update-apply disabled until the manifest is present.
-- Clean git updateability is preserved by avoiding silent tracked-file mutations during normal startup; for example, the launcher no longer auto-runs `npm audit fix`.
+- The launcher runs `npm audit fix` when `npm install` reports frontend vulnerabilities, including on clean git checkouts, so dependency CVE remediation remains automatic.
 - Preservation is defined against the active runtime roots, not only the default folders. The launcher may use `backend/data`, `backend/logs`, or instance-scoped `.moto_instances/<instance_id>/...` roots, and browser storage prefixes plus OS-keyring namespaces are part of that same preserved state boundary.
 
 ---
@@ -176,7 +178,7 @@ bash linux-ubuntu-launcher.sh
 1. Go to **Compiler Interface** tab
 2. Enter compiler-directing prompt (e.g., "Build a paper titled 'Modular Forms in the Langlands Program'")
 3. Configure settings:
-   - Select validator, high-context, and high-parameter models
+   - Select Validator, Writing Submitter, and Rigor & Proofs Submitter models
    - Set context windows and output token limits
 4. Click **Start Compiler**
 5. Watch real-time paper construction in **Live Paper** tab
@@ -243,22 +245,22 @@ moto-math-variant/
 
 **Compiler**:
 - Validator model (coherence/rigor checking)
-- High-context model (outline, construction, review)
-- High-parameter model (rigor enhancement)
+- Writing Submitter model (outline, construction, review)
+- Rigor & Proofs Submitter model (Lean/proof work and rigor enhancement)
 
 **Autonomous Research**:
 - All aggregator and compiler roles configurable
 - Separate models for topic selection, completion review, etc.
 
-### Cloud Access & Keys
+### OpenRouter/OAuth
 
 Each role supports:
 - **Provider**: LM Studio (local), OpenRouter (cloud API key), or desktop OAuth providers such as OpenAI Codex and xAI Grok/SuperGrok
 - **Model Selection**: Choose from available models
-- **Host/Provider**: Select specific OpenRouter provider (e.g., Anthropic, Google)
+- **Host/Provider**: Select a specific OpenRouter provider when needed
 - **Fallback**: Optional LM Studio fallback if a cloud provider fails or runs out of credits
 
-`Cloud Access & Keys` in the header is where you manage cloud credentials. OpenRouter keys are stored through the backend keyring in desktop/default mode and in memory in hosted/generic mode. Desktop OAuth logins store tokens securely on the desktop backend and are selected through the `oAuth` provider dropdown; supported providers include OpenAI Codex/ChatGPT and xAI Grok/SuperGrok. These OAuth paths are separate from regular API-key billing, are not available in hosted/generic mode, and cannot be the only startup provider because MOTO's RAG embeddings are not routed through OAuth providers.
+`OpenRouter/OAuth` in the header is where you manage OpenRouter credentials and desktop OAuth logins. OpenRouter keys are stored through the backend keyring in desktop/default mode and in memory in hosted/generic mode. Desktop OAuth logins store tokens securely on the desktop backend and are selected through the `oAuth` provider dropdown; supported providers include OpenAI Codex/ChatGPT and xAI Grok/SuperGrok. These OAuth paths are separate from regular API-key billing, are not available in hosted/generic mode, and cannot be the only startup provider because MOTO's RAG embeddings are not routed through OAuth providers.
 
 ### Context and Output Settings
 

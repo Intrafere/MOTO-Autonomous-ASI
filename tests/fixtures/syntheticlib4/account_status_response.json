@@ -1,0 +1,21 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "schema_version": "syntheticlib4.account_status.v1",
+  "authenticated": true,
+  "membership_active": true,
+  "membership_tier": "individual_member",
+  "access_expires_at": "2026-07-12T00:00:00Z",
+  "scopes": [
+    "proofs:read",
+    "releases:read",
+    "deltas:read",
+    "usage:write",
+    "account:status",
+    "user_proofs:read"
+  ],
+  "quota": {
+    "api_requests_remaining_day": 2000,
+    "text_searches_remaining_month": 2000,
+    "semantic_searches_remaining_month": 200
+  }
+}

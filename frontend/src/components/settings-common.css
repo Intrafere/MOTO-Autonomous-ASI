@@ -144,6 +144,7 @@
   color: var(--accent-green);
   font-size: 0.9rem;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 /* OpenRouter status banner */
@@ -426,10 +427,33 @@
   color: var(--accent-red);
 }
 
+.settings-error {
+  color: var(--accent-red);
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-top: 0.35rem;
+}
+
 /* Success text inline */
 .status-success-text {
   color: var(--accent-green);
   font-size: 0.85rem;
+}
+
+.status-success-text--reserved {
+  display: inline-block;
+  min-width: 4.75rem;
+  text-align: right;
+}
+
+.status-success-text--hidden {
+  visibility: hidden;
+}
+
+.settings-inline-save-message {
+  margin-left: auto;
+  text-align: right;
+  white-space: nowrap;
 }
 
 /* Dark text input */
@@ -727,6 +751,29 @@
   font-weight: bold;
   color: #000;
   letter-spacing: 0.03em;
+}
+
+.ranking-badge--stacked {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  line-height: 1.05;
+  text-align: center;
+  white-space: nowrap;
+  margin-bottom: 0.45rem;
+}
+
+.ranking-badge-crown {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.ranking-badge-text {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .ranking-badge--gold {

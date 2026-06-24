@@ -11,7 +11,7 @@ import {
   useProofCheckRuntime,
 } from '../../hooks/useProofCheckRuntime';
 
-export default function LiveResults() {
+export default function LiveResults({ onClearPrompt = null }) {
   const [results, setResults] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
   const [showLatex, setShowLatex] = useState(false); // Raw text by default for performance with large docs
@@ -84,6 +84,7 @@ export default function LiveResults() {
     
     try {
       const data = await api.clearAllSubmissions();
+      onClearPrompt?.();
       alert(data.message);
       // Refresh results to show empty state
       fetchResults();

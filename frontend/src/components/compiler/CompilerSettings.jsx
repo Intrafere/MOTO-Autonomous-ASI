@@ -4,22 +4,27 @@ import {
   computeCodexAutoSettings,
   computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeSakanaFuguAutoSettings,
   computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
+  formatOpenRouterProviderLabel,
+  getOpenRouterProviderTitle,
   getProviderNames,
   getReasoningSupportInfo,
   hasEndpointMetadata,
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
+  SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import {
   chooseCloudAccessProvider,
   getConfiguredCloudAccessProviders,
   isCloudAccessProvider,
   cloudAccessProviderLabel,
+  SAKANA_FUGU_PROVIDER,
   XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
 import HelpTooltip from '../HelpTooltip';
@@ -33,19 +38,38 @@ const SETTINGS_KEY = 'compiler_settings';
 const RAW_VIEW_EXIT_WARNING = 'Switching back to the GUI view will restore your last GUI settings/profile and discard raw-only changes. Continue?';
 const formatRawSettings = (value) => JSON.stringify(value, null, 2);
 const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer attempts, then run a 5th same-model call to choose or synthesize the best final answer. It uses 5x the API calls, so it is about 5x slower and 5x more costly, but can produce more intelligent answers.';
+const LEGACY_WRITER_CAMEL_PREFIX = ['high', 'Context'].join('');
 
-function CompilerSettings({ capabilities, developerModeEnabled = false }) {
+const isMeaningfulWriterSetting = (value, suffix) => {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string' && value.trim() === '') return false;
+  if ((suffix === 'ContextSize' || suffix === 'MaxOutput') && Number(value) <= 0) return false;
+  return true;
+};
+
+const readWriterSetting = (settings, suffix) => {
+  const current = settings[`writer${suffix}`];
+  if (isMeaningfulWriterSetting(current, suffix)) {
+    return current;
+  }
+  return settings[`${LEGACY_WRITER_CAMEL_PREFIX}${suffix}`];
+};
+
+function CompilerSettings({ capabilities, connectivityStatus, developerModeEnabled = false }) {
   // LM Studio and OpenRouter models
   const [lmStudioModels, setLmStudioModels] = useState([]);
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [xaiGrokModels, setXaiGrokModels] = useState([]);
+  const [sakanaFuguModels, setSakanaFuguModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
+  const [hasSakanaFuguKey, setHasSakanaFuguKey] = useState(false);
   const [openAICodexModelError, setOpenAICodexModelError] = useState('');
   const [xaiGrokModelError, setXaiGrokModelError] = useState('');
+  const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [loadingModels, setLoadingModels] = useState(true);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -61,17 +85,27 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   const [validatorMaxOutput, setValidatorMaxOutput] = useState(DEFAULT_MAX_OUTPUT_TOKENS);
   const [validatorSuperchargeEnabled, setValidatorSuperchargeEnabled] = useState(false);
 
-  // High-Context settings
-  const [highContextProvider, setHighContextProvider] = useState('lm_studio');
-  const [highContextModel, setHighContextModel] = useState('');
-  const [highContextOpenrouterProvider, setHighContextOpenrouterProvider] = useState(null);
-  const [highContextOpenrouterReasoningEffort, setHighContextOpenrouterReasoningEffort] = useState(DEFAULT_OPENROUTER_REASONING_EFFORT);
-  const [highContextLmStudioFallback, setHighContextLmStudioFallback] = useState(null);
-  const [highContextContextSize, setHighContextContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
-  const [highContextMaxOutput, setHighContextMaxOutput] = useState(DEFAULT_MAX_OUTPUT_TOKENS);
-  const [highContextSuperchargeEnabled, setHighContextSuperchargeEnabled] = useState(false);
+  // Assistant settings (defaults to Validator)
+  const [assistantProvider, setAssistantProvider] = useState('lm_studio');
+  const [assistantModel, setAssistantModel] = useState('');
+  const [assistantOpenrouterProvider, setAssistantOpenrouterProvider] = useState(null);
+  const [assistantOpenrouterReasoningEffort, setAssistantOpenrouterReasoningEffort] = useState(DEFAULT_OPENROUTER_REASONING_EFFORT);
+  const [assistantLmStudioFallback, setAssistantLmStudioFallback] = useState(null);
+  const [assistantContextSize, setAssistantContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
+  const [assistantMaxOutput, setAssistantMaxOutput] = useState(DEFAULT_MAX_OUTPUT_TOKENS);
+  const [assistantSuperchargeEnabled, setAssistantSuperchargeEnabled] = useState(false);
 
-  // High-Param settings
+  // Writing settings
+  const [writerProvider, setWritingProvider] = useState('lm_studio');
+  const [writerModel, setWritingModel] = useState('');
+  const [writerOpenrouterProvider, setWritingOpenrouterProvider] = useState(null);
+  const [writerOpenrouterReasoningEffort, setWritingOpenrouterReasoningEffort] = useState(DEFAULT_OPENROUTER_REASONING_EFFORT);
+  const [writerLmStudioFallback, setWritingLmStudioFallback] = useState(null);
+  const [writerContextSize, setWritingContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
+  const [writerMaxOutput, setWritingMaxOutput] = useState(DEFAULT_MAX_OUTPUT_TOKENS);
+  const [writerSuperchargeEnabled, setWritingSuperchargeEnabled] = useState(false);
+
+  // Rigor & Proofs settings (legacy highParam keys)
   const [highParamProvider, setHighParamProvider] = useState('lm_studio');
   const [highParamModel, setHighParamModel] = useState('');
   const [highParamOpenrouterProvider, setHighParamOpenrouterProvider] = useState(null);
@@ -81,7 +115,7 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   const [highParamMaxOutput, setHighParamMaxOutput] = useState(DEFAULT_MAX_OUTPUT_TOKENS);
   const [highParamSuperchargeEnabled, setHighParamSuperchargeEnabled] = useState(false);
 
-  // Critique Submitter settings
+  // Deprecated critique compatibility state; saved values mirror Rigor & Proofs.
   const [critiqueSubmitterProvider, setCritiqueSubmitterProvider] = useState('lm_studio');
   const [critiqueSubmitterModel, setCritiqueSubmitterModel] = useState('');
   const [critiqueSubmitterOpenrouterProvider, setCritiqueSubmitterOpenrouterProvider] = useState(null);
@@ -98,13 +132,6 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   const [rawSettingsMessage, setRawSettingsMessage] = useState('');
   const [guiSettingsBeforeRaw, setGuiSettingsBeforeRaw] = useState(null);
 
-  // Wolfram Alpha settings
-  const [wolframEnabled, setWolframEnabled] = useState(false);
-  const [wolframApiKey, setWolframApiKey] = useState('');
-  const [hasStoredWolframKey, setHasStoredWolframKey] = useState(false);
-  const [wolframTestResult, setWolframTestResult] = useState('');
-  const [testingWolfram, setTestingWolfram] = useState(false);
-
   // Critique prompt editor state
   const [critiquePromptExpanded, setCritiquePromptExpanded] = useState(false);
   const [customCritiquePrompt, setCustomCritiquePrompt] = useState('');
@@ -112,9 +139,14 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   const [defaultCritiquePrompt, setDefaultCritiquePrompt] = useState('');
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
   const genericMode = Boolean(capabilities?.genericMode);
+  const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
+  const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
+  const sakanaFuguAvailable = !genericMode && capabilities?.sakanaFuguAvailable !== false;
+  const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
   const oauthStatusByProvider = {
     openai_codex_oauth: { configured: hasOpenAICodexLogin },
     [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+    [SAKANA_FUGU_PROVIDER]: { configured: hasSakanaFuguKey },
   };
   const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
 
@@ -149,33 +181,65 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
       } catch (err) {
         console.error('Failed to check OpenRouter key:', err);
       }
-      try {
-        const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
-        const configured = Boolean(codexStatus.status?.configured);
-        setHasOpenAICodexLogin(configured);
-        if (configured) {
-          fetchOpenAICodexModels();
-        } else {
-          setOpenAICodexModelError('');
+      if (openAICodexOauthAvailable) {
+        try {
+          const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+          const configured = Boolean(codexStatus.status?.configured);
+          setHasOpenAICodexLogin(configured);
+          if (configured) {
+            fetchOpenAICodexModels();
+          } else {
+            setOpenAICodexModelError('');
+          }
+        } catch (err) {
+          console.error('Failed to check OpenAI Codex login:', err);
+          setHasOpenAICodexLogin(false);
+          setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
         }
-      } catch (err) {
-        console.error('Failed to check OpenAI Codex login:', err);
+      } else {
         setHasOpenAICodexLogin(false);
-        setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+        setOpenAICodexModels([]);
+        setOpenAICodexModelError('');
       }
-      try {
-        const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
-        const configured = Boolean(xaiStatus.status?.configured);
-        setHasXAIGrokLogin(configured);
-        if (configured) {
-          fetchXAIGrokModels();
-        } else {
-          setXaiGrokModelError('');
+      if (xaiGrokOauthAvailable) {
+        try {
+          const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+          const configured = Boolean(xaiStatus.status?.configured);
+          setHasXAIGrokLogin(configured);
+          if (configured) {
+            fetchXAIGrokModels();
+          } else {
+            setXaiGrokModelError('');
+          }
+        } catch (err) {
+          console.error('Failed to check xAI Grok login:', err);
+          setHasXAIGrokLogin(false);
+          setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
         }
-      } catch (err) {
-        console.error('Failed to check xAI Grok login:', err);
+      } else {
         setHasXAIGrokLogin(false);
-        setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
+        setXaiGrokModels([]);
+        setXaiGrokModelError('');
+      }
+      if (sakanaFuguAvailable) {
+        try {
+          const sakanaStatus = await cloudAccessAPI.getSakanaFuguStatus();
+          const configured = Boolean(sakanaStatus.status?.configured);
+          setHasSakanaFuguKey(configured);
+          if (configured) {
+            fetchSakanaFuguModels();
+          } else {
+            setSakanaFuguModelError('');
+          }
+        } catch (err) {
+          console.error('Failed to check Sakana Fugu API key:', err);
+          setHasSakanaFuguKey(false);
+          setSakanaFuguModelError(`Sakana Fugu status could not be checked: ${err.message || 'unknown error'}.`);
+        }
+      } else {
+        setHasSakanaFuguKey(false);
+        setSakanaFuguModels([]);
+        setSakanaFuguModelError('');
       }
 
       // Fetch LM Studio models
@@ -204,16 +268,29 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
           if (settings.validatorContextSize) setValidatorContextSize(settings.validatorContextSize);
           if (settings.validatorMaxOutput) setValidatorMaxOutput(settings.validatorMaxOutput);
           if (settings.validatorSuperchargeEnabled !== undefined) setValidatorSuperchargeEnabled(settings.validatorSuperchargeEnabled);
-          // High-Context
-          if (settings.highContextProvider) setHighContextProvider(settings.highContextProvider);
-          if (settings.highContextModel) setHighContextModel(settings.highContextModel);
-          if (settings.highContextOpenrouterProvider) setHighContextOpenrouterProvider(settings.highContextOpenrouterProvider);
-          if (settings.highContextOpenrouterReasoningEffort) setHighContextOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.highContextOpenrouterReasoningEffort));
-          if (settings.highContextLmStudioFallback) setHighContextLmStudioFallback(settings.highContextLmStudioFallback);
-          if (settings.highContextContextSize) setHighContextContextSize(settings.highContextContextSize);
-          if (settings.highContextMaxOutput) setHighContextMaxOutput(settings.highContextMaxOutput);
-          if (settings.highContextSuperchargeEnabled !== undefined) setHighContextSuperchargeEnabled(settings.highContextSuperchargeEnabled);
-          // High-Param
+          // Assistant
+          setAssistantProvider(settings.assistantProvider || settings.validatorProvider || 'lm_studio');
+          setAssistantModel(settings.assistantModel || settings.validatorModel || '');
+          setAssistantOpenrouterProvider(settings.assistantOpenrouterProvider || settings.validatorOpenrouterProvider || null);
+          setAssistantOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.assistantOpenrouterReasoningEffort || settings.validatorOpenrouterReasoningEffort));
+          setAssistantLmStudioFallback(settings.assistantLmStudioFallback || settings.validatorLmStudioFallback || null);
+          setAssistantContextSize(settings.assistantContextSize || settings.validatorContextSize || DEFAULT_CONTEXT_WINDOW);
+          setAssistantMaxOutput(settings.assistantMaxOutput || settings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS);
+          setAssistantSuperchargeEnabled(
+            settings.assistantModel
+              ? Boolean(settings.assistantSuperchargeEnabled)
+              : Boolean(settings.validatorSuperchargeEnabled)
+          );
+          // Writing
+          if (readWriterSetting(settings, 'Provider')) setWritingProvider(readWriterSetting(settings, 'Provider'));
+          if (readWriterSetting(settings, 'Model')) setWritingModel(readWriterSetting(settings, 'Model'));
+          if (readWriterSetting(settings, 'OpenrouterProvider')) setWritingOpenrouterProvider(readWriterSetting(settings, 'OpenrouterProvider'));
+          if (readWriterSetting(settings, 'OpenrouterReasoningEffort')) setWritingOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(readWriterSetting(settings, 'OpenrouterReasoningEffort')));
+          if (readWriterSetting(settings, 'LmStudioFallback')) setWritingLmStudioFallback(readWriterSetting(settings, 'LmStudioFallback'));
+          if (readWriterSetting(settings, 'ContextSize')) setWritingContextSize(readWriterSetting(settings, 'ContextSize'));
+          if (readWriterSetting(settings, 'MaxOutput')) setWritingMaxOutput(readWriterSetting(settings, 'MaxOutput'));
+          if (readWriterSetting(settings, 'SuperchargeEnabled') !== undefined) setWritingSuperchargeEnabled(readWriterSetting(settings, 'SuperchargeEnabled'));
+          // Rigor & Proofs
           if (settings.highParamProvider) setHighParamProvider(settings.highParamProvider);
           if (settings.highParamModel) setHighParamModel(settings.highParamModel);
           if (settings.highParamOpenrouterProvider) setHighParamOpenrouterProvider(settings.highParamOpenrouterProvider);
@@ -222,7 +299,7 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
           if (settings.highParamContextSize) setHighParamContextSize(settings.highParamContextSize);
           if (settings.highParamMaxOutput) setHighParamMaxOutput(settings.highParamMaxOutput);
           if (settings.highParamSuperchargeEnabled !== undefined) setHighParamSuperchargeEnabled(settings.highParamSuperchargeEnabled);
-          // Critique Submitter
+          // Deprecated critique compatibility
           if (settings.critiqueSubmitterProvider) setCritiqueSubmitterProvider(settings.critiqueSubmitterProvider);
           if (settings.critiqueSubmitterModel) setCritiqueSubmitterModel(settings.critiqueSubmitterModel);
           if (settings.critiqueSubmitterOpenrouterProvider) setCritiqueSubmitterOpenrouterProvider(settings.critiqueSubmitterOpenrouterProvider);
@@ -231,8 +308,6 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
           if (settings.critiqueSubmitterContextSize) setCritiqueSubmitterContextSize(settings.critiqueSubmitterContextSize);
           if (settings.critiqueSubmitterMaxOutput) setCritiqueSubmitterMaxOutput(settings.critiqueSubmitterMaxOutput);
           if (settings.critiqueSubmitterSuperchargeEnabled !== undefined) setCritiqueSubmitterSuperchargeEnabled(settings.critiqueSubmitterSuperchargeEnabled);
-          // Wolfram Alpha
-          if (settings.wolframEnabled !== undefined) setWolframEnabled(settings.wolframEnabled);
           // Free-only toggle
           if (settings.freeOnly !== undefined) setFreeOnly(settings.freeOnly);
           if (settings.freeModelLooping !== undefined) setFreeModelLooping(settings.freeModelLooping);
@@ -250,19 +325,6 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
       } catch (error) {
         console.error('Failed to load free model settings:', error);
       }
-      
-      const loadWolframStatus = async () => {
-        try {
-          const response = await api.getWolframStatus();
-          setHasStoredWolframKey(Boolean(response.has_key));
-          if (response.enabled) {
-            setWolframEnabled(true);
-          }
-        } catch (err) {
-          console.error('Failed to load Wolfram Alpha status:', err);
-        }
-      };
-      loadWolframStatus();
       
       setIsLoaded(true);
       setLoadingModels(false);
@@ -284,11 +346,11 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
       validatorOpenrouterProvider,
       validatorOpenrouterReasoningEffort
     );
-    const nextHighContext = normalizeRoleState(
-      highContextProvider,
-      highContextModel,
-      highContextOpenrouterProvider,
-      highContextOpenrouterReasoningEffort
+    const nextWriting = normalizeRoleState(
+      writerProvider,
+      writerModel,
+      writerOpenrouterProvider,
+      writerOpenrouterReasoningEffort
     );
     const nextHighParam = normalizeRoleState(
       highParamProvider,
@@ -302,6 +364,12 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
       critiqueSubmitterOpenrouterProvider,
       critiqueSubmitterOpenrouterReasoningEffort
     );
+    const nextAssistant = normalizeRoleState(
+      assistantProvider,
+      assistantModel,
+      assistantOpenrouterProvider,
+      assistantOpenrouterReasoningEffort
+    );
 
     if (validatorProvider !== nextValidator.provider) setValidatorProvider(nextValidator.provider);
     if (validatorModel !== nextValidator.model) setValidatorModel(nextValidator.model);
@@ -313,15 +381,15 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
     }
     if (validatorLmStudioFallback !== null) setValidatorLmStudioFallback(null);
 
-    if (highContextProvider !== nextHighContext.provider) setHighContextProvider(nextHighContext.provider);
-    if (highContextModel !== nextHighContext.model) setHighContextModel(nextHighContext.model);
-    if (highContextOpenrouterProvider !== nextHighContext.openrouterProvider) {
-      setHighContextOpenrouterProvider(nextHighContext.openrouterProvider);
+    if (writerProvider !== nextWriting.provider) setWritingProvider(nextWriting.provider);
+    if (writerModel !== nextWriting.model) setWritingModel(nextWriting.model);
+    if (writerOpenrouterProvider !== nextWriting.openrouterProvider) {
+      setWritingOpenrouterProvider(nextWriting.openrouterProvider);
     }
-    if (highContextOpenrouterReasoningEffort !== nextHighContext.openrouterReasoningEffort) {
-      setHighContextOpenrouterReasoningEffort(nextHighContext.openrouterReasoningEffort);
+    if (writerOpenrouterReasoningEffort !== nextWriting.openrouterReasoningEffort) {
+      setWritingOpenrouterReasoningEffort(nextWriting.openrouterReasoningEffort);
     }
-    if (highContextLmStudioFallback !== null) setHighContextLmStudioFallback(null);
+    if (writerLmStudioFallback !== null) setWritingLmStudioFallback(null);
 
     if (highParamProvider !== nextHighParam.provider) setHighParamProvider(nextHighParam.provider);
     if (highParamModel !== nextHighParam.model) setHighParamModel(nextHighParam.model);
@@ -344,6 +412,15 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
       setCritiqueSubmitterOpenrouterReasoningEffort(nextCritique.openrouterReasoningEffort);
     }
     if (critiqueSubmitterLmStudioFallback !== null) setCritiqueSubmitterLmStudioFallback(null);
+    if (assistantProvider !== nextAssistant.provider) setAssistantProvider(nextAssistant.provider);
+    if (assistantModel !== nextAssistant.model) setAssistantModel(nextAssistant.model);
+    if (assistantOpenrouterProvider !== nextAssistant.openrouterProvider) {
+      setAssistantOpenrouterProvider(nextAssistant.openrouterProvider);
+    }
+    if (assistantOpenrouterReasoningEffort !== nextAssistant.openrouterReasoningEffort) {
+      setAssistantOpenrouterReasoningEffort(nextAssistant.openrouterReasoningEffort);
+    }
+    if (assistantLmStudioFallback !== null) setAssistantLmStudioFallback(null);
   }, [
     lmStudioEnabled,
     validatorProvider,
@@ -351,11 +428,11 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
     validatorOpenrouterProvider,
     validatorOpenrouterReasoningEffort,
     validatorLmStudioFallback,
-    highContextProvider,
-    highContextModel,
-    highContextOpenrouterProvider,
-    highContextOpenrouterReasoningEffort,
-    highContextLmStudioFallback,
+    writerProvider,
+    writerModel,
+    writerOpenrouterProvider,
+    writerOpenrouterReasoningEffort,
+    writerLmStudioFallback,
     highParamProvider,
     highParamModel,
     highParamOpenrouterProvider,
@@ -366,6 +443,11 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
     critiqueSubmitterOpenrouterProvider,
     critiqueSubmitterOpenrouterReasoningEffort,
     critiqueSubmitterLmStudioFallback,
+    assistantProvider,
+    assistantModel,
+    assistantOpenrouterProvider,
+    assistantOpenrouterReasoningEffort,
+    assistantLmStudioFallback,
   ]);
 
   // Fetch providers for any OpenRouter models after settings are loaded
@@ -377,21 +459,26 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
       fetchProvidersForModel(validatorModel);
     }
     
-    // Fetch providers for high-context
-    if (highContextProvider === 'openrouter' && highContextModel) {
-      fetchProvidersForModel(highContextModel);
+    // Fetch providers for writer
+    if (writerProvider === 'openrouter' && writerModel) {
+      fetchProvidersForModel(writerModel);
     }
     
-    // Fetch providers for high-param
+    // Fetch providers for Rigor & Proofs
     if (highParamProvider === 'openrouter' && highParamModel) {
       fetchProvidersForModel(highParamModel);
     }
     
-    // Fetch providers for critique submitter
+    // Fetch providers for deprecated critique compatibility fields
     if (critiqueSubmitterProvider === 'openrouter' && critiqueSubmitterModel) {
       fetchProvidersForModel(critiqueSubmitterModel);
     }
-  }, [isLoaded, hasOpenRouterKey, validatorProvider, validatorModel, highContextProvider, highContextModel, highParamProvider, highParamModel, critiqueSubmitterProvider, critiqueSubmitterModel]);
+
+    // Fetch providers for Assistant
+    if (assistantProvider === 'openrouter' && assistantModel) {
+      fetchProvidersForModel(assistantModel);
+    }
+  }, [isLoaded, hasOpenRouterKey, validatorProvider, validatorModel, writerProvider, writerModel, highParamProvider, highParamModel, critiqueSubmitterProvider, critiqueSubmitterModel, assistantProvider, assistantModel]);
 
   // Save settings to localStorage whenever values change
   useEffect(() => {
@@ -400,13 +487,20 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
     const settings = {
       validatorProvider, validatorModel, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback,
       validatorContextSize, validatorMaxOutput, validatorSuperchargeEnabled,
-      highContextProvider, highContextModel, highContextOpenrouterProvider, highContextOpenrouterReasoningEffort, highContextLmStudioFallback,
-      highContextContextSize, highContextMaxOutput, highContextSuperchargeEnabled,
+      assistantProvider, assistantModel, assistantOpenrouterProvider, assistantOpenrouterReasoningEffort, assistantLmStudioFallback,
+      assistantContextSize, assistantMaxOutput, assistantSuperchargeEnabled,
+      writerProvider, writerModel, writerOpenrouterProvider, writerOpenrouterReasoningEffort, writerLmStudioFallback,
+      writerContextSize, writerMaxOutput, writerSuperchargeEnabled,
       highParamProvider, highParamModel, highParamOpenrouterProvider, highParamOpenrouterReasoningEffort, highParamLmStudioFallback,
       highParamContextSize, highParamMaxOutput, highParamSuperchargeEnabled,
-      critiqueSubmitterProvider, critiqueSubmitterModel, critiqueSubmitterOpenrouterProvider, critiqueSubmitterOpenrouterReasoningEffort, critiqueSubmitterLmStudioFallback,
-      critiqueSubmitterContextSize, critiqueSubmitterMaxOutput, critiqueSubmitterSuperchargeEnabled,
-      wolframEnabled,
+      critiqueSubmitterProvider: highParamProvider,
+      critiqueSubmitterModel: highParamModel,
+      critiqueSubmitterOpenrouterProvider: highParamOpenrouterProvider,
+      critiqueSubmitterOpenrouterReasoningEffort: highParamOpenrouterReasoningEffort,
+      critiqueSubmitterLmStudioFallback: highParamLmStudioFallback,
+      critiqueSubmitterContextSize: highParamContextSize,
+      critiqueSubmitterMaxOutput: highParamMaxOutput,
+      critiqueSubmitterSuperchargeEnabled: highParamSuperchargeEnabled,
       freeOnly,
       freeModelLooping,
       freeModelAutoSelector,
@@ -419,13 +513,14 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   }, [
     isLoaded, validatorProvider, validatorModel, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback,
     validatorContextSize, validatorMaxOutput, validatorSuperchargeEnabled,
-    highContextProvider, highContextModel, highContextOpenrouterProvider, highContextOpenrouterReasoningEffort, highContextLmStudioFallback,
-    highContextContextSize, highContextMaxOutput, highContextSuperchargeEnabled,
+    assistantProvider, assistantModel, assistantOpenrouterProvider, assistantOpenrouterReasoningEffort, assistantLmStudioFallback,
+    assistantContextSize, assistantMaxOutput, assistantSuperchargeEnabled,
+    writerProvider, writerModel, writerOpenrouterProvider, writerOpenrouterReasoningEffort, writerLmStudioFallback,
+    writerContextSize, writerMaxOutput, writerSuperchargeEnabled,
     highParamProvider, highParamModel, highParamOpenrouterProvider, highParamOpenrouterReasoningEffort, highParamLmStudioFallback,
     highParamContextSize, highParamMaxOutput, highParamSuperchargeEnabled,
     critiqueSubmitterProvider, critiqueSubmitterModel, critiqueSubmitterOpenrouterProvider, critiqueSubmitterOpenrouterReasoningEffort, critiqueSubmitterLmStudioFallback,
     critiqueSubmitterContextSize, critiqueSubmitterMaxOutput, critiqueSubmitterSuperchargeEnabled,
-    wolframEnabled,
     freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders
   ]);
 
@@ -439,6 +534,12 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   };
 
   const fetchOpenAICodexModels = async () => {
+    if (!openAICodexOauthAvailable) {
+      setOpenAICodexModels([]);
+      setHasOpenAICodexLogin(false);
+      setOpenAICodexModelError('');
+      return;
+    }
     try {
       const result = await cloudAccessAPI.getOpenAICodexModels();
       const models = result.models || [];
@@ -457,6 +558,12 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
   };
 
   const fetchXAIGrokModels = async () => {
+    if (!xaiGrokOauthAvailable) {
+      setXaiGrokModels([]);
+      setHasXAIGrokLogin(false);
+      setXaiGrokModelError('');
+      return;
+    }
     try {
       const result = await cloudAccessAPI.getXAIGrokModels();
       const models = result.models || [];
@@ -471,6 +578,30 @@ function CompilerSettings({ capabilities, developerModeEnabled = false }) {
       setXaiGrokModels([]);
       setHasXAIGrokLogin(false);
       setXaiGrokModelError(`xAI Grok OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
+    }
+  };
+
+  const fetchSakanaFuguModels = async () => {
+    if (!sakanaFuguAvailable) {
+      setSakanaFuguModels([]);
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModelError('');
+      return;
+    }
+    try {
+      const result = await cloudAccessAPI.getSakanaFuguModels();
+      const models = result.models || [];
+      setSakanaFuguModels(models);
+      setHasSakanaFuguKey(models.length > 0);
+      setSakanaFuguModelError(models.length > 0
+        ? ''
+        : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
+      );
+    } catch (err) {
+      console.error('Failed to fetch Sakana Fugu models:', err);
+      setSakanaFuguModels([]);
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModelError(`Sakana Fugu API key is saved, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
 
@@ -585,6 +716,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const getOAuthModels = (provider) => {
     if (provider === 'openai_codex_oauth') return openAICodexModels;
     if (provider === XAI_GROK_PROVIDER) return xaiGrokModels;
+    if (provider === SAKANA_FUGU_PROVIDER) return sakanaFuguModels;
     return [];
   };
 
@@ -599,7 +731,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     }
     const autoSettings = provider === XAI_GROK_PROVIDER
       ? computeXAIGrokAutoSettings(model)
-      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+      : (provider === SAKANA_FUGU_PROVIDER
+        ? computeSakanaFuguAutoSettings(model)
+        : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider)));
     if (autoSettings.warnings.length > 0) {
       console.warn('[CompilerOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
     }
@@ -621,51 +755,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
   const isUsingCustomCritiquePrompt = customCritiquePrompt && customCritiquePrompt !== defaultCritiquePrompt;
 
-  // Wolfram Alpha handlers
-  const handleTestWolframConnection = async () => {
-    if (!wolframApiKey.trim()) {
-      setWolframTestResult('Please enter an API key');
-      return;
-    }
-    
-    setTestingWolfram(true);
-    setWolframTestResult('Testing...');
-    
-    try {
-      const response = await api.testWolframQuery({
-        query: 'What is 2+2?',
-        api_key: wolframApiKey
-      });
-      
-      if (response.success) {
-        setWolframTestResult(`✓ Success! Result: ${response.result}`);
-        await api.setWolframApiKey(wolframApiKey);
-        setHasStoredWolframKey(true);
-        setWolframEnabled(true);
-      } else {
-        setWolframTestResult('✗ Failed: ' + response.message);
-      }
-    } catch (err) {
-      setWolframTestResult('✗ Error: ' + err.message);
-    } finally {
-      setTestingWolfram(false);
-      setTimeout(() => setWolframTestResult(''), 5000);
-    }
-  };
-  
-  const handleClearWolframKey = async () => {
-    try {
-      await api.clearWolframApiKey();
-      setWolframApiKey('');
-      setWolframEnabled(false);
-      setHasStoredWolframKey(false);
-      setWolframTestResult('Key cleared');
-      setTimeout(() => setWolframTestResult(''), 3000);
-    } catch (err) {
-      console.error('Failed to clear Wolfram Alpha key:', err);
-    }
-  };
-
   // Handler for "Use Aggregator Models" button
   const handleUseAggregatorModels = async () => {
     if (!lmStudioEnabled) {
@@ -685,11 +774,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         setValidatorOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
         setValidatorLmStudioFallback(null);
         
-        setHighContextProvider('lm_studio');
-        setHighContextModel(settings.submitter_model);
-        setHighContextOpenrouterProvider(null);
-        setHighContextOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
-        setHighContextLmStudioFallback(null);
+        setWritingProvider('lm_studio');
+        setWritingModel(settings.submitter_model);
+        setWritingOpenrouterProvider(null);
+        setWritingOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
+        setWritingLmStudioFallback(null);
         
         setHighParamProvider('lm_studio');
         setHighParamModel(settings.submitter_model);
@@ -722,14 +811,22 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     validatorContextSize,
     validatorMaxOutput,
     validatorSuperchargeEnabled,
-    highContextProvider,
-    highContextModel,
-    highContextOpenrouterProvider,
-    highContextOpenrouterReasoningEffort,
-    highContextLmStudioFallback,
-    highContextContextSize,
-    highContextMaxOutput,
-    highContextSuperchargeEnabled,
+    assistantProvider,
+    assistantModel,
+    assistantOpenrouterProvider,
+    assistantOpenrouterReasoningEffort,
+    assistantLmStudioFallback,
+    assistantContextSize,
+    assistantMaxOutput,
+    assistantSuperchargeEnabled,
+    writerProvider,
+    writerModel,
+    writerOpenrouterProvider,
+    writerOpenrouterReasoningEffort,
+    writerLmStudioFallback,
+    writerContextSize,
+    writerMaxOutput,
+    writerSuperchargeEnabled,
     highParamProvider,
     highParamModel,
     highParamOpenrouterProvider,
@@ -746,7 +843,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     critiqueSubmitterContextSize,
     critiqueSubmitterMaxOutput,
     critiqueSubmitterSuperchargeEnabled,
-    wolframEnabled,
     freeOnly,
     freeModelLooping,
     freeModelAutoSelector,
@@ -762,14 +858,26 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setValidatorContextSize(rawSettings.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW);
     setValidatorMaxOutput(rawSettings.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
     setValidatorSuperchargeEnabled(Boolean(rawSettings.validatorSuperchargeEnabled));
-    setHighContextProvider(rawSettings.highContextProvider || 'lm_studio');
-    setHighContextModel(rawSettings.highContextModel || '');
-    setHighContextOpenrouterProvider(rawSettings.highContextOpenrouterProvider || null);
-    setHighContextOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.highContextOpenrouterReasoningEffort));
-    setHighContextLmStudioFallback(rawSettings.highContextLmStudioFallback || null);
-    setHighContextContextSize(rawSettings.highContextContextSize ?? DEFAULT_CONTEXT_WINDOW);
-    setHighContextMaxOutput(rawSettings.highContextMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
-    setHighContextSuperchargeEnabled(Boolean(rawSettings.highContextSuperchargeEnabled));
+    setAssistantProvider(rawSettings.assistantProvider || rawSettings.validatorProvider || 'lm_studio');
+    setAssistantModel(rawSettings.assistantModel || rawSettings.validatorModel || '');
+    setAssistantOpenrouterProvider(rawSettings.assistantOpenrouterProvider || rawSettings.validatorOpenrouterProvider || null);
+    setAssistantOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort));
+    setAssistantLmStudioFallback(rawSettings.assistantLmStudioFallback || rawSettings.validatorLmStudioFallback || null);
+    setAssistantContextSize(rawSettings.assistantContextSize || rawSettings.validatorContextSize || DEFAULT_CONTEXT_WINDOW);
+    setAssistantMaxOutput(rawSettings.assistantMaxOutput || rawSettings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS);
+    setAssistantSuperchargeEnabled(
+      rawSettings.assistantModel
+        ? Boolean(rawSettings.assistantSuperchargeEnabled)
+        : Boolean(rawSettings.validatorSuperchargeEnabled)
+    );
+    setWritingProvider(readWriterSetting(rawSettings, 'Provider') || 'lm_studio');
+    setWritingModel(readWriterSetting(rawSettings, 'Model') || '');
+    setWritingOpenrouterProvider(readWriterSetting(rawSettings, 'OpenrouterProvider') || null);
+    setWritingOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(readWriterSetting(rawSettings, 'OpenrouterReasoningEffort')));
+    setWritingLmStudioFallback(readWriterSetting(rawSettings, 'LmStudioFallback') || null);
+    setWritingContextSize(readWriterSetting(rawSettings, 'ContextSize') ?? DEFAULT_CONTEXT_WINDOW);
+    setWritingMaxOutput(readWriterSetting(rawSettings, 'MaxOutput') ?? DEFAULT_MAX_OUTPUT_TOKENS);
+    setWritingSuperchargeEnabled(Boolean(readWriterSetting(rawSettings, 'SuperchargeEnabled')));
     setHighParamProvider(rawSettings.highParamProvider || 'lm_studio');
     setHighParamModel(rawSettings.highParamModel || '');
     setHighParamOpenrouterProvider(rawSettings.highParamOpenrouterProvider || null);
@@ -786,7 +894,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setCritiqueSubmitterContextSize(rawSettings.critiqueSubmitterContextSize ?? DEFAULT_CONTEXT_WINDOW);
     setCritiqueSubmitterMaxOutput(rawSettings.critiqueSubmitterMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
     setCritiqueSubmitterSuperchargeEnabled(Boolean(rawSettings.critiqueSubmitterSuperchargeEnabled));
-    setWolframEnabled(rawSettings.wolframEnabled ?? false);
     setFreeOnly(rawSettings.freeOnly ?? false);
     setFreeModelLooping(rawSettings.freeModelLooping ?? true);
     setFreeModelAutoSelector(rawSettings.freeModelAutoSelector ?? true);
@@ -801,16 +908,23 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         validatorProvider: rawSettings.validatorProvider || 'lm_studio',
         validatorModel: rawSettings.validatorModel || '',
         validatorOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort),
-        highContextProvider: rawSettings.highContextProvider || 'lm_studio',
-        highContextModel: rawSettings.highContextModel || '',
-        highContextOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.highContextOpenrouterReasoningEffort),
+        assistantProvider: rawSettings.assistantProvider || rawSettings.validatorProvider || 'lm_studio',
+        assistantModel: rawSettings.assistantModel || rawSettings.validatorModel || '',
+        assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort),
+        assistantContextSize: rawSettings.assistantContextSize || rawSettings.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
+        assistantMaxOutput: rawSettings.assistantMaxOutput || rawSettings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
+        assistantSuperchargeEnabled: rawSettings.assistantModel
+          ? Boolean(rawSettings.assistantSuperchargeEnabled)
+          : Boolean(rawSettings.validatorSuperchargeEnabled),
+        writerProvider: readWriterSetting(rawSettings, 'Provider') || 'lm_studio',
+        writerModel: readWriterSetting(rawSettings, 'Model') || '',
+        writerOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(readWriterSetting(rawSettings, 'OpenrouterReasoningEffort')),
         highParamProvider: rawSettings.highParamProvider || 'lm_studio',
         highParamModel: rawSettings.highParamModel || '',
         highParamOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.highParamOpenrouterReasoningEffort),
         critiqueSubmitterProvider: rawSettings.critiqueSubmitterProvider || 'lm_studio',
         critiqueSubmitterModel: rawSettings.critiqueSubmitterModel || '',
         critiqueSubmitterOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.critiqueSubmitterOpenrouterReasoningEffort),
-        wolframEnabled: rawSettings.wolframEnabled ?? false,
         freeOnly: rawSettings.freeOnly ?? false,
         freeModelLooping: rawSettings.freeModelLooping ?? true,
         freeModelAutoSelector: rawSettings.freeModelAutoSelector ?? true,
@@ -863,7 +977,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     contextSize, setContextSize,
     maxOutput, setMaxOutput,
     superchargeEnabled, setSuperchargeEnabled,
-    showProofStrengthBadge = false
+    showProofStrengthBadge = false,
+    disabled = false,
   }) => {
     const effectiveProvider = lmStudioEnabled ? provider : 'openrouter';
     const models = effectiveProvider === 'openrouter'
@@ -877,7 +992,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       : { hasEndpointMetadata: false, supportsReasoning: false };
 
     return (
-      <div className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}>
+      <div
+        className={`submitter-config-section${effectiveProvider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
+        aria-disabled={disabled}
+        style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}
+      >
         <h5 className={effectiveProvider === 'openrouter' ? 'card-title--orange' : ''}>
           <span className="role-title-with-badges">
             <span>{title}</span>
@@ -886,6 +1005,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           {effectiveProvider === 'openrouter' && <span className="provider-badge-inline">[OpenRouter]</span>}
         </h5>
         <p className="settings-hint">{description}</p>
+        {disabled && (
+          <p className="settings-hint">
+            Assistant requires Session History Memory. Enable it from Connectivity to edit or run this role.
+          </p>
+        )}
+        <fieldset disabled={disabled} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
 
         {/* Provider Toggle */}
         <div className="settings-row">
@@ -935,9 +1060,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 }}
                 disabled={configuredOAuthProviders.length === 0}
                 className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
-                title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
+                title={configuredOAuthProviders.length === 0 ? 'Set up a cloud provider login or API key first' : 'Use a configured cloud provider'}
               >
-                oAuth
+                Cloud
               </button>
               {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
                 <select
@@ -949,7 +1074,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     setOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
                     setFallback(null);
                   }}
-                  title="Select OAuth provider"
+                  title="Select cloud provider"
                   className="input-dark"
                   style={{ width: 'auto', minWidth: '150px' }}
                 >
@@ -1015,7 +1140,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           <div className="settings-row">
             <label>Host Provider (optional)</label>
             <select
+              className="openrouter-host-provider-select"
               value={openrouterProv || ''}
+              title={getOpenRouterProviderTitle(openrouterProv)}
               onChange={async (e) => {
                 const providerName = e.target.value || null;
                 setOpenrouterProv(providerName);
@@ -1032,7 +1159,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             >
               <option value="">Auto (let OpenRouter choose)</option>
               {providers.map(p => (
-                <option key={p} value={p}>{p}</option>
+                <option key={p} value={p} title={getOpenRouterProviderTitle(p)}>
+                  {formatOpenRouterProviderLabel(p)}
+                </option>
               ))}
             </select>
           </div>
@@ -1053,6 +1182,23 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               {reasoningInfo.hasEndpointMetadata && !reasoningInfo.supportsReasoning
                 ? 'This selected host does not advertise reasoning support; OpenRouter may ignore the setting.'
                 : 'Auto sends OpenRouter max reasoning effort by default.'}
+            </small>
+          </div>
+        )}
+
+        {effectiveProvider === SAKANA_FUGU_PROVIDER && model && (
+          <div className="settings-row">
+            <label>Reasoning Effort</label>
+            <select
+              value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
+              onChange={(e) => setOpenrouterReasoningEffort(e.target.value)}
+            >
+              {SAKANA_FUGU_REASONING_EFFORT_OPTIONS.map(option => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <small className="settings-hint">
+              Sakana Fugu supports high and xhigh reasoning effort only; auto maps to xhigh.
             </small>
           </div>
         )}
@@ -1124,6 +1270,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             </label>
           </div>
         )}
+        </fieldset>
       </div>
     );
   };
@@ -1136,13 +1283,14 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     <div className="autonomous-settings-layout">
       <HighlightedModelsSidebar />
       <div className="autonomous-settings">
-          <h2>Compiler Settings</h2>
-
-      {saveStatus && (
-        <div className="save-message" style={{ marginBottom: '1rem' }}>
-          {saveStatus}
-        </div>
-      )}
+          <div className="settings-header-row">
+            <h2>Compiler Settings</h2>
+            {saveStatus && (
+              <div className="save-message">
+                {saveStatus}
+              </div>
+            )}
+          </div>
 
       {/* OpenRouter Status Banner */}
       {!hasOpenRouterKey && (
@@ -1258,30 +1406,51 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         })}
 
         {renderRoleConfig({
-          title: 'High-Context Model',
-          description: 'Handles construction, outline creation/updates, and review modes. Needs large context for comprehensive outlines.',
-          provider: highContextProvider,
-          setProvider: setHighContextProvider,
-          model: highContextModel,
-          setModel: setHighContextModel,
-          openrouterProv: highContextOpenrouterProvider,
-          setOpenrouterProv: setHighContextOpenrouterProvider,
-          openrouterReasoningEffort: highContextOpenrouterReasoningEffort,
-          setOpenrouterReasoningEffort: setHighContextOpenrouterReasoningEffort,
-          fallback: highContextLmStudioFallback,
-          setFallback: setHighContextLmStudioFallback,
-          contextSize: highContextContextSize,
-          setContextSize: setHighContextContextSize,
-          maxOutput: highContextMaxOutput,
-          setMaxOutput: setHighContextMaxOutput,
-          superchargeEnabled: highContextSuperchargeEnabled,
-          setSuperchargeEnabled: setHighContextSuperchargeEnabled,
-          showProofStrengthBadge: true,
+          title: 'Assistant',
+          description: 'Runs in parallel during outline, writing, review, and proof work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases do not receive Assistant context.',
+          provider: assistantProvider,
+          setProvider: setAssistantProvider,
+          model: assistantModel || validatorModel,
+          setModel: setAssistantModel,
+          openrouterProv: assistantOpenrouterProvider,
+          setOpenrouterProv: setAssistantOpenrouterProvider,
+          openrouterReasoningEffort: assistantOpenrouterReasoningEffort,
+          setOpenrouterReasoningEffort: setAssistantOpenrouterReasoningEffort,
+          fallback: assistantLmStudioFallback,
+          setFallback: setAssistantLmStudioFallback,
+          contextSize: assistantContextSize,
+          setContextSize: setAssistantContextSize,
+          maxOutput: assistantMaxOutput,
+          setMaxOutput: setAssistantMaxOutput,
+          superchargeEnabled: assistantSuperchargeEnabled,
+          setSuperchargeEnabled: setAssistantSuperchargeEnabled,
+          disabled: !assistantMemoryEnabled,
         })}
 
         {renderRoleConfig({
-          title: 'High-Parameter Model',
-          description: 'Rigor enhancement mode: adds citations, strengthens methodology, and clarifies assumptions.',
+          title: 'Writing Submitter',
+          description: 'Handles construction, outline creation/updates, and review modes. Needs large context for comprehensive outlines.',
+          provider: writerProvider,
+          setProvider: setWritingProvider,
+          model: writerModel,
+          setModel: setWritingModel,
+          openrouterProv: writerOpenrouterProvider,
+          setOpenrouterProv: setWritingOpenrouterProvider,
+          openrouterReasoningEffort: writerOpenrouterReasoningEffort,
+          setOpenrouterReasoningEffort: setWritingOpenrouterReasoningEffort,
+          fallback: writerLmStudioFallback,
+          setFallback: setWritingLmStudioFallback,
+          contextSize: writerContextSize,
+          setContextSize: setWritingContextSize,
+          maxOutput: writerMaxOutput,
+          setMaxOutput: setWritingMaxOutput,
+          superchargeEnabled: writerSuperchargeEnabled,
+          setSuperchargeEnabled: setWritingSuperchargeEnabled,
+        })}
+
+        {renderRoleConfig({
+          title: 'Rigor & Proofs Submitter',
+          description: 'Handles Lean/proof work, rigor theorem discovery and placement, and post-body critique generation.',
           provider: highParamProvider,
           setProvider: setHighParamProvider,
           model: highParamModel,
@@ -1301,26 +1470,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           showProofStrengthBadge: true,
         })}
 
-        {renderRoleConfig({
-          title: 'Critique Submitter',
-          description: "Generates validated peer review critiques for the paper's AI self-review section.",
-          provider: critiqueSubmitterProvider,
-          setProvider: setCritiqueSubmitterProvider,
-          model: critiqueSubmitterModel,
-          setModel: setCritiqueSubmitterModel,
-          openrouterProv: critiqueSubmitterOpenrouterProvider,
-          setOpenrouterProv: setCritiqueSubmitterOpenrouterProvider,
-          openrouterReasoningEffort: critiqueSubmitterOpenrouterReasoningEffort,
-          setOpenrouterReasoningEffort: setCritiqueSubmitterOpenrouterReasoningEffort,
-          fallback: critiqueSubmitterLmStudioFallback,
-          setFallback: setCritiqueSubmitterLmStudioFallback,
-          contextSize: critiqueSubmitterContextSize,
-          setContextSize: setCritiqueSubmitterContextSize,
-          maxOutput: critiqueSubmitterMaxOutput,
-          setMaxOutput: setCritiqueSubmitterMaxOutput,
-          superchargeEnabled: critiqueSubmitterSuperchargeEnabled,
-          setSuperchargeEnabled: setCritiqueSubmitterSuperchargeEnabled,
-        })}
       </div>
 
       {hasOpenRouterKey && (
@@ -1382,99 +1531,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         </div>
       )}
 
-      {/* Wolfram Alpha Integration */}
-      <div className="settings-group">
-        <h4>Wolfram Alpha Integration (Optional)</h4>
-        <p className="settings-info">
-          Enable Wolfram Alpha API for computational verification in rigor mode. 
-          Get your API key from <a href="https://products.wolframalpha.com/api" target="_blank" rel="noopener noreferrer">developer.wolframalpha.com</a>
-        </p>
-        
-        <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ marginBottom: '1rem' }}>
-          <input
-            type="checkbox"
-            checked={wolframEnabled}
-            onChange={async (e) => {
-              const checked = e.target.checked;
-              if (!checked) {
-                await handleClearWolframKey();
-              } else {
-                setWolframEnabled(true);
-              }
-            }}
-          />
-          <span className="settings-option-copy">
-            <span className="settings-option-title">Enable Wolfram Alpha Verification in Rigor Mode</span>
-            <span className="settings-option-description">
-              Lets rigor mode request computational verification for equations, properties, and theorem checks.
-            </span>
-          </span>
-        </label>
-        
-        {wolframEnabled && (
-          <div className="indented-section">
-            <div className="form-group">
-              <label>Wolfram Alpha API Key:</label>
-              <input
-                type="password"
-                value={wolframApiKey}
-                onChange={(e) => setWolframApiKey(e.target.value)}
-                placeholder={
-                  hasStoredWolframKey && !wolframApiKey
-                    ? (
-                      genericMode
-                        ? 'Loaded in the current backend session. Enter a new App ID to replace it.'
-                        : 'Stored securely on backend. Enter a new App ID to replace it.'
-                    )
-                    : 'Enter your Wolfram Alpha App ID'
-                }
-                className="input-dark"
-                style={{ marginBottom: '0.5rem' }}
-              />
-              {hasStoredWolframKey && !wolframApiKey && (
-                <small className="hint-text">
-                  {genericMode
-                    ? 'A Wolfram Alpha key is already loaded in the current backend session.'
-                    : 'A Wolfram Alpha key is already stored securely on the backend for this machine.'}
-                </small>
-              )}
-            </div>
-            
-            <div className="provider-toggle-group" style={{ marginTop: '0.75rem' }}>
-              <button 
-                onClick={handleTestWolframConnection}
-                disabled={testingWolfram}
-                className="btn-success-sm"
-                style={{
-                  cursor: testingWolfram ? 'wait' : 'pointer',
-                  opacity: testingWolfram ? 0.6 : 1
-                }}
-              >
-                {testingWolfram ? 'Testing...' : 'Test Connection'}
-              </button>
-              
-              <button 
-                onClick={handleClearWolframKey}
-                className="btn-ghost"
-              >
-                Clear Key
-              </button>
-            </div>
-            
-            {wolframTestResult && (
-              <div className={`test-result-banner ${wolframTestResult.includes('✓') ? 'test-result-banner--success' : 'test-result-banner--error'}`}>
-                {wolframTestResult}
-              </div>
-            )}
-            
-            <small className="hint-text" style={{ marginTop: '1rem' }}>
-              In rigor mode, the AI can request Wolfram Alpha verification of mathematical claims. 
-              This enables computational checking of theorems, solving equations, and verifying properties.
-            </small>
-          </div>
-        )}
-      </div>
-
       <div className="settings-group">
         <h4>Workflow Configuration</h4>
         
@@ -1535,9 +1591,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               </button>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                {critiquePromptSaved && (
-                  <span className="status-success-text">✓ Saved!</span>
-                )}
+                <span className={`status-success-text status-success-text--reserved${critiquePromptSaved ? '' : ' status-success-text--hidden'}`}>
+                  ✓ Saved!
+                </span>
                 <button
                   onClick={handleSaveCritiquePrompt}
                   className="btn-accent-purple"
@@ -1564,16 +1620,16 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               maxOutput: validatorMaxOutput,
               supercharge: validatorSuperchargeEnabled
             },
-            highContext: {
-              provider: highContextProvider,
-              model: highContextModel?.split('/').pop() || 'Not selected',
-              host: highContextProvider === 'openrouter' ? (highContextOpenrouterProvider || 'Auto') : 'N/A',
-              fallback: highContextProvider === 'openrouter' ? (highContextLmStudioFallback?.split('/').pop() || 'None') : 'N/A',
-              context: highContextContextSize,
-              maxOutput: highContextMaxOutput,
-              supercharge: highContextSuperchargeEnabled
+            writer: {
+              provider: writerProvider,
+              model: writerModel?.split('/').pop() || 'Not selected',
+              host: writerProvider === 'openrouter' ? (writerOpenrouterProvider || 'Auto') : 'N/A',
+              fallback: writerProvider === 'openrouter' ? (writerLmStudioFallback?.split('/').pop() || 'None') : 'N/A',
+              context: writerContextSize,
+              maxOutput: writerMaxOutput,
+              supercharge: writerSuperchargeEnabled
             },
-            highParam: {
+            rigorAndProofs: {
               provider: highParamProvider,
               model: highParamModel?.split('/').pop() || 'Not selected',
               host: highParamProvider === 'openrouter' ? (highParamOpenrouterProvider || 'Auto') : 'N/A',
@@ -1581,15 +1637,6 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               context: highParamContextSize,
               maxOutput: highParamMaxOutput,
               supercharge: highParamSuperchargeEnabled
-            },
-            critiqueSubmitter: {
-              provider: critiqueSubmitterProvider,
-              model: critiqueSubmitterModel?.split('/').pop() || 'Not selected',
-              host: critiqueSubmitterProvider === 'openrouter' ? (critiqueSubmitterOpenrouterProvider || 'Auto') : 'N/A',
-              fallback: critiqueSubmitterProvider === 'openrouter' ? (critiqueSubmitterLmStudioFallback?.split('/').pop() || 'None') : 'N/A',
-              context: critiqueSubmitterContextSize,
-              maxOutput: critiqueSubmitterMaxOutput,
-              supercharge: critiqueSubmitterSuperchargeEnabled
             }
           }, null, 2)}
         </pre>

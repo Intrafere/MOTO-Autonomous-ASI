@@ -268,6 +268,7 @@ def _format_context_blocks(context_blocks: dict[str, str] | None, fallback: str)
     current_packet = (context_blocks.get("current_final_cycle_packet") or "").strip()
     direct_context = (context_blocks.get("direct_proof_context") or "").strip()
     rag_context = (context_blocks.get("rag_evidence_context") or "").strip()
+    proof_search_context = (context_blocks.get("proof_search_context") or "").strip()
     refuted_warnings = (context_blocks.get("refuted_construction_warnings") or "").strip()
     capped_feedback = (context_blocks.get("capped_rejection_feedback") or "").strip()
     if working_proof:
@@ -278,6 +279,11 @@ def _format_context_blocks(context_blocks: dict[str, str] | None, fallback: str)
         sections.append(f"DIRECT PROOF CONTEXT:\n{direct_context}")
     if rag_context:
         sections.append(f"RETRIEVED LEANOJ RAG EVIDENCE:\n{rag_context}")
+    if proof_search_context:
+        sections.append(
+            "SYNTHETIC / LOCAL VERIFIED PROOF SEARCH RESULTS:\n"
+            f"{proof_search_context}"
+        )
     if refuted_warnings:
         sections.append(
             "REFUTED CONSTRUCTIONS - DO NOT USE AS PROOF EVIDENCE:\n"

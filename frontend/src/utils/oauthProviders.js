@@ -1,5 +1,6 @@
 export const OPENAI_CODEX_PROVIDER = 'openai_codex_oauth';
 export const XAI_GROK_PROVIDER = 'xai_grok_oauth';
+export const SAKANA_FUGU_PROVIDER = 'sakana_fugu';
 
 export const CLOUD_ACCESS_PROVIDERS = [
   {
@@ -7,7 +8,7 @@ export const CLOUD_ACCESS_PROVIDERS = [
     label: 'OpenAI Codex',
     shortLabel: 'Codex',
     loginLabel: 'OpenAI Codex OAuth',
-    unavailableTitle: 'Set OpenAI Codex login in Cloud Access & Keys first',
+    unavailableTitle: 'Set OpenAI Codex login in OpenRouter/OAuth first',
     modelErrorLabel: 'OpenAI Codex OAuth',
   },
   {
@@ -15,8 +16,16 @@ export const CLOUD_ACCESS_PROVIDERS = [
     label: 'xAI Grok',
     shortLabel: 'Grok',
     loginLabel: 'xAI Grok OAuth',
-    unavailableTitle: 'Set xAI Grok login in Cloud Access & Keys first',
+    unavailableTitle: 'Set xAI Grok login in OpenRouter/OAuth first',
     modelErrorLabel: 'xAI Grok OAuth',
+  },
+  {
+    id: SAKANA_FUGU_PROVIDER,
+    label: 'Sakana Fugu',
+    shortLabel: 'Fugu',
+    loginLabel: 'Sakana Fugu API Key',
+    unavailableTitle: 'Set Sakana Fugu API key in OpenRouter/OAuth first',
+    modelErrorLabel: 'Sakana Fugu API',
   },
 ];
 
@@ -31,7 +40,7 @@ export function getCloudAccessProvider(providerId) {
 }
 
 export function cloudAccessProviderLabel(providerId) {
-  return getCloudAccessProvider(providerId)?.label || 'OAuth';
+  return getCloudAccessProvider(providerId)?.label || 'Cloud Provider';
 }
 
 export function cloudAccessProviderShortLabel(providerId) {

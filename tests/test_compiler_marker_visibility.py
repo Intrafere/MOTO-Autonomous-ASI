@@ -4,8 +4,8 @@ from pathlib import Path
 
 from backend.compiler.core import compiler_coordinator as coordinator_module
 from backend.compiler.core.compiler_coordinator import CompilerCoordinator
-from backend.compiler.agents.high_context_submitter import (
-    _strip_paper_markers_for_llm as strip_for_high_context,
+from backend.compiler.agents.writer_submitter import (
+    _strip_paper_markers_for_llm as strip_for_writer,
 )
 from backend.compiler.agents.high_param_submitter import (
     _strip_paper_markers_for_llm as strip_for_high_param,
@@ -32,7 +32,7 @@ class CompilerMarkerVisibilityTests(unittest.TestCase):
             f"{PAPER_ANCHOR}"
         )
 
-        for strip_for_llm in (strip_for_high_context, strip_for_high_param):
+        for strip_for_llm in (strip_for_writer, strip_for_high_param):
             with self.subTest(strip_for_llm=strip_for_llm.__module__):
                 visible_paper = strip_for_llm(paper)
 
@@ -172,7 +172,7 @@ class CompilerCoordinatorMarkerTests(unittest.IsolatedAsyncioTestCase):
                 coordinator = CompilerCoordinator()
                 coordinator.autonomous_mode = True
                 coordinator.autonomous_section_phase = "conclusion"
-                coordinator.high_context_submitter = FakeSubmitter()
+                coordinator.writer_submitter = FakeSubmitter()
                 coordinator.validator = FakeValidator()
 
                 accepted, rejection_reason = await coordinator._submit_and_validate_construction()
@@ -246,7 +246,7 @@ class CompilerCoordinatorMarkerTests(unittest.IsolatedAsyncioTestCase):
                 coordinator = CompilerCoordinator()
                 coordinator.autonomous_mode = True
                 coordinator.autonomous_section_phase = "conclusion"
-                coordinator.high_context_submitter = FakeSubmitter()
+                coordinator.writer_submitter = FakeSubmitter()
                 coordinator.validator = FakeValidator()
 
                 accepted, rejection_reason = await coordinator._submit_and_validate_construction()

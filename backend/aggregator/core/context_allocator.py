@@ -15,8 +15,22 @@ logger = logging.getLogger(__name__)
 
 
 class ContextAllocationError(Exception):
-    """Raised when context allocation fails."""
-    pass
+    """Raised when required direct-injected context cannot fit."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        required_tokens: int | None = None,
+        available_tokens: int | None = None,
+        context_window: int | None = None,
+        output_reserve: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.required_tokens = required_tokens
+        self.available_tokens = available_tokens
+        self.context_window = context_window
+        self.output_reserve = output_reserve
 
 
 class ContextAllocator:
@@ -35,6 +49,34 @@ class ContextAllocator:
         # Default max output tokens
         self.submitter_max_output_tokens = rag_config.submitter_max_output_tokens
         self.validator_max_output_tokens = rag_config.validator_max_output_tokens
+
+    @staticmethod
+    def _raise_no_rag_budget(
+        *,
+        role: str,
+        available_tokens: int,
+        already_allocated: int,
+        rag_formatting_overhead: int,
+        context_window: int,
+        output_reserve: int,
+    ) -> None:
+        raise ContextAllocationError(
+            f"{role} context overflow: some lower-priority context must be offloaded to RAG, "
+            "but no input budget remains for retrieved evidence after mandatory/direct context.",
+            required_tokens=already_allocated + rag_formatting_overhead + 1,
+            available_tokens=available_tokens,
+            context_window=context_window,
+            output_reserve=output_reserve,
+        )
+
+    @staticmethod
+    def _remove_direct_part(direct_parts: List[str], content: str) -> bool:
+        """Remove one exact direct-injected block so it can be served through RAG."""
+        try:
+            direct_parts.remove(content)
+            return True
+        except ValueError:
+            return False
     
     def set_context_windows(self, submitter_context: int, validator_context: int, 
                             submitter_max_output: int = None, validator_max_output: int = None):
@@ -131,10 +173,17 @@ class ContextAllocator:
         
         # Check if user prompt alone exceeds limits
         if user_prompt_tokens > (available_tokens - minimum_rag_allocation):
+            direct_limit = available_tokens - minimum_rag_allocation
             raise ContextAllocationError(
-                f"User prompt ({user_prompt_tokens} tokens) exceeds maximum allowed "
-                f"({available_tokens - minimum_rag_allocation} tokens). "
-                f"Please shorten your prompt."
+                f"User prompt ({user_prompt_tokens:,} tokens) exceeds the configured submitter context limit. "
+                f"The submitter can only accept {direct_limit:,} direct input tokens "
+                f"(context window: {ctx_window:,}, output reserve: {self.submitter_max_output_tokens:,}). "
+                "This prompt must be direct-injected. Please condense the prompt and restart, "
+                "or select a model with a larger context window.",
+                required_tokens=user_prompt_tokens,
+                available_tokens=direct_limit,
+                context_window=ctx_window,
+                output_reserve=self.submitter_max_output_tokens,
             )
         
         remaining_tokens = available_tokens - mandatory_tokens
@@ -155,23 +204,18 @@ class ContextAllocator:
         needs_rejection_log_rag = False
         needs_user_files_rag = False
         
-        # Priority 1: Shared training - try direct injection first
-        # BUT: Reserve minimum space for RAG (at least 5000 tokens) if content needs to be offloaded
-        minimum_rag_reserve = 5000  # Ensure meaningful RAG retrieval space
+        # Priority 1: Shared training - direct-first. Do not reserve space for
+        # RAG unless some content actually fails to fit.
         if shared_training_content:
             formatted = f"[SHARED TRAINING]\n{shared_training_content}"
             tokens = count_tokens(formatted)
-            # Direct inject only if it fits AND leaves enough space for other content + RAG
-            if tokens <= remaining_tokens and (tokens < remaining_tokens - minimum_rag_reserve):
+            if tokens <= remaining_tokens:
                 direct_parts.append(formatted)
                 remaining_tokens -= tokens
                 logger.debug(f"Submitter: Shared training direct injected ({tokens} tokens)")
             else:
                 needs_shared_training_rag = True
-                if tokens > remaining_tokens:
-                    logger.info(f"Submitter: Shared training offloaded to RAG ({tokens} tokens > {remaining_tokens} available)")
-                else:
-                    logger.info(f"Submitter: Shared training offloaded to RAG ({tokens} tokens would leave insufficient RAG space)")
+                logger.info(f"Submitter: Shared training offloaded to RAG ({tokens} tokens > {remaining_tokens} available)")
         
         # Priority 2: Local training - try direct injection first
         if local_training_content:
@@ -215,7 +259,48 @@ class ContextAllocator:
         # Perform RAG retrieval ONLY if content was offloaded
         rag_context = None
         if any([needs_shared_training_rag, needs_local_training_rag, needs_rejection_log_rag, needs_user_files_rag]):
-            # Build exclusion list: sources that were direct-injected should not appear in RAG
+            # Available space for RAG (with buffer for RAG formatting overhead)
+            # RAG content will be wrapped with "\n---\nRETRIEVED EVIDENCE:\n{rag_text}" which adds tokens
+            rag_formatting_overhead = count_tokens("\n---\nRETRIEVED EVIDENCE:\n")
+            safety_buffer = 500  # Increased buffer for final prompt assembly + RAG wrapping
+
+            def calculate_rag_budget() -> tuple[int, int, int]:
+                direct_content_tokens = count_tokens("\n\n".join(direct_parts))
+                already_allocated = mandatory_tokens + direct_content_tokens
+                max_rag_space = available_tokens - already_allocated - safety_buffer - rag_formatting_overhead
+                return max(0, max_rag_space), direct_content_tokens, already_allocated
+
+            rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+            if rag_max_tokens <= 0:
+                if (
+                    user_files_str
+                    and not needs_user_files_rag
+                    and self._remove_direct_part(direct_parts, user_files_str)
+                ):
+                    needs_user_files_rag = True
+                    logger.info("Submitter: User files moved from direct context to RAG to preserve retrieval budget")
+                    rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+                if (
+                    rag_max_tokens <= 0
+                    and shared_training_content
+                    and not needs_shared_training_rag
+                ):
+                    shared_direct = f"[SHARED TRAINING]\n{shared_training_content}"
+                    if self._remove_direct_part(direct_parts, shared_direct):
+                        needs_shared_training_rag = True
+                        logger.info("Submitter: Shared training moved from direct context to RAG to preserve retrieval budget")
+                        rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+                if rag_max_tokens <= 0:
+                    self._raise_no_rag_budget(
+                        role="Submitter",
+                        available_tokens=available_tokens,
+                        already_allocated=already_allocated,
+                        rag_formatting_overhead=rag_formatting_overhead + safety_buffer,
+                        context_window=ctx_window,
+                        output_reserve=max_output,
+                    )
+
+            # Build exclusion list after any budget-preserving direct-to-RAG moves.
             exclude_sources = []
             if not needs_shared_training_rag and shared_training_content:
                 exclude_sources.extend(self._get_shared_training_rag_sources())
@@ -223,23 +308,6 @@ class ContextAllocator:
                 exclude_sources.extend(user_files_content.keys())
             if exclude_sources:
                 exclude_sources = list(dict.fromkeys(exclude_sources))
-            
-            # FIXED: Calculate RAG budget from REMAINING space after direct injection
-            # This ensures we maximize context usage without exceeding limits
-            direct_content_temp = "\n\n".join(direct_parts)
-            direct_content_tokens = count_tokens(direct_content_temp)
-            
-            # Total tokens already allocated
-            already_allocated = mandatory_tokens + direct_content_tokens
-            
-            # Available space for RAG (with buffer for RAG formatting overhead)
-            # RAG content will be wrapped with "\n---\nRETRIEVED EVIDENCE:\n{rag_text}" which adds tokens
-            rag_formatting_overhead = count_tokens("\n---\nRETRIEVED EVIDENCE:\n")
-            safety_buffer = 500  # Increased buffer for final prompt assembly + RAG wrapping
-            max_rag_space = available_tokens - already_allocated - safety_buffer - rag_formatting_overhead
-            
-            # Use as much as possible for RAG while respecting the limit
-            rag_max_tokens = max(0, max_rag_space)  # Ensure non-negative
             
             logger.info(
                 f"Submitter: Performing RAG retrieval (max {rag_max_tokens} tokens) for offloaded content. "
@@ -318,11 +386,37 @@ class ContextAllocator:
         
         mandatory_tokens = user_prompt_tokens + json_schema_tokens + system_prompt_tokens + submission_tokens + assembly_overhead
         
-        # Check if user prompt alone exceeds limits
+        # Check if the required prompt/proof block alone exceeds limits.  In
+        # autonomous mode this may include verified-proof context intentionally
+        # prepended to the prompt; that context is mandatory for validation and
+        # must fail visibly instead of being silently offloaded or counted as a
+        # normal rejection.
         if user_prompt_tokens > (available_tokens - minimum_rag_allocation):
+            direct_limit = available_tokens - minimum_rag_allocation
             raise ContextAllocationError(
-                f"User prompt ({user_prompt_tokens} tokens) exceeds maximum allowed. "
-                f"Please shorten your prompt."
+                f"Validator context overflow: mandatory direct context requires {user_prompt_tokens:,} tokens, "
+                f"but the validator can only accept {direct_limit:,} direct input tokens "
+                f"(context window: {self.validator_context_window:,}, output reserve: {self.validator_max_output_tokens:,}). "
+                "The validator must see the full user prompt and proof context without compromise. "
+                "Please condense into a new prompt and restart, or select a validator model with a larger context window.",
+                required_tokens=user_prompt_tokens,
+                available_tokens=direct_limit,
+                context_window=self.validator_context_window,
+                output_reserve=self.validator_max_output_tokens,
+            )
+
+        if mandatory_tokens > available_tokens:
+            raise ContextAllocationError(
+                f"Validator context overflow: mandatory direct context requires {mandatory_tokens:,} tokens, "
+                f"but the validator can only accept {available_tokens:,} input tokens "
+                f"(context window: {self.validator_context_window:,}, output reserve: {self.validator_max_output_tokens:,}). "
+                "A complete and honest validation requires direct injection of the user prompt, proof context, "
+                "JSON contract, system instructions, and submission under review. Please condense into a new prompt "
+                "and restart, or select a validator model with a larger context window.",
+                required_tokens=mandatory_tokens,
+                available_tokens=available_tokens,
+                context_window=self.validator_context_window,
+                output_reserve=self.validator_max_output_tokens,
             )
         
         remaining_tokens = available_tokens - mandatory_tokens
@@ -344,14 +438,12 @@ class ContextAllocator:
         needs_shared_training_rag = False
         needs_user_files_rag = False
         
-        # Priority 1: Shared training - try direct injection first
-        # BUT: Reserve minimum space for RAG (at least 5000 tokens) if content needs to be offloaded
-        minimum_rag_reserve = 5000  # Ensure meaningful RAG retrieval space
+        # Priority 1: Shared training - direct-first. RAG is a fallback for
+        # content that cannot fit, not a reason to offload content that fits.
         if shared_training_content:
             formatted_training = f"[SHARED TRAINING]\n{shared_training_content}"
             training_tokens = count_tokens(formatted_training)
-            # Direct inject only if it fits AND leaves enough space for other content + RAG
-            if training_tokens <= remaining_tokens and (training_tokens < remaining_tokens - minimum_rag_reserve):
+            if training_tokens <= remaining_tokens:
                 # Fits - use direct injection
                 direct_parts.append(formatted_training)
                 remaining_tokens -= training_tokens
@@ -359,10 +451,7 @@ class ContextAllocator:
             else:
                 # Doesn't fit - offload to RAG
                 needs_shared_training_rag = True
-                if training_tokens > remaining_tokens:
-                    logger.info(f"Validator: Shared training offloaded to RAG ({training_tokens} tokens > {remaining_tokens} available)")
-                else:
-                    logger.info(f"Validator: Shared training offloaded to RAG ({training_tokens} tokens would leave insufficient RAG space)")
+                logger.info(f"Validator: Shared training offloaded to RAG ({training_tokens} tokens > {remaining_tokens} available)")
         
         # Priority 2: User files - try direct injection first
         user_files_str = ""
@@ -384,7 +473,48 @@ class ContextAllocator:
         # Perform RAG retrieval ONLY if content was offloaded
         rag_context = None
         if needs_shared_training_rag or needs_user_files_rag:
-            # Build exclusion list: sources that were direct-injected should not appear in RAG
+            # Available space for RAG (with buffer for RAG formatting overhead)
+            # RAG content will be wrapped with "\n---\nEXISTING KNOWLEDGE BASE (Retrieved):\n{rag_text}" which adds tokens
+            rag_formatting_overhead = count_tokens("\n---\nEXISTING KNOWLEDGE BASE (Retrieved):\n")
+            safety_buffer = 500  # Increased buffer for final prompt assembly + RAG wrapping
+
+            def calculate_rag_budget() -> tuple[int, int, int]:
+                direct_content_tokens = count_tokens("\n\n".join(direct_parts))
+                already_allocated = mandatory_tokens + direct_content_tokens
+                max_rag_space = available_tokens - already_allocated - safety_buffer - rag_formatting_overhead
+                return max(0, max_rag_space), direct_content_tokens, already_allocated
+
+            rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+            if rag_max_tokens <= 0:
+                if (
+                    user_files_str
+                    and not needs_user_files_rag
+                    and self._remove_direct_part(direct_parts, user_files_str)
+                ):
+                    needs_user_files_rag = True
+                    logger.info("Validator: User files moved from direct context to RAG to preserve retrieval budget")
+                    rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+                if (
+                    rag_max_tokens <= 0
+                    and shared_training_content
+                    and not needs_shared_training_rag
+                ):
+                    shared_direct = f"[SHARED TRAINING]\n{shared_training_content}"
+                    if self._remove_direct_part(direct_parts, shared_direct):
+                        needs_shared_training_rag = True
+                        logger.info("Validator: Shared training moved from direct context to RAG to preserve retrieval budget")
+                        rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+                if rag_max_tokens <= 0:
+                    self._raise_no_rag_budget(
+                        role="Validator",
+                        available_tokens=available_tokens,
+                        already_allocated=already_allocated,
+                        rag_formatting_overhead=rag_formatting_overhead + safety_buffer,
+                        context_window=self.validator_context_window,
+                        output_reserve=self.validator_max_output_tokens,
+                    )
+
+            # Build exclusion list after any budget-preserving direct-to-RAG moves.
             exclude_sources = []
             if not needs_shared_training_rag and shared_training_content:
                 exclude_sources.extend(self._get_shared_training_rag_sources())
@@ -392,23 +522,6 @@ class ContextAllocator:
                 exclude_sources.extend(user_files_content.keys())
             if exclude_sources:
                 exclude_sources = list(dict.fromkeys(exclude_sources))
-            
-            # FIXED: Calculate RAG budget from REMAINING space after direct injection
-            # This ensures we maximize context usage without exceeding limits
-            direct_content_temp = "\n\n".join(direct_parts)
-            direct_content_tokens = count_tokens(direct_content_temp)
-            
-            # Total tokens already allocated
-            already_allocated = mandatory_tokens + direct_content_tokens
-            
-            # Available space for RAG (with buffer for RAG formatting overhead)
-            # RAG content will be wrapped with "\n---\nEXISTING KNOWLEDGE BASE (Retrieved):\n{rag_text}" which adds tokens
-            rag_formatting_overhead = count_tokens("\n---\nEXISTING KNOWLEDGE BASE (Retrieved):\n")
-            safety_buffer = 500  # Increased buffer for final prompt assembly + RAG wrapping
-            max_rag_space = available_tokens - already_allocated - safety_buffer - rag_formatting_overhead
-            
-            # Use as much as possible for RAG while respecting the limit
-            rag_max_tokens = max(0, max_rag_space)  # Ensure non-negative
             
             logger.info(
                 f"Validator: Performing RAG retrieval (max {rag_max_tokens} tokens) for offloaded content. "
@@ -515,15 +628,13 @@ class ContextAllocator:
         needs_submissions_rag = False
         needs_user_files_rag = False
         
-        # Reserve space for RAG if needed (at least 5000 tokens)
-        minimum_rag_reserve = 5000
-        
         # Priority 1: All submissions - try direct injection first
         if all_submissions_formatted:
             submissions_tokens = count_tokens(all_submissions_formatted)
             
-            # Direct inject if it fits AND leaves space for other content
-            if submissions_tokens <= remaining_tokens and (submissions_tokens < remaining_tokens - minimum_rag_reserve):
+            # Direct inject whenever it fits; use RAG only for content that
+            # cannot fit directly.
+            if submissions_tokens <= remaining_tokens:
                 direct_parts.append(f"[ALL SUBMISSIONS]\n{all_submissions_formatted}")
                 remaining_tokens -= submissions_tokens
                 logger.info(f"Cleanup: All submissions direct injected ({submissions_tokens} tokens)")
@@ -554,7 +665,48 @@ class ContextAllocator:
         # Perform RAG retrieval if content was offloaded
         rag_context = None
         if needs_submissions_rag or needs_user_files_rag:
-            # Build exclusion list: sources that were direct-injected should not appear in RAG
+            # Available space for RAG
+            rag_formatting_overhead = count_tokens("\n---\nADDITIONAL CONTEXT (Retrieved):\n")
+            safety_buffer = 500
+
+            def calculate_rag_budget() -> tuple[int, int, int]:
+                direct_content_tokens = count_tokens("\n\n".join(direct_parts))
+                already_allocated = mandatory_tokens + direct_content_tokens
+                max_rag_space = available_tokens - already_allocated - safety_buffer - rag_formatting_overhead
+                return max(0, max_rag_space), direct_content_tokens, already_allocated
+
+            rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+            if rag_max_tokens <= 0:
+                if (
+                    user_files_str
+                    and not needs_user_files_rag
+                    and self._remove_direct_part(direct_parts, user_files_str)
+                ):
+                    needs_user_files_rag = True
+                    logger.info("Cleanup: User files moved from direct context to RAG to preserve retrieval budget")
+                    rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+                if (
+                    rag_max_tokens <= 0
+                    and all_submissions_formatted
+                    and not needs_submissions_rag
+                ):
+                    submissions_direct = f"[ALL SUBMISSIONS]\n{all_submissions_formatted}"
+                    if self._remove_direct_part(direct_parts, submissions_direct):
+                        needs_submissions_rag = True
+                        submissions_ragged = True
+                        logger.info("Cleanup: Accepted submissions moved from direct context to RAG to preserve retrieval budget")
+                        rag_max_tokens, direct_content_tokens, already_allocated = calculate_rag_budget()
+                if rag_max_tokens <= 0:
+                    self._raise_no_rag_budget(
+                        role="Cleanup review",
+                        available_tokens=available_tokens,
+                        already_allocated=already_allocated,
+                        rag_formatting_overhead=rag_formatting_overhead + safety_buffer,
+                        context_window=self.validator_context_window,
+                        output_reserve=self.validator_max_output_tokens,
+                    )
+
+            # Build exclusion list after any budget-preserving direct-to-RAG moves.
             exclude_sources = []
             if not needs_submissions_rag and all_submissions_formatted:
                 exclude_sources.extend(self._get_shared_training_rag_sources())
@@ -562,17 +714,6 @@ class ContextAllocator:
                 exclude_sources.extend(user_files_content.keys())
             if exclude_sources:
                 exclude_sources = list(dict.fromkeys(exclude_sources))
-            
-            # Calculate RAG budget from remaining space
-            direct_content_temp = "\n\n".join(direct_parts)
-            direct_content_tokens = count_tokens(direct_content_temp)
-            already_allocated = mandatory_tokens + direct_content_tokens
-            
-            # Available space for RAG
-            rag_formatting_overhead = count_tokens("\n---\nADDITIONAL CONTEXT (Retrieved):\n")
-            safety_buffer = 500
-            max_rag_space = available_tokens - already_allocated - safety_buffer - rag_formatting_overhead
-            rag_max_tokens = max(0, max_rag_space)
             
             logger.info(
                 f"Cleanup: Performing RAG retrieval (max {rag_max_tokens} tokens) for offloaded content. "

@@ -5,13 +5,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 DEFAULT_CONTEXT_WINDOW = 0
 DEFAULT_MAX_OUTPUT_TOKENS = 0
 DEFAULT_OPENROUTER_REASONING_EFFORT = "auto"
 OpenRouterReasoningEffort = Literal["auto", "xhigh", "high", "medium", "low", "minimal", "none"]
-ModelProvider = Literal["lm_studio", "openrouter", "openai_codex_oauth", "xai_grok_oauth"]
+ModelProvider = Literal["lm_studio", "openrouter", "openai_codex_oauth", "xai_grok_oauth", "sakana_fugu"]
+_LEGACY_WRITER_PREFIX = "high" + "_context"
+
+
+def _legacy_writer_field(name: str) -> str:
+    return f"{_LEGACY_WRITER_PREFIX}_{name}"
 
 
 class DocumentChunk(BaseModel):
@@ -103,6 +108,8 @@ class SystemStatus(BaseModel):
     cleanup_reviews_performed: int = 0
     removals_proposed: int = 0
     removals_executed: int = 0
+    fatal_error_type: Optional[str] = None
+    fatal_error_message: Optional[str] = None
 
 
 class ModelConfig(BaseModel):
@@ -139,7 +146,7 @@ class WorkflowTask(BaseModel):
     """Represents a predicted API call in the workflow."""
     task_id: str  # Unique ID like "agg_sub1_001"
     sequence_number: int  # 1-20
-    role: str  # "Submitter 1", "Validator", "High-Context", etc.
+    role: str  # "Submitter 1", "Validator", "Writing Submitter", etc.
     mode: Optional[str] = None  # "Construction", "Rigor", "Review", etc.
     provider: str = "lm_studio"  # "openrouter" | "lm_studio"
     using_boost: bool = False
@@ -174,6 +181,15 @@ class AggregatorStartRequest(BaseModel):
     validator_context_size: int = DEFAULT_CONTEXT_WINDOW
     validator_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     validator_supercharge_enabled: bool = False
+    # Parallel Assistant proof-retrieval role (defaults hydrate from Validator in routes/UI)
+    assistant_provider: ModelProvider = "lm_studio"
+    assistant_model: str = ""
+    assistant_openrouter_provider: Optional[str] = None
+    assistant_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    assistant_lm_studio_fallback: Optional[str] = None
+    assistant_context_size: int = DEFAULT_CONTEXT_WINDOW
+    assistant_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    assistant_supercharge_enabled: bool = False
     uploaded_files: List[str] = Field(default_factory=list)
 
 
@@ -300,16 +316,40 @@ class CompilerStartRequest(BaseModel):
     validator_context_size: int = DEFAULT_CONTEXT_WINDOW
     validator_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     validator_supercharge_enabled: bool = False
-    # High-context submitter config
-    high_context_provider: ModelProvider = "lm_studio"
-    high_context_model: str
-    high_context_openrouter_provider: Optional[str] = None
-    high_context_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
-    high_context_lm_studio_fallback: Optional[str] = None
-    high_context_context_size: int = DEFAULT_CONTEXT_WINDOW
-    high_context_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
-    high_context_supercharge_enabled: bool = False
-    # High-param submitter config
+    # Writing submitter config
+    writer_provider: ModelProvider = Field(
+        default="lm_studio",
+        validation_alias=AliasChoices("writer_provider", _legacy_writer_field("provider")),
+    )
+    writer_model: str = Field(validation_alias=AliasChoices("writer_model", _legacy_writer_field("model")))
+    writer_openrouter_provider: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("writer_openrouter_provider", _legacy_writer_field("openrouter_provider")),
+    )
+    writer_openrouter_reasoning_effort: OpenRouterReasoningEffort = Field(
+        default=DEFAULT_OPENROUTER_REASONING_EFFORT,
+        validation_alias=AliasChoices(
+            "writer_openrouter_reasoning_effort",
+            _legacy_writer_field("openrouter_reasoning_effort"),
+        ),
+    )
+    writer_lm_studio_fallback: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("writer_lm_studio_fallback", _legacy_writer_field("lm_studio_fallback")),
+    )
+    writer_context_size: int = Field(
+        default=DEFAULT_CONTEXT_WINDOW,
+        validation_alias=AliasChoices("writer_context_size", _legacy_writer_field("context_size")),
+    )
+    writer_max_output_tokens: int = Field(
+        default=DEFAULT_MAX_OUTPUT_TOKENS,
+        validation_alias=AliasChoices("writer_max_output_tokens", _legacy_writer_field("max_output_tokens")),
+    )
+    writer_supercharge_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("writer_supercharge_enabled", _legacy_writer_field("supercharge_enabled")),
+    )
+    # Rigor & Proofs submitter config (legacy field prefix: high_param_*)
     high_param_provider: ModelProvider = "lm_studio"
     high_param_model: str
     high_param_openrouter_provider: Optional[str] = None
@@ -318,15 +358,26 @@ class CompilerStartRequest(BaseModel):
     high_param_context_size: int = DEFAULT_CONTEXT_WINDOW
     high_param_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     high_param_supercharge_enabled: bool = False
-    # Critique submitter config
+    # Deprecated compatibility aliases. Critique generation now uses the
+    # Rigor & Proofs submitter config; routes may mirror high_param_* here for
+    # older clients that still send/read critique_submitter_* fields.
     critique_submitter_provider: ModelProvider = "lm_studio"
-    critique_submitter_model: str
+    critique_submitter_model: str = ""
     critique_submitter_openrouter_provider: Optional[str] = None
     critique_submitter_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     critique_submitter_lm_studio_fallback: Optional[str] = None
     critique_submitter_context_window: int = DEFAULT_CONTEXT_WINDOW
     critique_submitter_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     critique_submitter_supercharge_enabled: bool = False
+    # Parallel Assistant proof-retrieval role (defaults hydrate from Validator in routes/UI)
+    assistant_provider: ModelProvider = "lm_studio"
+    assistant_model: str = ""
+    assistant_openrouter_provider: Optional[str] = None
+    assistant_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    assistant_lm_studio_fallback: Optional[str] = None
+    assistant_context_size: int = DEFAULT_CONTEXT_WINDOW
+    assistant_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    assistant_supercharge_enabled: bool = False
 
 
 # ============================================================================
@@ -474,16 +525,43 @@ class AutonomousResearchStartRequest(BaseModel):
     validator_context_window: int = DEFAULT_CONTEXT_WINDOW
     validator_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     validator_supercharge_enabled: bool = False
-    # Compiler high-context settings (separate from aggregator submitters)
-    high_context_provider: ModelProvider = "lm_studio"
-    high_context_model: str = ""  # Empty string allowed, will use submitter model as fallback
-    high_context_openrouter_provider: Optional[str] = None
-    high_context_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
-    high_context_lm_studio_fallback: Optional[str] = None
-    high_context_context_window: int = DEFAULT_CONTEXT_WINDOW
-    high_context_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
-    high_context_supercharge_enabled: bool = False
-    # Compiler high-param settings
+    # Compiler writer settings (separate from aggregator submitters)
+    writer_provider: ModelProvider = Field(
+        default="lm_studio",
+        validation_alias=AliasChoices("writer_provider", _legacy_writer_field("provider")),
+    )
+    writer_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("writer_model", _legacy_writer_field("model")),
+    )  # Empty string allowed, will use submitter model as fallback
+    writer_openrouter_provider: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("writer_openrouter_provider", _legacy_writer_field("openrouter_provider")),
+    )
+    writer_openrouter_reasoning_effort: OpenRouterReasoningEffort = Field(
+        default=DEFAULT_OPENROUTER_REASONING_EFFORT,
+        validation_alias=AliasChoices(
+            "writer_openrouter_reasoning_effort",
+            _legacy_writer_field("openrouter_reasoning_effort"),
+        ),
+    )
+    writer_lm_studio_fallback: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("writer_lm_studio_fallback", _legacy_writer_field("lm_studio_fallback")),
+    )
+    writer_context_window: int = Field(
+        default=DEFAULT_CONTEXT_WINDOW,
+        validation_alias=AliasChoices("writer_context_window", _legacy_writer_field("context_window")),
+    )
+    writer_max_tokens: int = Field(
+        default=DEFAULT_MAX_OUTPUT_TOKENS,
+        validation_alias=AliasChoices("writer_max_tokens", _legacy_writer_field("max_tokens")),
+    )
+    writer_supercharge_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("writer_supercharge_enabled", _legacy_writer_field("supercharge_enabled")),
+    )
+    # Compiler Rigor & Proofs settings (legacy field prefix: high_param_*)
     high_param_provider: ModelProvider = "lm_studio"
     high_param_model: str = ""  # Empty string allowed, will use submitter model as fallback
     high_param_openrouter_provider: Optional[str] = None
@@ -492,15 +570,26 @@ class AutonomousResearchStartRequest(BaseModel):
     high_param_context_window: int = DEFAULT_CONTEXT_WINDOW
     high_param_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     high_param_supercharge_enabled: bool = False
-    # Critique submitter settings
+    # Deprecated compatibility aliases. Critique generation now uses the
+    # Rigor & Proofs submitter config; routes may mirror high_param_* here for
+    # older clients that still send/read critique_submitter_* fields.
     critique_submitter_provider: ModelProvider = "lm_studio"
-    critique_submitter_model: str = ""  # For critique generation and rewrite decisions (uses high_context if empty)
+    critique_submitter_model: str = ""
     critique_submitter_openrouter_provider: Optional[str] = None
     critique_submitter_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     critique_submitter_lm_studio_fallback: Optional[str] = None
     critique_submitter_context_window: int = DEFAULT_CONTEXT_WINDOW
     critique_submitter_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     critique_submitter_supercharge_enabled: bool = False
+    # Parallel Assistant proof-retrieval role (defaults hydrate from Validator in routes/UI)
+    assistant_provider: ModelProvider = "lm_studio"
+    assistant_model: str = ""
+    assistant_openrouter_provider: Optional[str] = None
+    assistant_openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    assistant_lm_studio_fallback: Optional[str] = None
+    assistant_context_window: int = DEFAULT_CONTEXT_WINDOW
+    assistant_max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    assistant_supercharge_enabled: bool = False
     # Tier 3 Final Answer settings
     tier3_enabled: bool = False  # Default OFF — system stops at Tier 2 paper library
 
@@ -575,10 +664,16 @@ class ProofRoleConfigSnapshot(BaseModel):
 
 
 class ProofRuntimeConfigSnapshot(BaseModel):
-    """Persisted proof runtime config used for manual proof checks."""
+    """Persisted proof runtime config used for manual proof checks.
+
+    The source role slots are proof-submitter settings. After the Rigor &
+    Proofs consolidation, both brainstorm and paper slots should carry the
+    configured Rigor & Proofs submitter for proof-solving callers.
+    """
     brainstorm: ProofRoleConfigSnapshot
     paper: ProofRoleConfigSnapshot
     validator: ProofRoleConfigSnapshot
+    assistant: ProofRoleConfigSnapshot = Field(default_factory=ProofRoleConfigSnapshot)
 
 
 class ProofDependency(BaseModel):
@@ -707,6 +802,7 @@ class LeanOJStartRequest(BaseModel):
     brainstorm_validator: LeanOJRoleConfig
     path_decider: LeanOJRoleConfig = Field(default_factory=LeanOJRoleConfig)
     final_solver: LeanOJRoleConfig
+    assistant: LeanOJRoleConfig = Field(default_factory=LeanOJRoleConfig)
     max_initial_brainstorm_accepts: int = Field(default=30, ge=1, le=200)
     max_recursive_brainstorm_accepts: int = Field(default=10, ge=1, le=100)
     final_attempts_per_cycle: int = Field(default=30, ge=30, le=200)

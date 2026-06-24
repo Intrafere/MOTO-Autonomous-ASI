@@ -4,22 +4,27 @@ import {
   computeCodexAutoSettings,
   computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeSakanaFuguAutoSettings,
   computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_OPENROUTER_REASONING_EFFORT,
   findOpenRouterModel,
+  formatOpenRouterProviderLabel,
+  getOpenRouterProviderTitle,
   getProviderNames,
   getReasoningSupportInfo,
   hasEndpointMetadata,
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
+  SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import {
   chooseCloudAccessProvider,
   getConfiguredCloudAccessProviders,
   isCloudAccessProvider,
   cloudAccessProviderLabel,
+  SAKANA_FUGU_PROVIDER,
   XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
 import {
@@ -39,6 +44,7 @@ const SUPERCHARGE_TOOLTIP = 'Supercharge makes this role generate 4 full answer 
 
 const ROLE_EDITOR_GROUPS = [
   { key: 'validator', title: 'Validator', roleKeys: ['topic_validator', 'brainstorm_validator'] },
+  { key: 'assistant', title: 'Assistant', roleKeys: ['assistant'] },
   { key: 'final_solver', title: 'Final Proof Solver', roleKeys: ['final_solver'] },
 ];
 
@@ -54,10 +60,12 @@ function ModelSelector({
   openRouterModels,
   openAICodexModels,
   xaiGrokModels,
+  sakanaFuguModels,
   modelProviders,
   hasOpenRouterKey,
   hasOpenAICodexLogin,
   hasXAIGrokLogin,
+  hasSakanaFuguKey,
   isRunning,
   lmStudioEnabled,
 }) {
@@ -65,12 +73,15 @@ function ModelSelector({
   const oauthStatusByProvider = {
     openai_codex_oauth: { configured: hasOpenAICodexLogin },
     [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+    [SAKANA_FUGU_PROVIDER]: { configured: hasSakanaFuguKey },
   };
   const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
   const models = provider === 'openrouter'
     ? openRouterModels
     : (isCloudAccessProvider(provider)
-      ? (provider === XAI_GROK_PROVIDER ? xaiGrokModels : openAICodexModels)
+      ? (provider === XAI_GROK_PROVIDER
+        ? xaiGrokModels
+        : (provider === SAKANA_FUGU_PROVIDER ? sakanaFuguModels : openAICodexModels))
       : lmStudioModels);
   const providers = provider === 'openrouter' && config.modelId
     ? getProviderNames(modelProviders[config.modelId])
@@ -113,9 +124,9 @@ function ModelSelector({
                 openrouterProvider: null,
                 openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
               })}
-              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in Cloud Access & Keys first' : 'Use an OAuth subscription provider'}
+              title={configuredOAuthProviders.length === 0 ? 'Set up a cloud provider login or API key first' : 'Use a configured cloud provider'}
             >
-              oAuth
+              Cloud
             </button>
             {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
               <select
@@ -128,7 +139,7 @@ function ModelSelector({
                   openrouterProvider: null,
                   openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
                 })}
-                title="Select OAuth provider"
+                title="Select cloud provider"
                 className="input-dark"
                 style={{ width: 'auto', minWidth: '150px' }}
               >
@@ -169,13 +180,17 @@ function ModelSelector({
         <div className="settings-row">
           <label>Host Provider</label>
           <select
+            className="openrouter-host-provider-select"
             value={config.openrouterProvider || ''}
             disabled={isRunning}
+            title={getOpenRouterProviderTitle(config.openrouterProvider)}
             onChange={(event) => onChange({ ...config, provider, openrouterProvider: event.target.value || null })}
           >
             <option value="">Auto</option>
             {providers.map((providerName) => (
-              <option key={providerName} value={providerName}>{providerName}</option>
+              <option key={providerName} value={providerName} title={getOpenRouterProviderTitle(providerName)}>
+                {formatOpenRouterProviderLabel(providerName)}
+              </option>
             ))}
           </select>
         </div>
@@ -201,6 +216,24 @@ function ModelSelector({
         </div>
       )}
 
+      {provider === SAKANA_FUGU_PROVIDER && config.modelId && (
+        <div className="settings-row">
+          <label>Reasoning Effort</label>
+          <select
+            value={normalizeOpenRouterReasoningEffort(config.openrouterReasoningEffort)}
+            disabled={isRunning}
+            onChange={(event) => onChange({ ...config, provider, openrouterReasoningEffort: event.target.value })}
+          >
+            {SAKANA_FUGU_REASONING_EFFORT_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <small className="settings-hint">
+            Sakana Fugu supports high and xhigh reasoning effort only; auto maps to xhigh.
+          </small>
+        </div>
+      )}
+
       {provider !== 'lm_studio' && lmStudioEnabled && (
         <div className="settings-row">
           <label>LM Studio Fallback</label>
@@ -220,16 +253,31 @@ function ModelSelector({
   );
 }
 function RoleEditor(props) {
-  const { title, config, onChange, isRunning, developerModeEnabled = false } = props;
+  const { title, config, onChange, isRunning, developerModeEnabled = false, disabled = false } = props;
+  const controlsDisabled = isRunning || disabled;
   const updateNumber = (key, value, fallback) => {
     const parsed = parseInt(value, 10);
     onChange({ ...config, [key]: Number.isFinite(parsed) && parsed > 0 ? parsed : fallback });
   };
 
   return (
-    <div className={`submitter-config-section${config.provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}>
+    <div
+      className={`submitter-config-section${config.provider === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}
+      aria-disabled={disabled}
+      style={disabled ? { opacity: 0.55, pointerEvents: 'none' } : undefined}
+    >
       <h4>{title}</h4>
-      <ModelSelector {...props} />
+      {title === 'Assistant' && (
+        <p className="settings-info">
+          Runs in parallel during topic, brainstorm, path, master-proof edit, and final proof work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators never receive Assistant context.
+        </p>
+      )}
+      {disabled && (
+        <p className="settings-hint">
+          Assistant requires Session History Memory. Enable it from Connectivity to edit or run this role.
+        </p>
+      )}
+      <ModelSelector {...props} isRunning={controlsDisabled} />
       <div className="settings-row">
         <label>Context Window</label>
         <input
@@ -237,7 +285,7 @@ function RoleEditor(props) {
           min={4096}
           step={1024}
           value={config.contextWindow ?? DEFAULT_CONTEXT_WINDOW}
-          disabled={isRunning}
+          disabled={controlsDisabled}
           onChange={(event) => updateNumber('contextWindow', event.target.value, '')}
         />
       </div>
@@ -248,7 +296,7 @@ function RoleEditor(props) {
           min={1000}
           step={1000}
           value={config.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS}
-          disabled={isRunning}
+          disabled={controlsDisabled}
           onChange={(event) => updateNumber('maxOutputTokens', event.target.value, '')}
         />
       </div>
@@ -258,7 +306,7 @@ function RoleEditor(props) {
             <input
               type="checkbox"
               checked={Boolean(config.superchargeEnabled)}
-              disabled={isRunning}
+              disabled={controlsDisabled}
               onChange={(event) => onChange({ ...config, superchargeEnabled: event.target.checked })}
             />
             <HelpTooltip
@@ -280,6 +328,7 @@ export default function LeanOJSettings({
   settings,
   onSettingsChange,
   capabilities,
+  connectivityStatus,
   isRunning,
   developerModeEnabled = false,
 }) {
@@ -287,14 +336,18 @@ export default function LeanOJSettings({
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [xaiGrokModels, setXaiGrokModels] = useState([]);
+  const [sakanaFuguModels, setSakanaFuguModels] = useState([]);
   const [modelProviders, setModelProviders] = useState(settings.modelProviders || {});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
+  const [hasSakanaFuguKey, setHasSakanaFuguKey] = useState(false);
   const [openAICodexModelError, setOpenAICodexModelError] = useState('');
   const [xaiGrokModelError, setXaiGrokModelError] = useState('');
+  const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [userProfiles, setUserProfiles] = useState({});
   const [selectedProfile, setSelectedProfile] = useState(settings.selectedProfile || '');
+  const [profileApplyError, setProfileApplyError] = useState('');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
   const [advancedSettingsExpanded, setAdvancedSettingsExpanded] = useState(false);
@@ -303,6 +356,11 @@ export default function LeanOJSettings({
   const [rawSettingsMessage, setRawSettingsMessage] = useState('');
   const [guiSettingsBeforeRaw, setGuiSettingsBeforeRaw] = useState(null);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const genericMode = Boolean(capabilities?.genericMode);
+  const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
+  const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
+  const sakanaFuguAvailable = !genericMode && capabilities?.sakanaFuguAvailable !== false;
+  const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
 
   useEffect(() => {
     if (!developerModeEnabled && editRawSettings) {
@@ -324,50 +382,91 @@ export default function LeanOJSettings({
         console.error('Failed to load OpenRouter state for Proof Solver:', error);
       }
 
-      try {
-        const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
-        const configured = Boolean(codexStatus.status?.configured);
-        setHasOpenAICodexLogin(configured);
-        if (configured) {
-          const codexModels = await cloudAccessAPI.getOpenAICodexModels();
-          const models = codexModels.models || [];
-          setOpenAICodexModels(models);
-          setHasOpenAICodexLogin(models.length > 0);
-          setOpenAICodexModelError(models.length > 0
-            ? ''
-            : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
-          );
-        } else {
-          setOpenAICodexModelError('');
+      if (openAICodexOauthAvailable) {
+        try {
+          const codexStatus = await cloudAccessAPI.getOpenAICodexStatus();
+          const configured = Boolean(codexStatus.status?.configured);
+          setHasOpenAICodexLogin(configured);
+          if (configured) {
+            const codexModels = await cloudAccessAPI.getOpenAICodexModels();
+            const models = codexModels.models || [];
+            setOpenAICodexModels(models);
+            setHasOpenAICodexLogin(models.length > 0);
+            setOpenAICodexModelError(models.length > 0
+              ? ''
+              : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
+            );
+          } else {
+            setOpenAICodexModelError('');
+          }
+        } catch (error) {
+          console.error('Failed to load OpenAI Codex state for Proof Solver:', error);
+          setHasOpenAICodexLogin(false);
+          setOpenAICodexModels([]);
+          setOpenAICodexModelError(`OpenAI Codex OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
         }
-      } catch (error) {
-        console.error('Failed to load OpenAI Codex state for Proof Solver:', error);
+      } else {
         setHasOpenAICodexLogin(false);
         setOpenAICodexModels([]);
-        setOpenAICodexModelError(`OpenAI Codex OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
+        setOpenAICodexModelError('');
       }
 
-      try {
-        const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
-        const configured = Boolean(xaiStatus.status?.configured);
-        setHasXAIGrokLogin(configured);
-        if (configured) {
-          const xaiModels = await cloudAccessAPI.getXAIGrokModels();
-          const models = xaiModels.models || [];
-          setXaiGrokModels(models);
-          setHasXAIGrokLogin(models.length > 0);
-          setXaiGrokModelError(models.length > 0
-            ? ''
-            : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
-          );
-        } else {
-          setXaiGrokModelError('');
+      if (xaiGrokOauthAvailable) {
+        try {
+          const xaiStatus = await cloudAccessAPI.getXAIGrokStatus();
+          const configured = Boolean(xaiStatus.status?.configured);
+          setHasXAIGrokLogin(configured);
+          if (configured) {
+            const xaiModels = await cloudAccessAPI.getXAIGrokModels();
+            const models = xaiModels.models || [];
+            setXaiGrokModels(models);
+            setHasXAIGrokLogin(models.length > 0);
+            setXaiGrokModelError(models.length > 0
+              ? ''
+              : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
+            );
+          } else {
+            setXaiGrokModelError('');
+          }
+        } catch (error) {
+          console.error('Failed to load xAI Grok state for Proof Solver:', error);
+          setHasXAIGrokLogin(false);
+          setXaiGrokModels([]);
+          setXaiGrokModelError(`xAI Grok OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
         }
-      } catch (error) {
-        console.error('Failed to load xAI Grok state for Proof Solver:', error);
+      } else {
         setHasXAIGrokLogin(false);
         setXaiGrokModels([]);
-        setXaiGrokModelError(`xAI Grok OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
+        setXaiGrokModelError('');
+      }
+
+      if (sakanaFuguAvailable) {
+        try {
+          const sakanaStatus = await cloudAccessAPI.getSakanaFuguStatus();
+          const configured = Boolean(sakanaStatus.status?.configured);
+          setHasSakanaFuguKey(configured);
+          if (configured) {
+            const sakanaModels = await cloudAccessAPI.getSakanaFuguModels();
+            const models = sakanaModels.models || [];
+            setSakanaFuguModels(models);
+            setHasSakanaFuguKey(models.length > 0);
+            setSakanaFuguModelError(models.length > 0
+              ? ''
+              : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
+            );
+          } else {
+            setSakanaFuguModelError('');
+          }
+        } catch (error) {
+          console.error('Failed to load Sakana Fugu state for Proof Solver:', error);
+          setHasSakanaFuguKey(false);
+          setSakanaFuguModels([]);
+          setSakanaFuguModelError(`Sakana Fugu models could not be loaded: ${error.message || 'unknown error'}.`);
+        }
+      } else {
+        setHasSakanaFuguKey(false);
+        setSakanaFuguModels([]);
+        setSakanaFuguModelError('');
       }
 
       if (lmStudioEnabled) {
@@ -386,7 +485,7 @@ export default function LeanOJSettings({
       }
     };
     load();
-  }, [lmStudioEnabled, settings.freeOnly]);
+  }, [lmStudioEnabled, settings.freeOnly, openAICodexOauthAvailable, xaiGrokOauthAvailable, sakanaFuguAvailable]);
 
   useEffect(() => {
     setSelectedProfile(settings.selectedProfile || '');
@@ -397,6 +496,9 @@ export default function LeanOJSettings({
       ? { ...nextSettings, selectedProfile: '' }
       : nextSettings;
     const next = persistLeanOJSettings(finalSettings);
+    if (markCustom && profileApplyError) {
+      setProfileApplyError('');
+    }
     if (markCustom && selectedProfile) {
       setSelectedProfile('');
     } else {
@@ -509,6 +611,7 @@ export default function LeanOJSettings({
   const getOAuthModels = (provider) => {
     if (provider === 'openai_codex_oauth') return openAICodexModels;
     if (provider === XAI_GROK_PROVIDER) return xaiGrokModels;
+    if (provider === SAKANA_FUGU_PROVIDER) return sakanaFuguModels;
     return [];
   };
 
@@ -523,7 +626,9 @@ export default function LeanOJSettings({
     }
     const autoSettings = provider === XAI_GROK_PROVIDER
       ? computeXAIGrokAutoSettings(model)
-      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+      : (provider === SAKANA_FUGU_PROVIDER
+        ? computeSakanaFuguAutoSettings(model)
+        : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider)));
     if (autoSettings.warnings.length > 0) {
       console.warn('[ProofSolverOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
     }
@@ -577,24 +682,19 @@ export default function LeanOJSettings({
   const handleProfileSelect = async (profileKey) => {
     if (!profileKey) {
       setSelectedProfile('');
+      setProfileApplyError('');
       persistSettings({ ...settings, selectedProfile: '' });
       return;
     }
-    if (!hasOpenRouterKey) {
-      alert('OpenRouter API key required to use profiles. Please set your API key first.');
-      return;
-    }
-    if (openRouterModels.length === 0) {
-      alert('Please wait for OpenRouter models to load, or refresh OpenRouter models in settings.');
-      return;
-    }
     try {
+      setProfileApplyError('');
       const { settings: nextSettings } = await applyLeanOJProfileSelection(profileKey, userProfiles);
       setSelectedProfile(nextSettings.selectedProfile || profileKey);
       onSettingsChange(nextSettings);
       setModelProviders(nextSettings.modelProviders || {});
     } catch (error) {
       console.error(error.message || 'Failed to apply Proof Solver profile:', error);
+      setProfileApplyError(error.message || 'Failed to apply Proof Solver profile.');
     }
   };
 
@@ -613,6 +713,7 @@ export default function LeanOJSettings({
           modelId: config.modelId,
           provider: config.provider,
           openrouterProvider: config.openrouterProvider,
+          openrouterReasoningEffort: config.openrouterReasoningEffort,
           lmStudioFallbackId: config.lmStudioFallbackId,
           contextWindow: config.contextWindow,
           maxOutputTokens: config.maxOutputTokens,
@@ -628,6 +729,7 @@ export default function LeanOJSettings({
     setUserProfiles(nextProfiles);
     const nextSettings = persistLeanOJSettings({ ...settings, selectedProfile: key });
     setSelectedProfile(key);
+    setProfileApplyError('');
     onSettingsChange(nextSettings);
     setShowSaveDialog(false);
     setNewProfileName('');
@@ -652,6 +754,7 @@ export default function LeanOJSettings({
     setUserProfiles(nextProfiles);
     if (selectedProfile === profileKey) {
       setSelectedProfile('');
+      setProfileApplyError('');
       onSettingsChange(persistLeanOJSettings({ ...settings, selectedProfile: '' }));
     }
   };
@@ -707,6 +810,7 @@ export default function LeanOJSettings({
     });
     setModelProviders(nextSettings.modelProviders || {});
     setSelectedProfile(nextSettings.selectedProfile || '');
+    setProfileApplyError('');
     onSettingsChange(nextSettings);
     if (updateRawText) {
       setRawSettingsText(formatRawSettings(nextSettings));
@@ -780,6 +884,11 @@ export default function LeanOJSettings({
               </optgroup>
             )}
           </select>
+          {profileApplyError && (
+            <div className="settings-error" role="alert">
+              {profileApplyError}
+            </div>
+          )}
         </div>
         <div className="settings-row">
           <button type="button" className="secondary" disabled={isRunning} onClick={() => setShowSaveDialog(true)}>
@@ -921,10 +1030,12 @@ export default function LeanOJSettings({
             openRouterModels={openRouterModels}
             openAICodexModels={openAICodexModels}
             xaiGrokModels={xaiGrokModels}
+            sakanaFuguModels={sakanaFuguModels}
             modelProviders={modelProviders}
             hasOpenRouterKey={hasOpenRouterKey}
             hasOpenAICodexLogin={hasOpenAICodexLogin}
             hasXAIGrokLogin={hasXAIGrokLogin}
+            hasSakanaFuguKey={hasSakanaFuguKey}
             isRunning={isRunning}
             lmStudioEnabled={lmStudioEnabled}
             developerModeEnabled={developerModeEnabled}
@@ -944,13 +1055,16 @@ export default function LeanOJSettings({
               openRouterModels={openRouterModels}
               openAICodexModels={openAICodexModels}
               xaiGrokModels={xaiGrokModels}
+              sakanaFuguModels={sakanaFuguModels}
               modelProviders={modelProviders}
               hasOpenRouterKey={hasOpenRouterKey}
               hasOpenAICodexLogin={hasOpenAICodexLogin}
               hasXAIGrokLogin={hasXAIGrokLogin}
+              hasSakanaFuguKey={hasSakanaFuguKey}
               isRunning={isRunning}
               lmStudioEnabled={lmStudioEnabled}
               developerModeEnabled={developerModeEnabled}
+              disabled={group.key === 'assistant' && !assistantMemoryEnabled}
             />
           </div>
         ))}

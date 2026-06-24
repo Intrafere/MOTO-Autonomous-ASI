@@ -217,9 +217,10 @@ def _format_placeholder_rejection(token_name: str, *, from_lean_diagnostic: bool
         f"{reason}\n"
         "Required fix: produce a Lean 4 proof that closes every goal without "
         "using `sorry`, `admit`, unresolved `axiom` stubs introduced solely to "
-        "trivialize the target theorem, or any other placeholder. If the result "
-        "cannot be proved yet, return a narrower lemma that you can fully "
-        "prove instead."
+        "trivialize the target theorem, or any other placeholder. If the target "
+        "cannot be proved yet, do not replace it with a narrower, easier, "
+        "routine, trivial, local, or merely supporting lemma; keep attacking "
+        "the same high-impact target so Lean feedback exposes the real blocker."
     )
 
 

@@ -1,0 +1,16 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "schema_version": "syntheticlib4.retrieve_batch.v1",
+  "retrieval_batch_id": "rb_mock_001",
+  "release_id": "stable-2026-06-11",
+  "channel": "stable",
+  "proofs": [],
+  "next_cursor": "cursor_mock_007",
+  "exhausted": false,
+  "exhaustion_reason": null,
+  "quota_remaining": {
+    "api_requests_remaining_day": 1999,
+    "text_searches_remaining_month": 1999,
+    "semantic_searches_remaining_month": 199
+  }
+}

@@ -26,9 +26,9 @@ def get_submitter_system_prompt(lean4_enabled: bool = False) -> str:
     """Get system prompt for submitter agents."""
     lean_proof_route = (
         """OPTIONAL LEAN 4 PROOF ROUTE:
-If Lean 4 proof verification is enabled and you can produce a complete Lean 4 proof that would be useful public/citable novelty-bearing brainstorm progress, you may choose the `lean_proof` submission type. Novelty means the proved theorem, formulation, or Lean mechanization is absent from standard references or Mathlib and materially helps the user prompt; do not submit program-local firsts. A Lean proof candidate is NOT added directly to the knowledge base: the system first checks that it declares a valid novelty tier and anti-known-result rationale, then runs Lean 4, gives you up to 5 repair attempts with Lean/integrity feedback, and only then sends the Lean-verified proof to the normal brainstorm validator for usefulness and redundancy review.
+If Lean 4 proof verification is enabled and you can produce a complete Lean 4 proof for a high-impact theorem that directly solves, rules out, reduces, obstructs, or otherwise makes major progress on the user prompt, you may choose the `lean_proof` submission type. Novelty means the proved theorem is absent from standard references or Mathlib and materially helps the user prompt; do not submit program-local firsts. A Lean proof candidate is NOT added directly to the knowledge base: the system first checks that it declares a valid novelty tier and anti-known-result rationale, then runs Lean 4, gives you up to 5 repair attempts with Lean/integrity feedback, and only then sends the Lean-verified proof to the normal brainstorm validator for usefulness and redundancy review.
 
-Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to accept. Do not use this route for routine helper lemmas, standard Mathlib/textbook facts, general known-knowledge-base entries, or proofs that are only new to this program. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
+Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to accept for that high-impact target. Do not use this route for supporting lemmas, routine helper lemmas, local facts, trivial/easy proofs, standard Mathlib/textbook facts, general known-knowledge-base entries, weakened/downshifted substitutes, or proofs that are only new to this program. Do not use `sorry`, `admit`, or fake `axiom`/`constant`/`opaque` devices.
 """
         if lean4_enabled
         else ""
@@ -37,15 +37,15 @@ Use `lean_proof` only for complete proof code you genuinely expect Lean 4 to acc
         """Lean proof candidate:
 {
   "submission_type": "lean_proof",
-  "theorem_statement": "Natural-language statement of the theorem or lemma proved by the Lean code.",
-  "formal_sketch": "Brief note about assumptions, formalization choices, and why this proof helps the brainstorm.",
+  "theorem_statement": "Natural-language statement of the high-impact theorem proved by the Lean code.",
+  "formal_sketch": "Brief note about assumptions, formalization choices, and why this proof directly advances the user's prompt.",
   "expected_novelty_tier": "major_mathematical_discovery | mathematical_discovery | novel_variant | novel_formulation",
   "prompt_relevance_rationale": "Why this proof directly solves, solves toward, or materially helps solve the user prompt.",
   "novelty_rationale": "Why this proof is absent from standard references or Mathlib and would be public/citable novelty rather than background knowledge or a program-local first.",
   "why_not_standard_known_result": "Why this is not merely a textbook/Mathlib/routine helper result.",
   "theorem_name": "Optional Lean declaration name",
   "lean_code": "Complete Lean 4 code expected to verify.",
-  "reasoning": "Why this verified proof would be a useful brainstorm addition"
+  "reasoning": "Why this verified proof is high-impact brainstorm progress"
 }
 """
         if lean4_enabled
@@ -145,10 +145,10 @@ def get_submitter_json_schema(lean4_enabled: bool = False) -> str:
     lean_proof_schema = (
         """
 
-Lean proof candidate, only when Lean 4 is enabled and you can provide complete code:
+Lean proof candidate, only when Lean 4 is enabled and you can provide complete code for a high-impact prompt-solving theorem:
 {
   "submission_type": "lean_proof",
-  "theorem_statement": "string - natural-language statement proved",
+  "theorem_statement": "string - natural-language statement of the high-impact theorem proved",
   "formal_sketch": "string - formalization notes",
   "expected_novelty_tier": "string - one of major_mathematical_discovery, mathematical_discovery, novel_variant, novel_formulation",
   "prompt_relevance_rationale": "string - how this directly serves the prompt",
@@ -156,13 +156,13 @@ Lean proof candidate, only when Lean 4 is enabled and you can provide complete c
   "why_not_standard_known_result": "string - why this is not merely textbook/Mathlib/routine helper knowledge",
   "theorem_name": "string - optional Lean declaration name",
   "lean_code": "string - complete Lean 4 source code",
-  "reasoning": "string - why the verified proof would help the brainstorm"
+  "reasoning": "string - why the verified proof is high-impact prompt-solving progress"
 }"""
         if lean4_enabled
         else ""
     )
     lean_proof_note = (
-        "Lean proof candidates must follow the schema above, but should not be copied from a generic example: only use that route when you can provide complete Lean 4 code for a prompt-specific public/citable novelty-bearing theorem."
+        "Lean proof candidates must follow the schema above, but should not be copied from a generic example: only use that route when you can provide complete Lean 4 code for a high-impact prompt-solving theorem. Never use it for supporting lemmas, routine helpers, local facts, trivial/easy proofs, or weakened substitutes."
         if lean4_enabled
         else ""
     )

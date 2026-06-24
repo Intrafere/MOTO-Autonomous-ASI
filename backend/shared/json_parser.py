@@ -380,24 +380,14 @@ def sanitize_json_response(raw_content: str) -> str:
     # Some models emit these BEFORE the JSON, some WITHIN the content
     # Strategy: Remove ALL control token patterns using regex
     
-    # Pattern for control tokens: <|word|> or <|word|>word (with optional trailing word)
-    control_token_pattern = r'<\|[a-zA-Z_]+\|>(?:[a-zA-Z_]+\s*)?'
-    
-    if re.search(control_token_pattern, content):
-        original_content = content
-        content = re.sub(control_token_pattern, '', content).strip()
+    original_content = content
+    content = _strip_control_tokens_outside_json_strings(content).strip()
+    if content != original_content:
         logger.debug(
             "Stripped control tokens: before=(%s), after=(%s)",
             _content_diagnostics(original_content),
             _content_diagnostics(content),
         )
-    
-    # Additional cleanup: Remove any remaining angle bracket artifacts
-    # that might be partial control tokens
-    if '<|' in content:
-        # Remove any remaining <|...> patterns
-        content = re.sub(r'<\|[^>]*\|>', '', content).strip()
-        logger.debug("Removed remaining control token artifacts")
     
     # STEP 4: Extract only the first complete JSON object if multiple exist
     # Some models (especially reasoning models) may output multiple JSON objects

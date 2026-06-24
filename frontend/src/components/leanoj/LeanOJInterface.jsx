@@ -17,6 +17,7 @@ export default function LeanOJInterface({
   onSkipBrainstorm,
   onForceBrainstorm,
   developerModeEnabled = false,
+  assistantMemoryEnabled = true,
 }) {
   const [prompt, setPrompt] = useState(settings.prompt || '');
   const [leanTemplate, setLeanTemplate] = useState(settings.leanTemplate || '');
@@ -49,7 +50,7 @@ export default function LeanOJInterface({
   const handleStart = async () => {
     try {
       const nextSettings = persistDraft(prompt, leanTemplate);
-      await onStart(settingsToLeanOJRequest(nextSettings, prompt, leanTemplate));
+      await onStart(settingsToLeanOJRequest(nextSettings, prompt, leanTemplate, { assistantEnabled: assistantMemoryEnabled }));
     } catch (error) {
       alert(error.message || 'Failed to start Proof Solver');
     }

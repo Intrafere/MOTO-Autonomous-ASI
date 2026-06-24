@@ -8,9 +8,9 @@ Supports two modes:
 
 This is the crucial mechanism that enables COMPOUNDING KNOWLEDGE across research cycles.
 By selecting reference papers before brainstorming, submitters can:
-- Build upon proven mathematical frameworks from prior papers
+- Build upon promising mathematical frameworks from prior AI-generated papers while independently re-checking their claims
 - Avoid re-exploring territory already covered in depth
-- Identify novel connections between new topics and established results
+- Identify novel connections between new topics and previously explored results
 - Accelerate convergence on valuable insights by standing on prior work
 
 CONTEXT HANDLING:
@@ -24,6 +24,10 @@ from typing import Optional, Dict, Any, List, Callable
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
@@ -38,6 +42,18 @@ from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.core.autonomous_rag_manager import autonomous_rag_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _is_reference_model_call_failure(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return (
+        is_non_retryable_model_error(exc)
+        or is_transient_model_call_error(exc)
+        or "upstream provider timeout" in message
+        or "response missing 'choices'" in message
+        or "no api key" in message
+        or "exceeds context limit" in message
+    )
 
 
 class ReferenceSelectorAgent:
@@ -148,7 +164,7 @@ class ReferenceSelectorAgent:
         
         if expansion_request is None:
             logger.error(f"ReferenceSelector [{mode}]: Failed to get expansion request")
-            return []
+            raise RuntimeError(f"Reference selection failed during expansion request for mode={mode}")
         
         # Check if proceeding without references
         if expansion_request.proceed_without_references:
@@ -228,6 +244,13 @@ class ReferenceSelectorAgent:
                     max_total_papers=max_total_papers,
                 )
             
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
+
             # Validate prompt size
             prompt_tokens = count_tokens(prompt)
             max_input = self._calculate_max_input_tokens()
@@ -236,8 +259,6 @@ class ReferenceSelectorAgent:
                 logger.error(f"ReferenceSelector: Expansion prompt ({prompt_tokens} tokens) exceeds limit ({max_input})")
                 return None
             
-            # Generate task ID for tracking
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -283,6 +304,8 @@ class ReferenceSelectorAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as e:
+            if _is_reference_model_call_failure(e):
+                raise
             logger.error(f"ReferenceSelector: Error requesting expansion: {e}")
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
@@ -360,6 +383,7 @@ class ReferenceSelectorAgent:
             # Reserve ~40% of context for papers, rest for prompts/brainstorm
             paper_budget = int(max_input * 0.4)
             
+            retrieved_context = ""
             if total_paper_tokens <= paper_budget:
                 # All papers fit - use direct injection
                 logger.info(f"ReferenceSelector [{mode}]: Direct injection for {len(expanded_papers)} papers "
@@ -378,12 +402,17 @@ class ReferenceSelectorAgent:
                     query=f"{user_research_prompt} {topic_prompt}"
                 )
                 
-                # Create modified papers list with RAG content
-                papers_for_prompt = [{
-                    "paper_id": "combined_rag",
-                    "title": f"RAG-retrieved content from {len(expanded_papers)} papers",
-                    "content": rag_content
-                }]
+                retrieved_context = rag_content or ""
+                papers_for_prompt = []
+                for paper in expanded_papers:
+                    papers_for_prompt.append({
+                        **paper,
+                        "content": (
+                            "[Full paper content omitted from this per-paper slot because the expanded set "
+                            "exceeded the context budget. Use this paper's metadata together with the "
+                            "RAG-retrieved full-paper evidence block below.]"
+                        ),
+                    })
             
             # Build prompt with prepared papers
             prompt = build_reference_selection_prompt(
@@ -392,18 +421,53 @@ class ReferenceSelectorAgent:
                 brainstorm_summary=brainstorm_summary,
                 expanded_papers=papers_for_prompt,
                 mode=mode,
-                max_papers=max_papers
+                max_papers=max_papers,
+                retrieved_context=retrieved_context,
             )
             
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
+
             # Validate prompt size
             prompt_tokens = count_tokens(prompt)
             if prompt_tokens > max_input:
                 logger.error(f"ReferenceSelector [{mode}]: Prompt ({prompt_tokens} tokens) still exceeds limit ({max_input})")
-                # Fall back to selecting from abstracts only
-                return [p.get("paper_id") for p in expanded_papers[:max_papers]]
+                metadata_only_papers = [
+                    {
+                        **paper,
+                        "content": (
+                            "[Full content omitted because even retrieved evidence exceeded the context budget. "
+                            "Select only if this paper's title, abstract, and outline are clearly very useful.]"
+                        ),
+                    }
+                    for paper in expanded_papers
+                ]
+                prompt = build_reference_selection_prompt(
+                    user_research_prompt=user_research_prompt,
+                    topic_prompt=topic_prompt,
+                    brainstorm_summary=brainstorm_summary,
+                    expanded_papers=metadata_only_papers,
+                    mode=mode,
+                    max_papers=max_papers,
+                )
+                prompt_tokens = count_tokens(prompt)
+                if prompt_tokens > max_input:
+                    logger.error(
+                        "ReferenceSelector [%s]: Metadata-only selection prompt still exceeds limit (%s > %s); "
+                        "failing visibly rather than selecting by list order.",
+                        mode,
+                        prompt_tokens,
+                        max_input,
+                    )
+                    raise ValueError(
+                        f"Reference metadata-only final-selection prompt exceeds context limit "
+                        f"({prompt_tokens} > {max_input})."
+                    )
             
-            # Generate task ID for tracking
-            task_id = self.get_current_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -453,6 +517,8 @@ class ReferenceSelectorAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as e:
+            if _is_reference_model_call_failure(e):
+                raise
             logger.error(f"ReferenceSelector [{mode}]: Error making final selection: {e}")
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)

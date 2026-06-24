@@ -1,6 +1,7 @@
 export const DEFAULT_CONTEXT_WINDOW = '';
 export const DEFAULT_MAX_OUTPUT_TOKENS = '';
 export const DEFAULT_OPENROUTER_REASONING_EFFORT = 'auto';
+export const USA_HOST_TOOLTIP = 'We manually mark USA based companies so researchers can more easily distinguish which hosts may have more strict data protection laws. Check OpenRouter terms to be certain.';
 export const OPENROUTER_REASONING_EFFORT_OPTIONS = [
   { value: 'auto', label: 'Auto (max supported)' },
   { value: 'xhigh', label: 'xhigh (maximum)' },
@@ -10,10 +11,60 @@ export const OPENROUTER_REASONING_EFFORT_OPTIONS = [
   { value: 'minimal', label: 'minimal' },
   { value: 'none', label: 'none / disabled' },
 ];
+export const SAKANA_FUGU_REASONING_EFFORT_OPTIONS = [
+  { value: 'auto', label: 'Auto (xhigh)' },
+  { value: 'xhigh', label: 'xhigh (maximum)' },
+  { value: 'high', label: 'high' },
+];
 const AUTO_ENDPOINT_OUTLIER_RATIO = 0.75;
 const AUTO_MIN_CAPABLE_OUTPUT_TOKENS = 32768;
 const KNOWN_WEAK_AUTO_PROVIDERS = new Set([
   'venice',
+]);
+const USA_OPENROUTER_HOST_PROVIDERS = new Set([
+  'amazon',
+  'amazon bedrock',
+  'anthropic',
+  'anyscale',
+  'aws',
+  'aws bedrock',
+  'azure',
+  'baseten',
+  'cerebras',
+  'cerebras systems',
+  'cloudflare',
+  'databricks',
+  'deepinfra',
+  'fireworks',
+  'fireworks ai',
+  'google',
+  'google ai',
+  'google ai studio',
+  'google vertex',
+  'groq',
+  'hyperbolic',
+  'inference.net',
+  'lambda',
+  'lambda labs',
+  'lepton',
+  'lepton ai',
+  'meta',
+  'microsoft',
+  'microsoft azure',
+  'modal',
+  'nvidia',
+  'nvidia nim',
+  'openai',
+  'openrouter',
+  'parasail',
+  'perplexity',
+  'replicate',
+  'sambanova',
+  'sambanova systems',
+  'snowflake',
+  'together',
+  'together ai',
+  'xai',
 ]);
 const XAI_GROK_KNOWN_MODEL_LIMITS = {
   'grok-4': {
@@ -46,7 +97,7 @@ function getModelContext(model) {
 }
 
 function normalizeProviderName(providerName) {
-  return typeof providerName === 'string' ? providerName.trim().toLowerCase() : '';
+  return typeof providerName === 'string' ? providerName.trim().toLowerCase().replace(/\s+/g, ' ') : '';
 }
 
 function getEndpointProviderName(endpoint) {
@@ -214,7 +265,7 @@ export function findOpenRouterModel(models, modelId) {
   return models.find((model) => model.id === modelId) || null;
 }
 
-export function computeCloudAccessAutoSettings(model, providerLabel = 'Cloud Access') {
+export function computeCloudAccessAutoSettings(model, providerLabel = 'OpenRouter/OAuth') {
   const warnings = [];
   const contextWindow = getCloudAccessModelContext(model);
   const maxOutputTokens = getCloudAccessModelOutputCap(model);
@@ -267,6 +318,10 @@ export function computeXAIGrokAutoSettings(model) {
   };
 }
 
+export function computeSakanaFuguAutoSettings(model) {
+  return computeCloudAccessAutoSettings(model, 'Sakana Fugu');
+}
+
 export function hasEndpointMetadata(providerData) {
   return Boolean(
     providerData &&
@@ -298,6 +353,18 @@ export function normalizeProviderData(providerData) {
 
 export function getProviderNames(providerData) {
   return normalizeProviderData(providerData).providers;
+}
+
+export function isOpenRouterUsHostProvider(providerName) {
+  return USA_OPENROUTER_HOST_PROVIDERS.has(normalizeProviderName(providerName));
+}
+
+export function formatOpenRouterProviderLabel(providerName) {
+  return isOpenRouterUsHostProvider(providerName) ? `🇺🇸 ${providerName}` : providerName;
+}
+
+export function getOpenRouterProviderTitle(providerName) {
+  return isOpenRouterUsHostProvider(providerName) ? USA_HOST_TOOLTIP : undefined;
 }
 
 export function normalizeOpenRouterReasoningEffort(value) {
@@ -348,9 +415,10 @@ export function computeOpenRouterAutoSettings(model, providerData, selectedProvi
   const { endpoints } = normalizeProviderData(providerData);
   const warnings = [];
   const modelContext = getModelContext(model);
+  const normalizedSelectedProvider = normalizeProviderName(selectedProvider);
 
   const initialRelevantEndpoints = selectedProvider
-    ? endpoints.filter((endpoint) => endpoint?.provider_name === selectedProvider)
+    ? endpoints.filter((endpoint) => normalizeProviderName(getEndpointProviderName(endpoint)) === normalizedSelectedProvider)
     : endpoints;
   const autoEndpointSelection = selectedProvider
     ? {

@@ -25,10 +25,15 @@ def get_manual_aggregator_prompt_path() -> Path:
 
 async def save_manual_aggregator_prompt(prompt: str) -> None:
     """Persist the latest manual Aggregator prompt for stopped/restarted proof checks."""
+    if not (prompt or "").strip():
+        logger.warning("Refusing to overwrite manual Aggregator prompt with an empty value")
+        return
     path = get_manual_aggregator_prompt_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    async with aiofiles.open(path, "w", encoding="utf-8") as handle:
+    temp_path = path.with_name(f"{path.name}.tmp")
+    async with aiofiles.open(temp_path, "w", encoding="utf-8") as handle:
         await handle.write(prompt or "")
+    await asyncio.to_thread(temp_path.replace, path)
 
 
 async def load_manual_aggregator_prompt() -> str:

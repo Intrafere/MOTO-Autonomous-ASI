@@ -13,13 +13,19 @@ from backend.shared.config import system_config, rag_config
 from backend.shared.models import SystemStatus, Submission, ValidationResult, SubmitterConfig, WorkflowTask, ModelConfig, ProofAttemptFeedback
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.rag_lock import rag_operation_lock
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import OAuthProviderCooldownError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.context_overflow import (
+    CONTEXT_OVERFLOW_RESOLUTION,
+    CONTEXT_OVERFLOW_STOP_MESSAGE,
+    CONTEXT_OVERFLOW_STOP_REASON,
+)
 from backend.aggregator.agents.submitter import SubmitterAgent
 from backend.aggregator.agents.validator import ValidatorAgent
+from backend.aggregator.core.context_allocator import ContextAllocationError
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.core.rag_manager import rag_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
@@ -133,6 +139,8 @@ class Coordinator:
         self.enable_cleanup_review = True
         self.creativity_emphasis_boost_enabled = False
         self.persist_event_log = True
+        self.fatal_error_message: Optional[str] = None
+        self.fatal_error_type: Optional[str] = None
 
         # Optional source-level hard cap used by autonomous brainstorm mode.
         self.max_total_acceptances: Optional[int] = None
@@ -238,6 +246,7 @@ class Coordinator:
         local_rejection_log_dir: Optional[str] = None,
         local_rejection_log_template: Optional[str] = None,
         reset_local_rejection_logs_on_start: bool = False,
+        assistant_workflow_mode_override: Optional[str] = None,
     ) -> None:
         """
         Initialize the coordinator with configuration.
@@ -390,6 +399,8 @@ class Coordinator:
             logger.info("Clearing RAG for fresh Part 1 aggregator session...")
             await asyncio.to_thread(rag_manager.clear_all_documents)
             logger.info("RAG cleared successfully for Part 1 aggregator")
+            await self._rebuild_shared_training_rag_after_cleanup()
+            logger.info("Persisted Part 1 accepted submissions re-indexed after RAG clear")
         else:
             logger.info("Skipping stats load (autonomous mode - starting fresh)")
             # Reset stats to 0 for autonomous brainstorm
@@ -459,6 +470,7 @@ class Coordinator:
                 local_rejection_log_dir=local_rejection_log_dir,
                 local_rejection_log_template=local_rejection_log_template,
                 reset_local_rejection_log_on_initialize=reset_local_rejection_logs_on_start,
+                assistant_workflow_mode_override=assistant_workflow_mode_override,
             )
             await submitter.initialize()
             # Set callback to add submissions to queue
@@ -709,6 +721,8 @@ class Coordinator:
             return
         
         self.is_running = True
+        self.fatal_error_message = None
+        self.fatal_error_type = None
         logger.info("Starting coordinator...")
         
         # Reset free model manager state for fresh start
@@ -822,6 +836,9 @@ class Coordinator:
                 
                 # Batch validate
                 results = await self.validator.validate_batch(submissions)
+                if not self.is_running or self.fatal_error_type:
+                    logger.info("Skipping validator result processing after workflow stop/context overflow")
+                    break
                 
                 # Process results
                 for submission, result in zip(submissions, results):
@@ -847,6 +864,15 @@ class Coordinator:
                         "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+            except OAuthProviderCooldownError as e:
+                logger.warning("Validator paused for OAuth provider cooldown: %s", e)
+                await api_client_manager.wait_for_oauth_provider_cooldown(
+                    e,
+                    role_id="aggregator_validator",
+                )
+            except ContextAllocationError as e:
+                await self._handle_context_overflow(e, role_id="aggregator_validator")
+                break
             except Exception as e:
                 logger.error(f"Validator loop error on iteration {iteration}: {e}", exc_info=True)
                 await asyncio.sleep(2)
@@ -919,6 +945,9 @@ class Coordinator:
                     
                     results = await self.validator.validate_batch(submissions)
                     validations_done += len(submissions)
+                    if not self.is_running or self.fatal_error_type:
+                        logger.info("Skipping single-model validator result processing after workflow stop/context overflow")
+                        break
                     
                     for submission, result in zip(submissions, results):
                         if result.decision == "accept" or self._is_verified_brainstorm_proof_submission(submission):
@@ -951,6 +980,15 @@ class Coordinator:
                         "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+            except OAuthProviderCooldownError as e:
+                logger.warning("Single-model workflow paused for OAuth provider cooldown: %s", e)
+                await api_client_manager.wait_for_oauth_provider_cooldown(
+                    e,
+                    role_id="aggregator_single_model",
+                )
+            except ContextAllocationError as e:
+                await self._handle_context_overflow(e, role_id="aggregator_single_model")
+                break
             except Exception as e:
                 logger.error(f"Single-model workflow error at round {round_number}: {e}", exc_info=True)
                 await asyncio.sleep(5)
@@ -1068,6 +1106,12 @@ class Coordinator:
                 logger.error("Acceptance cap callback failed: %s", e, exc_info=True)
 
         current_task = asyncio.current_task()
+        if (
+            self._validator_task
+            and self._validator_task is not current_task
+            and not self._validator_task.done()
+        ):
+            await _cancel_and_drain_task(self._validator_task)
         for submitter in self.submitters:
             try:
                 await submitter.stop()
@@ -1207,7 +1251,7 @@ class Coordinator:
         creativity_prefix = "(Creativity Emphasized) " if creativity_emphasized else ""
         await self._add_persisted_event(
             "submission_rejected",
-            f"{creativity_prefix}Submission from Submitter {submission.submitter_id} REJECTED: {rejection_reason}",
+            f"{creativity_prefix}Submission from Submitter {submission.submitter_id} REJECTED WITH FEEDBACK: {rejection_reason}",
             {
                 "submission_id": submission.submission_id,
                 "submitter_id": submission.submitter_id,
@@ -1218,6 +1262,45 @@ class Coordinator:
         
         # Save stats
         await self._save_stats()
+
+    async def _handle_context_overflow(self, error: ContextAllocationError, *, role_id: str) -> None:
+        """Stop the workflow when mandatory direct context cannot fit."""
+        self.fatal_error_type = "context_overflow"
+        self.fatal_error_message = str(error)
+        self.is_running = False
+
+        logger.error("Fatal context overflow in %s: %s", role_id, error)
+
+        current_task = asyncio.current_task()
+        for submitter in self.submitters:
+            try:
+                if submitter._task is current_task:
+                    submitter.is_running = False
+                    submitter.state.is_active = False
+                    continue
+                await submitter.stop()
+            except Exception as stop_exc:
+                logger.warning(
+                    "Failed to stop submitter %s after context overflow: %s",
+                    submitter.submitter_id,
+                    stop_exc,
+                )
+
+        await queue_manager.clear()
+
+        payload = {
+            "role_id": role_id,
+            "reason": CONTEXT_OVERFLOW_STOP_REASON,
+            "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
+            "error_detail": str(error),
+            "required_tokens": getattr(error, "required_tokens", None),
+            "available_tokens": getattr(error, "available_tokens", None),
+            "context_window": getattr(error, "context_window", None),
+            "output_reserve": getattr(error, "output_reserve", None),
+            "resolution": CONTEXT_OVERFLOW_RESOLUTION,
+        }
+        await self._broadcast("context_overflow_error", payload)
+        await self._add_persisted_event("context_overflow_error", payload["message"], payload)
     
     async def _perform_cleanup_review(self) -> None:
         """
@@ -1527,7 +1610,9 @@ class Coordinator:
             shared_training_size=shared_training_size,
             cleanup_reviews_performed=self.cleanup_reviews_performed,
             removals_proposed=self.removals_proposed,
-            removals_executed=self.removals_executed
+            removals_executed=self.removals_executed,
+            fatal_error_type=self.fatal_error_type,
+            fatal_error_message=self.fatal_error_message,
         )
     
     async def get_results(self) -> str:

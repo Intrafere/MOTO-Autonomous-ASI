@@ -250,6 +250,25 @@
   font-style: italic;
 }
 
+.boost-settings-open-btn {
+  width: 100%;
+  margin-bottom: 0.75rem;
+  padding: 0.52rem 0.75rem;
+  border: 1px solid rgba(30, 255, 28, 0.24);
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, rgba(20, 37, 22, 0.92), rgba(11, 16, 13, 0.96));
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.boost-settings-open-btn:hover,
+.boost-settings-open-btn:focus-visible {
+  border-color: rgba(30, 255, 28, 0.42);
+  outline: none;
+}
+
 /* Token Stats & Research Timer */
 .token-stats-section {
   padding: 0.75rem 1rem;

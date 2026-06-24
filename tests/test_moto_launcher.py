@@ -25,28 +25,76 @@ class ResolveInstanceRuntimeTests(TestCase):
         self.assertTrue(runtime.data_root.endswith("backend\\data") or runtime.data_root.endswith("backend/data"))
         self.assertTrue(runtime.log_root.endswith("backend\\logs") or runtime.log_root.endswith("backend/logs"))
 
-    def test_occupied_defaults_allocate_isolated_instance(self) -> None:
+    def test_occupied_backend_keeps_default_memory_and_frontend_origin(self) -> None:
         def fake_port_in_use(port: int) -> bool:
-            return port in {8000, 5173}
+            return port == 8000
 
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None):
-                with mock.patch.object(moto_launcher, "port_in_use", side_effect=fake_port_in_use):
-                    with mock.patch.object(moto_launcher, "new_instance_id", return_value="instance_test_1234"):
-                        runtime = moto_launcher.resolve_instance_runtime()
+                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                    with mock.patch.object(moto_launcher, "port_in_use", side_effect=fake_port_in_use):
+                        with mock.patch.object(moto_launcher, "new_instance_id", return_value="instance_test_1234"):
+                            runtime = moto_launcher.resolve_instance_runtime()
 
-        self.assertEqual(runtime.instance_id, "instance_test_1234")
+        self.assertEqual(runtime.instance_id, "default")
         self.assertEqual(runtime.backend_port, 8001)
-        self.assertEqual(runtime.frontend_port, 5174)
-        self.assertFalse(runtime.is_default)
-        self.assertIn(".moto_instances", runtime.data_root)
-        self.assertIn("instance_test_1234", runtime.data_root)
-        self.assertIn(".moto_instances", runtime.log_root)
-        self.assertEqual(runtime.secret_namespace, "instance_test_1234")
-        self.assertEqual(runtime.storage_prefix, "instance_test_1234")
+        self.assertEqual(runtime.frontend_port, 5173)
+        self.assertTrue(runtime.is_default)
+        self.assertTrue(runtime.data_root.endswith("backend\\data") or runtime.data_root.endswith("backend/data"))
+        self.assertTrue(runtime.log_root.endswith("backend\\logs") or runtime.log_root.endswith("backend/logs"))
+        self.assertIsNone(runtime.secret_namespace)
+        self.assertIsNone(runtime.storage_prefix)
         self.assertFalse(runtime.explicit_override)
 
-    def test_last_record_default_is_reused_when_ports_busy(self) -> None:
+    def test_occupied_default_frontend_blocks_plain_launch(self) -> None:
+        def fake_port_in_use(port: int) -> bool:
+            return port == 5173
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None):
+                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                    with mock.patch.object(moto_launcher, "port_in_use", side_effect=fake_port_in_use):
+                        with self.assertRaisesRegex(RuntimeError, "Frontend port 5173 is already in use"):
+                            moto_launcher.resolve_instance_runtime()
+
+    def test_port_only_override_does_not_create_isolated_identity(self) -> None:
+        with mock.patch.dict(os.environ, {"MOTO_BACKEND_PORT": "8123"}, clear=True):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None):
+                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                    with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
+                        runtime = moto_launcher.resolve_instance_runtime()
+
+        self.assertEqual(runtime.instance_id, "default")
+        self.assertEqual(runtime.backend_port, 8123)
+        self.assertEqual(runtime.frontend_port, 5173)
+        self.assertTrue(runtime.is_default)
+        self.assertIsNone(runtime.secret_namespace)
+        self.assertIsNone(runtime.storage_prefix)
+        self.assertFalse(runtime.explicit_override)
+
+    def test_frontend_port_only_override_is_rejected_for_default_identity(self) -> None:
+        with mock.patch.dict(os.environ, {"MOTO_FRONTEND_PORT": "5174"}, clear=True):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None):
+                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                    with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
+                        with mock.patch.object(moto_launcher, "new_instance_id", return_value="instance_test_1234"):
+                            with self.assertRaisesRegex(RuntimeError, "Frontend port overrides are disabled"):
+                                moto_launcher.resolve_instance_runtime()
+
+    def test_explicit_identity_frontend_port_override_is_allowed(self) -> None:
+        with mock.patch.dict(os.environ, {"MOTO_INSTANCE_ID": "explicit_run", "MOTO_FRONTEND_PORT": "5174"}, clear=True):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None) as loader:
+                with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
+                    runtime = moto_launcher.resolve_instance_runtime()
+
+        self.assertEqual(runtime.instance_id, "explicit_run")
+        self.assertEqual(runtime.backend_port, 8000)
+        self.assertEqual(runtime.frontend_port, 5174)
+        self.assertFalse(runtime.is_default)
+        self.assertTrue(runtime.explicit_override)
+        loader.assert_not_called()
+
+    def test_last_record_default_is_reused_when_backend_port_busy(self) -> None:
         """
         Regression test for the 1/3-startup keyring namespace drift bug.
 
@@ -59,7 +107,7 @@ class ResolveInstanceRuntimeTests(TestCase):
         the default ports are temporarily occupied — only the ports change.
         """
         def fake_port_in_use(port: int) -> bool:
-            return port in {8000, 5173}
+            return port == 8000
 
         saved_record = {
             "instance_id": "default",
@@ -82,10 +130,50 @@ class ResolveInstanceRuntimeTests(TestCase):
         # Ports are allowed to shift because they are not part of the keyring
         # namespace — stability of `secret_namespace` is all that matters.
         self.assertNotEqual(runtime.backend_port, 8000)
-        self.assertNotEqual(runtime.frontend_port, 5173)
+        self.assertEqual(runtime.frontend_port, 5173)
 
-    def test_last_record_isolated_instance_is_reused_even_when_default_ports_are_free(self) -> None:
-        """A prior isolated launch must keep its namespace even when default ports become free."""
+    def test_last_record_default_blocks_when_frontend_origin_busy(self) -> None:
+        saved_record = {
+            "instance_id": "default",
+            "data_root": None,
+            "log_root": None,
+            "secret_namespace": None,
+            "storage_prefix": None,
+        }
+
+        def fake_port_in_use(port: int) -> bool:
+            return port == 5173
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=saved_record):
+                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                    with mock.patch.object(moto_launcher, "port_in_use", side_effect=fake_port_in_use):
+                        with self.assertRaisesRegex(RuntimeError, "Frontend port 5173 is already in use"):
+                            moto_launcher.resolve_instance_runtime()
+
+    def test_stale_default_record_cannot_redirect_default_memory_or_storage(self) -> None:
+        saved_record = {
+            "instance_id": "default",
+            "data_root": r"C:\\wrong\\data",
+            "log_root": r"C:\\wrong\\logs",
+            "keyring_namespace": "wrong_namespace",
+            "storage_prefix": "wrong_storage",
+        }
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=saved_record):
+                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
+                    with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
+                        runtime = moto_launcher.resolve_instance_runtime()
+
+        self.assertEqual(runtime.instance_id, "default")
+        self.assertTrue(runtime.is_default)
+        self.assertTrue(runtime.data_root.endswith("backend\\data") or runtime.data_root.endswith("backend/data"))
+        self.assertTrue(runtime.log_root.endswith("backend\\logs") or runtime.log_root.endswith("backend/logs"))
+        self.assertIsNone(runtime.secret_namespace)
+        self.assertIsNone(runtime.storage_prefix)
+
+    def test_plain_launch_ignores_recorded_isolated_instance(self) -> None:
+        """A plain consumer relaunch must return to the shared default memory/keyring."""
         saved_record = {
             "instance_id": "instance_20260101_000000_1111",
             "data_root": r"C:\\custom\\data",
@@ -99,13 +187,14 @@ class ResolveInstanceRuntimeTests(TestCase):
                     with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
                         runtime = moto_launcher.resolve_instance_runtime()
 
-        self.assertEqual(runtime.instance_id, "instance_20260101_000000_1111")
-        self.assertFalse(runtime.is_default)
-        self.assertEqual(runtime.secret_namespace, "instance_20260101_000000_1111")
-        self.assertEqual(runtime.storage_prefix, "instance_20260101_000000_1111")
+        self.assertEqual(runtime.instance_id, "default")
+        self.assertTrue(runtime.is_default)
+        self.assertIsNone(runtime.secret_namespace)
+        self.assertIsNone(runtime.storage_prefix)
+        self.assertTrue(runtime.data_root.endswith("backend\\data") or runtime.data_root.endswith("backend/data"))
 
-    def test_live_instance_is_not_reused_to_avoid_data_root_collision(self) -> None:
-        """A recorded identity currently live in another process must be avoided."""
+    def test_live_non_default_record_does_not_create_new_plain_launch_namespace(self) -> None:
+        """A recorded isolated instance never redirects a plain launch away from default."""
         saved_record = {
             "instance_id": "instance_20260101_000000_1111",
             "data_root": None,
@@ -116,7 +205,7 @@ class ResolveInstanceRuntimeTests(TestCase):
         live_record = [{"instance_id": "instance_20260101_000000_1111"}]
 
         def fake_port_in_use(port: int) -> bool:
-            return port in {8000, 5173}
+            return port == 8000
 
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=saved_record):
@@ -125,12 +214,13 @@ class ResolveInstanceRuntimeTests(TestCase):
                         with mock.patch.object(moto_launcher, "new_instance_id", return_value="instance_test_freshly_minted"):
                             runtime = moto_launcher.resolve_instance_runtime()
 
-        self.assertEqual(runtime.instance_id, "instance_test_freshly_minted")
-        self.assertNotEqual(runtime.instance_id, saved_record["instance_id"])
-        self.assertFalse(runtime.is_default)
+        self.assertEqual(runtime.instance_id, "default")
+        self.assertTrue(runtime.is_default)
+        self.assertIsNone(runtime.secret_namespace)
+        self.assertIsNone(runtime.storage_prefix)
 
-    def test_live_default_instance_is_not_recreated_when_ports_look_free(self) -> None:
-        """A live recorded default instance must block fallback to the default identity."""
+    def test_live_default_instance_blocks_plain_relaunch(self) -> None:
+        """A live default instance must not cause a new empty namespace."""
         saved_record = {
             "instance_id": "default",
             "data_root": None,
@@ -145,12 +235,8 @@ class ResolveInstanceRuntimeTests(TestCase):
                 with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=live_record):
                     with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
                         with mock.patch.object(moto_launcher, "new_instance_id", return_value="instance_safe_parallel"):
-                            runtime = moto_launcher.resolve_instance_runtime()
-
-        self.assertEqual(runtime.instance_id, "instance_safe_parallel")
-        self.assertFalse(runtime.is_default)
-        self.assertEqual(runtime.secret_namespace, "instance_safe_parallel")
-        self.assertEqual(runtime.storage_prefix, "instance_safe_parallel")
+                            with self.assertRaisesRegex(RuntimeError, "default MOTO instance already appears to be running"):
+                                moto_launcher.resolve_instance_runtime()
 
     def test_explicit_override_does_not_read_last_record(self) -> None:
         """Explicit env overrides must never be replaced by a stored record."""
@@ -173,21 +259,33 @@ class ResolveInstanceRuntimeTests(TestCase):
         # caller provided explicit overrides.
         loader.assert_not_called()
 
-    def test_resolve_instance_runtime_reads_keyring_namespace_field(self) -> None:
-        saved_record = {
-            "instance_id": "instance_20260101_000000_1111",
-            "data_root": r"C:\\custom\\data",
-            "log_root": r"C:\\custom\\logs",
-            "keyring_namespace": "stored_keyring_namespace",
-            "storage_prefix": "instance_20260101_000000_1111",
-        }
-        with mock.patch.dict(os.environ, {}, clear=True):
-            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=saved_record):
-                with mock.patch.object(moto_launcher, "cleanup_launcher_state", return_value=[]):
-                    with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
-                        runtime = moto_launcher.resolve_instance_runtime()
+    def test_explicit_secret_namespace_is_preserved(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"MOTO_INSTANCE_ID": "explicit_run", "MOTO_SECRET_NAMESPACE": "stored_keyring_namespace"},
+            clear=True,
+        ):
+            with mock.patch.object(moto_launcher, "load_last_instance_record", return_value=None) as loader:
+                with mock.patch.object(moto_launcher, "port_in_use", return_value=False):
+                    runtime = moto_launcher.resolve_instance_runtime()
 
+        self.assertEqual(runtime.instance_id, "explicit_run")
         self.assertEqual(runtime.secret_namespace, "stored_keyring_namespace")
+        self.assertTrue(runtime.explicit_override)
+        loader.assert_not_called()
+
+    def test_runtime_lock_blocks_live_default_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            moto_launcher.write_runtime_lock(temp_dir, 4242, "default")
+            with mock.patch.object(moto_launcher, "is_pid_running", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "data root is already in use"):
+                    moto_launcher.assert_runtime_lock_available(temp_dir)
+
+    def test_runtime_lock_ignores_stale_default_backend_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            moto_launcher.write_runtime_lock(temp_dir, 4242, "default")
+            with mock.patch.object(moto_launcher, "is_pid_running", return_value=False):
+                moto_launcher.assert_runtime_lock_available(temp_dir)
 
 
 class WindowsLauncherStrategyTests(TestCase):
@@ -260,6 +358,55 @@ class LauncherDependencyVersionTests(TestCase):
                                 moto_launcher.check_node_installation()
 
                 self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], str(node_dir.resolve()))
+
+    def test_frontend_dependency_install_runs_audit_fix_for_clean_git_vulnerabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / "frontend").mkdir()
+
+            install_result = mock.Mock(
+                returncode=0,
+                stdout="added 1 package, and audited 1 package\n1 high severity vulnerability",
+            )
+            fix_result = mock.Mock(returncode=0, stdout="fixed 1 vulnerability")
+
+            with mock.patch.object(moto_launcher, "SCRIPT_DIR", repo_root):
+                with mock.patch.object(moto_launcher, "get_npm_command", return_value="npm"):
+                    with mock.patch.object(moto_launcher.subprocess, "run", side_effect=[install_result, fix_result]) as run:
+                        _, vulnerability_warning = moto_launcher.install_frontend_dependencies()
+
+            self.assertFalse(vulnerability_warning)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args_list[0].args[0], ["npm", "install"])
+            self.assertEqual(run.call_args_list[1].args[0], ["npm", "audit", "fix"])
+
+    def test_frontend_dependency_install_runs_audit_fix_for_npm_remediation_instruction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo_root = Path(temp_dir)
+            (repo_root / "frontend").mkdir()
+
+            install_result = mock.Mock(
+                returncode=0,
+                stdout=(
+                    "27 packages are looking for funding\n"
+                    "  run `npm fund` for details\n\n"
+                    "2 vulnerabilities (1 moderate, 1 high)\n\n"
+                    "To address all issues, run:\n"
+                    "  npm audit fix\n\n"
+                    "Run `npm audit` for details.\n"
+                ),
+            )
+            fix_result = mock.Mock(returncode=0, stdout="found 0 vulnerabilities")
+
+            with mock.patch.object(moto_launcher, "SCRIPT_DIR", repo_root):
+                with mock.patch.object(moto_launcher, "get_npm_command", return_value="npm"):
+                    with mock.patch.object(moto_launcher.subprocess, "run", side_effect=[install_result, fix_result]) as run:
+                        _, vulnerability_warning = moto_launcher.install_frontend_dependencies()
+
+            self.assertFalse(vulnerability_warning)
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args_list[0].args[0], ["npm", "install"])
+            self.assertEqual(run.call_args_list[1].args[0], ["npm", "audit", "fix"])
 
 
 class LinuxLauncherStrategyTests(TestCase):

@@ -1,0 +1,9 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "error": {
+    "code": "quota_exceeded",
+    "message": "SyntheticLib4 monthly search quota is exhausted.",
+    "retryable": false,
+    "http_status": 429
+  }
+}

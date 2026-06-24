@@ -430,7 +430,7 @@ async def toggle_category_boost(category: str) -> Dict[str, Any]:
     
     Categories:
     - Aggregator: agg_sub1, agg_sub2, ..., agg_sub10, agg_val
-    - Compiler: comp_hc, comp_hp, comp_val
+    - Compiler: comp_writer, comp_hp, comp_val
     - Autonomous: auto_ts, auto_tv, auto_cr, auto_rs, auto_pt, auto_prc
     
     Args:

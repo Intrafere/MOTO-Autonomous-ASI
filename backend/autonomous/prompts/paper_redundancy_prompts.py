@@ -50,11 +50,11 @@ REASONS FOR REMOVAL - A paper should be removed if it:
 
 REASONS TO KEEP - A paper should be kept if it:
 1. Provides a stronger direct answer to the user's prompt than overlapping papers
-2. Provides ANY unique mathematical content not covered elsewhere
-3. Offers a different perspective or approach even if related to other papers
-4. Contains specific proofs, theorems, or techniques not present elsewhere
-5. Contributes to research diversity in any meaningful way
-6. Covers distinct mathematical subtopics within a broader area
+2. Provides unique mathematical content that materially strengthens a direct route to the user's prompt
+3. Offers a different perspective or approach that materially improves the strongest direct answer path
+4. Contains specific proofs, theorems, or techniques necessary for direct prompt progress
+5. Contributes to research diversity only when that diversity improves credible direct-answer progress
+6. Covers distinct mathematical subtopics only when those subtopics are necessary to the user's prompt
 
 CONSERVATIVE APPROACH:
 - When in doubt, DO NOT recommend removal

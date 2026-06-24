@@ -49,6 +49,11 @@ from backend.autonomous.memory.proof_database import proof_database
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.config import rag_config, system_config
+from backend.shared.context_overflow import (
+    CONTEXT_OVERFLOW_RESOLUTION,
+    CONTEXT_OVERFLOW_STOP_MESSAGE,
+    CONTEXT_OVERFLOW_STOP_REASON,
+)
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import Lean4Result, get_lean4_client
@@ -70,6 +75,8 @@ from backend.shared.provider_pause import (
     mark_provider_paused,
     wait_for_provider_resume,
 )
+from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
+from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.token_tracker import token_tracker
 from backend.shared.utils import count_tokens
 
@@ -150,6 +157,7 @@ _LEANOJ_ACTIVE_PLAN_CONTEXT_TERMS = (
     "master proof route",
     "next obligation",
 )
+_LEANOJ_PROOF_SEARCH_MAX_TOKENS = 3500
 
 
 class LeanOJConfigurationError(RuntimeError):
@@ -291,6 +299,9 @@ class LeanOJCoordinator:
         self._restored_from_disk = False
         self._master_proof_no_progress_count = 0
         self._last_master_proof_edit_signature = ""
+        self._pending_final_solver_assistant_target_hash = ""
+        self._fatal_stop_reason: Optional[str] = None
+        self._fatal_stop_message: str = ""
 
     @property
     def is_running(self) -> bool:
@@ -306,6 +317,34 @@ class LeanOJCoordinator:
     async def _broadcast(self, event: str, data: Optional[dict[str, Any]] = None) -> None:
         if self._broadcast_callback:
             await self._broadcast_callback(event, data or {})
+
+    @staticmethod
+    def _is_context_overflow_exception(exc: BaseException) -> bool:
+        message = str(exc or "").lower()
+        return (
+            "context overflow" in message
+            or "prompt context overflow" in message
+            or "exceeds the configured input budget" in message
+            or "mandatory direct-inject" in message
+        )
+
+    async def _handle_context_overflow_stop(self, exc: BaseException, *, role_id: str = "") -> None:
+        self._fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
+        self._fatal_stop_message = CONTEXT_OVERFLOW_STOP_MESSAGE
+        self._state.phase = "stopped"
+        self._state.last_error = str(exc)
+        await self._persist_and_broadcast(
+            "context_overflow_error",
+            {
+                "workflow_mode": "leanoj",
+                "role_id": role_id,
+                "phase": self._state.phase,
+                "reason": CONTEXT_OVERFLOW_STOP_REASON,
+                "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
+                "error_detail": str(exc),
+                "resolution": CONTEXT_OVERFLOW_RESOLUTION,
+            },
+        )
 
     def get_state(self) -> LeanOJState:
         return self._state
@@ -520,6 +559,8 @@ class LeanOJCoordinator:
 
         self._running = True
         self._state.is_running = True
+        self._fatal_stop_reason = None
+        self._fatal_stop_message = ""
         if self._state.phase == "idle":
             self._state.phase = "initial_topic_candidates"
         elif self._state.phase in {"stopped", "error"}:
@@ -553,11 +594,24 @@ class LeanOJCoordinator:
             await self._run_workflow(self._request)
         except asyncio.CancelledError:
             raise
+        except LeanOJConfigurationError as exc:
+            if self._is_context_overflow_exception(exc):
+                logger.error("LeanOJ stopped for context overflow: %s", exc)
+                await self._handle_context_overflow_stop(exc)
+            else:
+                logger.exception("LeanOJ workflow failed")
+                self._state.phase = "error"
+                self._state.last_error = str(exc)
+                await self._persist_and_broadcast("leanoj_error", {"message": str(exc)})
         except Exception as exc:
-            logger.exception("LeanOJ workflow failed")
-            self._state.phase = "error"
-            self._state.last_error = str(exc)
-            await self._persist_and_broadcast("leanoj_error", {"message": str(exc)})
+            if self._is_context_overflow_exception(exc):
+                logger.error("LeanOJ stopped for context overflow: %s", exc)
+                await self._handle_context_overflow_stop(exc)
+            else:
+                logger.exception("LeanOJ workflow failed")
+                self._state.phase = "error"
+                self._state.last_error = str(exc)
+                await self._persist_and_broadcast("leanoj_error", {"message": str(exc)})
         finally:
             self._running = False
             self._state.is_running = False
@@ -566,7 +620,14 @@ class LeanOJCoordinator:
             self._state.updated_at = datetime.now()
             token_tracker.stop_timer()
             api_client_manager.set_autonomous_logger_callback(None)
-            await self._persist_and_broadcast("leanoj_stopped")
+            stopped_payload = None
+            if self._fatal_stop_reason:
+                stopped_payload = {
+                    **self.get_status(),
+                    "reason": self._fatal_stop_reason,
+                    "message": self._fatal_stop_message or CONTEXT_OVERFLOW_STOP_MESSAGE,
+                }
+            await self._persist_and_broadcast("leanoj_stopped", stopped_payload)
 
     async def stop(self) -> None:
         if not self.is_active and not self._state.session_id:
@@ -619,6 +680,8 @@ class LeanOJCoordinator:
         self._restored_from_disk = False
         self._master_proof_no_progress_count = 0
         self._last_master_proof_edit_signature = ""
+        self._fatal_stop_reason = None
+        self._fatal_stop_message = ""
         await self._broadcast("leanoj_cleared", self.get_status())
 
     async def skip_brainstorm(self) -> None:
@@ -1017,7 +1080,10 @@ class LeanOJCoordinator:
                 )
             except asyncio.CancelledError:
                 raise
-            except LeanOJConfigurationError:
+            except LeanOJConfigurationError as exc:
+                if self._is_context_overflow_exception(exc):
+                    await self._handle_context_overflow_stop(exc, role_id=role_id)
+                    self._stop_event.set()
                 raise
             except Exception as exc:
                 logger.warning("LeanOJ topic submitter %s failed: %s", submitter_index, exc)
@@ -1652,7 +1718,10 @@ class LeanOJCoordinator:
                     )
             except asyncio.CancelledError:
                 raise
-            except LeanOJConfigurationError:
+            except LeanOJConfigurationError as exc:
+                if self._is_context_overflow_exception(exc):
+                    await self._handle_context_overflow_stop(exc, role_id=role_id)
+                    self._stop_event.set()
                 raise
             except Exception as exc:
                 logger.warning("LeanOJ brainstorm submitter %s failed: %s", submitter_index, exc)
@@ -2701,7 +2770,86 @@ class LeanOJCoordinator:
             current_working_proof_attempt=working_proof_attempt,
             capped_rejection_feedback=capped_rejection_feedback,
         )
-        return allocation.as_prompt_blocks()
+        context_blocks = allocation.as_prompt_blocks()
+        if resolved_scope == "final_solver":
+            proof_search_context = await self._build_final_solver_proof_search_context(
+                request=request,
+                task_request=task_request,
+            )
+            if proof_search_context:
+                context_blocks["proof_search_context"] = proof_search_context
+        return context_blocks
+
+    async def _build_final_solver_proof_search_context(
+        self,
+        *,
+        request: LeanOJStartRequest,
+        task_request: str,
+    ) -> str:
+        """Return compact optional proof-search context for the LeanOJ final solver."""
+        self._pending_final_solver_assistant_target_hash = ""
+        master_proof = await self._read_master_proof()
+        snapshot = AssistantTargetSnapshot(
+            workflow_mode="leanoj",
+            target_kind="final_solver",
+            user_prompt=request.user_prompt,
+            target_statement=request.lean_template,
+            lean_template=request.lean_template,
+            formal_sketch=master_proof[-4000:],
+            rejection_feedback="\n".join(
+                str(item.get("feedback") or item.get("reasoning") or item)
+                for item in self._final_solver_failure_window()[-5:]
+            ),
+            accepted_solver_summary="\n".join(self._final_solver_active_plan_items()[-8:]),
+            source_title="LeanOJ final proof solver",
+            source_type="leanoj",
+            source_id=self._state.session_id,
+            imports=["Mathlib"],
+        )
+        target_hash = assistant_proof_search_coordinator.submit_target(snapshot)
+        pack = assistant_proof_search_coordinator.get_latest_pack(target_hash)
+        if not pack:
+            return ""
+        formatted = pack.to_prompt_context(max_code_chars_per_result=0)
+        if count_tokens(formatted) > _LEANOJ_PROOF_SEARCH_MAX_TOKENS:
+            return "[Assistant proof-support results omitted because they exceeded the final-solver optional context budget.]"
+        if pack.results:
+            self._pending_final_solver_assistant_target_hash = target_hash
+        return formatted
+
+    @staticmethod
+    def _format_final_solver_proof_search_results(records: list[dict[str, Any]]) -> str:
+        lines = [
+            "[Optional retrieved proof context. Use only as verified-helper/proof-pattern guidance for the current LeanOJ template. Do not paste unrelated proofs or build a known-knowledge library.]",
+        ]
+        for index, record in enumerate(records[:7], start=1):
+            source = " ".join(
+                str(part).strip()
+                for part in [
+                    record.get("corpus"),
+                    record.get("corpus_scope") or record.get("release_id"),
+                ]
+                if str(part or "").strip()
+            )
+            lines.extend(
+                [
+                    "",
+                    f"Result {index}",
+                    f"Source: {source or '[unknown]'}",
+                    f"Source kind: {record.get('source_kind') or '[unknown]'}",
+                    f"Proof ID: {record.get('proof_id') or '[none]'}",
+                    f"Fingerprint: {record.get('fingerprint') or '[none]'}",
+                    f"Theorem: {record.get('theorem_name') or record.get('display_title') or '[unnamed]'}",
+                    f"Statement: {record.get('theorem_statement') or '[missing]'}",
+                    f"Description: {record.get('proof_description') or record.get('formal_sketch') or '[none]'}",
+                    f"Imports: {', '.join(record.get('imports') or []) or '[none]'}",
+                    f"Dependencies: {', '.join(record.get('dependency_names') or []) or '[none]'}",
+                    f"Theorem statement hash: {record.get('theorem_statement_hash') or '[none]'}",
+                    f"Lean code hash: {record.get('lean_code_hash') or '[none]'}",
+                    f"Canonical URI: {record.get('canonical_uri') or '[none]'}",
+                ]
+            )
+        return "\n".join(lines)
 
     def _infer_context_scope(self, mode: str) -> str:
         if mode == "final_solver":
@@ -4689,9 +4837,15 @@ class LeanOJCoordinator:
                     config.context_window,
                     config.max_output_tokens,
                 )
+                await api_client_manager.prewarm_assistant_memory_context(
+                    task_id=task_id,
+                    role_id=role_id,
+                    prompt=current_prompt,
+                )
                 call_payload["prompt_tokens"] = prompt_tokens
                 call_payload["max_input_tokens"] = max_input_tokens
                 if prompt_tokens > max_input_tokens:
+                    self._pending_final_solver_assistant_target_hash = ""
                     raise LeanOJConfigurationError(
                         "PROOF SOLVER PROMPT CONTEXT OVERFLOW: assembled prompt exceeds the configured "
                         f"input budget for role {role_id}. Prompt tokens: {prompt_tokens}. "
@@ -4706,6 +4860,13 @@ class LeanOJCoordinator:
                     max_tokens=config.max_output_tokens,
                     temperature=temperature,
                 )
+                if self._pending_final_solver_assistant_target_hash:
+                    assistant_proof_search_coordinator.mark_pack_consumed_by_solver(
+                        self._pending_final_solver_assistant_target_hash,
+                        role_id=role_id,
+                        task_id=task_id,
+                    )
+                    self._pending_final_solver_assistant_target_hash = ""
                 self.completed_task_ids.add(task_id)
 
                 choices = response.get("choices") or []
@@ -4868,6 +5029,8 @@ class LeanOJCoordinator:
             ("brainstorm_validator", request.brainstorm_validator),
             ("final_solver", request.final_solver),
         ]
+        if (request.assistant.model_id or "").strip():
+            role_configs.append(("assistant", request.assistant))
         role_configs.extend(
             (f"brainstorm_submitter_{index}", submitter)
             for index, submitter in enumerate(request.brainstorm_submitters, start=1)
@@ -4918,6 +5081,7 @@ class LeanOJCoordinator:
         self.workflow_tasks = tasks
 
     def _configure_roles(self, request: LeanOJStartRequest) -> None:
+        assistant_config = request.assistant if (request.assistant.model_id or "").strip() else request.topic_validator
         self._configure_role("leanoj_topic_generator", request.topic_generator)
         self._configure_role("leanoj_topic_selector", request.topic_generator)
         self._configure_role("leanoj_topic_validator", request.topic_validator)
@@ -4926,6 +5090,7 @@ class LeanOJCoordinator:
         self._configure_role("leanoj_brainstorm_validator", request.brainstorm_validator)
         self._configure_role("leanoj_master_proof_edit_validator", request.brainstorm_validator)
         self._configure_role("leanoj_final_solver", request.final_solver)
+        self._configure_role("leanoj_assistant", assistant_config)
         for index, submitter in enumerate(request.brainstorm_submitters, start=1):
             self._configure_role(f"leanoj_topic_submitter_{index}", submitter)
             self._configure_role(f"leanoj_brainstorm_submitter_{index}", submitter)

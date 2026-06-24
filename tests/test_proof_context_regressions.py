@@ -5,6 +5,7 @@ from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
+from backend.api.routes import aggregator as aggregator_route
 from backend.api.routes import compiler as compiler_route
 from backend.api.routes import proofs as proofs_route
 from backend.autonomous.agents import proof_formalization_agent as proof_formalization_module
@@ -19,7 +20,13 @@ from backend.autonomous.memory.proof_database import ProofDatabase
 from backend.autonomous.prompts.proof_prompts import build_proof_formalization_prompt
 from backend.aggregator.memory.shared_training import (
     clear_manual_aggregator_prompt,
+    load_manual_aggregator_prompt,
     save_manual_aggregator_prompt,
+)
+from backend.compiler.memory.manual_prompt import (
+    clear_manual_compiler_prompt,
+    load_manual_compiler_prompt,
+    save_manual_compiler_prompt,
 )
 from backend.shared.config import system_config
 from backend.shared.models import (
@@ -153,6 +160,66 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(snapshot)
 
+    async def test_manual_compiler_current_runtime_uses_rigor_and_proofs_submitter(self):
+        previous_values = {
+            "high_param_submitter": getattr(proofs_route.compiler_coordinator, "high_param_submitter", None),
+            "validator_model": getattr(proofs_route.compiler_coordinator, "validator_model", None),
+            "high_param_provider": getattr(proofs_route.compiler_coordinator, "high_param_provider", None),
+            "high_param_openrouter_provider": getattr(proofs_route.compiler_coordinator, "high_param_openrouter_provider", None),
+            "high_param_openrouter_reasoning_effort": getattr(proofs_route.compiler_coordinator, "high_param_openrouter_reasoning_effort", None),
+            "high_param_lm_studio_fallback": getattr(proofs_route.compiler_coordinator, "high_param_lm_studio_fallback", None),
+            "high_param_supercharge_enabled": getattr(proofs_route.compiler_coordinator, "high_param_supercharge_enabled", None),
+            "validator_provider": getattr(proofs_route.compiler_coordinator, "validator_provider", None),
+            "validator_openrouter_provider": getattr(proofs_route.compiler_coordinator, "validator_openrouter_provider", None),
+            "validator_openrouter_reasoning_effort": getattr(proofs_route.compiler_coordinator, "validator_openrouter_reasoning_effort", None),
+            "validator_lm_studio_fallback": getattr(proofs_route.compiler_coordinator, "validator_lm_studio_fallback", None),
+            "validator_context_window": getattr(proofs_route.compiler_coordinator, "validator_context_window", None),
+            "validator_max_tokens": getattr(proofs_route.compiler_coordinator, "validator_max_tokens", None),
+            "validator_supercharge_enabled": getattr(proofs_route.compiler_coordinator, "validator_supercharge_enabled", None),
+            "compiler_high_param_context_window": system_config.compiler_high_param_context_window,
+            "compiler_high_param_max_output_tokens": system_config.compiler_high_param_max_output_tokens,
+        }
+        try:
+            proofs_route.compiler_coordinator.high_param_submitter = SimpleNamespace(model_name="rigor-model")
+            proofs_route.compiler_coordinator.validator_model = "validator-model"
+            proofs_route.compiler_coordinator.high_param_provider = "openrouter"
+            proofs_route.compiler_coordinator.high_param_openrouter_provider = "RigorHost"
+            proofs_route.compiler_coordinator.high_param_openrouter_reasoning_effort = "xhigh"
+            proofs_route.compiler_coordinator.high_param_lm_studio_fallback = "rigor-fallback"
+            proofs_route.compiler_coordinator.high_param_supercharge_enabled = True
+            proofs_route.compiler_coordinator.validator_provider = "openrouter"
+            proofs_route.compiler_coordinator.validator_openrouter_provider = "ValidatorHost"
+            proofs_route.compiler_coordinator.validator_openrouter_reasoning_effort = "high"
+            proofs_route.compiler_coordinator.validator_lm_studio_fallback = "validator-fallback"
+            proofs_route.compiler_coordinator.validator_context_window = 4096
+            proofs_route.compiler_coordinator.validator_max_tokens = 512
+            proofs_route.compiler_coordinator.validator_supercharge_enabled = False
+            system_config.compiler_high_param_context_window = 8192
+            system_config.compiler_high_param_max_output_tokens = 1024
+
+            request = ProofCheckRequest(
+                source_type="paper",
+                source_id=proofs_route.MANUAL_COMPILER_CURRENT_SOURCE_ID,
+            )
+            snapshot = await proofs_route._get_runtime_snapshot(request)
+        finally:
+            for key, value in previous_values.items():
+                if key.startswith("compiler_"):
+                    setattr(system_config, key, value)
+                else:
+                    setattr(proofs_route.compiler_coordinator, key, value)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.paper.model_id, "rigor-model")
+        self.assertEqual(snapshot.paper.provider, "openrouter")
+        self.assertEqual(snapshot.paper.openrouter_provider, "RigorHost")
+        self.assertEqual(snapshot.paper.openrouter_reasoning_effort, "xhigh")
+        self.assertEqual(snapshot.paper.lm_studio_fallback_id, "rigor-fallback")
+        self.assertEqual(snapshot.paper.context_window, 8192)
+        self.assertEqual(snapshot.paper.max_output_tokens, 1024)
+        self.assertTrue(snapshot.paper.supercharge_enabled)
+        self.assertEqual(snapshot.validator.model_id, "validator-model")
+
     async def test_cross_source_exact_proof_match_is_stored_non_novel_without_novelty_call(self):
         existing_record = ProofRecord(
             proof_id="proof_existing",
@@ -240,6 +307,31 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("existing_verified", user_prompt_section)
         self.assertIn("existing_verified", proof_context_section)
 
+    def test_formalization_prompt_includes_retrieved_proof_search_context(self):
+        prompt = build_proof_formalization_prompt(
+            user_prompt="Solve the actual user prompt.",
+            source_type="paper",
+            theorem_statement="Target theorem.",
+            formal_sketch="Use the source.",
+            full_source_content="Paper body without proof appendix.",
+            source_excerpt="Local target excerpt.",
+            prior_attempts=[],
+            retrieved_proofs_context=(
+                "Result 1\n"
+                "Source: syntheticlib4 stable\n"
+                "Theorem: retrieved_pattern\n"
+                "Lean code hash: code_hash"
+            ),
+        )
+
+        retrieved_section = prompt.split(
+            "SYNTHETIC / LOCAL VERIFIED PROOF SEARCH RESULTS:",
+            1,
+        )[1].split("COMMON LEAN 4 PITFALLS TO AVOID:", 1)[0]
+
+        self.assertIn("retrieved_pattern", retrieved_section)
+        self.assertIn("Use retrieved proofs only as optional proof-pattern", retrieved_section)
+
     async def test_manual_aggregator_prompt_falls_back_to_persisted_prompt(self):
         old_data_dir = system_config.data_dir
         old_validator = proofs_route.coordinator.validator
@@ -258,6 +350,61 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
                 system_config.data_dir = old_data_dir
 
         self.assertEqual(recovered_prompt, expected_prompt)
+
+    async def test_manual_aggregator_prompt_rejects_empty_overwrite(self):
+        old_data_dir = system_config.data_dir
+        expected_prompt = "Durable manual Aggregator prompt sentinel."
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                system_config.data_dir = tmpdir
+                await save_manual_aggregator_prompt(expected_prompt)
+                await save_manual_aggregator_prompt("")
+
+                recovered_prompt = await load_manual_aggregator_prompt()
+            finally:
+                await clear_manual_aggregator_prompt()
+                system_config.data_dir = old_data_dir
+
+        self.assertEqual(recovered_prompt, expected_prompt)
+
+    async def test_manual_compiler_prompt_rejects_empty_overwrite(self):
+        old_data_dir = system_config.data_dir
+        expected_prompt = "Durable manual Compiler prompt sentinel."
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                system_config.data_dir = tmpdir
+                await save_manual_compiler_prompt(expected_prompt)
+                await save_manual_compiler_prompt("")
+
+                recovered_prompt = await load_manual_compiler_prompt()
+            finally:
+                await clear_manual_compiler_prompt()
+                system_config.data_dir = old_data_dir
+
+        self.assertEqual(recovered_prompt, expected_prompt)
+
+    async def test_manual_prompt_routes_return_persisted_prompts(self):
+        old_data_dir = system_config.data_dir
+        aggregator_prompt = "Route manual Aggregator prompt sentinel."
+        compiler_prompt = "Route manual Compiler prompt sentinel."
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                system_config.data_dir = tmpdir
+                await save_manual_aggregator_prompt(aggregator_prompt)
+                await save_manual_compiler_prompt(compiler_prompt)
+
+                aggregator_response = await aggregator_route.get_prompt()
+                compiler_response = await compiler_route.get_prompt()
+            finally:
+                await clear_manual_aggregator_prompt()
+                await clear_manual_compiler_prompt()
+                system_config.data_dir = old_data_dir
+
+        self.assertEqual(aggregator_response["prompt"], aggregator_prompt)
+        self.assertEqual(compiler_response["prompt"], compiler_prompt)
 
     async def test_legacy_history_manual_check_uses_legacy_proof_database(self):
         old_paper_library = proofs_route.paper_library
@@ -630,14 +777,22 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
             await compiler_route._run_compiler_aggregator_proof_check(
                 SimpleNamespace(
                     compiler_prompt="Manual prompt",
-                    high_context_provider="lm_studio",
-                    high_context_model="hc-model",
-                    high_context_openrouter_provider=None,
-                    high_context_openrouter_reasoning_effort="auto",
-                    high_context_lm_studio_fallback=None,
-                    high_context_context_size=4000,
-                    high_context_max_output_tokens=1000,
-                    high_context_supercharge_enabled=False,
+                    writer_provider="lm_studio",
+                    writer_model="writer-model",
+                    writer_openrouter_provider=None,
+                    writer_openrouter_reasoning_effort="auto",
+                    writer_lm_studio_fallback=None,
+                    writer_context_size=4000,
+                    writer_max_output_tokens=1000,
+                    writer_supercharge_enabled=False,
+                    high_param_provider="lm_studio",
+                    high_param_model="rigor-model",
+                    high_param_openrouter_provider=None,
+                    high_param_openrouter_reasoning_effort="auto",
+                    high_param_lm_studio_fallback=None,
+                    high_param_context_size=5000,
+                    high_param_max_output_tokens=1200,
+                    high_param_supercharge_enabled=False,
                     validator_provider="lm_studio",
                     validator_model="validator-model",
                     validator_openrouter_provider=None,
@@ -646,6 +801,14 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
                     validator_context_size=4000,
                     validator_max_output_tokens=1000,
                     validator_supercharge_enabled=False,
+                    assistant_provider="lm_studio",
+                    assistant_model=None,
+                    assistant_openrouter_provider=None,
+                    assistant_openrouter_reasoning_effort="auto",
+                    assistant_lm_studio_fallback=None,
+                    assistant_context_size=4000,
+                    assistant_max_output_tokens=1000,
+                    assistant_supercharge_enabled=False,
                 )
             )
         finally:
@@ -656,6 +819,9 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(captured["source_type"], "brainstorm")
         self.assertEqual(captured["source_id"], proofs_route.MANUAL_AGGREGATOR_SOURCE_ID)
+        self.assertEqual(captured["submitter_model"], "rigor-model")
+        self.assertEqual(captured["submitter_context"], 5000)
+        self.assertEqual(captured["submitter_max_tokens"], 1200)
         self.assertFalse(captured["append_to_source"])
         self.assertIs(captured["append_proof_callback"], fake_append_callback)
         self.assertIn("Manual Aggregator proof-only content sentinel.", captured["content"])
@@ -929,6 +1095,9 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_proof_identification_requires_relevance_novelty_and_standard_rationales(self):
         class FakeApiClientManager:
+            async def prewarm_assistant_memory_context(self, **_kwargs):
+                return ""
+
             async def generate_completion(self, **_kwargs):
                 return {
                     "choices": [
@@ -1329,6 +1498,351 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error", checkpoint_statuses)
         self.assertIn("proof_check_complete", events)
         self.assertNotIn("proof_check_no_candidates", events)
+
+    async def test_malformed_identification_output_does_not_mark_no_candidates(self):
+        old_lean4_enabled = system_config.lean4_enabled
+        system_config.lean4_enabled = True
+        stage = ProofVerificationStage()
+        events: list[str] = []
+        checkpoint_statuses: list[str] = []
+
+        async def broadcast(event_type, _payload):
+            events.append(event_type)
+
+        async def checkpoint(payload):
+            checkpoint_statuses.append(payload["status"])
+
+        async def malformed_identification_output(*_args, **_kwargs):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "The brainstorm contains proof-relevant ideas, but this is not JSON."
+                        }
+                    }
+                ]
+            }
+
+        class FakeProofDb:
+            pass
+
+        old_generate_completion = proof_identification_module.api_client_manager.generate_completion
+        proof_identification_module.api_client_manager.generate_completion = malformed_identification_output
+        try:
+            result = await stage.run(
+                content="brainstorm source",
+                source_type="brainstorm",
+                source_id="topic_identification_malformed",
+                user_prompt="prove things",
+                submitter_model="model",
+                submitter_context=4000,
+                submitter_max_tokens=1000,
+                validator_model="validator",
+                validator_context=4000,
+                validator_max_tokens=1000,
+                broadcast_fn=broadcast,
+                novel_proofs_db=FakeProofDb(),
+                append_to_source=False,
+                checkpoint_callback=checkpoint,
+            )
+        finally:
+            proof_identification_module.api_client_manager.generate_completion = old_generate_completion
+            system_config.lean4_enabled = old_lean4_enabled
+
+        self.assertTrue(result.had_error)
+        self.assertIn("No JSON found", result.error_message)
+        self.assertIn("error", checkpoint_statuses)
+        self.assertIn("proof_check_complete", events)
+        self.assertNotIn("proof_check_no_candidates", events)
+
+    async def test_empty_array_identification_output_does_not_mark_no_candidates(self):
+        old_lean4_enabled = system_config.lean4_enabled
+        system_config.lean4_enabled = True
+        stage = ProofVerificationStage()
+        events: list[str] = []
+        checkpoint_statuses: list[str] = []
+
+        async def broadcast(event_type, _payload):
+            events.append(event_type)
+
+        async def checkpoint(payload):
+            checkpoint_statuses.append(payload["status"])
+
+        async def empty_array_identification_output(*_args, **_kwargs):
+            return {"choices": [{"message": {"content": "[]"}}]}
+
+        class FakeProofDb:
+            pass
+
+        old_generate_completion = proof_identification_module.api_client_manager.generate_completion
+        proof_identification_module.api_client_manager.generate_completion = empty_array_identification_output
+        try:
+            result = await stage.run(
+                content="brainstorm source",
+                source_type="brainstorm",
+                source_id="topic_identification_empty_array",
+                user_prompt="prove things",
+                submitter_model="model",
+                submitter_context=4000,
+                submitter_max_tokens=1000,
+                validator_model="validator",
+                validator_context=4000,
+                validator_max_tokens=1000,
+                broadcast_fn=broadcast,
+                novel_proofs_db=FakeProofDb(),
+                append_to_source=False,
+                checkpoint_callback=checkpoint,
+            )
+        finally:
+            proof_identification_module.api_client_manager.generate_completion = old_generate_completion
+            system_config.lean4_enabled = old_lean4_enabled
+
+        self.assertTrue(result.had_error)
+        self.assertIn("error", checkpoint_statuses)
+        self.assertIn("proof_check_complete", events)
+        self.assertNotIn("proof_check_no_candidates", events)
+
+    async def test_schema_invalid_identification_output_does_not_mark_no_candidates(self):
+        old_lean4_enabled = system_config.lean4_enabled
+        system_config.lean4_enabled = True
+        stage = ProofVerificationStage()
+        events: list[str] = []
+        checkpoint_statuses: list[str] = []
+
+        async def broadcast(event_type, _payload):
+            events.append(event_type)
+
+        async def checkpoint(payload):
+            checkpoint_statuses.append(payload["status"])
+
+        async def schema_invalid_identification_output(*_args, **_kwargs):
+            return {"choices": [{"message": {"content": json.dumps({"theorems": []})}}]}
+
+        class FakeProofDb:
+            pass
+
+        old_generate_completion = proof_identification_module.api_client_manager.generate_completion
+        proof_identification_module.api_client_manager.generate_completion = schema_invalid_identification_output
+        try:
+            result = await stage.run(
+                content="brainstorm source",
+                source_type="brainstorm",
+                source_id="topic_identification_schema_invalid",
+                user_prompt="prove things",
+                submitter_model="model",
+                submitter_context=4000,
+                submitter_max_tokens=1000,
+                validator_model="validator",
+                validator_context=4000,
+                validator_max_tokens=1000,
+                broadcast_fn=broadcast,
+                novel_proofs_db=FakeProofDb(),
+                append_to_source=False,
+                checkpoint_callback=checkpoint,
+            )
+        finally:
+            proof_identification_module.api_client_manager.generate_completion = old_generate_completion
+            system_config.lean4_enabled = old_lean4_enabled
+
+        self.assertTrue(result.had_error)
+        self.assertIn("omitted has_provable_theorems", result.error_message)
+        self.assertIn("error", checkpoint_statuses)
+        self.assertIn("proof_check_complete", events)
+        self.assertNotIn("proof_check_no_candidates", events)
+
+    async def test_inconsistent_identification_output_does_not_mark_no_candidates(self):
+        old_lean4_enabled = system_config.lean4_enabled
+        system_config.lean4_enabled = True
+        stage = ProofVerificationStage()
+        events: list[str] = []
+        checkpoint_statuses: list[str] = []
+
+        async def broadcast(event_type, _payload):
+            events.append(event_type)
+
+        async def checkpoint(payload):
+            checkpoint_statuses.append(payload["status"])
+
+        async def inconsistent_identification_output(*_args, **_kwargs):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"has_provable_theorems": True, "theorems": []}
+                            )
+                        }
+                    }
+                ]
+            }
+
+        class FakeProofDb:
+            pass
+
+        old_generate_completion = proof_identification_module.api_client_manager.generate_completion
+        proof_identification_module.api_client_manager.generate_completion = inconsistent_identification_output
+        try:
+            result = await stage.run(
+                content="brainstorm source",
+                source_type="brainstorm",
+                source_id="topic_identification_inconsistent",
+                user_prompt="prove things",
+                submitter_model="model",
+                submitter_context=4000,
+                submitter_max_tokens=1000,
+                validator_model="validator",
+                validator_context=4000,
+                validator_max_tokens=1000,
+                broadcast_fn=broadcast,
+                novel_proofs_db=FakeProofDb(),
+                append_to_source=False,
+                checkpoint_callback=checkpoint,
+            )
+        finally:
+            proof_identification_module.api_client_manager.generate_completion = old_generate_completion
+            system_config.lean4_enabled = old_lean4_enabled
+
+        self.assertTrue(result.had_error)
+        self.assertIn("claimed provable theorems", result.error_message)
+        self.assertIn("error", checkpoint_statuses)
+        self.assertIn("proof_check_complete", events)
+        self.assertNotIn("proof_check_no_candidates", events)
+
+    async def test_malformed_claimed_candidate_does_not_mark_no_candidates(self):
+        old_lean4_enabled = system_config.lean4_enabled
+        system_config.lean4_enabled = True
+        stage = ProofVerificationStage()
+        events: list[str] = []
+        checkpoint_statuses: list[str] = []
+
+        async def broadcast(event_type, _payload):
+            events.append(event_type)
+
+        async def checkpoint(payload):
+            checkpoint_statuses.append(payload["status"])
+
+        async def malformed_claimed_candidate_output(*_args, **_kwargs):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "has_provable_theorems": True,
+                                    "theorems": [
+                                        {
+                                            "theorem_id": "missing_rationales",
+                                            "statement": "A claimed theorem missing rationales.",
+                                            "expected_novelty_tier": "mathematical_discovery",
+                                        }
+                                    ],
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+
+        class FakeProofDb:
+            pass
+
+        old_generate_completion = proof_identification_module.api_client_manager.generate_completion
+        proof_identification_module.api_client_manager.generate_completion = malformed_claimed_candidate_output
+        try:
+            result = await stage.run(
+                content="brainstorm source",
+                source_type="brainstorm",
+                source_id="topic_identification_malformed_candidate",
+                user_prompt="prove things",
+                submitter_model="model",
+                submitter_context=4000,
+                submitter_max_tokens=1000,
+                validator_model="validator",
+                validator_context=4000,
+                validator_max_tokens=1000,
+                broadcast_fn=broadcast,
+                novel_proofs_db=FakeProofDb(),
+                append_to_source=False,
+                checkpoint_callback=checkpoint,
+            )
+        finally:
+            proof_identification_module.api_client_manager.generate_completion = old_generate_completion
+            system_config.lean4_enabled = old_lean4_enabled
+
+        self.assertTrue(result.had_error)
+        self.assertIn("no valid theorem candidates", result.error_message)
+        self.assertIn("error", checkpoint_statuses)
+        self.assertIn("proof_check_complete", events)
+        self.assertNotIn("proof_check_no_candidates", events)
+
+    async def test_not_novel_identification_candidate_can_mark_no_candidates(self):
+        old_lean4_enabled = system_config.lean4_enabled
+        system_config.lean4_enabled = True
+        stage = ProofVerificationStage()
+        events: list[str] = []
+        checkpoint_statuses: list[str] = []
+
+        async def broadcast(event_type, _payload):
+            events.append(event_type)
+
+        async def checkpoint(payload):
+            checkpoint_statuses.append(payload["status"])
+
+        async def not_novel_identification_output(*_args, **_kwargs):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "has_provable_theorems": True,
+                                    "theorems": [
+                                        {
+                                            "theorem_id": "known",
+                                            "statement": "A standard known theorem.",
+                                            "expected_novelty_tier": "not_novel",
+                                            "prompt_relevance_rationale": "It is adjacent to the prompt.",
+                                            "novelty_rationale": "It is not novel.",
+                                            "why_not_standard_known_result": "It is standard.",
+                                        }
+                                    ],
+                                }
+                            )
+                        }
+                    }
+                ]
+            }
+
+        class FakeProofDb:
+            pass
+
+        old_generate_completion = proof_identification_module.api_client_manager.generate_completion
+        proof_identification_module.api_client_manager.generate_completion = not_novel_identification_output
+        try:
+            result = await stage.run(
+                content="brainstorm source",
+                source_type="brainstorm",
+                source_id="topic_identification_not_novel",
+                user_prompt="prove things",
+                submitter_model="model",
+                submitter_context=4000,
+                submitter_max_tokens=1000,
+                validator_model="validator",
+                validator_context=4000,
+                validator_max_tokens=1000,
+                broadcast_fn=broadcast,
+                novel_proofs_db=FakeProofDb(),
+                append_to_source=False,
+                checkpoint_callback=checkpoint,
+            )
+        finally:
+            proof_identification_module.api_client_manager.generate_completion = old_generate_completion
+            system_config.lean4_enabled = old_lean4_enabled
+
+        self.assertFalse(result.had_error)
+        self.assertEqual(result.total_candidates, 0)
+        self.assertIn("no_candidates", checkpoint_statuses)
+        self.assertIn("proof_check_no_candidates", events)
 
 
 if __name__ == "__main__":

@@ -133,13 +133,13 @@ class WorkflowPredictor:
         seq = current_sequence
         
         if not outline_accepted:
-            # Outline creation phase (iterative): HC → V → HC → V (max 15 iterations)
+            # Outline creation phase (iterative): writer -> validator -> writer -> validator
             for i in range(min(20, 30)):  # 15 iterations max = 30 tasks
                 if i % 2 == 0:
                     tasks.append(WorkflowTask(
-                        task_id=f"comp_hc_outline_{seq:03d}",
+                        task_id=f"comp_writer_outline_{seq:03d}",
                         sequence_number=seq + 1,
-                        role="High-Context",
+                        role="Writing Submitter",
                         mode="Outline Creation",
                         provider="lm_studio"
                     ))
@@ -157,25 +157,25 @@ class WorkflowPredictor:
                     break
         else:
             # Paper construction phase - Construction cycle pattern
-            # HC(const) → V → HC(const) → V → HC(const) → V → HC(const) → V → 
-            # HC(outline) → V → HC(review) → V → HC(review) → V → HP(rigor) → V
+            # writer construction/review turns alternate with validator turns,
+            # then Rigor & Proofs runs the theorem/proof cycle.
             
             cycle_pattern = [
-                ("High-Context", "Construction"),
+                ("Writing Submitter", "Construction"),
                 ("Validator", "Construction Review"),
-                ("High-Context", "Construction"),
+                ("Writing Submitter", "Construction"),
                 ("Validator", "Construction Review"),
-                ("High-Context", "Construction"),
+                ("Writing Submitter", "Construction"),
                 ("Validator", "Construction Review"),
-                ("High-Context", "Construction"),
+                ("Writing Submitter", "Construction"),
                 ("Validator", "Construction Review"),
-                ("High-Context", "Outline Update"),
+                ("Writing Submitter", "Outline Update"),
                 ("Validator", "Outline Review"),
-                ("High-Context", "Paper Review"),
+                ("Writing Submitter", "Paper Review"),
                 ("Validator", "Review Validation"),
-                ("High-Context", "Paper Review"),
+                ("Writing Submitter", "Paper Review"),
                 ("Validator", "Review Validation"),
-                ("High-Param", "Rigor Enhancement"),
+                ("Rigor & Proofs", "Rigor Enhancement"),
                 ("Validator", "Rigor Review"),
             ]
             
@@ -183,9 +183,9 @@ class WorkflowPredictor:
                 pattern_idx = i % len(cycle_pattern)
                 role, mode = cycle_pattern[pattern_idx]
                 
-                if role == "High-Context":
-                    task_id = f"comp_hc_{seq:03d}"
-                elif role == "High-Param":
+                if role == "Writing Submitter":
+                    task_id = f"comp_writer_{seq:03d}"
+                elif role == "Rigor & Proofs":
                     task_id = f"comp_hp_{seq:03d}"
                 else:
                     task_id = f"comp_val_{seq:03d}"

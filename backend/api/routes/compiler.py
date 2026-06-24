@@ -18,7 +18,13 @@ from backend.shared.api_client_manager import api_client_manager
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.manual_proof_context import get_manual_proof_context_lock
 from backend.shared.workflow_start_guard import workflow_start_guard
+from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.compiler.core.compiler_coordinator import CRITIQUE_ATTEMPT_TARGET, compiler_coordinator
+from backend.compiler.memory.manual_prompt import (
+    clear_manual_compiler_prompt,
+    load_manual_compiler_prompt,
+    save_manual_compiler_prompt,
+)
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import paper_memory
 from backend.aggregator.core.coordinator import coordinator
@@ -137,7 +143,7 @@ async def _run_saved_compiler_paper_proof_check(
         submitter_model = str(proof_config.get("submitter_model") or "")
         validator_model = str(proof_config.get("validator_model") or "")
         if not submitter_model:
-            logger.warning("Skipping saved compiler paper proof check: high-context model is unavailable")
+            logger.warning("Skipping saved compiler paper proof check: Rigor & Proofs model is unavailable")
             return
         if not validator_model:
             logger.warning("Skipping saved compiler paper proof check: validator model is unavailable")
@@ -204,6 +210,10 @@ async def _run_saved_compiler_paper_proof_check(
         )
     finally:
         await _release_pre_reserved_source("paper", source_id, source_reserved)
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="saved_compiler_paper_proof_check_complete",
+        )
 
 
 def _get_start_conflict() -> str | None:
@@ -248,14 +258,14 @@ async def _run_compiler_aggregator_proof_check(
         role_suffix = "compiler_aggregator"
 
         submitter_config = ModelConfig(
-            provider=request.high_context_provider,
-            model_id=request.high_context_model,
-            openrouter_provider=request.high_context_openrouter_provider,
-            openrouter_reasoning_effort=request.high_context_openrouter_reasoning_effort,
-            lm_studio_fallback_id=request.high_context_lm_studio_fallback,
-            context_window=request.high_context_context_size,
-            max_output_tokens=request.high_context_max_output_tokens,
-            supercharge_enabled=request.high_context_supercharge_enabled,
+            provider=request.high_param_provider,
+            model_id=request.high_param_model,
+            openrouter_provider=request.high_param_openrouter_provider,
+            openrouter_reasoning_effort=request.high_param_openrouter_reasoning_effort,
+            lm_studio_fallback_id=request.high_param_lm_studio_fallback,
+            context_window=request.high_param_context_size,
+            max_output_tokens=request.high_param_max_output_tokens,
+            supercharge_enabled=request.high_param_supercharge_enabled,
         )
         validator_config = ModelConfig(
             provider=request.validator_provider,
@@ -274,6 +284,39 @@ async def _run_compiler_aggregator_proof_check(
         ):
             api_client_manager.configure_role(role_id, submitter_config)
         api_client_manager.configure_role("autonomous_proof_novelty", validator_config)
+        api_client_manager.configure_role(
+            "compiler_assistant",
+            ModelConfig(
+                provider=(
+                    request.assistant_provider
+                    if request.assistant_model
+                    else request.validator_provider
+                ),
+                model_id=request.assistant_model or request.validator_model,
+                openrouter_provider=(
+                    request.assistant_openrouter_provider
+                    if request.assistant_model
+                    else request.validator_openrouter_provider
+                ),
+                openrouter_reasoning_effort=(
+                    request.assistant_openrouter_reasoning_effort
+                    if request.assistant_model
+                    else request.validator_openrouter_reasoning_effort
+                ),
+                lm_studio_fallback_id=(
+                    request.assistant_lm_studio_fallback
+                    if request.assistant_model
+                    else request.validator_lm_studio_fallback
+                ),
+                context_window=request.assistant_context_size if request.assistant_model else request.validator_context_size,
+                max_output_tokens=request.assistant_max_output_tokens if request.assistant_model else request.validator_max_output_tokens,
+                supercharge_enabled=(
+                    request.assistant_supercharge_enabled
+                    if request.assistant_model
+                    else request.validator_supercharge_enabled
+                ),
+            ),
+        )
 
         await websocket.broadcast_event(
             "compiler_proof_check_started",
@@ -285,9 +328,9 @@ async def _run_compiler_aggregator_proof_check(
             source_type="brainstorm",
             source_id=source_id,
             user_prompt=manual_proof_database.inject_into_prompt(request.compiler_prompt),
-            submitter_model=request.high_context_model,
-            submitter_context=request.high_context_context_size,
-            submitter_max_tokens=request.high_context_max_output_tokens,
+            submitter_model=request.high_param_model,
+            submitter_context=request.high_param_context_size,
+            submitter_max_tokens=request.high_param_max_output_tokens,
             validator_model=request.validator_model,
             validator_context=request.validator_context_size,
             validator_max_tokens=request.validator_max_output_tokens,
@@ -306,6 +349,10 @@ async def _run_compiler_aggregator_proof_check(
         )
     finally:
         await _release_pre_reserved_source("brainstorm", MANUAL_AGGREGATOR_SOURCE_ID, source_reserved)
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="compiler_aggregator_proof_check_complete",
+        )
         token_tracker.stop_timer()
 
 
@@ -346,18 +393,32 @@ async def start_compiler(request: CompilerStartRequest):
             if conflict:
                 raise HTTPException(status_code=400, detail=conflict)
 
+            if not request.compiler_prompt.strip():
+                raise HTTPException(status_code=400, detail="Compiler prompt is required.")
+
             if not request.allow_mathematical_proofs and not request.allow_research_papers:
                 raise HTTPException(
                     status_code=400,
                     detail="At least one allowed output must be enabled.",
                 )
 
+            effective_assistant_context_size = (
+                request.assistant_context_size
+                if request.assistant_model
+                else request.validator_context_size
+            )
+            effective_assistant_max_output_tokens = (
+                request.assistant_max_output_tokens
+                if request.assistant_model
+                else request.validator_max_output_tokens
+            )
             _validate_positive_role_limits({
                 "validator": (request.validator_context_size, request.validator_max_output_tokens),
-                "high-context submitter": (request.high_context_context_size, request.high_context_max_output_tokens),
-                "high-param submitter": (request.high_param_context_size, request.high_param_max_output_tokens),
-                "critique submitter": (request.critique_submitter_context_window, request.critique_submitter_max_tokens),
+                "Writing Submitter": (request.writer_context_size, request.writer_max_output_tokens),
+                "Rigor & Proofs submitter": (request.high_param_context_size, request.high_param_max_output_tokens),
+                "assistant": (effective_assistant_context_size, effective_assistant_max_output_tokens),
             })
+            await save_manual_compiler_prompt(request.compiler_prompt)
 
             effective_allow_mathematical_proofs = bool(
                 request.allow_mathematical_proofs and not system_config.generic_mode
@@ -398,26 +459,64 @@ async def start_compiler(request: CompilerStartRequest):
                 }
 
             await require_embedding_provider_ready()
+            assistant_model = request.assistant_model or request.validator_model
+            assistant_provider = (
+                request.assistant_provider
+                if request.assistant_model
+                else request.validator_provider
+            )
+            assistant_openrouter_provider = (
+                request.assistant_openrouter_provider
+                if request.assistant_model
+                else request.validator_openrouter_provider
+            )
+            assistant_reasoning_effort = (
+                request.assistant_openrouter_reasoning_effort
+                if request.assistant_model
+                else request.validator_openrouter_reasoning_effort
+            )
+            assistant_fallback = (
+                request.assistant_lm_studio_fallback
+                if request.assistant_model
+                else request.validator_lm_studio_fallback
+            )
+            api_client_manager.configure_role(
+                "compiler_assistant",
+                ModelConfig(
+                    provider=assistant_provider,
+                    model_id=assistant_model,
+                    openrouter_provider=assistant_openrouter_provider,
+                    openrouter_reasoning_effort=assistant_reasoning_effort,
+                    lm_studio_fallback_id=assistant_fallback,
+                    context_window=effective_assistant_context_size,
+                    max_output_tokens=effective_assistant_max_output_tokens,
+                    supercharge_enabled=(
+                        request.assistant_supercharge_enabled
+                        if request.assistant_model
+                        else request.validator_supercharge_enabled
+                    ),
+                ),
+            )
 
             # Update system config with user-provided context sizes
             system_config.compiler_validator_context_window = request.validator_context_size
-            system_config.compiler_high_context_context_window = request.high_context_context_size
+            system_config.compiler_writer_context_window = request.writer_context_size
             system_config.compiler_high_param_context_window = request.high_param_context_size
-            system_config.compiler_critique_submitter_context_window = request.critique_submitter_context_window
+            system_config.compiler_critique_submitter_context_window = request.high_param_context_size
 
             # Update max output token configurations
             system_config.compiler_validator_max_output_tokens = request.validator_max_output_tokens
-            system_config.compiler_high_context_max_output_tokens = request.high_context_max_output_tokens
+            system_config.compiler_writer_max_output_tokens = request.writer_max_output_tokens
             system_config.compiler_high_param_max_output_tokens = request.high_param_max_output_tokens
-            system_config.compiler_critique_submitter_max_tokens = request.critique_submitter_max_tokens
+            system_config.compiler_critique_submitter_max_tokens = request.high_param_max_output_tokens
 
-            # Store critique submitter model
-            system_config.compiler_critique_submitter_model = request.critique_submitter_model
+            # Deprecated critique fields are compatibility aliases for Rigor & Proofs.
+            system_config.compiler_critique_submitter_model = request.high_param_model
 
             logger.info(
-                "Compiler max output tokens - Validator: %s, High-context: %s, High-param: %s",
+                "Compiler max output tokens - Validator: %s, Writing Submitter: %s, Rigor & Proofs: %s",
                 redact_log_text(request.validator_max_output_tokens, 40),
-                redact_log_text(request.high_context_max_output_tokens, 40),
+                redact_log_text(request.writer_max_output_tokens, 40),
                 redact_log_text(request.high_param_max_output_tokens, 40),
             )
 
@@ -425,30 +524,30 @@ async def start_compiler(request: CompilerStartRequest):
             await compiler_coordinator.initialize(
                 compiler_prompt=request.compiler_prompt,
                 validator_model=request.validator_model,
-                high_context_model=request.high_context_model,
+                writer_model=request.writer_model,
                 high_param_model=request.high_param_model,
-                critique_submitter_model=request.critique_submitter_model,
+                critique_submitter_model=request.high_param_model,
                 # OpenRouter provider configs for each role
                 validator_provider=request.validator_provider,
                 validator_openrouter_provider=request.validator_openrouter_provider,
                 validator_openrouter_reasoning_effort=request.validator_openrouter_reasoning_effort,
                 validator_lm_studio_fallback=request.validator_lm_studio_fallback,
-                high_context_provider=request.high_context_provider,
-                high_context_openrouter_provider=request.high_context_openrouter_provider,
-                high_context_openrouter_reasoning_effort=request.high_context_openrouter_reasoning_effort,
-                high_context_lm_studio_fallback=request.high_context_lm_studio_fallback,
+                writer_provider=request.writer_provider,
+                writer_openrouter_provider=request.writer_openrouter_provider,
+                writer_openrouter_reasoning_effort=request.writer_openrouter_reasoning_effort,
+                writer_lm_studio_fallback=request.writer_lm_studio_fallback,
                 high_param_provider=request.high_param_provider,
                 high_param_openrouter_provider=request.high_param_openrouter_provider,
                 high_param_openrouter_reasoning_effort=request.high_param_openrouter_reasoning_effort,
                 high_param_lm_studio_fallback=request.high_param_lm_studio_fallback,
-                critique_submitter_provider=request.critique_submitter_provider,
-                critique_submitter_openrouter_provider=request.critique_submitter_openrouter_provider,
-                critique_submitter_openrouter_reasoning_effort=request.critique_submitter_openrouter_reasoning_effort,
-                critique_submitter_lm_studio_fallback=request.critique_submitter_lm_studio_fallback,
+                critique_submitter_provider=request.high_param_provider,
+                critique_submitter_openrouter_provider=request.high_param_openrouter_provider,
+                critique_submitter_openrouter_reasoning_effort=request.high_param_openrouter_reasoning_effort,
+                critique_submitter_lm_studio_fallback=request.high_param_lm_studio_fallback,
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
-                high_context_supercharge_enabled=request.high_context_supercharge_enabled,
+                writer_supercharge_enabled=request.writer_supercharge_enabled,
                 high_param_supercharge_enabled=request.high_param_supercharge_enabled,
-                critique_submitter_supercharge_enabled=request.critique_submitter_supercharge_enabled,
+                critique_submitter_supercharge_enabled=request.high_param_supercharge_enabled,
                 allow_mathematical_proofs=effective_allow_mathematical_proofs
             )
 
@@ -477,9 +576,9 @@ async def start_compiler(request: CompilerStartRequest):
         if request.validator_model in error_msg:
             failed_model_type = "validator"
             failed_model_name = request.validator_model
-        elif request.high_context_model in error_msg:
-            failed_model_type = "high_context"
-            failed_model_name = request.high_context_model
+        elif request.writer_model in error_msg:
+            failed_model_type = "writer"
+            failed_model_name = request.writer_model
         elif request.high_param_model in error_msg:
             failed_model_type = "high_param"
             failed_model_name = request.high_param_model
@@ -520,6 +619,10 @@ async def stop_compiler():
             await asyncio.gather(_compiler_proof_only_task, return_exceptions=True)
             _compiler_proof_only_task = None
         await compiler_coordinator.stop()
+        await assistant_proof_search_coordinator.stop_all(
+            broadcast=True,
+            reason="compiler_stopped",
+        )
         token_tracker.stop_timer()
         return {"status": "stopped", "message": "Compiler stopped"}
     except Exception as e:
@@ -543,7 +646,7 @@ async def test_models(request: CompilerStartRequest):
     
     results = {
         "validator": {"model": request.validator_model, "passed": False, "error": "", "details": {}},
-        "high_context": {"model": request.high_context_model, "passed": False, "error": "", "details": {}},
+        "writer": {"model": request.writer_model, "passed": False, "error": "", "details": {}},
         "high_param": {"model": request.high_param_model, "passed": False, "error": "", "details": {}}
     }
     
@@ -556,16 +659,16 @@ async def test_models(request: CompilerStartRequest):
     results["validator"]["error"] = error
     results["validator"]["details"] = details
     
-    # Test high-context model
+    # Test writer model
     is_compat, error, details = await lm_studio_client.test_model_compatibility(
-        request.high_context_model,
-        request.high_context_max_output_tokens,
+        request.writer_model,
+        request.writer_max_output_tokens,
     )
-    results["high_context"]["passed"] = is_compat
-    results["high_context"]["error"] = error
-    results["high_context"]["details"] = details
+    results["writer"]["passed"] = is_compat
+    results["writer"]["error"] = error
+    results["writer"]["details"] = details
     
-    # Test high-param model
+    # Test Rigor & Proofs model
     is_compat, error, details = await lm_studio_client.test_model_compatibility(
         request.high_param_model,
         request.high_param_max_output_tokens,
@@ -593,6 +696,16 @@ async def get_status():
         return status
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/prompt")
+async def get_prompt():
+    """Get the durable manual Compiler prompt."""
+    try:
+        return {"prompt": await load_manual_compiler_prompt()}
+    except Exception as e:
+        logger.error(f"Failed to get manual Compiler prompt: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -649,6 +762,7 @@ async def _save_paper_unlocked():
         outline = await outline_memory.get_outline()
         paper = await paper_memory.get_paper()
         word_count = await paper_memory.get_word_count()
+        persisted_prompt = compiler_coordinator.user_prompt or await load_manual_compiler_prompt()
         
         # Get model tracking data for author attribution
         model_data = compiler_coordinator.get_model_tracking_data()
@@ -672,8 +786,8 @@ async def _save_paper_unlocked():
             
             # Generate attribution header (no reference papers for manual mode)
             attribution_section = generate_attribution_for_existing_paper(
-                user_prompt=compiler_coordinator.user_prompt,
-                paper_title=compiler_coordinator.paper_title or compiler_coordinator.user_prompt,
+                user_prompt=persisted_prompt,
+                paper_title=compiler_coordinator.paper_title or persisted_prompt,
                 model_usage=model_data["model_usage"],
                 generation_date=gen_date,
                 reference_paper_models=None  # No reference papers in manual mode
@@ -712,31 +826,31 @@ async def _save_paper_unlocked():
         async with aiofiles.open(output_path, 'w', encoding='utf-8') as f:
             await f.write(full_content)
 
-        high_context = compiler_coordinator.high_context_submitter
+        rigor_submitter = compiler_coordinator.high_param_submitter
         proof_check_scheduled = bool(
             system_config.lean4_enabled
             and getattr(compiler_coordinator, "allow_mathematical_proofs", True)
             and full_content.strip()
-            and high_context is not None
-            and getattr(high_context, "model_name", "")
+            and rigor_submitter is not None
+            and getattr(rigor_submitter, "model_name", "")
             and compiler_coordinator.validator_model
         )
         if proof_check_scheduled:
-            source_title = compiler_coordinator.paper_title or compiler_coordinator.user_prompt or "Compiler Paper"
+            source_title = compiler_coordinator.paper_title or persisted_prompt or "Compiler Paper"
             proof_source_content = paper_library.strip_verified_proofs_from_content(full_content)
             proof_source_hash = hashlib.sha256(proof_source_content.encode("utf-8")).hexdigest()[:16]
             proof_source_id = f"compiler_manual_{proof_source_hash}"
             proof_config = {
                 "lean4_enabled": system_config.lean4_enabled,
-                "user_prompt": compiler_coordinator.user_prompt,
-                "submitter_model": high_context.model_name,
-                "submitter_provider": compiler_coordinator.high_context_provider,
-                "submitter_openrouter_provider": compiler_coordinator.high_context_openrouter_provider,
-                "submitter_openrouter_reasoning_effort": compiler_coordinator.high_context_openrouter_reasoning_effort,
-                "submitter_lm_studio_fallback": compiler_coordinator.high_context_lm_studio_fallback,
-                "submitter_context": system_config.compiler_high_context_context_window,
-                "submitter_max_tokens": system_config.compiler_high_context_max_output_tokens,
-                "submitter_supercharge_enabled": getattr(compiler_coordinator, "high_context_supercharge_enabled", False),
+                "user_prompt": persisted_prompt,
+                "submitter_model": rigor_submitter.model_name,
+                "submitter_provider": compiler_coordinator.high_param_provider,
+                "submitter_openrouter_provider": compiler_coordinator.high_param_openrouter_provider,
+                "submitter_openrouter_reasoning_effort": compiler_coordinator.high_param_openrouter_reasoning_effort,
+                "submitter_lm_studio_fallback": compiler_coordinator.high_param_lm_studio_fallback,
+                "submitter_context": system_config.compiler_high_param_context_window,
+                "submitter_max_tokens": system_config.compiler_high_param_max_output_tokens,
+                "submitter_supercharge_enabled": getattr(compiler_coordinator, "high_param_supercharge_enabled", False),
                 "validator_model": compiler_coordinator.validator_model,
                 "validator_provider": compiler_coordinator.validator_provider,
                 "validator_openrouter_provider": compiler_coordinator.validator_openrouter_provider,
@@ -856,13 +970,20 @@ async def clear_paper(confirm: bool = False):
                 raise HTTPException(status_code=409, detail=blocker)
             if compiler_coordinator.is_running:
                 await compiler_coordinator.stop()
+            persisted_prompt = compiler_coordinator.user_prompt or await load_manual_compiler_prompt()
             archived_proofs = await manual_proof_database.archive_current_run(
                 Path(system_config.data_dir) / "manual_proof_runs",
-                user_prompt=compiler_coordinator.user_prompt or "",
+                user_prompt=persisted_prompt,
                 reason="manual_compiler_clear_paper",
             )
             await clear_manual_shared_training_proof_appendix()
             await compiler_coordinator.clear_paper()
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="compiler_cleared",
+            )
+            await assistant_proof_search_coordinator.clear_cooldown_state()
+            await clear_manual_compiler_prompt()
         
         # Also clear any paper critiques
         from backend.shared.critique_memory import clear_critiques

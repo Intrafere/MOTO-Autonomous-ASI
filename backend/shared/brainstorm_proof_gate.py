@@ -24,8 +24,6 @@ NOVEL_PROOF_TIERS = {
     "novel_variant",
     "novel_formulation",
 }
-
-
 @dataclass
 class BrainstormProofGateResult:
     """Result of checking a proof candidate before normal brainstorm validation."""
@@ -98,6 +96,44 @@ def _format_lean_feedback(lean_result: Any) -> str:
     return "\n\n".join(parts).strip() or "Lean 4 accepted with no diagnostics."
 
 
+def _candidate_metadata_rejection(
+    *,
+    expected_novelty_tier: str,
+    prompt_relevance_rationale: str,
+    novelty_rationale: str,
+    why_not_standard_known_result: str,
+) -> str:
+    """Return a rejection reason when a proof target is not eligible for Lean cost."""
+    normalized_tier = (expected_novelty_tier or "").strip().lower()
+    if normalized_tier == "not_novel":
+        return (
+            "Lean proof candidate rejected before Lean cost: `expected_novelty_tier` was "
+            "`not_novel`. Supporting, routine, trivial, local, or known results must not "
+            "be submitted as proof targets."
+        )
+    if normalized_tier not in NOVEL_PROOF_TIERS:
+        return (
+            "Lean proof candidate rejected before Lean cost: missing or invalid "
+            "`expected_novelty_tier`. The proof route is only for high-impact "
+            "prompt-solving theorem targets."
+        )
+    missing = [
+        field_name
+        for field_name, value in (
+            ("prompt_relevance_rationale", prompt_relevance_rationale),
+            ("novelty_rationale", novelty_rationale),
+            ("why_not_standard_known_result", why_not_standard_known_result),
+        )
+        if not (value or "").strip()
+    ]
+    if missing:
+        return (
+            "Lean proof candidate rejected before Lean cost: missing required "
+            f"novelty/prompt-impact rationale field(s): {', '.join(missing)}."
+        )
+    return ""
+
+
 def _build_retry_prompt(
     *,
     user_prompt: str,
@@ -149,15 +185,14 @@ PRIOR ATTEMPTS AND FEEDBACK:
 Respond with ONLY valid JSON:
 {{
   "theorem_name": "Lean declaration name, if named",
-  "theorem_statement": "natural-language theorem statement being proved",
-  "formal_sketch": "updated formalization notes",
-  "expected_novelty_tier": "{expected_novelty_tier}",
-  "prompt_relevance_rationale": "{prompt_relevance_rationale}",
-  "novelty_rationale": "{novelty_rationale}",
-  "why_not_standard_known_result": "{why_not_standard_known_result}",
   "lean_code": "complete Lean 4 code",
-  "reasoning": "brief explanation of the repair"
+  "reasoning": "brief explanation of how this repairs the SAME intended high-impact theorem target without narrowing, weakening, or substituting a supporting lemma"
 }}
+
+Do not change the intended theorem statement, novelty tier, prompt relevance rationale,
+novelty rationale, or anti-standard-result rationale. The repair budget is for
+fixing the Lean proof of the same high-impact target, not for replacing it with a
+narrower, easier, routine, trivial, local, or merely supporting lemma.
 """
 
 
@@ -251,8 +286,27 @@ async def verify_brainstorm_proof_candidate(
             ),
             attempts=[],
         )
-    if expected_novelty_tier not in NOVEL_PROOF_TIERS:
-        expected_novelty_tier = expected_novelty_tier or "not_novel"
+    metadata_rejection = _candidate_metadata_rejection(
+        expected_novelty_tier=expected_novelty_tier,
+        prompt_relevance_rationale=prompt_relevance_rationale,
+        novelty_rationale=novelty_rationale,
+        why_not_standard_known_result=why_not_standard_known_result,
+    )
+    if metadata_rejection:
+        return BrainstormProofGateResult(
+            accepted=False,
+            theorem_statement=theorem_statement,
+            theorem_name=theorem_name,
+            formal_sketch=formal_sketch,
+            expected_novelty_tier=expected_novelty_tier or "not_novel",
+            prompt_relevance_rationale=prompt_relevance_rationale,
+            novelty_rationale=novelty_rationale,
+            why_not_standard_known_result=why_not_standard_known_result,
+            lean_code=lean_code,
+            reasoning=reasoning,
+            failure_feedback=metadata_rejection,
+            attempts=[],
+        )
 
     attempts: list[ProofAttemptFeedback] = []
     current = {
@@ -279,6 +333,28 @@ async def verify_brainstorm_proof_candidate(
         ).strip()
         lean_code = str(current.get("lean_code") or "").strip()
         reasoning = str(current.get("reasoning") or reasoning).strip()
+
+        metadata_rejection = _candidate_metadata_rejection(
+            expected_novelty_tier=expected_novelty_tier,
+            prompt_relevance_rationale=prompt_relevance_rationale,
+            novelty_rationale=novelty_rationale,
+            why_not_standard_known_result=why_not_standard_known_result,
+        )
+        if metadata_rejection:
+            return BrainstormProofGateResult(
+                accepted=False,
+                theorem_statement=theorem_statement,
+                theorem_name=theorem_name,
+                formal_sketch=formal_sketch,
+                expected_novelty_tier=expected_novelty_tier or "not_novel",
+                prompt_relevance_rationale=prompt_relevance_rationale,
+                novelty_rationale=novelty_rationale,
+                why_not_standard_known_result=why_not_standard_known_result,
+                lean_code=lean_code,
+                reasoning=reasoning,
+                attempts=list(attempts),
+                failure_feedback=metadata_rejection,
+            )
 
         lean_result = await get_lean4_client().check_proof(
             lean_code,
@@ -403,21 +479,13 @@ async def verify_brainstorm_proof_candidate(
             if not isinstance(repaired, dict):
                 raise ValueError("Proof repair response was not a JSON object.")
             current = {
-                "theorem_statement": str(repaired.get("theorem_statement") or theorem_statement).strip(),
-                "formal_sketch": str(repaired.get("formal_sketch") or formal_sketch).strip(),
+                "theorem_statement": theorem_statement,
+                "formal_sketch": formal_sketch,
                 "theorem_name": str(repaired.get("theorem_name") or theorem_name).strip(),
-                "expected_novelty_tier": str(
-                    repaired.get("expected_novelty_tier") or expected_novelty_tier
-                ).strip(),
-                "prompt_relevance_rationale": str(
-                    repaired.get("prompt_relevance_rationale") or prompt_relevance_rationale
-                ).strip(),
-                "novelty_rationale": str(
-                    repaired.get("novelty_rationale") or novelty_rationale
-                ).strip(),
-                "why_not_standard_known_result": str(
-                    repaired.get("why_not_standard_known_result") or why_not_standard_known_result
-                ).strip(),
+                "expected_novelty_tier": expected_novelty_tier,
+                "prompt_relevance_rationale": prompt_relevance_rationale,
+                "novelty_rationale": novelty_rationale,
+                "why_not_standard_known_result": why_not_standard_known_result,
                 "lean_code": str(repaired.get("lean_code") or "").strip(),
                 "reasoning": str(repaired.get("reasoning") or "").strip(),
             }

@@ -23,6 +23,9 @@ from backend.api.routes import (
     features,
     health,
     proofs,
+    proof_search,
+    syntheticlib4,
+    connectivity,
     update,
     leanoj,
     cloud_access,
@@ -114,6 +117,7 @@ def _apply_generic_mode_openrouter_env(api_client_manager) -> None:
 
 def _restore_desktop_provider_credentials(api_client_manager) -> None:
     """Restore persisted desktop credentials from the OS-backed keyring."""
+    from backend.shared.runtime_settings import get_persisted_connectivity_toggles
     from backend.shared.secret_store import (
         SecretStoreError,
         load_openrouter_api_key,
@@ -150,7 +154,8 @@ def _restore_desktop_provider_credentials(api_client_manager) -> None:
         if wolfram_api_key:
             initialize_wolfram_client(wolfram_api_key)
             system_config.wolfram_alpha_api_key = wolfram_api_key
-            system_config.wolfram_alpha_enabled = True
+            persisted_toggles = get_persisted_connectivity_toggles()
+            system_config.wolfram_alpha_enabled = persisted_toggles.get("wolfram_alpha_enabled", True)
             logger.info("Restored Wolfram Alpha API key from secure backend storage")
         else:
             logger.info(
@@ -311,7 +316,9 @@ async def lifespan(app: FastAPI):
     clear_lean4_client()
     await lm_studio_client.close()
     from backend.shared.openai_codex_client import openai_codex_client
+    from backend.shared.sakana_fugu_client import sakana_fugu_client
     await openai_codex_client.close()
+    await sakana_fugu_client.close()
     logger.info("Shutdown complete")
 
 
@@ -335,6 +342,9 @@ app.include_router(workflow.router)
 app.include_router(features.router)
 app.include_router(health.router)
 app.include_router(proofs.router)
+app.include_router(proof_search.router)
+app.include_router(syntheticlib4.router)
+app.include_router(connectivity.router)
 app.include_router(openrouter.router)
 app.include_router(cloud_access.router)
 app.include_router(download.router)

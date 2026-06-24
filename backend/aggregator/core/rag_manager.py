@@ -224,6 +224,7 @@ class RAGManager:
         candidates = await self._hybrid_recall(
             queries,
             chunk_size,
+            exclude_sources=exclude_sources,
             include_sources=include_sources,
             include_source_prefixes=include_source_prefixes,
         )
@@ -328,6 +329,7 @@ class RAGManager:
         self,
         queries: List[str],
         chunk_size: int,
+        exclude_sources: Optional[List[str]] = None,
         include_sources: Optional[List[str]] = None,
         include_source_prefixes: Optional[List[str]] = None
     ) -> List[Tuple[DocumentChunk, float]]:
@@ -336,6 +338,7 @@ class RAGManager:
         # concurrent RAG add/remove operations mutating the live chunk lists.
         chunks = list(self._filter_chunks_by_source_scope(
             self.chunks_by_size[chunk_size],
+            exclude_sources=exclude_sources,
             include_sources=include_sources,
             include_source_prefixes=include_source_prefixes,
         ))
@@ -499,18 +502,24 @@ class RAGManager:
     def _filter_chunks_by_source_scope(
         chunks: List[DocumentChunk],
         *,
+        exclude_sources: Optional[List[str]] = None,
         include_sources: Optional[List[str]] = None,
         include_source_prefixes: Optional[List[str]] = None
     ) -> List[DocumentChunk]:
-        """Limit chunks to an explicit source allowlist and/or source prefixes."""
+        """Limit chunks to an explicit source allowlist/prefixes and exclusions."""
+        exclude_set = {source for source in (exclude_sources or []) if source}
         include_set = {source for source in (include_sources or []) if source}
         prefixes = tuple(prefix for prefix in (include_source_prefixes or []) if prefix)
-        if not include_set and not prefixes:
+        if not exclude_set and not include_set and not prefixes:
             return chunks
 
         scoped = []
         for chunk in chunks:
-            if chunk.source_file in include_set or (prefixes and chunk.source_file.startswith(prefixes)):
+            if chunk.source_file in exclude_set:
+                continue
+            if not include_set and not prefixes:
+                scoped.append(chunk)
+            elif chunk.source_file in include_set or (prefixes and chunk.source_file.startswith(prefixes)):
                 scoped.append(chunk)
         return scoped
     

@@ -1,0 +1,9 @@
+{
+  "contract_version": "moto-syntheticlib4-v1",
+  "error": {
+    "code": "incompatible_release",
+    "message": "Requested release is not compatible with this MOTO SyntheticLib4 contract.",
+    "retryable": false,
+    "http_status": 409
+  }
+}

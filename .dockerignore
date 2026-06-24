@@ -23,12 +23,28 @@ backend/data/
 backend/logs/
 .moto_instances/
 .moto_launcher_state.json
+.moto_last_instance.json
 .moto_update_notice.json
+backend/data/.moto_runtime.lock
 
 tests/
 web conversion plans/
 commits_pending.txt
 proof-integration-build*-plan.md
+PENDING_TESTS
+BUILD_PLAN_*.md
+(old) SyntheticLib Upgrade Plans/
+HARDOJ_AWS_COMPUTE_DONATION_OUTLINE.md
+LEANOJ_MASTER_PROOF_WRITER_REMAINDER.md
+LEANOJ_PROBLEM_11_PROMPT.md
+randomlog*.txt
+RANDOM LOG.txt
+current_prompt.md
+recovered_manual_aggregator_prompt.txt
+leanoj_master_proof_*.lean.txt
+PicksTheorem_FinalSkeleton.lean
+CLASSICALPICKS.LEAN
+moto-zap-quickscan-report.html
 
 Click To Launch MOTO.bat
 linux-ubuntu-launcher.sh

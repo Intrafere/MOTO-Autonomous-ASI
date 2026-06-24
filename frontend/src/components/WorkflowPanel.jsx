@@ -1,9 +1,145 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { websocket } from '../services/websocket';
 import { boostAPI, workflowAPI } from '../services/api';
 import './WorkflowPanel.css';
 
 const AUTO_OPEN_DELAY_SECONDS = 600;
+const BOOST_CATEGORY_GROUPS = ['Aggregator', 'Compiler', 'Autonomous', 'Proof Solver'];
+const MAX_SUBMITTERS = 10;
+const WORKFLOW_PANEL_COLLAPSED_KEY = 'workflow_panel_collapsed';
+
+const readStoredCollapsedState = () => {
+  if (typeof window === 'undefined') return true;
+  return window.localStorage.getItem(WORKFLOW_PANEL_COLLAPSED_KEY) !== 'false';
+};
+
+const clampSubmitterCount = (value, fallback = 3) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(MAX_SUBMITTERS, Math.max(1, Math.floor(parsed)));
+};
+
+const readStoredJson = (key) => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.debug(`Failed to read ${key}:`, error);
+    return null;
+  }
+};
+
+const extractCategoryPrefix = (taskId = '') => {
+  const normalizedTaskId = String(taskId || '');
+  const lastUnderscore = normalizedTaskId.lastIndexOf('_');
+  if (lastUnderscore > 0) {
+    return canonicalCategory(normalizedTaskId.slice(0, lastUnderscore));
+  }
+  return canonicalCategory(normalizedTaskId);
+};
+
+const canonicalCategory = (category) => {
+  const aliases = {
+    comp_hc: 'comp_writer',
+    comp_crit: 'comp_hp',
+    critique_val: 'comp_val',
+    critique_cleanup: 'comp_val',
+    leanoj_path: 'leanoj_final',
+  };
+  const normalized = String(category || '');
+  if (/^critique_sub\d+$/.test(normalized)) return 'comp_hp';
+  return aliases[normalized] || normalized;
+};
+
+const maxIndexedPrefixFromTasks = (tasks, prefix) => (
+  tasks.reduce((maxIndex, task) => {
+    const category = extractCategoryPrefix(task?.task_id);
+    const match = category.match(new RegExp(`^${prefix}(\\d+)$`));
+    return match ? Math.max(maxIndex, Number(match[1])) : maxIndex;
+  }, 0)
+);
+
+const addIndexedCategories = (ids, prefix, count) => {
+  const safeCount = clampSubmitterCount(count);
+  for (let index = 1; index <= safeCount; index += 1) {
+    ids.add(`${prefix}${index}`);
+  }
+};
+
+const getAggregatorSubmitterCount = (tasks) => {
+  const taskCount = maxIndexedPrefixFromTasks(tasks, 'agg_sub');
+  if (taskCount > 0) return clampSubmitterCount(taskCount);
+
+  const settings = readStoredJson('aggregator_settings') || {};
+  const legacy = readStoredJson('aggregatorConfig') || {};
+  const configs = settings.submitterConfigs || legacy.submitterConfigs || [];
+  return clampSubmitterCount(settings.numSubmitters ?? legacy.numSubmitters ?? configs.length);
+};
+
+const getAutonomousSubmitterCount = (tasks) => {
+  const taskCount = maxIndexedPrefixFromTasks(tasks, 'agg_sub');
+  const settings = readStoredJson('autonomous_research_settings') || {};
+  const configs = settings.submitterConfigs || settings.submitter_configs || [];
+  const storedCount = clampSubmitterCount(settings.numSubmitters ?? configs.length);
+  return taskCount > 1 ? clampSubmitterCount(taskCount) : storedCount;
+};
+
+const getLeanOJSubmitterCount = (tasks) => {
+  const taskCount = Math.max(
+    maxIndexedPrefixFromTasks(tasks, 'leanoj_topic_sub'),
+    maxIndexedPrefixFromTasks(tasks, 'leanoj_brainstorm_sub')
+  );
+  if (taskCount > 0) return clampSubmitterCount(taskCount);
+
+  const settings = readStoredJson('leanoj_solver_settings') || {};
+  const configs = settings.submitterConfigs || settings.brainstorm_submitters || [];
+  return clampSubmitterCount(settings.numSubmitters ?? configs.length);
+};
+
+const getAutonomousAllowsPapers = () => {
+  const settings = readStoredJson('autonomous_research_settings') || {};
+  return settings.allowResearchPapers ?? settings.allow_research_papers ?? true;
+};
+
+const getActiveCategoryIds = (mode, tasks = []) => {
+  const ids = new Set();
+  const normalizedMode = mode || 'idle';
+
+  if (normalizedMode === 'aggregator') {
+    addIndexedCategories(ids, 'agg_sub', getAggregatorSubmitterCount(tasks));
+    ids.add('agg_val');
+  } else if (normalizedMode === 'compiler') {
+    ids.add('comp_val');
+    ids.add('comp_writer');
+    ids.add('comp_hp');
+  } else if (normalizedMode === 'autonomous') {
+    addIndexedCategories(ids, 'agg_sub', getAutonomousSubmitterCount(tasks));
+    ids.add('agg_val');
+    if (getAutonomousAllowsPapers()) {
+      ids.add('comp_val');
+      ids.add('comp_writer');
+      ids.add('comp_hp');
+    }
+  } else if (normalizedMode === 'leanoj') {
+    const submitterCount = getLeanOJSubmitterCount(tasks);
+    ids.add('leanoj_topic');
+    ids.add('leanoj_topic_val');
+    ids.add('leanoj_brainstorm_val');
+    ids.add('leanoj_sufficiency');
+    ids.add('leanoj_path_val');
+    ids.add('leanoj_final');
+    addIndexedCategories(ids, 'leanoj_topic_sub', submitterCount);
+    addIndexedCategories(ids, 'leanoj_brainstorm_sub', submitterCount);
+  }
+
+  tasks.forEach((task) => {
+    const category = extractCategoryPrefix(task?.task_id);
+    if (category) ids.add(category);
+  });
+
+  return ids;
+};
 
 const formatNumber = (n) => n.toLocaleString();
 
@@ -14,9 +150,17 @@ const formatTime = (totalSeconds) => {
   return `${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
 };
 
-export default function WorkflowPanel({ isRunning }) {
-  const [collapsed, setCollapsed] = useState(true);
+export default function WorkflowPanel({
+  isRunning,
+  onOpenBoostSettings,
+  collapsed: controlledCollapsed,
+  onCollapseChange,
+}) {
+  const [internalCollapsed, setInternalCollapsed] = useState(readStoredCollapsedState);
+  const isControlledCollapsed = typeof controlledCollapsed === 'boolean';
+  const collapsed = isControlledCollapsed ? controlledCollapsed : internalCollapsed;
   const [mode, setMode] = useState('idle');
+  const [workflowTasks, setWorkflowTasks] = useState([]);
   
   // Boost controls state
   const [boostNextCount, setBoostNextCount] = useState(0);
@@ -38,10 +182,19 @@ export default function WorkflowPanel({ isRunning }) {
   // No persistence. Resets every time isRunning goes true.
   const hasPoppedThisSession = useRef(false);
 
+  const setPanelCollapsed = useCallback((nextCollapsed) => {
+    if (!isControlledCollapsed) {
+      setInternalCollapsed(nextCollapsed);
+    }
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(WORKFLOW_PANEL_COLLAPSED_KEY, nextCollapsed.toString());
+    }
+    onCollapseChange?.(nextCollapsed);
+  }, [isControlledCollapsed, onCollapseChange]);
+
   const expandPanel = useCallback(() => {
-    setCollapsed(false);
-    localStorage.setItem('workflow_panel_collapsed', 'false');
-  }, []);
+    setPanelCollapsed(false);
+  }, [setPanelCollapsed]);
 
   useEffect(() => {
     if (isRunning) {
@@ -170,6 +323,7 @@ export default function WorkflowPanel({ isRunning }) {
   useEffect(() => {
     if (!isRunning) {
       setMode('idle');
+      setWorkflowTasks([]);
       return;
     }
 
@@ -178,6 +332,7 @@ export default function WorkflowPanel({ isRunning }) {
         const response = await workflowAPI.getPredictions();
         if (response.success) {
           setMode(response.mode || 'idle');
+          setWorkflowTasks(response.tasks || []);
         }
       } catch (error) {
         console.debug('Failed to fetch workflow mode:', error);
@@ -188,6 +343,21 @@ export default function WorkflowPanel({ isRunning }) {
     const interval = setInterval(fetchMode, 5000);
     return () => clearInterval(interval);
   }, [isRunning]);
+
+  const activeCategoryIds = useMemo(
+    () => (isRunning ? getActiveCategoryIds(mode, workflowTasks) : new Set()),
+    [isRunning, mode, workflowTasks]
+  );
+
+  const visibleCategories = useMemo(
+    () => availableCategories.filter((cat) => activeCategoryIds.has(cat.id)),
+    [availableCategories, activeCategoryIds]
+  );
+
+  const visibleBoostedCategories = useMemo(
+    () => boostedCategories.filter((categoryId) => activeCategoryIds.has(categoryId)),
+    [boostedCategories, activeCategoryIds]
+  );
 
   useEffect(() => {
     if (!isRunning) {
@@ -218,11 +388,17 @@ export default function WorkflowPanel({ isRunning }) {
       setBoostAlwaysPrefer(data.enabled || false);
     };
 
+    const handleWorkflowUpdated = (data) => {
+      setMode(prevMode => data.mode || prevMode || 'idle');
+      setWorkflowTasks(data.tasks || []);
+    };
+
     websocket.on('boost_next_count_updated', handleBoostNextCountUpdated);
     websocket.on('category_boost_toggled', handleCategoryBoostToggled);
     websocket.on('boost_enabled', handleBoostEnabled);
     websocket.on('boost_disabled', handleBoostDisabled);
     websocket.on('boost_always_prefer_updated', handleAlwaysPreferUpdated);
+    websocket.on('workflow_updated', handleWorkflowUpdated);
 
     return () => {
       websocket.off('boost_next_count_updated', handleBoostNextCountUpdated);
@@ -230,15 +406,12 @@ export default function WorkflowPanel({ isRunning }) {
       websocket.off('boost_enabled', handleBoostEnabled);
       websocket.off('boost_disabled', handleBoostDisabled);
       websocket.off('boost_always_prefer_updated', handleAlwaysPreferUpdated);
+      websocket.off('workflow_updated', handleWorkflowUpdated);
     };
   }, [isRunning, fetchBoostStatus]);
 
   const toggleCollapse = () => {
-    setCollapsed(prev => {
-      const next = !prev;
-      localStorage.setItem('workflow_panel_collapsed', next.toString());
-      return next;
-    });
+    setPanelCollapsed(!collapsed);
   };
 
   // REMOVED: Conditional rendering that hid panel when no workflow running
@@ -264,11 +437,19 @@ export default function WorkflowPanel({ isRunning }) {
           <div className="boost-controls">
             {!boostEnabled && (
               <div className="boost-disabled-notice">
-                Boost not enabled - Enable in API Boost button above. This is a great way to use your free, daily OpenRouter credits.
+                Boost not enabled - open API Boost settings here to configure a boost model. This is a great way to use your free, daily OpenRouter credits.
               </div>
             )}
+
+            <button
+              type="button"
+              className="boost-settings-open-btn"
+              onClick={onOpenBoostSettings}
+            >
+              Open API Boost Settings
+            </button>
             
-            <div className={`boost-section ${boostedCategories.length > 0 || boostAlwaysPrefer ? 'boost-mode-inactive' : ''}`}>
+            <div className={`boost-section ${visibleBoostedCategories.length > 0 || boostAlwaysPrefer ? 'boost-mode-inactive' : ''}`}>
               <label className="boost-label">Boost Next # of Tasks:</label>
               <div className="boost-next-row">
                 <input
@@ -285,14 +466,14 @@ export default function WorkflowPanel({ isRunning }) {
                   }}
                   placeholder="0"
                   className="boost-next-input"
-                  disabled={!boostEnabled || boostedCategories.length > 0 || boostAlwaysPrefer}
-                  title={boostedCategories.length > 0 ? 'Disable category boost first' : boostAlwaysPrefer ? 'Disable "always prefer" first' : 'Replace the remaining boosted-call count immediately'}
+                  disabled={!boostEnabled || visibleBoostedCategories.length > 0 || boostAlwaysPrefer}
+                  title={visibleBoostedCategories.length > 0 ? 'Disable category boost first' : boostAlwaysPrefer ? 'Disable "always prefer" first' : 'Replace the remaining boosted-call count immediately'}
                 />
                 <button 
                   onClick={handleSetBoostNextCount}
                   className="boost-apply-btn"
-                  disabled={!boostEnabled || boostNextInput.trim() === '' || boostedCategories.length > 0 || boostAlwaysPrefer}
-                  title={boostedCategories.length > 0 ? 'Disable category boost first' : boostAlwaysPrefer ? 'Disable "always prefer" first' : 'Apply a new remaining count immediately'}
+                  disabled={!boostEnabled || boostNextInput.trim() === '' || visibleBoostedCategories.length > 0 || boostAlwaysPrefer}
+                  title={visibleBoostedCategories.length > 0 ? 'Disable category boost first' : boostAlwaysPrefer ? 'Disable "always prefer" first' : 'Apply a new remaining count immediately'}
                 >
                   Apply
                 </button>
@@ -302,13 +483,13 @@ export default function WorkflowPanel({ isRunning }) {
               </div>
             </div>
 
-            <div className={`boost-section boost-always-prefer-row ${boostNextCount > 0 || boostedCategories.length > 0 ? 'boost-mode-inactive' : ''}`}>
+            <div className={`boost-section boost-always-prefer-row ${boostNextCount > 0 || visibleBoostedCategories.length > 0 ? 'boost-mode-inactive' : ''}`}>
               <label className="boost-always-prefer-label">
                 <input
                   type="checkbox"
                   checked={boostAlwaysPrefer}
                   onChange={handleAlwaysPreferToggle}
-                  disabled={!boostEnabled || boostNextCount > 0 || boostedCategories.length > 0}
+                  disabled={!boostEnabled || boostNextCount > 0 || visibleBoostedCategories.length > 0}
                   className="boost-always-prefer-checkbox"
                 />
                 <span>Use boost as next API call when available</span>
@@ -318,14 +499,14 @@ export default function WorkflowPanel({ isRunning }) {
               )}
             </div>
 
-            {availableCategories.length > 0 && (
+            {visibleCategories.length > 0 && (
               <>
                 <div className="boost-or-divider">— OR —</div>
                 <div className={`boost-section ${boostNextCount > 0 || boostAlwaysPrefer ? 'boost-mode-inactive' : ''}`}>
                   <label className="boost-label">Boost by Category:</label>
                   <div className="boost-categories">
-                    {['Aggregator', 'Compiler', 'Autonomous', 'Proof Solver'].map(group => {
-                      const groupCats = availableCategories.filter(cat => cat.group === group);
+                    {BOOST_CATEGORY_GROUPS.map(group => {
+                      const groupCats = visibleCategories.filter(cat => cat.group === group);
                       if (!groupCats.length) return null;
                       return (
                         <div key={group} className="boost-category-group">

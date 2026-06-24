@@ -12,6 +12,10 @@ from typing import Optional, Dict, Any, List, Tuple, Callable
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.models import PaperTitleSelection
@@ -25,6 +29,19 @@ from backend.autonomous.prompts.paper_title_prompts import (
 logger = logging.getLogger(__name__)
 
 
+def _is_title_model_call_failure(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    return (
+        is_non_retryable_model_error(exc)
+        or is_transient_model_call_error(exc)
+        or "upstream provider timeout" in message
+        or "response missing 'choices'" in message
+        or "no api key" in message
+        or "exceeds context" in message
+        or "exceeds the configured" in message
+    )
+
+
 class PaperTitleSelectorAgent:
     """
     Agent that selects titles for papers.
@@ -36,12 +53,16 @@ class PaperTitleSelectorAgent:
         model_id: str,
         validator_model_id: str,
         context_window: int = 0,
-        max_output_tokens: int = 0
+        max_output_tokens: int = 0,
+        validator_context_window: Optional[int] = None,
+        validator_max_output_tokens: Optional[int] = None,
     ):
         self.model_id = model_id
         self.validator_model_id = validator_model_id
         self.context_window = context_window
         self.max_output_tokens = max_output_tokens
+        self.validator_context_window = validator_context_window or context_window
+        self.validator_max_output_tokens = validator_max_output_tokens or max_output_tokens
         
         # Task tracking for workflow panel and boost integration
         self.task_sequence: int = 0
@@ -231,12 +252,19 @@ class PaperTitleSelectorAgent:
                     candidate_titles=candidate_titles
                 )
             
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+            )
+
             if count_tokens(prompt) > max_input_tokens:
                 logger.error("PaperTitleSelector: Cannot fit prompt even after all truncation")
-                return None
+                raise ValueError(
+                    "Title generation prompt exceeds context limit even after shedding optional title context."
+                )
 
-            # Generate task ID for tracking
-            task_id = self.get_current_validation_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -284,6 +312,8 @@ class PaperTitleSelectorAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as e:
+            if _is_title_model_call_failure(e):
+                raise
             logger.error(f"PaperTitleSelector: Error generating title: {e}")
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)
@@ -316,9 +346,20 @@ class PaperTitleSelectorAgent:
                 proposed_title=proposed_title,
                 title_reasoning=title_reasoning
             )
+
+            max_input_tokens = rag_config.get_available_input_tokens(
+                self.validator_context_window,
+                self.validator_max_output_tokens,
+            )
+            prompt_tokens = count_tokens(prompt)
+            if prompt_tokens > max_input_tokens:
+                raise ValueError(
+                    "Title validation prompt exceeds the configured validator context window "
+                    f"({prompt_tokens} > {max_input_tokens})."
+                )
             
             # Generate task ID for validation tracking
-            task_id = self.get_current_task_id()
+            task_id = self.get_current_validation_task_id()
             self.task_sequence += 1
             
             # Notify task started (for workflow panel)
@@ -333,6 +374,7 @@ class PaperTitleSelectorAgent:
                 role_id="autonomous_paper_title_validator",
                 model=self.validator_model_id,
                 messages=[{"role": "user", "content": prompt}],
+                max_tokens=self.validator_max_output_tokens,
                 temperature=0.0  # Deterministic validation - evolving context provides diversity
             )
             
@@ -363,6 +405,8 @@ class PaperTitleSelectorAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as e:
+            if _is_title_model_call_failure(e):
+                raise
             logger.error(f"PaperTitleSelector: Error validating title: {e}")
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)

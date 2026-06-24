@@ -16,11 +16,19 @@ export const LEANOJ_ROLE_KEYS = [
   'topic_validator',
   'brainstorm_validator',
   'final_solver',
+  'assistant',
 ];
 
 const GEMINI_FLASH_LATEST_MODEL = '~google/gemini-flash-latest';
 const GEMINI_FLASH_LATEST_CONTEXT_WINDOW = 1048576;
 const GEMINI_FLASH_LATEST_MAX_OUTPUT_TOKENS = 65536;
+const MINIMAX_M3_MODEL = 'minimax/minimax-m3';
+const MINIMAX_M3_CONTEXT_WINDOW = 1048576;
+const MINIMAX_M3_MAX_OUTPUT_TOKENS = 131072;
+const GPT_55_MODEL = 'openai/gpt-5.5';
+const GPT_55_CONTEXT_WINDOW = 400000;
+const GPT_55_MAX_OUTPUT_TOKENS = 65536;
+const CLAUDE_OPUS_LATEST_MODEL = '~anthropic/claude-opus-latest';
 
 const DEFAULT_ROLE_CONFIG = {
   provider: 'lm_studio',
@@ -54,19 +62,32 @@ const geminiFlashLatestRole = () => role(
   GEMINI_FLASH_LATEST_MAX_OUTPUT_TOKENS
 );
 
+const minimaxM3Role = () => role(
+  MINIMAX_M3_MODEL,
+  MINIMAX_M3_CONTEXT_WINDOW,
+  MINIMAX_M3_MAX_OUTPUT_TOKENS
+);
+
+const gpt55Role = () => role(
+  GPT_55_MODEL,
+  GPT_55_CONTEXT_WINDOW,
+  GPT_55_MAX_OUTPUT_TOKENS
+);
+
 export const LEANOJ_RECOMMENDED_PROFILES = {
   [LEANOJ_RECOMMENDED_PROFILE_KEY]: {
     name: 'Balanced Proof Solver',
     numSubmitters: 3,
     submitters: [
-      role('moonshotai/kimi-k2.6'),
+      minimaxM3Role(),
       role('deepseek/deepseek-v4-pro', 1048576, 65500),
       role('google/gemini-3.1-pro-preview', 1048576, 65500),
     ],
     roles: {
-      topic_generator: role('moonshotai/kimi-k2.6'),
+      topic_generator: minimaxM3Role(),
       topic_validator: geminiFlashLatestRole(),
       brainstorm_validator: geminiFlashLatestRole(),
+      assistant: geminiFlashLatestRole(),
       final_solver: role('google/gemini-3.1-pro-preview', 1048576, 65500),
     },
   },
@@ -74,15 +95,16 @@ export const LEANOJ_RECOMMENDED_PROFILES = {
     name: 'Lab Grade Solver',
     numSubmitters: 3,
     submitters: [
-      role('openai/gpt-5.5'),
+      gpt55Role(),
       role('deepseek/deepseek-v4-pro', 1048576, 65500),
-      role('anthropic/claude-opus-4.7', 1048576, 65500),
+      role(CLAUDE_OPUS_LATEST_MODEL, 1048576, 65500),
     ],
     roles: {
-      topic_generator: role('openai/gpt-5.5'),
+      topic_generator: gpt55Role(),
       topic_validator: geminiFlashLatestRole(),
       brainstorm_validator: geminiFlashLatestRole(),
-      final_solver: role('anthropic/claude-opus-4.7', 1048576, 65500),
+      assistant: geminiFlashLatestRole(),
+      final_solver: role(CLAUDE_OPUS_LATEST_MODEL, 1048576, 65500),
     },
   },
 };
@@ -154,7 +176,13 @@ export function normalizeLeanOJSettings(settings = {}) {
     : DEFAULT_SETTINGS.submitterConfigs;
 
   const roles = LEANOJ_ROLE_KEYS.reduce((acc, roleKey) => {
-    acc[roleKey] = normalizeRoleConfig((settings.roles || {})[roleKey] || DEFAULT_SETTINGS.roles[roleKey]);
+    const rawRoles = settings.roles || {};
+    acc[roleKey] = normalizeRoleConfig(
+      rawRoles[roleKey]
+      || (roleKey === 'assistant' ? rawRoles.topic_validator : null)
+      || DEFAULT_SETTINGS.roles[roleKey]
+      || DEFAULT_SETTINGS.roles.topic_validator
+    );
     return acc;
   }, {});
 
@@ -209,10 +237,19 @@ const roleToApi = (config = {}, label = 'Role') => ({
   supercharge_enabled: Boolean(config.superchargeEnabled),
 });
 
-export function settingsToLeanOJRequest(settings, prompt, leanTemplate) {
+export function settingsToLeanOJRequest(settings, prompt, leanTemplate, options = {}) {
   const normalized = normalizeLeanOJSettings(settings);
   const roles = normalized.roles;
   const topicGenerator = normalized.submitterConfigs[0] || roles.topic_generator;
+  const assistantEnabled = options.assistantEnabled !== false;
+  const assistantConfig = assistantEnabled
+    ? roleToApi(roles.assistant || roles.topic_validator, 'Assistant')
+    : {
+        ...roleToApi(roles.topic_validator, 'Topic validator'),
+        model_id: '',
+        openrouter_provider: null,
+        lm_studio_fallback_id: null,
+      };
   return {
     user_prompt: prompt ?? normalized.prompt ?? '',
     lean_template: leanTemplate ?? normalized.leanTemplate ?? '',
@@ -223,6 +260,7 @@ export function settingsToLeanOJRequest(settings, prompt, leanTemplate) {
     brainstorm_validator: roleToApi(roles.brainstorm_validator, 'Brainstorm validator'),
     path_decider: roleToApi(roles.final_solver, 'Final proof solver'),
     final_solver: roleToApi(roles.final_solver, 'Final proof solver'),
+    assistant: assistantConfig,
     max_initial_brainstorm_accepts: Number(normalized.maxInitialBrainstormAccepts || 30),
     max_recursive_brainstorm_accepts: Number(normalized.maxRecursiveBrainstormAccepts || 10),
     final_attempts_per_cycle: Number(normalized.finalAttemptsPerCycle || 30),
@@ -263,7 +301,7 @@ export async function applyLeanOJProfileSelection(profileKey, userProfiles = {})
 
   const current = getStoredLeanOJSettings();
   const roles = LEANOJ_ROLE_KEYS.reduce((acc, roleKey) => {
-    acc[roleKey] = convertRole((profile.roles || {})[roleKey]);
+    acc[roleKey] = convertRole((profile.roles || {})[roleKey] || (roleKey === 'assistant' ? (profile.roles || {}).topic_validator : {}));
     return acc;
   }, {});
   const submitterConfigs = (profile.submitters || []).map((submitter, index) => ({

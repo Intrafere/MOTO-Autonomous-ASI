@@ -6,7 +6,38 @@ import {
 } from '../../utils/openRouterSelection';
 import TextFileUploader from '../TextFileUploader';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
+import { readPromptDraft, readPromptDraftSync, savePromptDraft } from '../../utils/promptDraftStorage';
 import '../autonomous/AutonomousResearch.css';
+
+const COMPILER_PROMPT_STORAGE_KEY = 'compiler_prompt';
+const LEGACY_WRITER_CAMEL_PREFIX = ['high', 'Context'].join('');
+
+const isMeaningfulWriterSetting = (value, suffix) => {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string' && value.trim() === '') return false;
+  if ((suffix === 'ContextSize' || suffix === 'MaxOutput') && Number(value) <= 0) return false;
+  return true;
+};
+
+const readWriterSetting = (settings, suffix) => {
+  const current = settings[`writer${suffix}`];
+  if (isMeaningfulWriterSetting(current, suffix)) {
+    return current;
+  }
+  return settings[`${LEGACY_WRITER_CAMEL_PREFIX}${suffix}`];
+};
+
+const migrateCompilerWriterSettings = (settings = {}) => ({
+  ...settings,
+  writerProvider: readWriterSetting(settings, 'Provider') || settings.writerProvider,
+  writerModel: readWriterSetting(settings, 'Model') || settings.writerModel,
+  writerOpenrouterProvider: readWriterSetting(settings, 'OpenrouterProvider') ?? settings.writerOpenrouterProvider,
+  writerOpenrouterReasoningEffort: readWriterSetting(settings, 'OpenrouterReasoningEffort') || settings.writerOpenrouterReasoningEffort,
+  writerLmStudioFallback: readWriterSetting(settings, 'LmStudioFallback') ?? settings.writerLmStudioFallback,
+  writerContextSize: readWriterSetting(settings, 'ContextSize') ?? settings.writerContextSize,
+  writerMaxOutput: readWriterSetting(settings, 'MaxOutput') ?? settings.writerMaxOutput,
+  writerSuperchargeEnabled: readWriterSetting(settings, 'SuperchargeEnabled') ?? settings.writerSuperchargeEnabled,
+});
 
 function CompilerInterface({
   activeTab,
@@ -14,15 +45,18 @@ function CompilerInterface({
   anyWorkflowRunning = false,
   onWorkflowRunningChange = null,
   developerModeEnabled = false,
+  connectivityStatus = null,
 }) {
-  const [compilerPrompt, setCompilerPrompt] = useState('');
+  const [compilerPrompt, setCompilerPrompt] = useState(() => (
+    readPromptDraftSync(COMPILER_PROMPT_STORAGE_KEY)
+  ));
+  const [compilerPromptDraftLoaded, setCompilerPromptDraftLoaded] = useState(false);
   const [status, setStatus] = useState({ is_running: false });
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState(null);
   const [validatorContextSize, setValidatorContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
-  const [highContextContextSize, setHighContextContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
+  const [writerContextSize, setWritingContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
   const [highParamContextSize, setHighParamContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
-  const [critiqueSubmitterContextSize, setCritiqueSubmitterContextSize] = useState(DEFAULT_CONTEXT_WINDOW);
   const [critiquePhaseActive, setCritiquePhaseActive] = useState(false);
   const [critiqueAcceptances, setCritiqueAcceptances] = useState(0);
   const [paperVersion, setPaperVersion] = useState(1);
@@ -47,7 +81,7 @@ function CompilerInterface({
     }
 
     const nextSettings = { ...settings };
-    const rolePrefixes = ['validator', 'highContext', 'highParam', 'critiqueSubmitter'];
+    const rolePrefixes = ['validator', 'assistant', 'writer', 'highParam'];
 
     rolePrefixes.forEach((rolePrefix) => {
       const providerKey = `${rolePrefix}Provider`;
@@ -107,6 +141,46 @@ function CompilerInterface({
   }, [allowedOutputs]);
 
   useEffect(() => {
+    if (compilerPromptDraftLoaded) {
+      savePromptDraft(COMPILER_PROMPT_STORAGE_KEY, compilerPrompt);
+    }
+  }, [compilerPrompt, compilerPromptDraftLoaded]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const hydrateCompilerPrompt = async () => {
+      try {
+        const savedDraft = await readPromptDraft(COMPILER_PROMPT_STORAGE_KEY);
+        if (savedDraft && !cancelled) {
+          setCompilerPrompt((current) => (
+            current.trim() ? current : savedDraft
+          ));
+        }
+
+        const response = await compilerAPI.getPrompt();
+        const persistedPrompt = response.data?.prompt || '';
+        if (!persistedPrompt.trim() || cancelled) {
+          return;
+        }
+        setCompilerPrompt((current) => (
+          current.trim() ? current : persistedPrompt
+        ));
+      } catch (error) {
+        console.debug('Could not hydrate manual Compiler prompt:', error);
+      } finally {
+        if (!cancelled) {
+          setCompilerPromptDraftLoaded(true);
+        }
+      }
+    };
+
+    hydrateCompilerPrompt();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (proofOutputsAvailable || !allowedOutputs.mathematicalProofs) {
       return;
     }
@@ -128,11 +202,12 @@ function CompilerInterface({
     const savedSettings = localStorage.getItem('compiler_settings');
     if (savedSettings) {
       try {
-        const settings = normalizeCompilerSettingsForCapabilities(JSON.parse(savedSettings));
+        const settings = normalizeCompilerSettingsForCapabilities(
+          migrateCompilerWriterSettings(JSON.parse(savedSettings))
+        );
         if (settings.validatorContextSize) setValidatorContextSize(settings.validatorContextSize);
-        if (settings.highContextContextSize) setHighContextContextSize(settings.highContextContextSize);
+        if (settings.writerContextSize) setWritingContextSize(settings.writerContextSize);
         if (settings.highParamContextSize) setHighParamContextSize(settings.highParamContextSize);
-        if (settings.critiqueSubmitterContextSize) setCritiqueSubmitterContextSize(settings.critiqueSubmitterContextSize);
         // Store for use in handleStart
         window.compilerSettings = settings;
         if (!lmStudioEnabled) {
@@ -201,14 +276,15 @@ function CompilerInterface({
     const settings = window.compilerSettings || {};
     
     // Check if models are configured in settings
-    if (!settings.validatorModel || !settings.highContextModel || !settings.highParamModel || !settings.critiqueSubmitterModel) {
-      alert('Please configure all four models in the Compiler Settings tab first (validator, high-context, high-param, critique submitter)');
+    if (!settings.validatorModel || !settings.writerModel || !settings.highParamModel) {
+      alert('Please configure Validator, Writing Submitter, and Rigor & Proofs Submitter in the Compiler Settings tab first.');
       return;
     }
 
     setIsStarting(true);
     setError(null);
     try {
+      const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled !== false;
       await compilerAPI.start({
         compiler_prompt: compilerPrompt,
         // Validator config with OpenRouter support
@@ -220,16 +296,16 @@ function CompilerInterface({
         validator_context_size: settings.validatorContextSize ?? validatorContextSize,
         validator_max_output_tokens: settings.validatorMaxOutput,
         validator_supercharge_enabled: developerModeEnabled && Boolean(settings.validatorSuperchargeEnabled),
-        // High-context submitter config with OpenRouter support
-        high_context_provider: lmStudioEnabled ? (settings.highContextProvider || 'lm_studio') : 'openrouter',
-        high_context_model: settings.highContextModel,
-        high_context_openrouter_provider: settings.highContextOpenrouterProvider || null,
-        high_context_openrouter_reasoning_effort: settings.highContextOpenrouterReasoningEffort || 'auto',
-        high_context_lm_studio_fallback: lmStudioEnabled ? (settings.highContextLmStudioFallback || null) : null,
-        high_context_context_size: settings.highContextContextSize ?? highContextContextSize,
-        high_context_max_output_tokens: settings.highContextMaxOutput,
-        high_context_supercharge_enabled: developerModeEnabled && Boolean(settings.highContextSuperchargeEnabled),
-        // High-param submitter config with OpenRouter support
+        // Writing submitter config with OpenRouter support
+        writer_provider: lmStudioEnabled ? (settings.writerProvider || 'lm_studio') : 'openrouter',
+        writer_model: settings.writerModel,
+        writer_openrouter_provider: settings.writerOpenrouterProvider || null,
+        writer_openrouter_reasoning_effort: settings.writerOpenrouterReasoningEffort || 'auto',
+        writer_lm_studio_fallback: lmStudioEnabled ? (settings.writerLmStudioFallback || null) : null,
+        writer_context_size: settings.writerContextSize ?? writerContextSize,
+        writer_max_output_tokens: settings.writerMaxOutput,
+        writer_supercharge_enabled: developerModeEnabled && Boolean(settings.writerSuperchargeEnabled),
+        // Rigor & Proofs Submitter config with OpenRouter support
         high_param_provider: lmStudioEnabled ? (settings.highParamProvider || 'lm_studio') : 'openrouter',
         high_param_model: settings.highParamModel,
         high_param_openrouter_provider: settings.highParamOpenrouterProvider || null,
@@ -238,19 +314,31 @@ function CompilerInterface({
         high_param_context_size: settings.highParamContextSize ?? highParamContextSize,
         high_param_max_output_tokens: settings.highParamMaxOutput,
         high_param_supercharge_enabled: developerModeEnabled && Boolean(settings.highParamSuperchargeEnabled),
-        // Critique submitter config with OpenRouter support
-        critique_submitter_provider: lmStudioEnabled
-          ? (settings.critiqueSubmitterProvider || 'lm_studio')
-          : 'openrouter',
-        critique_submitter_model: settings.critiqueSubmitterModel,
-        critique_submitter_openrouter_provider: settings.critiqueSubmitterOpenrouterProvider || null,
-        critique_submitter_openrouter_reasoning_effort: settings.critiqueSubmitterOpenrouterReasoningEffort || 'auto',
-        critique_submitter_lm_studio_fallback: lmStudioEnabled
-          ? (settings.critiqueSubmitterLmStudioFallback || null)
+        // Deprecated critique fields mirror Rigor & Proofs for compatibility.
+        critique_submitter_provider: lmStudioEnabled ? (settings.highParamProvider || 'lm_studio') : 'openrouter',
+        critique_submitter_model: settings.highParamModel,
+        critique_submitter_openrouter_provider: settings.highParamOpenrouterProvider || null,
+        critique_submitter_openrouter_reasoning_effort: settings.highParamOpenrouterReasoningEffort || 'auto',
+        critique_submitter_lm_studio_fallback: lmStudioEnabled ? (settings.highParamLmStudioFallback || null) : null,
+        critique_submitter_context_window: settings.highParamContextSize ?? highParamContextSize,
+        critique_submitter_max_tokens: settings.highParamMaxOutput,
+        critique_submitter_supercharge_enabled: developerModeEnabled && Boolean(settings.highParamSuperchargeEnabled),
+        assistant_provider: assistantMemoryEnabled
+          ? (lmStudioEnabled ? (settings.assistantProvider || settings.validatorProvider || 'lm_studio') : 'openrouter')
+          : (lmStudioEnabled ? (settings.validatorProvider || 'lm_studio') : 'openrouter'),
+        assistant_model: assistantMemoryEnabled ? (settings.assistantModel || settings.validatorModel) : '',
+        assistant_openrouter_provider: assistantMemoryEnabled
+          ? (settings.assistantOpenrouterProvider || settings.validatorOpenrouterProvider || null)
           : null,
-        critique_submitter_context_window: settings.critiqueSubmitterContextSize ?? critiqueSubmitterContextSize,
-        critique_submitter_max_tokens: settings.critiqueSubmitterMaxOutput,
-        critique_submitter_supercharge_enabled: developerModeEnabled && Boolean(settings.critiqueSubmitterSuperchargeEnabled),
+        assistant_openrouter_reasoning_effort: assistantMemoryEnabled
+          ? (settings.assistantOpenrouterReasoningEffort || settings.validatorOpenrouterReasoningEffort || 'auto')
+          : 'auto',
+        assistant_lm_studio_fallback: assistantMemoryEnabled && lmStudioEnabled
+          ? (settings.assistantLmStudioFallback || settings.validatorLmStudioFallback || null)
+          : null,
+        assistant_context_size: assistantMemoryEnabled ? (settings.assistantContextSize || settings.validatorContextSize || validatorContextSize) : 0,
+        assistant_max_output_tokens: assistantMemoryEnabled ? (settings.assistantMaxOutput || settings.validatorMaxOutput) : 0,
+        assistant_supercharge_enabled: assistantMemoryEnabled && developerModeEnabled && Boolean(settings.assistantSuperchargeEnabled),
         allow_mathematical_proofs: Boolean(mathematicalProofsAllowed),
         allow_research_papers: Boolean(researchPapersAllowed)
       });
@@ -350,8 +438,8 @@ function CompilerInterface({
   const getModelTypeLabel = (type) => {
     const labels = {
       validator: 'Validator Model',
-      high_context: 'High-Context Model',
-      high_param: 'High-Parameter Model'
+      writer: 'Writing Submitter',
+      high_param: 'Rigor & Proofs Submitter'
     };
     return labels[type] || type;
   };
@@ -518,16 +606,12 @@ function CompilerInterface({
           <span className="stat-label">Validator Tokens</span>
         </div>
         <div className="stat-item">
-          <span className="stat-value">{highContextContextSize.toLocaleString()}</span>
-          <span className="stat-label">High-Context Tokens</span>
+          <span className="stat-value">{writerContextSize.toLocaleString()}</span>
+          <span className="stat-label">Writing Submitter Tokens</span>
         </div>
         <div className="stat-item">
           <span className="stat-value">{highParamContextSize.toLocaleString()}</span>
-          <span className="stat-label">High-Param Tokens</span>
-        </div>
-        <div className="stat-item">
-          <span className="stat-value">{critiqueSubmitterContextSize.toLocaleString()}</span>
-          <span className="stat-label">Critique Tokens</span>
+          <span className="stat-label">Rigor & Proofs Tokens</span>
         </div>
       </div>
 

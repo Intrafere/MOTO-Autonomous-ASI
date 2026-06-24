@@ -59,19 +59,25 @@ class XAIGrokClient:
         "openid profile email offline_access grok-cli:access api:access",
     )
     DEFAULT_PLAN = os.getenv("MOTO_XAI_GROK_OAUTH_PLAN", "generic")
-    DEFAULT_REFERRER = os.getenv("MOTO_XAI_GROK_OAUTH_REFERRER", "moto")
+    DEFAULT_REFERRER = os.getenv("MOTO_XAI_GROK_OAUTH_REFERRER", "moto-autonomous-asi")
     REFRESH_SKEW_SECONDS = 120
-    MAX_RETRIES = 3
+    MAX_RETRIES = 4
     RETRY_DELAY = 2.0
+    RETRY_MAX_DELAY = 30.0
     TRANSIENT_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
     TRANSIENT_MARKERS = (
         "bad gateway",
         "connection timeout",
+        "disconnect/reset before headers",
         "gateway timeout",
+        "incomplete chunked read",
         "peer closed connection",
         "service unavailable",
+        "server_error",
         "temporarily unavailable",
+        "upstream connect error",
         "upstream provider timeout",
+        "you can retry",
     )
     CHAT_UNSUPPORTED_MODEL_MARKERS = (
         "multi-agent",
@@ -222,6 +228,14 @@ class XAIGrokClient:
     def _is_transient_text(cls, text: str) -> bool:
         lowered = (text or "").lower()
         return any(marker in lowered for marker in cls.TRANSIENT_MARKERS)
+
+    @classmethod
+    def _max_attempts(cls) -> int:
+        return cls.MAX_RETRIES + 1
+
+    @classmethod
+    def _retry_delay(cls, retry_index: int) -> float:
+        return min(cls.RETRY_MAX_DELAY, cls.RETRY_DELAY * (2 ** max(0, retry_index)))
 
     async def exchange_code(
         self,
@@ -486,7 +500,8 @@ class XAIGrokClient:
 
     async def _post_with_retry(self, url: str, **kwargs) -> httpx.Response:
         """POST with retry on transient transport/provider errors."""
-        for attempt in range(self.MAX_RETRIES):
+        max_attempts = self._max_attempts()
+        for attempt in range(max_attempts):
             try:
                 response = await self.client.post(url, **kwargs)
                 if response.status_code >= 400 and (
@@ -494,36 +509,40 @@ class XAIGrokClient:
                     or self._is_transient_text(response.text)
                 ):
                     error_detail = sanitize_provider_error_text(response.text)
+                    delay = self._retry_delay(attempt)
                     logger.warning(
-                        "xAI Grok transient completion response (attempt %s/%s): status=%s error=%s",
+                        "xAI Grok transient completion response (attempt %s/%s): status=%s error=%s%s",
                         attempt + 1,
-                        self.MAX_RETRIES,
+                        max_attempts,
                         response.status_code,
                         error_detail,
+                        f"; retrying in {delay:.1f}s" if attempt < max_attempts - 1 else "",
                     )
-                    if attempt < self.MAX_RETRIES - 1:
-                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(delay)
                         continue
-                    raise ValueError(
-                        f"xAI Grok connection failed after {self.MAX_RETRIES} attempts: "
+                    raise XAIGrokRequestError(
+                        f"xAI Grok connection failed after {self.MAX_RETRIES} retries: "
                         f"HTTP {response.status_code}: {error_detail}"
                     )
                 return response
-            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            except httpx.TransportError as exc:
                 error_type = type(exc).__name__
                 error_detail = sanitize_provider_error_text(str(exc) or repr(exc))
+                delay = self._retry_delay(attempt)
                 logger.warning(
-                    "xAI Grok connection error (attempt %s/%s): [%s] %s",
+                    "xAI Grok connection error (attempt %s/%s): [%s] %s%s",
                     attempt + 1,
-                    self.MAX_RETRIES,
+                    max_attempts,
                     error_type,
                     error_detail,
+                    f"; retrying in {delay:.1f}s" if attempt < max_attempts - 1 else "",
                 )
-                if attempt < self.MAX_RETRIES - 1:
-                    await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(delay)
                     continue
-                raise ValueError(
-                    f"xAI Grok connection failed after {self.MAX_RETRIES} attempts: "
+                raise XAIGrokRequestError(
+                    f"xAI Grok connection failed after {self.MAX_RETRIES} retries: "
                     f"[{error_type}] {error_detail}"
                 )
 

@@ -32,12 +32,12 @@ class CompilerRAGManager:
         # role settings that only exist after a start request.
         self.context_window = max(
             system_config.compiler_validator_context_window,
-            system_config.compiler_high_context_context_window,
+            system_config.compiler_writer_context_window,
             system_config.compiler_high_param_context_window
         )
         self.max_output_tokens = max(
             system_config.compiler_validator_max_output_tokens,
-            system_config.compiler_high_context_max_output_tokens,
+            system_config.compiler_writer_max_output_tokens,
             system_config.compiler_high_param_max_output_tokens
         )
         self.available_tokens = 0
@@ -88,12 +88,12 @@ class CompilerRAGManager:
         # conservative shared RAG budget.
         max_context_window = max(
             system_config.compiler_validator_context_window,
-            system_config.compiler_high_context_context_window,
+            system_config.compiler_writer_context_window,
             system_config.compiler_high_param_context_window
         )
         max_output_tokens = max(
             system_config.compiler_validator_max_output_tokens,
-            system_config.compiler_high_context_max_output_tokens,
+            system_config.compiler_writer_max_output_tokens,
             system_config.compiler_high_param_max_output_tokens
         )
         self.update_context_window(max_context_window, max_output_tokens)
