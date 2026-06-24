@@ -23,6 +23,7 @@ _OPENAI_CODEX_OAUTH_CHUNK_COUNT = "openai_codex_oauth_chunk_count"
 _XAI_GROK_OAUTH = "xai_grok_oauth"
 _XAI_GROK_OAUTH_CHUNK_PREFIX = "xai_grok_oauth_chunk"
 _XAI_GROK_OAUTH_CHUNK_COUNT = "xai_grok_oauth_chunk_count"
+_SAKANA_FUGU_API_KEY = "sakana_fugu_api_key"
 _SYNTHETICLIB4_API_KEY = "syntheticlib4_api_key"
 # Windows Credential Manager limits blobs to 2560 bytes, which is about
 # 1280 UTF-16 characters through keyring/win32cred. Keep chunks below that.
@@ -223,6 +224,21 @@ def clear_xai_grok_oauth_tokens() -> None:
     """Delete persisted xAI Grok OAuth tokens."""
     _delete_secret(_XAI_GROK_OAUTH)
     _delete_chunked_secret(_XAI_GROK_OAUTH_CHUNK_PREFIX, _XAI_GROK_OAUTH_CHUNK_COUNT)
+
+
+def load_sakana_fugu_api_key() -> Optional[str]:
+    """Load the persisted Sakana Fugu API key."""
+    return _get_secret(_SAKANA_FUGU_API_KEY)
+
+
+def store_sakana_fugu_api_key(api_key: str) -> None:
+    """Persist the Sakana Fugu API key securely."""
+    _set_secret(_SAKANA_FUGU_API_KEY, api_key)
+
+
+def clear_sakana_fugu_api_key() -> None:
+    """Delete the persisted Sakana Fugu API key."""
+    _delete_secret(_SAKANA_FUGU_API_KEY)
 
 
 def load_syntheticlib4_api_key() -> Optional[str]:

@@ -18,6 +18,7 @@ import {
   sanitizeFilename,
 } from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
+import { readBooleanStorage } from '../../utils/safeStorage';
 
 const LiveTier3Progress = ({ api, status, capabilities }) => {
   const [paperData, setPaperData] = useState(null);
@@ -31,8 +32,7 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
 
   // Check banner shimmer setting from localStorage
   const getBannerShimmerEnabled = () => {
-    const saved = localStorage.getItem('banner_shimmer_enabled');
-    return saved !== null ? JSON.parse(saved) : true;
+    return readBooleanStorage('banner_shimmer_enabled', true);
   };
 
   // Load paper progress from API

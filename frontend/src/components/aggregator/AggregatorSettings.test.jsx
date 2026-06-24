@@ -10,8 +10,10 @@ vi.mock('../../services/api', () => ({
   cloudAccessAPI: {
     getOpenAICodexStatus: vi.fn(),
     getXAIGrokStatus: vi.fn(),
+    getSakanaFuguStatus: vi.fn(),
     getOpenAICodexModels: vi.fn(),
     getXAIGrokModels: vi.fn(),
+    getSakanaFuguModels: vi.fn(),
   },
   openRouterAPI: {
     getApiKeyStatus: vi.fn(),
@@ -46,6 +48,7 @@ function renderSettings({
   initialConfig = baseConfig,
   lmStudioEnabled = true,
   memoryEnabled = true,
+  capabilities: capabilityOverrides = {},
 } = {}) {
   let observedConfig = initialConfig;
 
@@ -64,7 +67,11 @@ function renderSettings({
       <AggregatorSettings
         config={config}
         setConfig={setConfig}
-        capabilities={{ lmStudioEnabled, genericMode: !lmStudioEnabled }}
+        capabilities={{
+          lmStudioEnabled,
+          genericMode: !lmStudioEnabled,
+          ...capabilityOverrides,
+        }}
         connectivityStatus={{
           skills: {
             agent_conversation_memory: {
@@ -101,8 +108,10 @@ beforeEach(() => {
   api.getModels.mockResolvedValue({ models: [{ id: 'lm-validator' }, { id: 'lm-assistant' }] });
   cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: false } });
   cloudAccessAPI.getXAIGrokStatus.mockResolvedValue({ status: { configured: false } });
+  cloudAccessAPI.getSakanaFuguStatus.mockResolvedValue({ status: { configured: false } });
   cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [] });
   cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [] });
+  cloudAccessAPI.getSakanaFuguModels.mockResolvedValue({ models: [] });
 });
 
 test('renders Assistant role and greys it out when Session History Memory is disabled', async () => {
@@ -183,6 +192,24 @@ test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', asy
   });
   expect(cloudAccessAPI.getOpenAICodexStatus).not.toHaveBeenCalled();
   expect(cloudAccessAPI.getXAIGrokStatus).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getSakanaFuguStatus).not.toHaveBeenCalled();
   expect(cloudAccessAPI.getOpenAICodexModels).not.toHaveBeenCalled();
   expect(cloudAccessAPI.getXAIGrokModels).not.toHaveBeenCalled();
+  expect(cloudAccessAPI.getSakanaFuguModels).not.toHaveBeenCalled();
+});
+
+test('loads Sakana Fugu models when desktop capability is enabled and key is configured', async () => {
+  cloudAccessAPI.getSakanaFuguStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getSakanaFuguModels.mockResolvedValue({
+    models: [{ id: 'fugu', name: 'Fugu', context_length: 1000000, max_output_tokens: 100000 }],
+  });
+
+  renderSettings({
+    capabilities: { lmStudioEnabled: true, genericMode: false, sakanaFuguAvailable: true },
+  });
+
+  await waitFor(() => {
+    expect(cloudAccessAPI.getSakanaFuguStatus).toHaveBeenCalled();
+    expect(cloudAccessAPI.getSakanaFuguModels).toHaveBeenCalled();
+  });
 });

@@ -68,7 +68,9 @@ import { CLOUD_ACCESS_PROVIDERS, isCloudAccessProvider } from './utils/oauthProv
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  buildRejectionFeedbackNoticeActivity,
   hasRecentAssistantProofPackDuplicate,
+  shouldAddRejectionFeedbackNotice,
 } from './utils/activityStyles';
 import {
   canStorePromptDraftInLocalStorage,
@@ -76,6 +78,7 @@ import {
   removePromptDraft,
   savePromptDraft,
 } from './utils/promptDraftStorage';
+import { readBooleanStorage } from './utils/safeStorage';
 
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
 const AGGREGATOR_PROMPT_STORAGE_KEY = 'aggregator_user_prompt';
@@ -108,6 +111,7 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   pdfDownloadAvailable: true,
   openAICodexOauthAvailable: true,
   xaiGrokOauthAvailable: true,
+  sakanaFuguAvailable: true,
   version: '',
   buildCommit: '',
   updateChannel: 'main',
@@ -211,14 +215,16 @@ function persistDismissedOAuthProviderNotifications(seenSet) {
 }
 
 function getProviderNotificationKey(data = {}) {
-  if (data.id) {
-    return String(data.id);
+  if (data.notification_key) {
+    return String(data.notification_key);
   }
   const provider = data.provider || 'oauth';
   const roleId = data.role_id || provider;
   const reason = data.reason || 'provider_error';
-  const createdAt = data.created_at || data._serverTimestamp || data.timestamp || '';
-  return [provider, roleId, reason, createdAt].map(value => String(value || '')).join(':');
+  const model = data.model || '*';
+  return [provider, roleId, reason, model]
+    .map(value => String(value || '').replace(/:/g, '_'))
+    .join(':');
 }
 
 function buildOAuthProviderNotification(data = {}, fallbackProvider = 'oauth') {
@@ -242,7 +248,11 @@ function buildOAuthProviderNotification(data = {}, fallbackProvider = 'oauth') {
 
 function addOAuthProviderNotification(setNotifications, data = {}, fallbackProvider = 'oauth') {
   const notification = buildOAuthProviderNotification(data, fallbackProvider);
-  if (readDismissedOAuthProviderNotifications().has(notification.notification_key)) {
+  const dismissedNotifications = readDismissedOAuthProviderNotifications();
+  if (
+    dismissedNotifications.has(notification.notification_key)
+    || (data.id && dismissedNotifications.has(String(data.id)))
+  ) {
     return;
   }
   setNotifications(prev => {
@@ -253,7 +263,7 @@ function addOAuthProviderNotification(setNotifications, data = {}, fallbackProvi
   });
 }
 
-function truncateOAuthActivityDetail(value, maxChars = 250) {
+function truncateOAuthActivityDetail(value, maxChars = 1800) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
   if (text.length <= maxChars) return text;
@@ -264,13 +274,39 @@ function truncateOAuthActivityDetail(value, maxChars = 250) {
 function buildOAuthActivityMessage(data = {}, fallbackProviderLabel = 'OAuth provider') {
   const providerLabel = data.provider_label || fallbackProviderLabel;
   const roleId = data.role_id || 'a role';
+  const isOAuthProvider = providerLabel.toLowerCase().includes('oauth')
+    || data.provider === 'openai_codex_oauth'
+    || data.provider === 'xai_grok_oauth';
+  const providerKind = isOAuthProvider ? 'OAuth' : 'provider';
+  const repairHint = isOAuthProvider
+    ? 'check your OAuth connection and sign in again'
+    : 'check your provider connection or key';
+  if (data.reason === 'usage_limit_reached') {
+    return buildOAuthUsageLimitActivityMessage(data, providerLabel);
+  }
   const detail = truncateOAuthActivityDetail(
     data.oauth_error_message || data.error_message || data.error_summary,
   );
   if (detail) {
-    return `${providerLabel} OAuth failed for ${roleId}: ${detail}`;
+    return `${providerLabel} ${providerKind} failed for ${roleId}: ${detail}`;
   }
-  return `${providerLabel} OAuth failed for ${roleId}; check your OAuth connection and sign in again.`;
+  return `${providerLabel} ${providerKind} failed for ${roleId}; ${repairHint}.`;
+}
+
+function buildOAuthUsageLimitActivityMessage(data = {}, fallbackProviderLabel = 'OAuth provider') {
+  const providerLabel = data.provider_label || fallbackProviderLabel;
+  const roleId = data.role_id || 'a role';
+  const resetsIn = Number(data.resets_in_seconds);
+  const resetText = Number.isFinite(resetsIn) && resetsIn > 0
+    ? ` Provider reset in about ${Math.max(1, Math.ceil(resetsIn / 60))} minute(s).`
+    : '';
+  const fallbackText = data.fallback_model
+    ? ` Using LM Studio fallback (${data.fallback_model}) until reset.`
+    : ' Roles without fallback will wait until the provider reset.';
+  if (data.message) {
+    return String(data.message);
+  }
+  return `${providerLabel} usage limit reached for ${roleId}.${fallbackText}${resetText}`;
 }
 
 const createDefaultAggregatorSubmitterConfigs = () => (
@@ -377,6 +413,9 @@ function normalizeFeaturesPayload(payload = {}) {
     xaiGrokOauthAvailable: payload.xai_grok_oauth_available === undefined
       ? !genericMode
       : payload.xai_grok_oauth_available !== false,
+    sakanaFuguAvailable: payload.sakana_fugu_available === undefined
+      ? !genericMode
+      : payload.sakana_fugu_available !== false,
     version: payload.version || '',
     buildCommit: payload.build_commit || '',
     updateChannel: payload.update_channel || 'main',
@@ -459,6 +498,18 @@ function normalizeAutonomousConfigForCapabilities(config, lmStudioEnabled) {
   });
 
   return nextConfig;
+}
+
+function coercePositiveIntegerSetting(value, fallback) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+$/.test(text)) {
+    return fallback;
+  }
+  const parsed = Number(text);
+  if (Number.isSafeInteger(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return fallback;
 }
 
 function readPersistedLiveActivity(storageKey) {
@@ -564,10 +615,7 @@ function App() {
     : appMode === 'leanoj'
       ? leanojActiveTab
       : autonomousActiveTab;
-  const shimmerAccentsEnabled = (() => {
-    const saved = localStorage.getItem('banner_shimmer_enabled');
-    return saved !== null ? JSON.parse(saved) : true;
-  })();
+  const shimmerAccentsEnabled = readBooleanStorage('banner_shimmer_enabled', true);
   
   // Models list (fetched from API)
   const [models, setModels] = useState([]);
@@ -1365,6 +1413,49 @@ function App() {
         return [...prev, event].slice(-MAX_LIVE_ACTIVITY_EVENTS);
       });
     };
+    const countTrailingRejections = (events) => {
+      let count = 0;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const eventName = events[index]?.event || events[index]?.type || '';
+        if (eventName === 'rejection_feedback_notice') {
+          continue;
+        }
+        if (eventName.includes('rejected') || eventName === 'submission_rejected') {
+          count += 1;
+          continue;
+        }
+        break;
+      }
+      return count;
+    };
+    const addActivityWithRejectionFeedbackNotice = (event) => {
+      setAutonomousActivity(prev => {
+        const observedConsecutiveRejections = countTrailingRejections(prev) + 1;
+        const nextEvents = [event];
+        const shown = { first: false, tenth: false };
+        for (let index = prev.length - 1; index >= 0; index -= 1) {
+          const eventName = prev[index]?.event || prev[index]?.type || '';
+          if (eventName === 'auto_research_started' || eventName === 'auto_research_resumed') {
+            break;
+          }
+          if (eventName !== 'rejection_feedback_notice') {
+            continue;
+          }
+          if (Number(prev[index]?.data?.consecutive_rejections) >= 10) {
+            shown.tenth = true;
+          } else {
+            shown.first = true;
+          }
+        }
+        if (shouldAddRejectionFeedbackNotice(event.data || {}, observedConsecutiveRejections, shown)) {
+          nextEvents.push(buildRejectionFeedbackNoticeActivity(event.timestamp, {
+            ...(event.data || {}),
+            consecutive_rejections: observedConsecutiveRejections,
+          }));
+        }
+        return [...prev, ...nextEvents].slice(-MAX_LIVE_ACTIVITY_EVENTS);
+      });
+    };
     const formatHungConnectionMessage = (data = {}) => {
       const model = data.model || 'model';
       const provider = data.provider || 'provider';
@@ -1497,7 +1588,7 @@ function App() {
         ? `Proof check complete: ${verified}/${data.total_candidates} candidates verified, ${novel} novel`
         : `Proof check complete: ${verified} verified`;
       const base = roundLabel ? `${roundLabel} complete: ${baseMessage}` : baseMessage;
-      const detail = formatReason(data.message, 220);
+      const detail = formatReason(data.message, 1800);
       return detail ? `${base} - ${detail}` : base;
     };
     
@@ -1568,10 +1659,10 @@ function App() {
     }));
     
     unsubscribers.push(websocket.on('topic_selection_rejected', (data) => {
-      addActivity({
+      addActivityWithRejectionFeedbackNotice({
         event: 'topic_selection_rejected',
         timestamp: getTimestamp(data),
-        message: `Topic selection rejected`,
+        message: `Topic selection rejected with feedback`,
         data
       });
     }));
@@ -1593,10 +1684,10 @@ function App() {
       if (!autonomousRunningRef.current) return;
       const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : 'N/A';
       const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-      addActivity({
+      addActivityWithRejectionFeedbackNotice({
         event: 'submission_rejected',
         timestamp: getTimestamp(data),
-        message: `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED (total: ${data.total_rejections})`,
+        message: `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED WITH FEEDBACK (total: ${data.total_rejections})`,
         data
       });
     }));
@@ -1787,14 +1878,8 @@ function App() {
         data
       });
     };
-    unsubscribers.push(websocket.on('assistant_proof_pack_refresh_started', (data) => {
-      handleAutonomousAssistantEvent('assistant_proof_pack_refresh_started', data);
-    }));
     unsubscribers.push(websocket.on('assistant_proof_pack_updated', (data) => {
       handleAutonomousAssistantEvent('assistant_proof_pack_updated', data);
-    }));
-    unsubscribers.push(websocket.on('assistant_proof_pack_warning', (data) => {
-      handleAutonomousAssistantEvent('assistant_proof_pack_warning', data);
     }));
 
     unsubscribers.push(websocket.on('proof_check_started', (data) => {
@@ -2345,6 +2430,29 @@ function App() {
       addOAuthProviderNotification(setCodexOAuthNotifications, data, data.provider || 'oauth');
     }));
 
+    unsubscribers.push(websocket.on('sakana_fugu_error', (data) => {
+      console.error('Sakana Fugu error:', data);
+      addActivity({
+        event: 'sakana_fugu_error',
+        timestamp: getTimestamp(data),
+        ...data,
+        message: buildOAuthActivityMessage(data, 'Sakana Fugu'),
+      });
+      addOAuthProviderNotification(setCodexOAuthNotifications, data, 'sakana_fugu');
+    }));
+
+    unsubscribers.push(websocket.on('oauth_provider_usage_limited', (data) => {
+      console.warn('OAuth provider usage limit:', data);
+      const providerLabel = data.provider_label || 'OpenAI Codex';
+      addActivity({
+        event: 'oauth_provider_usage_limited',
+        timestamp: getTimestamp(data),
+        ...data,
+        message: buildOAuthUsageLimitActivityMessage(data, providerLabel),
+      });
+      addOAuthProviderNotification(setCodexOAuthNotifications, data, data.provider || 'openai_codex_oauth');
+    }));
+
     unsubscribers.push(websocket.on('leanoj_provider_paused', (data) => {
       console.warn('Proof Solver paused for provider credits:', data);
       addActivity({
@@ -2692,17 +2800,9 @@ function App() {
         setLeanojRunning(true);
         addLeanOJActivity('leanoj_started', data, 'Proof Solver started');
       }],
-      ['assistant_proof_pack_refresh_started', (data) => {
-        if (data.workflow_mode !== 'leanoj') return;
-        addLeanOJActivity('assistant_proof_pack_refresh_started', data, formatAssistantProofPackEventMessage('assistant_proof_pack_refresh_started', data));
-      }],
       ['assistant_proof_pack_updated', (data) => {
         if (data.workflow_mode !== 'leanoj') return;
         addLeanOJActivity('assistant_proof_pack_updated', data, formatAssistantProofPackEventMessage('assistant_proof_pack_updated', data));
-      }],
-      ['assistant_proof_pack_warning', (data) => {
-        if (data.workflow_mode !== 'leanoj') return;
-        addLeanOJActivity('assistant_proof_pack_warning', data, formatAssistantProofPackEventMessage('assistant_proof_pack_warning', data));
       }],
       ['leanoj_stopped', (data) => {
         setLeanojRunning(false);
@@ -2877,8 +2977,8 @@ function App() {
         openrouter_provider: cfg.openrouterProvider || null,
         openrouter_reasoning_effort: cfg.openrouterReasoningEffort || 'auto',
         lm_studio_fallback_id: lmStudioEnabled ? (cfg.lmStudioFallbackId || null) : null,
-        context_window: cfg.contextWindow,
-        max_output_tokens: cfg.maxOutputTokens,
+        context_window: coercePositiveIntegerSetting(cfg.contextWindow, DEFAULT_CONTEXT_WINDOW),
+        max_output_tokens: coercePositiveIntegerSetting(cfg.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS),
         supercharge_enabled: superchargeAllowed && Boolean(cfg.superchargeEnabled || cfg.supercharge_enabled)
       })) || [];
 
@@ -2898,8 +2998,8 @@ function App() {
         validator_lm_studio_fallback: lmStudioEnabled
           ? autonomousConfig.validator_lm_studio_fallback
           : null,
-        validator_context_window: autonomousConfig.validator_context_window,
-        validator_max_tokens: autonomousConfig.validator_max_tokens,
+        validator_context_window: coercePositiveIntegerSetting(autonomousConfig.validator_context_window, DEFAULT_CONTEXT_WINDOW),
+        validator_max_tokens: coercePositiveIntegerSetting(autonomousConfig.validator_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
         validator_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.validator_supercharge_enabled),
         // Writing submitter config with OpenRouter support
         writer_provider: normalizeRuntimeProvider(
@@ -2912,8 +3012,8 @@ function App() {
         writer_lm_studio_fallback: lmStudioEnabled
           ? autonomousConfig.writer_lm_studio_fallback
           : null,
-        writer_context_window: autonomousConfig.writer_context_window,
-        writer_max_tokens: autonomousConfig.writer_max_tokens,
+        writer_context_window: coercePositiveIntegerSetting(autonomousConfig.writer_context_window, DEFAULT_CONTEXT_WINDOW),
+        writer_max_tokens: coercePositiveIntegerSetting(autonomousConfig.writer_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
         writer_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.writer_supercharge_enabled),
         // Rigor & Proofs Submitter config with OpenRouter support
         high_param_provider: normalizeRuntimeProvider(
@@ -2926,8 +3026,8 @@ function App() {
         high_param_lm_studio_fallback: lmStudioEnabled
           ? autonomousConfig.high_param_lm_studio_fallback
           : null,
-        high_param_context_window: autonomousConfig.high_param_context_window,
-        high_param_max_tokens: autonomousConfig.high_param_max_tokens,
+        high_param_context_window: coercePositiveIntegerSetting(autonomousConfig.high_param_context_window, DEFAULT_CONTEXT_WINDOW),
+        high_param_max_tokens: coercePositiveIntegerSetting(autonomousConfig.high_param_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
         high_param_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
         // Deprecated critique fields mirror Rigor & Proofs for compatibility.
         critique_submitter_provider: normalizeRuntimeProvider(
@@ -2940,8 +3040,8 @@ function App() {
         critique_submitter_lm_studio_fallback: lmStudioEnabled
           ? autonomousConfig.high_param_lm_studio_fallback
           : null,
-        critique_submitter_context_window: autonomousConfig.high_param_context_window,
-        critique_submitter_max_tokens: autonomousConfig.high_param_max_tokens,
+        critique_submitter_context_window: coercePositiveIntegerSetting(autonomousConfig.high_param_context_window, DEFAULT_CONTEXT_WINDOW),
+        critique_submitter_max_tokens: coercePositiveIntegerSetting(autonomousConfig.high_param_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
         critique_submitter_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
         assistant_provider: assistantMemoryEnabled
           ? normalizeRuntimeProvider(
@@ -2959,8 +3059,18 @@ function App() {
         assistant_lm_studio_fallback: assistantMemoryEnabled && lmStudioEnabled
           ? (autonomousConfig.assistant_lm_studio_fallback || autonomousConfig.validator_lm_studio_fallback)
           : null,
-        assistant_context_window: assistantMemoryEnabled ? (autonomousConfig.assistant_context_window || autonomousConfig.validator_context_window) : 0,
-        assistant_max_tokens: assistantMemoryEnabled ? (autonomousConfig.assistant_max_tokens || autonomousConfig.validator_max_tokens) : 0,
+        assistant_context_window: assistantMemoryEnabled
+          ? coercePositiveIntegerSetting(
+              autonomousConfig.assistant_context_window || autonomousConfig.validator_context_window,
+              DEFAULT_CONTEXT_WINDOW
+            )
+          : 0,
+        assistant_max_tokens: assistantMemoryEnabled
+          ? coercePositiveIntegerSetting(
+              autonomousConfig.assistant_max_tokens || autonomousConfig.validator_max_tokens,
+              DEFAULT_MAX_OUTPUT_TOKENS
+            )
+          : 0,
         assistant_supercharge_enabled: assistantMemoryEnabled && superchargeAllowed && Boolean(autonomousConfig.assistant_supercharge_enabled),
         allow_mathematical_proofs: !capabilities.genericMode && (autonomousConfig.allow_mathematical_proofs ?? true),
         allow_research_papers: autonomousConfig.allow_research_papers ?? true,
@@ -2997,7 +3107,7 @@ function App() {
 
   const handleAutonomousClear = async () => {
     if (!window.confirm('Clear all autonomous research data? This cannot be undone.')) {
-      return;
+      return false;
     }
     try {
       const result = await autonomousAPI.clear();
@@ -3014,10 +3124,12 @@ function App() {
       } else {
         alert('All autonomous research data cleared successfully.');
       }
+      return true;
     } catch (error) {
       // Show detailed error message
       const errorMsg = error.details || error.message || 'Unknown error';
       alert(`Failed to clear data:\n\n${errorMsg}\n\nThis may be due to Windows file locking. Try closing file explorer and any programs that may have files open, then try again.`);
+      return false;
     }
   };
 
@@ -3336,7 +3448,7 @@ function App() {
 
     if (cloudAccessPresent) {
       setStartupSetupMessage(
-        'OAuth login is saved, but OAuth providers are supplementary chat/model providers. Configure OpenRouter or confirm LM Studio for RAG embeddings before starting.'
+        'Cloud provider access is saved, but direct role providers are supplementary chat/model providers. Configure OpenRouter or confirm LM Studio for RAG embeddings before starting.'
       );
       setShowStartupSetupModal(true);
       return;
@@ -3444,7 +3556,7 @@ function App() {
       cloudAccessJustConfiguredRef.current = false;
       setShowStartupSetupModal(true);
       setStartupSetupMessage(
-        'OAuth login was saved. To start MOTO, also configure OpenRouter or confirm LM Studio so RAG embeddings are available.'
+        'Cloud provider access was saved. To start MOTO, also configure OpenRouter or confirm LM Studio so RAG embeddings are available.'
       );
     }
   };

@@ -28,6 +28,46 @@ class AssistantCandidateStats:
     failure_penalty: float = 0.0
 
 
+@dataclass(frozen=True)
+class AssistantCooldownState:
+    """Durable Assistant proof-memory backoff state for one run scope."""
+
+    run_key: str
+    zero_attempts_in_batch: int = 0
+    zero_cooldown_stage: int = 0
+    zero_cooldown_skips_remaining: int = 0
+    zero_steady_81_batches: int = 0
+    zero_shutdown_active: bool = False
+    stagnant_same_count: int = 0
+    stagnant_attempts_in_batch: int = 0
+    stagnant_cooldown_stage: int = 0
+    stagnant_cooldown_skips_remaining: int = 0
+    last_signature: str = ""
+    last_reason: str = ""
+    updated_at: str = ""
+
+    @classmethod
+    def empty(cls, run_key: str) -> "AssistantCooldownState":
+        return cls(run_key=run_key, updated_at=_now_iso())
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "run_key": self.run_key,
+            "zero_attempts_in_batch": self.zero_attempts_in_batch,
+            "zero_cooldown_stage": self.zero_cooldown_stage,
+            "zero_cooldown_skips_remaining": self.zero_cooldown_skips_remaining,
+            "zero_steady_81_batches": self.zero_steady_81_batches,
+            "zero_shutdown_active": self.zero_shutdown_active,
+            "stagnant_same_count": self.stagnant_same_count,
+            "stagnant_attempts_in_batch": self.stagnant_attempts_in_batch,
+            "stagnant_cooldown_stage": self.stagnant_cooldown_stage,
+            "stagnant_cooldown_skips_remaining": self.stagnant_cooldown_skips_remaining,
+            "last_signature": self.last_signature,
+            "last_reason": self.last_reason,
+            "updated_at": self.updated_at,
+        }
+
+
 def default_assistant_cache_path() -> Path:
     return Path(system_config.data_dir) / "proof_search" / "assistant_ranker.sqlite"
 
@@ -269,6 +309,89 @@ class AssistantRankCache:
             self._prune_cache(conn, max_targets=DEFAULT_MAX_ASSISTANT_CACHE_TARGETS)
             conn.commit()
 
+    def load_cooldown_state(self, run_key: str) -> AssistantCooldownState:
+        if not self.db_path.exists():
+            return AssistantCooldownState.empty(run_key)
+        with closing(self._connect()) as conn:
+            self._create_schema(conn)
+            row = conn.execute(
+                """
+                SELECT *
+                FROM assistant_cooldown_state
+                WHERE run_key = ?
+                LIMIT 1
+                """,
+                (run_key,),
+            ).fetchone()
+        if row is None:
+            return AssistantCooldownState.empty(run_key)
+        return _cooldown_state_from_row(row)
+
+    def save_cooldown_state(self, state: AssistantCooldownState) -> None:
+        now_state = state if state.updated_at else _replace_cooldown_state(state, updated_at=_now_iso())
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect()) as conn:
+            self._create_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO assistant_cooldown_state (
+                    run_key,
+                    zero_attempts_in_batch,
+                    zero_cooldown_stage,
+                    zero_cooldown_skips_remaining,
+                    zero_steady_81_batches,
+                    zero_shutdown_active,
+                    stagnant_same_count,
+                    stagnant_attempts_in_batch,
+                    stagnant_cooldown_stage,
+                    stagnant_cooldown_skips_remaining,
+                    last_signature,
+                    last_reason,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_key) DO UPDATE SET
+                    zero_attempts_in_batch = excluded.zero_attempts_in_batch,
+                    zero_cooldown_stage = excluded.zero_cooldown_stage,
+                    zero_cooldown_skips_remaining = excluded.zero_cooldown_skips_remaining,
+                    zero_steady_81_batches = excluded.zero_steady_81_batches,
+                    zero_shutdown_active = excluded.zero_shutdown_active,
+                    stagnant_same_count = excluded.stagnant_same_count,
+                    stagnant_attempts_in_batch = excluded.stagnant_attempts_in_batch,
+                    stagnant_cooldown_stage = excluded.stagnant_cooldown_stage,
+                    stagnant_cooldown_skips_remaining = excluded.stagnant_cooldown_skips_remaining,
+                    last_signature = excluded.last_signature,
+                    last_reason = excluded.last_reason,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    now_state.run_key,
+                    now_state.zero_attempts_in_batch,
+                    now_state.zero_cooldown_stage,
+                    now_state.zero_cooldown_skips_remaining,
+                    now_state.zero_steady_81_batches,
+                    int(now_state.zero_shutdown_active),
+                    now_state.stagnant_same_count,
+                    now_state.stagnant_attempts_in_batch,
+                    now_state.stagnant_cooldown_stage,
+                    now_state.stagnant_cooldown_skips_remaining,
+                    now_state.last_signature,
+                    now_state.last_reason,
+                    now_state.updated_at,
+                ),
+            )
+            conn.commit()
+
+    def clear_cooldown_state(self, run_key: str | None = None) -> None:
+        if not self.db_path.exists():
+            return
+        with closing(self._connect()) as conn:
+            self._create_schema(conn)
+            if run_key:
+                conn.execute("DELETE FROM assistant_cooldown_state WHERE run_key = ?", (run_key,))
+            else:
+                conn.execute("DELETE FROM assistant_cooldown_state")
+            conn.commit()
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
@@ -340,6 +463,25 @@ class AssistantRankCache:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_assistant_goal_cache_pack ON assistant_goal_cache(pack_target_hash)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assistant_cooldown_state (
+                run_key TEXT PRIMARY KEY,
+                zero_attempts_in_batch INTEGER NOT NULL DEFAULT 0,
+                zero_cooldown_stage INTEGER NOT NULL DEFAULT 0,
+                zero_cooldown_skips_remaining INTEGER NOT NULL DEFAULT 0,
+                zero_steady_81_batches INTEGER NOT NULL DEFAULT 0,
+                zero_shutdown_active INTEGER NOT NULL DEFAULT 0,
+                stagnant_same_count INTEGER NOT NULL DEFAULT 0,
+                stagnant_attempts_in_batch INTEGER NOT NULL DEFAULT 0,
+                stagnant_cooldown_stage INTEGER NOT NULL DEFAULT 0,
+                stagnant_cooldown_skips_remaining INTEGER NOT NULL DEFAULT 0,
+                last_signature TEXT NOT NULL DEFAULT '',
+                last_reason TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
         )
 
     def _prune_cache(self, conn: sqlite3.Connection, *, max_targets: int) -> None:
@@ -474,3 +616,27 @@ def _hash_text(value: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _cooldown_state_from_row(row: sqlite3.Row) -> AssistantCooldownState:
+    return AssistantCooldownState(
+        run_key=str(row["run_key"] or ""),
+        zero_attempts_in_batch=int(row["zero_attempts_in_batch"] or 0),
+        zero_cooldown_stage=int(row["zero_cooldown_stage"] or 0),
+        zero_cooldown_skips_remaining=int(row["zero_cooldown_skips_remaining"] or 0),
+        zero_steady_81_batches=int(row["zero_steady_81_batches"] or 0),
+        zero_shutdown_active=bool(row["zero_shutdown_active"]),
+        stagnant_same_count=int(row["stagnant_same_count"] or 0),
+        stagnant_attempts_in_batch=int(row["stagnant_attempts_in_batch"] or 0),
+        stagnant_cooldown_stage=int(row["stagnant_cooldown_stage"] or 0),
+        stagnant_cooldown_skips_remaining=int(row["stagnant_cooldown_skips_remaining"] or 0),
+        last_signature=str(row["last_signature"] or ""),
+        last_reason=str(row["last_reason"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+    )
+
+
+def _replace_cooldown_state(state: AssistantCooldownState, **updates: Any) -> AssistantCooldownState:
+    payload = state.to_payload()
+    payload.update(updates)
+    return AssistantCooldownState(**payload)

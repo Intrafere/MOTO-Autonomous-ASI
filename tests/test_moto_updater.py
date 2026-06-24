@@ -105,6 +105,44 @@ class InstallStateTests(TestCase):
         self.assertIsNotNone(result.warning)
         self.assertFalse(result.can_apply_update)
 
+    def test_check_for_updates_formats_transient_github_failure(self) -> None:
+        local_manifest = moto_updater.BuildManifest(
+            version="1.0.9",
+            build_commit="localcommit",
+            update_channel="main",
+            api_contract_version="build5-v1",
+        )
+        http_504 = urllib.error.HTTPError(
+            url="https://api.github.com/repos/example/repo/branches/main",
+            code=504,
+            msg="Gateway Time-out",
+            hdrs=None,
+            fp=None,
+        )
+
+        with mock.patch.object(moto_updater, "load_local_manifest", return_value=local_manifest):
+            with mock.patch.object(moto_updater, "cleanup_launcher_state", return_value=[]):
+                with mock.patch.object(
+                    moto_updater,
+                    "classify_install_state",
+                    return_value=moto_updater.InstallState(
+                        kind="zip_install",
+                        label="ZIP / extracted consumer install",
+                        can_auto_apply=True,
+                        reason="ZIP / extracted consumer install.",
+                    ),
+                ):
+                    with mock.patch.object(moto_updater, "fetch_remote_manifest", side_effect=http_504):
+                        with mock.patch.object(moto_updater, "fetch_branch_head_fallback") as fallback:
+                            result = moto_updater.check_for_updates()
+
+        self.assertFalse(result.update_available)
+        self.assertEqual(result.metadata_source, "none")
+        self.assertIsNotNone(result.error)
+        self.assertIn("GitHub update metadata is temporarily unavailable", result.error or "")
+        self.assertIn("Startup will continue", result.error or "")
+        fallback.assert_not_called()
+
     def test_fetch_remote_manifest_uses_branch_head_as_update_key(self) -> None:
         local_manifest = moto_updater.BuildManifest(
             version="1.0.9",

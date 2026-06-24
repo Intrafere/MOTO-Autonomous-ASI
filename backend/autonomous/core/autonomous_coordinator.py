@@ -357,6 +357,20 @@ class AutonomousCoordinator:
         self._resume_paper_phase = None
         await self._save_workflow_state(tier="tier1_aggregation", phase="topic_exploration")
 
+    async def _handle_papers_disabled_after_brainstorm(self) -> None:
+        """Finish a proofs-only brainstorm handoff without entering paper compilation."""
+        await self._broadcast("research_papers_disabled_brainstorm_complete", {
+            "topic_id": self._current_topic_id,
+            "message": "Research paper output is disabled; returning to topic selection after brainstorm proof work."
+        })
+        self._brainstorm_paper_count = 0
+        self._current_brainstorm_paper_ids = []
+        self._last_completed_paper_id = None
+        self._current_reference_papers = []
+        self._current_reference_brainstorms = []
+        logger.info("Research paper output disabled; skipping Tier 2 paper compilation")
+        await self._save_proofs_only_next_topic_state()
+
     def _build_proof_runtime_config_snapshot(self) -> Dict[str, Any]:
         """Build the persisted runtime snapshot used by proof routes/manual checks."""
         rigor_config = ProofRoleConfigSnapshot(
@@ -2482,12 +2496,25 @@ class AutonomousCoordinator:
                         if self._stop_event.is_set():
                             break
 
+                        if not candidate_questions.strip():
+                            logger.warning("Topic exploration produced no validated candidates; restarting exploration")
+                            continue
+
                         topic_result = await self._topic_selection_loop(candidate_questions)
 
                         if self._stop_event.is_set():
                             break
 
-                        self._current_reference_papers = await self._pre_brainstorm_reference_selection()
+                        if not topic_result:
+                            logger.warning("Topic selection ended without selecting a topic; restarting topic exploration")
+                            continue
+
+                        self._current_reference_papers = []
+                        self._current_reference_brainstorms = []
+                        if self._allow_research_papers:
+                            self._current_reference_papers = await self._pre_brainstorm_reference_selection()
+                        else:
+                            self._current_reference_brainstorms = await self._pre_brainstorm_reference_brainstorm_selection()
 
                         if self._stop_event.is_set():
                             break
@@ -2500,6 +2527,10 @@ class AutonomousCoordinator:
                             break
 
                         if write_paper:
+                            if not self._allow_research_papers:
+                                await self._handle_papers_disabled_after_brainstorm()
+                                continue
+
                             while not self._stop_event.is_set():
                                 if await self._paper_compilation_workflow():
                                     break
@@ -2654,7 +2685,7 @@ class AutonomousCoordinator:
 
                         if not self._allow_research_papers:
                             logger.info("Research paper output disabled; skipping resumed Tier 2 paper compilation")
-                            await self._save_proofs_only_next_topic_state()
+                            await self._handle_papers_disabled_after_brainstorm()
                             continue
 
                         # A resumed brainstorm MUST produce a paper - retry until success or stop
@@ -2782,6 +2813,10 @@ class AutonomousCoordinator:
                             break
                         
                         if write_paper:
+                            if not self._allow_research_papers:
+                                await self._handle_papers_disabled_after_brainstorm()
+                                continue
+
                             # A completed brainstorm MUST produce a paper - retry until success or stop
                             _resume_paper_attempt = 0
                             while not self._stop_event.is_set():
@@ -2931,12 +2966,20 @@ class AutonomousCoordinator:
                 
                 if self._stop_event.is_set():
                     break
+
+                if not candidate_questions.strip():
+                    logger.warning("Topic exploration produced no validated candidates; restarting exploration")
+                    continue
                 
                 # Phase 1: Topic selection (informed by exploration candidates)
                 topic_result = await self._topic_selection_loop(candidate_questions)
                 
                 if self._stop_event.is_set():
                     break
+
+                if not topic_result:
+                    logger.warning("Topic selection ended without selecting a topic; restarting topic exploration")
+                    continue
                 
                 # Phase 1.5: Pre-brainstorm reference selection.
                 # Paper-enabled runs keep today's paper-reference behavior; proof-only
@@ -2967,17 +3010,7 @@ class AutonomousCoordinator:
                     continue
 
                 if not self._allow_research_papers:
-                    await self._broadcast("research_papers_disabled_brainstorm_complete", {
-                        "topic_id": self._current_topic_id,
-                        "message": "Research paper output is disabled; returning to topic selection after brainstorm proof work."
-                    })
-                    self._brainstorm_paper_count = 0
-                    self._current_brainstorm_paper_ids = []
-                    self._last_completed_paper_id = None
-                    self._current_reference_papers = []
-                    self._current_reference_brainstorms = []
-                    logger.info("Research paper output disabled; skipping Tier 2 paper compilation")
-                    await self._save_proofs_only_next_topic_state()
+                    await self._handle_papers_disabled_after_brainstorm()
                     continue
                 
                 # Phase 3: Paper compilation
@@ -3450,12 +3483,20 @@ class AutonomousCoordinator:
                 
                 if self._stop_event.is_set():
                     break
+
+                if not candidate_questions.strip():
+                    logger.warning("Topic exploration produced no validated candidates; restarting exploration")
+                    continue
                 
                 # Phase 1: Topic selection (informed by exploration candidates)
-                await self._topic_selection_loop(candidate_questions)
+                topic_result = await self._topic_selection_loop(candidate_questions)
                 
                 if self._stop_event.is_set():
                     break
+
+                if not topic_result:
+                    logger.warning("Topic selection ended without selecting a topic; restarting topic exploration")
+                    continue
                 
                 # Phase 1.5: Pre-brainstorm reference selection.
                 self._current_reference_papers = []
@@ -3484,17 +3525,7 @@ class AutonomousCoordinator:
                     continue
 
                 if not self._allow_research_papers:
-                    await self._broadcast("research_papers_disabled_brainstorm_complete", {
-                        "topic_id": self._current_topic_id,
-                        "message": "Research paper output is disabled; returning to topic selection after brainstorm proof work."
-                    })
-                    self._brainstorm_paper_count = 0
-                    self._current_brainstorm_paper_ids = []
-                    self._last_completed_paper_id = None
-                    self._current_reference_papers = []
-                    self._current_reference_brainstorms = []
-                    logger.info("Research paper output disabled; skipping Tier 2 paper compilation")
-                    await self._save_proofs_only_next_topic_state()
+                    await self._handle_papers_disabled_after_brainstorm()
                     continue
                 
                 # Phase 3: Paper compilation
@@ -3675,7 +3706,6 @@ class AutonomousCoordinator:
         await self._enter_topic_exploration_boundary()
         
         TARGET_CANDIDATES = 5
-        MAX_CONSECUTIVE_REJECTIONS = 15
         
         await self._broadcast("topic_exploration_started", {
             "target": TARGET_CANDIDATES,
@@ -3712,6 +3742,7 @@ class AutonomousCoordinator:
         await shared_training_memory.reload_insights_from_current_path()
         
         exploration_aggregator = None
+        exploration_completed = False
         
         try:
             exploration_aggregator = AggregatorCoordinator()
@@ -3749,7 +3780,6 @@ class AutonomousCoordinator:
             
             last_acceptances = 0
             last_rejections = 0
-            consecutive_rejections = 0
             
             while self._running and not self._stop_event.is_set():
                 status = await exploration_aggregator.get_status()
@@ -3769,7 +3799,6 @@ class AutonomousCoordinator:
                 
                 # Track new acceptances
                 if current_acceptances > last_acceptances:
-                    consecutive_rejections = 0
                     last_acceptances = current_acceptances
                     
                     await self._broadcast("topic_exploration_progress", {
@@ -3789,20 +3818,23 @@ class AutonomousCoordinator:
                         logger.info(f"TopicExploration: Target of {TARGET_CANDIDATES} candidates reached")
                         break
                 
-                # Track consecutive rejections for safety valve
+                # Track rejections for progress totals. Rejections do not end
+                # exploration; this phase runs until enough candidates are accepted.
                 if current_rejections > last_rejections:
-                    new_rejections = current_rejections - last_rejections
-                    consecutive_rejections += new_rejections
                     last_rejections = current_rejections
-                    
-                    if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
-                        logger.warning(f"TopicExploration: {consecutive_rejections} consecutive rejections - proceeding with {current_acceptances} candidates")
-                        break
                 
                 await asyncio.sleep(2)
             
             # Stop the exploration aggregator
             await exploration_aggregator.stop()
+
+            if last_acceptances < TARGET_CANDIDATES:
+                logger.warning(
+                    "Topic exploration ended before target: %s/%s candidates accepted",
+                    last_acceptances,
+                    TARGET_CANDIDATES,
+                )
+                return ""
             
             # Read accepted candidates from the exploration database
             candidates_text = ""
@@ -3823,12 +3855,19 @@ class AutonomousCoordinator:
                         lines.append("-" * 40)
                     candidates_text = "\n".join(lines)
             
+            if not candidates_text.strip():
+                logger.warning(
+                    "Topic exploration reached target count but no candidate text was available; restarting exploration"
+                )
+                return ""
+
             await self._broadcast("topic_exploration_complete", {
                 "accepted_count": last_acceptances,
                 "total_attempts": last_acceptances + last_rejections
             })
             
             logger.info(f"Topic exploration complete: {last_acceptances} candidates accepted")
+            exploration_completed = True
             
             return candidates_text
             
@@ -3862,8 +3901,9 @@ class AutonomousCoordinator:
                 shared_training_memory.last_ragged_submission_count = 0
             logger.info("Exploration: Restored shared_training_memory state")
             
-            # Clean up exploration database file
-            if exploration_db_path.exists():
+            # Clean up only after the target is reached; interrupted/failed runs
+            # must not masquerade as completed candidate exploration.
+            if exploration_completed and exploration_db_path.exists():
                 try:
                     exploration_db_path.unlink()
                 except OSError as cleanup_exc:
@@ -3929,9 +3969,8 @@ class AutonomousCoordinator:
             else:
                 await self._topic_selector.handle_rejection(submission, validation.reasoning)
                 await research_metadata.increment_stat("topic_selection_rejections")
-                
                 await self._broadcast("topic_selection_rejected", {
-                    "reasoning": validation.reasoning
+                    "reasoning": validation.reasoning,
                 })
                 
                 logger.info(f"Topic selection rejected: {validation.reasoning[:100]}...")
@@ -3985,7 +4024,7 @@ class AutonomousCoordinator:
                     )
                     await self._broadcast("topic_selection_rejected", {
                         "reasoning": f"Cannot continue brainstorm {topic_id} — it is already marked complete. "
-                                     f"Select a new topic or continue an incomplete brainstorm."
+                                     f"Select a new topic or continue an incomplete brainstorm.",
                     })
                     return None
                 
@@ -4643,6 +4682,13 @@ class AutonomousCoordinator:
                     await self._brainstorm_aggregator.stop()
                     return False
 
+                async def handle_manual_override() -> bool:
+                    logger.info("Manual override detected - transitioning to paper writing")
+                    self._manual_paper_writing_triggered = False
+                    await self._brainstorm_aggregator.stop()
+                    proof_status = await self._run_brainstorm_completion_proofs()
+                    return proof_status == "complete"
+
                 # Get current aggregator stats
                 status = await self._brainstorm_aggregator.get_status()
                 if getattr(self._brainstorm_aggregator, "fatal_error_type", None) == "context_overflow":
@@ -4653,12 +4699,32 @@ class AutonomousCoordinator:
                     self._mark_context_overflow_stop()
                     self._stop_event.set()
                     return False
-                if not status.is_running:
-                    logger.warning("Brainstorm aggregator stopped unexpectedly")
-                    return False
                 current_acceptances = status.total_acceptances
                 current_rejections = status.total_rejections
                 current_cleanup_removals = status.removals_executed  # Track actual cleanup/pruning removals
+
+                if not status.is_running:
+                    if self._manual_paper_writing_triggered:
+                        return await handle_manual_override()
+
+                    total_acceptances = resume_acceptance_base + current_acceptances
+                    cap_reached = bool(
+                        getattr(self._brainstorm_aggregator, "_acceptance_cap_reached", False)
+                        or self._brainstorm_hard_limit_triggered
+                        or (
+                            getattr(self._brainstorm_aggregator, "max_total_acceptances", None) is not None
+                            and total_acceptances >= getattr(self._brainstorm_aggregator, "max_total_acceptances")
+                        )
+                    )
+                    if cap_reached:
+                        self._acceptance_count = max(self._acceptance_count, total_acceptances)
+                        if not self._brainstorm_hard_limit_triggered:
+                            await self._trigger_brainstorm_hard_limit(self._acceptance_count)
+                        proof_status = await self._run_brainstorm_completion_proofs()
+                        return proof_status == "complete"
+
+                    logger.warning("Brainstorm aggregator stopped unexpectedly")
+                    return False
                 
                 # Track cleanup removals for status display
                 if current_cleanup_removals != self._cleanup_removals:
@@ -4725,11 +4791,7 @@ class AutonomousCoordinator:
                 
                 # Check for manual override trigger (before checking stop event)
                 if self._manual_paper_writing_triggered:
-                    logger.info("Manual override detected - transitioning to paper writing")
-                    self._manual_paper_writing_triggered = False
-                    await self._brainstorm_aggregator.stop()
-                    proof_status = await self._run_brainstorm_completion_proofs()
-                    return proof_status == "complete"
+                    return await handle_manual_override()
                 
                 # Track consecutive rejections and increment total rejections stat
                 if current_rejections > last_rejections:
@@ -5257,6 +5319,10 @@ class AutonomousCoordinator:
             
             if self._stop_event.is_set():
                 return False
+
+            if not candidate_titles.strip():
+                logger.warning("Paper title exploration produced no validated candidates; retrying title exploration")
+                return False
             
             # Step 3: Final title selection (informed by candidate titles)
             paper_title = await self._paper_title_selection(
@@ -5490,7 +5556,6 @@ class AutonomousCoordinator:
         )
         
         TARGET_CANDIDATES = 5
-        MAX_CONSECUTIVE_REJECTIONS = 15
         
         # Build the exploration user prompt for the aggregator
         from backend.autonomous.prompts.paper_title_exploration_prompts import build_title_exploration_user_prompt
@@ -5537,6 +5602,7 @@ class AutonomousCoordinator:
         )
         
         exploration_aggregator = None
+        exploration_completed = False
         
         try:
             # Short-circuit: if we already have enough candidates from a prior run,
@@ -5589,7 +5655,6 @@ class AutonomousCoordinator:
                 last_aggregator_acceptances = 0
                 last_acceptances = resumed_count
                 last_rejections = 0
-                consecutive_rejections = 0
                 
                 while self._running and not self._stop_event.is_set():
                     status = await exploration_aggregator.get_status()
@@ -5609,7 +5674,6 @@ class AutonomousCoordinator:
                     current_rejections = status.total_rejections
                     
                     if current_aggregator_acceptances > last_aggregator_acceptances:
-                        consecutive_rejections = 0
                         last_aggregator_acceptances = current_aggregator_acceptances
                         last_acceptances = current_acceptances
                         
@@ -5631,17 +5695,19 @@ class AutonomousCoordinator:
                             break
                     
                     if current_rejections > last_rejections:
-                        new_rejections = current_rejections - last_rejections
-                        consecutive_rejections += new_rejections
                         last_rejections = current_rejections
-                        
-                        if consecutive_rejections >= MAX_CONSECUTIVE_REJECTIONS:
-                            logger.warning(f"TitleExploration: {consecutive_rejections} consecutive rejections - proceeding with {current_acceptances} candidates")
-                            break
                     
                     await asyncio.sleep(2)
                 
                 await exploration_aggregator.stop()
+
+                if last_acceptances < TARGET_CANDIDATES:
+                    logger.warning(
+                        "Paper title exploration ended before target: %s/%s candidates accepted",
+                        last_acceptances,
+                        TARGET_CANDIDATES,
+                    )
+                    return ""
             
             # Read accepted candidates from the title candidates database
             candidates_text = ""
@@ -5661,12 +5727,19 @@ class AutonomousCoordinator:
                         lines.append("-" * 40)
                     candidates_text = "\n".join(lines)
             
+            if not candidates_text.strip():
+                logger.warning(
+                    "Paper title exploration reached target count but no candidate text was available; retrying title exploration"
+                )
+                return ""
+
             await self._broadcast("paper_title_exploration_complete", {
                 "accepted_count": last_acceptances,
                 "total_attempts": last_acceptances + last_rejections
             })
             
             logger.info(f"Paper title exploration complete: {last_acceptances} candidates accepted")
+            exploration_completed = True
             
             return candidates_text
             
@@ -5697,7 +5770,7 @@ class AutonomousCoordinator:
                 shared_training_memory.last_ragged_submission_count = 0
             logger.info("TitleExploration: Restored shared_training_memory state")
             
-            if title_db_path.exists():
+            if exploration_completed and title_db_path.exists():
                 try:
                     title_db_path.unlink()
                 except OSError as cleanup_exc:
@@ -6004,28 +6077,53 @@ class AutonomousCoordinator:
     
     def _extract_abstract(self, paper_content: str) -> str:
         """Extract abstract text from paper."""
-        # Try to find abstract section
-        abstract_patterns = [
-            r"##\s*Abstract\s*\n(.*?)(?=\n##|\n#|\Z)",
-            r"#\s*Abstract\s*\n(.*?)(?=\n##|\n#|\Z)",
-            r"\*\*Abstract\*\*\s*\n(.*?)(?=\n##|\n#|\n\*\*|\Z)",
-            r"\\(?:section|chapter)\*?\{Abstract\}\s*\n(.*?)(?=\n\\(?:section|chapter)\*?\{|\Z)",
+        def limit_metadata_abstract(abstract_text: str) -> Optional[str]:
+            abstract_text = abstract_text.strip()
+            if not abstract_text or abstract_text.lower() == "abstract":
+                return None
+            return abstract_text[:500] if len(abstract_text) > 500 else abstract_text
+
+        begin_match = re.search(
             r"\\begin\{abstract\}\s*(.*?)\s*\\end\{abstract\}",
-        ]
-        
-        for pattern in abstract_patterns:
-            match = re.search(pattern, paper_content, re.IGNORECASE | re.DOTALL)
-            if match:
-                abstract = match.group(1).strip()
-                # Limit to first 500 chars for metadata
-                return abstract[:500] if len(abstract) > 500 else abstract
-        
-        # Fallback: first paragraph after title
+            paper_content,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if begin_match:
+            abstract = limit_metadata_abstract(begin_match.group(1))
+            if abstract:
+                return abstract
+
+        heading_pattern = re.compile(
+            r"(?im)^\s*(?:#{1,6}\s*)?(?:\*\*)?Abstract(?:\*\*)?\s*$|"
+            r"^\s*\\(?:section|chapter)\*?\{Abstract\}\s*$"
+        )
+        next_section_pattern = re.compile(
+            r"(?im)^\s*(?:#{1,6}\s*)?(?:\*\*)?"
+            r"(?:[IVXLCDM]+\.|\d+\.)?\s*"
+            r"(?:Introduction|Background|Preliminaries|Body|Conclusion|References|Bibliography|Appendix)\b"
+            r"|^\s*\\(?:section|chapter)\*?\{(?!Abstract\})[^}]+\}\s*$"
+        )
+
+        for match in heading_pattern.finditer(paper_content):
+            section_start = match.end()
+            next_match = next_section_pattern.search(paper_content, section_start)
+            section_end = next_match.start() if next_match else len(paper_content)
+            abstract = limit_metadata_abstract(paper_content[section_start:section_end])
+            if abstract:
+                return abstract
+
+        # Fallback: first content line after title/header metadata, skipping section headings.
         lines = paper_content.split('\n')
-        for i, line in enumerate(lines):
-            if line.strip() and not line.startswith('#'):
-                # Found first non-heading line
-                return lines[i].strip()[:500]
+        heading_line_pattern = re.compile(
+            r"^\s*(?:#{1,6}\s*)?(?:\*\*)?"
+            r"(?:Abstract|Introduction|Conclusion|References|Bibliography|Appendix)"
+            r"(?:\*\*)?\s*$",
+            re.IGNORECASE,
+        )
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#') and not heading_line_pattern.match(stripped):
+                return stripped[:500]
         
         return "[Abstract not found]"
     
@@ -7347,6 +7445,10 @@ class AutonomousCoordinator:
         
         if self._stop_event.is_set():
             return None
+
+        if not candidate_titles.strip():
+            logger.warning("Tier 3 title exploration produced no validated candidates; retrying title selection later")
+            return None
         
         # Use the existing title selector with special context + candidate titles
         title = await self._title_selector.select_title(
@@ -7542,6 +7644,10 @@ class AutonomousCoordinator:
         )
         
         if self._stop_event.is_set():
+            return False
+
+        if not candidate_titles.strip():
+            logger.warning("Volume chapter title exploration produced no validated candidates; retrying chapter later")
             return False
         
         # Select chapter title from candidates

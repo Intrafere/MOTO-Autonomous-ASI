@@ -12,6 +12,10 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 test('recommended profiles do not carry a standalone critique role', () => {
   for (const profileKey of RECOMMENDED_PROFILE_KEYS) {
     expect(RECOMMENDED_PROFILES[profileKey]).toBeTruthy();
@@ -269,6 +273,93 @@ test('persisted autonomous settings store only public non-secret configuration',
   expect(rawStoredSettings).not.toContain('modelProviders');
 });
 
+test('autonomous settings persistence recovers from an oversized stale stored value', () => {
+  const originalSetItem = localStorage.setItem.bind(localStorage);
+  const calls = [];
+  let failOnce = true;
+  const quotaError = new DOMException('quota exceeded', 'QuotaExceededError');
+
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation((key, value) => {
+    calls.push([key, value]);
+    if (key === 'autonomous_research_settings' && failOnce) {
+      failOnce = false;
+      throw quotaError;
+    }
+    return originalSetItem(key, value);
+  });
+
+  persistAutonomousSettings({
+    numSubmitters: 1,
+    submitterConfigs: [
+      {
+        submitterId: 1,
+        provider: 'openrouter',
+        modelId: 'public-model',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+      },
+    ],
+    localConfig: {
+      validator_provider: 'openrouter',
+      validator_model: 'validator-model',
+      validator_context_window: 4096,
+      validator_max_tokens: 512,
+    },
+    modelProviders: {
+      'public-model': {
+        endpoints: Array.from({ length: 100 }, (_, index) => ({ provider_name: `provider-${index}` })),
+      },
+    },
+  });
+
+  expect(calls.filter(([key]) => key === 'autonomous_research_settings')).toHaveLength(2);
+  const rawStoredSettings = localStorage.getItem('autonomous_research_settings');
+  expect(rawStoredSettings).toContain('public-model');
+  expect(rawStoredSettings).not.toContain('modelProviders');
+  expect(rawStoredSettings).not.toContain('provider-99');
+});
+
+test('autonomous settings persistence frees rebuildable activity caches on quota errors', () => {
+  const originalSetItem = localStorage.setItem.bind(localStorage);
+  const quotaError = new DOMException('quota exceeded', 'QuotaExceededError');
+  const calls = [];
+
+  originalSetItem('compiler_events_log', JSON.stringify(Array.from({ length: 100 }, (_, index) => ({ index }))));
+  originalSetItem('autonomous_live_activity_events', JSON.stringify(Array.from({ length: 100 }, (_, index) => ({ index }))));
+
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation((key, value) => {
+    calls.push([key, value]);
+    if (key === 'autonomous_research_settings' && localStorage.getItem('compiler_events_log')) {
+      throw quotaError;
+    }
+    return originalSetItem(key, value);
+  });
+
+  persistAutonomousSettings({
+    numSubmitters: 1,
+    submitterConfigs: [
+      {
+        submitterId: 1,
+        provider: 'openrouter',
+        modelId: 'public-model',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+      },
+    ],
+    localConfig: {
+      validator_provider: 'openrouter',
+      validator_model: 'validator-model',
+      validator_context_window: 4096,
+      validator_max_tokens: 512,
+    },
+  });
+
+  expect(calls.filter(([key]) => key === 'autonomous_research_settings')).toHaveLength(2);
+  expect(localStorage.getItem('compiler_events_log')).toBeNull();
+  expect(localStorage.getItem('autonomous_live_activity_events')).toBeNull();
+  expect(localStorage.getItem('autonomous_research_settings')).toContain('public-model');
+});
+
 test('partial autonomous settings saves preserve existing output and creativity toggles', () => {
   persistAutonomousSettings({
     allowMathematicalProofs: false,
@@ -299,6 +390,16 @@ test('OAuth startup defaults use known public model metadata from availability o
   ]);
   expect(codex.modelId).toBe('gpt-5.4');
   expect(codex.config.validator_model).toBe('gpt-5.4');
+
+  const codexSpark = applyCloudAccessStartupDefaults(OPENAI_CODEX_STARTUP_CHOICE, []);
+  expect(codexSpark.modelId).toBe('gpt-5.3-codex-spark-high');
+  expect(codexSpark.config.validator_context_window).toBe(128000);
+  expect(codexSpark.config.validator_max_tokens).toBe(32768);
+  expect(codexSpark.config.validator_openrouter_reasoning_effort).toBe('high');
+  expect(codexSpark.config.assistant_openrouter_reasoning_effort).toBe('high');
+  expect(codexSpark.config.writer_openrouter_reasoning_effort).toBe('high');
+  expect(codexSpark.config.high_param_openrouter_reasoning_effort).toBe('high');
+  expect(codexSpark.config.submitter_configs[0].openrouter_reasoning_effort).toBe('high');
 
   const xai = applyCloudAccessStartupDefaults(XAI_GROK_STARTUP_CHOICE, [
     { id: 'grok-4', accountScopedField: 'must-not-persist' },

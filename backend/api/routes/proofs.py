@@ -146,7 +146,7 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
             return "Lean 4 response: proof verified."
         error = _compact(
             data.get("error_summary") or data.get("error_output") or data.get("reason"),
-            limit=960,
+            limit=1800,
         )
         return f"Lean 4 response: {error} - proof not verified." if error else ""
 
@@ -875,7 +875,7 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
                 "total_candidates": 0,
                 "message": (
                     "Proof verification encountered an error: "
-                    f"{ProofVerificationStage._summarize_error(str(exc), limit=960)}"
+                    f"{ProofVerificationStage._summarize_error(str(exc), limit=1800)}"
                 ),
             },
         )

@@ -108,6 +108,22 @@ class AssistantMemoryInjectionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(snapshot.user_prompt, "PROVE TRUE IN A DIRECT WAY.")
 
+    async def test_aggregator_snapshot_extracts_shared_training_as_accepted_memory(self) -> None:
+        snapshot = APIClientManager._build_assistant_target_snapshot(
+            "aggregator_submitter_1",
+            "agg_sub1_001",
+            (
+                "USER PROMPT:\nProve useful facts about True.\n\n"
+                "[SHARED TRAINING]\nSubmission 1: a verified supporting idea.\nSubmission 2: another idea.\n\n"
+                "[REJECTION LOG]\nSubmitter-private feedback that should not alter the shared target.\n\n"
+                "YOUR TASK:\nGenerate a brainstorm submission."
+            ),
+        )
+
+        self.assertIn("Submission 1: a verified supporting idea.", snapshot.accepted_memory_summary)
+        self.assertIn("Submission 2: another idea.", snapshot.accepted_memory_summary)
+        self.assertNotIn("Submitter-private feedback", snapshot.accepted_memory_summary)
+
     async def test_latest_pack_fallback_does_not_cross_unrelated_phase_families(self) -> None:
         pack = AssistantProofPack(
             workflow_mode="autonomous",

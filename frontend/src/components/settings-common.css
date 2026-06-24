@@ -427,6 +427,13 @@
   color: var(--accent-red);
 }
 
+.settings-error {
+  color: var(--accent-red);
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-top: 0.35rem;
+}
+
 /* Success text inline */
 .status-success-text {
   color: var(--accent-green);

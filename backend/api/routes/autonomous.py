@@ -928,6 +928,7 @@ async def clear_autonomous_research(confirm: bool = False):
                 broadcast=True,
                 reason="autonomous_cleared",
             )
+            await assistant_proof_search_coordinator.clear_cooldown_state()
             logger.info("Autonomous research data clear completed successfully")
             
             return {
@@ -2249,6 +2250,7 @@ async def clear_tier3_data(confirm: bool = False):
             broadcast=True,
             reason="tier3_cleared",
         )
+        await assistant_proof_search_coordinator.clear_cooldown_state()
         
         # Also clear any final answer critiques
         from backend.shared.critique_memory import clear_critiques

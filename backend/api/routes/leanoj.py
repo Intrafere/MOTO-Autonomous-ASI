@@ -315,6 +315,7 @@ async def clear_leanoj(confirm: bool = False):
             broadcast=True,
             reason="leanoj_cleared",
         )
+        await assistant_proof_search_coordinator.clear_cooldown_state()
         return {
             "success": True,
             "message": "Proof Solver progress cleared",

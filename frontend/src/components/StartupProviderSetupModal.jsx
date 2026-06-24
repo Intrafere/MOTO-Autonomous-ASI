@@ -44,7 +44,7 @@ export default function StartupProviderSetupModal({
           {lmStudioEnabled ? (
             <>
               MOTO needs <strong>OpenRouter or a running LM Studio server</strong> before you start.
-              oAuth providers are supplementary model providers because RAG embeddings still need OpenRouter or LM Studio.
+              Cloud role providers are supplementary because RAG embeddings still need OpenRouter or LM Studio.
             </>
           ) : (
             <>
@@ -122,11 +122,11 @@ export default function StartupProviderSetupModal({
                 opacity: 0.82,
               }}
             >
-              <h3 style={{ marginTop: 0, color: '#ff9f4a' }}>oAuth Add-On</h3>
+              <h3 style={{ marginTop: 0, color: '#ff9f4a' }}>Cloud Provider Add-On</h3>
               <ol style={{ margin: '0 0 1rem 1.1rem', padding: 0, color: '#d7d7e8', lineHeight: '1.55' }}>
-                <li>Use a supported subscription login such as OpenAI Codex or xAI Grok/SuperGrok for chat/model roles.</li>
+                <li>Use a supported subscription provider such as OpenAI Codex, xAI Grok/SuperGrok, or Sakana Fugu for chat/model roles.</li>
                 <li>Set up OpenRouter or LM Studio first so RAG embeddings are available.</li>
-                <li>After startup, add OAuth from OpenRouter/OAuth and select it in role settings.</li>
+                <li>After startup, add cloud provider access from OpenRouter & Cloud Subscriptions and select it in role settings.</li>
               </ol>
               <button
                 type="button"

@@ -77,7 +77,7 @@ async def _openrouter_oauth_status() -> dict[str, Any]:
     openrouter_configured = bool(rag_config.openrouter_api_key)
     oauth_configured = any(
         bool((providers.get(provider_id) or {}).get("configured"))
-        for provider_id in ("openai_codex_oauth", "xai_grok_oauth")
+        for provider_id in ("openai_codex_oauth", "xai_grok_oauth", "sakana_fugu")
     )
     active = openrouter_configured or oauth_configured
     return {

@@ -11,6 +11,11 @@ export const OPENROUTER_REASONING_EFFORT_OPTIONS = [
   { value: 'minimal', label: 'minimal' },
   { value: 'none', label: 'none / disabled' },
 ];
+export const SAKANA_FUGU_REASONING_EFFORT_OPTIONS = [
+  { value: 'auto', label: 'Auto (xhigh)' },
+  { value: 'xhigh', label: 'xhigh (maximum)' },
+  { value: 'high', label: 'high' },
+];
 const AUTO_ENDPOINT_OUTLIER_RATIO = 0.75;
 const AUTO_MIN_CAPABLE_OUTPUT_TOKENS = 32768;
 const KNOWN_WEAK_AUTO_PROVIDERS = new Set([
@@ -311,6 +316,10 @@ export function computeXAIGrokAutoSettings(model) {
       !warning.includes('xAI Grok model metadata did not expose')
     )),
   };
+}
+
+export function computeSakanaFuguAutoSettings(model) {
+  return computeCloudAccessAutoSettings(model, 'Sakana Fugu');
 }
 
 export function hasEndpointMetadata(providerData) {

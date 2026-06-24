@@ -13,6 +13,7 @@ import {
   isPDFDownloadAvailable,
   sanitizeFilename,
 } from '../../utils/downloadHelpers';
+import { readBooleanStorage } from '../../utils/safeStorage';
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import { autonomousAPI } from '../../services/api';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
@@ -37,8 +38,7 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
 
   // Check banner shimmer setting from localStorage
   const getBannerShimmerEnabled = () => {
-    const saved = localStorage.getItem('banner_shimmer_enabled');
-    return saved !== null ? JSON.parse(saved) : true;
+    return readBooleanStorage('banner_shimmer_enabled', true);
   };
 
   // Handle regenerate final answer

@@ -32,7 +32,7 @@ _DEFAULT_MANIFEST = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build5-v49",
+    "api_contract_version": "build5-v53",
 }
 
 _DEFAULT_PRESERVED_ROOTS = {
@@ -399,6 +399,20 @@ def fetch_branch_head_fallback(local_manifest: BuildManifest, timeout_seconds: i
     )
 
 
+def _format_update_check_error(exc: BaseException) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        detail = f"HTTP {exc.code} {exc.reason}".strip()
+        if exc.code >= 500 or exc.code == 429:
+            return f"GitHub update metadata is temporarily unavailable ({detail}). Startup will continue with the installed build."
+        return f"GitHub update metadata request failed ({detail}). Startup will continue with the installed build."
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None) or exc
+        return f"Could not reach GitHub update metadata ({reason}). Startup will continue with the installed build."
+    if isinstance(exc, TimeoutError):
+        return "Timed out while checking GitHub update metadata. Startup will continue with the installed build."
+    return f"Could not check GitHub update metadata ({exc}). Startup will continue with the installed build."
+
+
 def cleanup_path(path: Path) -> None:
     if not path.exists():
         return
@@ -697,12 +711,13 @@ def check_for_updates(exclude_instance_id: str | None = None) -> UpdateCheckResu
                     None,
                     install_state,
                     error=(
-                        f"{exc}. The fallback branch-head lookup also failed: {fallback_exc}"
+                        f"{_format_update_check_error(exc)} The fallback branch-head lookup also failed: "
+                        f"{_format_update_check_error(fallback_exc)}"
                     ),
                 )
-        return UpdateCheckResult(local_manifest, None, install_state, error=str(exc))
+        return UpdateCheckResult(local_manifest, None, install_state, error=_format_update_check_error(exc))
     except (RuntimeError, urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-        return UpdateCheckResult(local_manifest, None, install_state, error=str(exc))
+        return UpdateCheckResult(local_manifest, None, install_state, error=_format_update_check_error(exc))
 
 
 def show_yes_no_dialog(title: str, message: str) -> bool:

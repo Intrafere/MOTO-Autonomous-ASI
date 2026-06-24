@@ -16,6 +16,20 @@ const connectivityStatus = {
 };
 
 describe('ConnectivityPanel', () => {
+  test('shows startup state before connectivity status hydrates', () => {
+    render(
+      <ConnectivityPanel
+        appMode="autonomous"
+        developerModeEnabled={false}
+        connectivityStatus={null}
+        capabilities={{ lmStudioEnabled: true }}
+        onModeChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getAllByText('starting').length).toBeGreaterThanOrEqual(3);
+  });
+
   test('uses workflow-memory language for Session History Memory tooltip', () => {
     render(
       <ConnectivityPanel

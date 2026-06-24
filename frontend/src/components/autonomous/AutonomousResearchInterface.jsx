@@ -15,6 +15,11 @@ const AUTONOMOUS_PROMPT_STORAGE_KEY = 'autonomous_research_prompt';
 
 const HIDDEN_LIVE_ACTIVITY_EVENTS = new Set([
   'assistant_proof_pack_refresh_started',
+  'assistant_proof_pack_warning',
+  'assistant_proof_pack_stopped',
+  'assistant_proof_memory_unavailable',
+  'assistant_proof_memory_cooldown',
+  'assistant_proof_memory_shutdown',
 ]);
 
 const AutonomousResearchInterface = ({
@@ -255,7 +260,10 @@ const AutonomousResearchInterface = ({
     if (showClearConfirm) {
       setIsClearing(true);
       try {
-        await onClear();
+        const cleared = await onClear();
+        if (!cleared) {
+          return;
+        }
         removePromptDraft(AUTONOMOUS_PROMPT_STORAGE_KEY);
         setResearchPrompt('');
         setShowClearConfirm(false);

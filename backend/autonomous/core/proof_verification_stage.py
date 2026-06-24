@@ -1140,7 +1140,7 @@ class ProofVerificationStage:
                         "message": (
                             "Proof verification hit a transient provider error after retries; "
                             "the proof checkpoint was preserved for retry: "
-                            f"{self._summarize_error(str(exc), limit=960)}"
+                            f"{self._summarize_error(str(exc), limit=1800)}"
                         ),
                     },
                 )
@@ -1169,7 +1169,7 @@ class ProofVerificationStage:
                     "total_candidates": result.total_candidates,
                     "message": (
                         "Proof verification encountered an error: "
-                        f"{self._summarize_error(str(exc), limit=960)}"
+                        f"{self._summarize_error(str(exc), limit=1800)}"
                     ),
                 },
             )

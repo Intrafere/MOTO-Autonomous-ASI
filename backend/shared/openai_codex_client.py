@@ -42,6 +42,30 @@ class OpenAICodexRequestError(OpenAICodexError):
     """Raised when Codex rejects a completion request after authentication."""
 
 
+class OAuthUsageLimitError(OpenAICodexError):
+    """Raised when an OAuth-backed provider reports a timed usage limit."""
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        provider_label: str,
+        message: str,
+        plan_type: str = "",
+        resets_at: Optional[int] = None,
+        resets_in_seconds: Optional[int] = None,
+    ) -> None:
+        self.provider = provider
+        self.provider_label = provider_label
+        self.plan_type = plan_type
+        self.resets_at = resets_at
+        self.resets_in_seconds = resets_in_seconds
+        detail = message or "The usage limit has been reached."
+        if resets_in_seconds is not None:
+            detail = f"{detail} Resets in {resets_in_seconds} seconds."
+        super().__init__(detail)
+
+
 class OpenAICodexClient:
     """Client for OpenAI Codex OAuth and the ChatGPT Codex Responses backend."""
 
@@ -73,6 +97,19 @@ class OpenAICodexClient:
         "upstream provider timeout",
         "you can retry",
     )
+    CODEX_SPARK_MODEL_ID = "gpt-5.3-codex-spark"
+    CODEX_SPARK_HIGH_MODEL_ID = "gpt-5.3-codex-spark-high"
+    PUBLIC_MODEL_CATALOG = (
+        {
+            "slug": CODEX_SPARK_HIGH_MODEL_ID,
+            "title": "GPT-5.3 Codex Spark (high)",
+            "canonical_model": CODEX_SPARK_MODEL_ID,
+            "reasoning_effort": "high",
+            "context_length": 128000,
+            "input_context_window": 128000,
+            "max_output_tokens": 32768,
+        },
+    )
     KNOWN_MODEL_LIMITS = {
         # OpenAI documents GPT-5.5 in Codex as a 400K-window product. Public
         # Codex runtime metadata has exposed this as 272K input + 128K output
@@ -83,6 +120,13 @@ class OpenAICodexClient:
             "effective_input_context_window": 258400,
             "max_output_tokens": 128000,
             "effective_context_window_percent": 95,
+        },
+        CODEX_SPARK_HIGH_MODEL_ID: {
+            "context_length": 128000,
+            "input_context_window": 128000,
+            "max_output_tokens": 32768,
+            "canonical_model": CODEX_SPARK_MODEL_ID,
+            "reasoning_effort": "high",
         },
     }
 
@@ -393,6 +437,14 @@ class OpenAICodexClient:
                 "effective_context_window_percent": effective_percent,
             },
         }
+        canonical_model = model.get("canonical_model") or known.get("canonical_model")
+        if canonical_model:
+            normalized["canonical_model"] = str(canonical_model)
+            normalized["provider_metadata"]["canonical_model"] = str(canonical_model)
+        model_reasoning_effort = model.get("reasoning_effort") or known.get("reasoning_effort")
+        if model_reasoning_effort:
+            normalized["reasoning_effort"] = str(model_reasoning_effort)
+            normalized["provider_metadata"]["reasoning_effort"] = str(model_reasoning_effort)
         if context_length:
             normalized["context_length"] = context_length
         if max_output_tokens:
@@ -449,6 +501,7 @@ class OpenAICodexClient:
             )
         data = response.json()
         models = []
+        seen_model_ids = set()
         for model in data.get("models", []):
             if not isinstance(model, dict):
                 continue
@@ -456,8 +509,21 @@ class OpenAICodexClient:
                 continue
             normalized = self._normalize_model_metadata(model)
             if normalized:
+                seen_model_ids.add(normalized["id"])
                 models.append(normalized)
+        for model in self.PUBLIC_MODEL_CATALOG:
+            normalized = self._normalize_model_metadata(model)
+            if normalized and normalized["id"] not in seen_model_ids:
+                models.append(normalized)
+                seen_model_ids.add(normalized["id"])
         return models
+
+    @classmethod
+    def _resolve_model_request(cls, model: str, reasoning_effort: Optional[str]) -> tuple[str, Optional[str]]:
+        """Map user-facing Codex aliases onto the backend model id/request knobs."""
+        if model == cls.CODEX_SPARK_HIGH_MODEL_ID:
+            return cls.CODEX_SPARK_MODEL_ID, "high"
+        return model, reasoning_effort
 
     @staticmethod
     def _split_instructions(messages: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
@@ -537,6 +603,77 @@ class OpenAICodexClient:
             or cls._is_transient_completion_text(body)
         )
 
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> Optional[int]:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @classmethod
+    def _extract_usage_limit_payload(cls, value: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(value, dict):
+            return None
+        error_type = str(value.get("type") or value.get("code") or "").strip().lower()
+        if error_type == "usage_limit_reached":
+            return value
+        for key in ("error", "response"):
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                found = cls._extract_usage_limit_payload(nested)
+                if found is not None:
+                    return found
+        response = value.get("response")
+        if isinstance(response, dict):
+            nested_error = response.get("error")
+            if isinstance(nested_error, dict):
+                return cls._extract_usage_limit_payload(nested_error)
+        return None
+
+    @classmethod
+    def _usage_limit_error_from_payload(cls, value: Any) -> Optional[OAuthUsageLimitError]:
+        payload = cls._extract_usage_limit_payload(value)
+        if payload is None:
+            return None
+        resets_at = cls._coerce_positive_int(payload.get("resets_at"))
+        resets_in_seconds = cls._coerce_positive_int(payload.get("resets_in_seconds"))
+        if resets_at is None and resets_in_seconds is not None:
+            resets_at = int(time.time()) + resets_in_seconds
+        elif resets_in_seconds is None and resets_at is not None:
+            resets_in_seconds = max(1, resets_at - int(time.time()))
+        message = str(payload.get("message") or "The usage limit has been reached.").strip()
+        return OAuthUsageLimitError(
+            provider="openai_codex_oauth",
+            provider_label="OpenAI Codex",
+            message=message,
+            plan_type=str(payload.get("plan_type") or "").strip(),
+            resets_at=resets_at,
+            resets_in_seconds=resets_in_seconds,
+        )
+
+    @classmethod
+    def _usage_limit_error_from_text(cls, text: str) -> Optional[OAuthUsageLimitError]:
+        raw = str(text or "")
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if 0 <= start < end:
+            try:
+                parsed = json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                parsed = None
+            usage_error = cls._usage_limit_error_from_payload(parsed)
+            if usage_error is not None:
+                return usage_error
+        lowered = raw.lower()
+        if "usage_limit_reached" in lowered or "usage limit has been reached" in lowered:
+            return OAuthUsageLimitError(
+                provider="openai_codex_oauth",
+                provider_label="OpenAI Codex",
+                message="The usage limit has been reached.",
+            )
+        return None
+
     @classmethod
     def _max_attempts(cls) -> int:
         return cls.MAX_RETRIES + 1
@@ -589,6 +726,9 @@ class OpenAICodexClient:
         try:
             data = json.loads(body)
             if isinstance(data, dict):
+                usage_error = cls._usage_limit_error_from_payload(data)
+                if usage_error is not None:
+                    raise usage_error
                 return data
         except json.JSONDecodeError:
             logger.debug("OpenAI Codex response body is not plain JSON; parsing stream events")
@@ -611,6 +751,9 @@ class OpenAICodexClient:
                 response = event.get("response")
                 response_error = response.get("error") if isinstance(response, dict) else None
                 error = event.get("error") or response_error
+                usage_error = cls._usage_limit_error_from_payload(error or event)
+                if usage_error is not None:
+                    raise usage_error
                 raise OpenAICodexRequestError(
                     f"OpenAI Codex completion failed: {sanitize_provider_error_text(json.dumps(error or event))}"
                 )
@@ -718,6 +861,8 @@ class OpenAICodexClient:
         tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Generate a completion and return a Chat Completions-compatible shape."""
+        requested_model = model
+        model, reasoning_effort = self._resolve_model_request(model, reasoning_effort)
         tokens = await self.get_valid_tokens()
         instructions, input_items = self._split_instructions(messages)
         payload: Dict[str, Any] = {
@@ -750,6 +895,9 @@ class OpenAICodexClient:
                 headers=self._headers(tokens, accept_stream=True),
             )
             if response.status_code >= 400:
+                usage_error = self._usage_limit_error_from_text(response.text)
+                if usage_error is not None:
+                    raise usage_error
                 message = f"OpenAI Codex completion failed: {sanitize_provider_error_text(response.text)}"
                 if response.status_code in {401, 403}:
                     if not auth_retry_used:
@@ -787,6 +935,8 @@ class OpenAICodexClient:
                         f"while reading streamed response: {exc}"
                     ) from exc
                 raise
+            except OAuthUsageLimitError:
+                raise
         content, tool_calls = self._extract_output(data)
         message: Dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
@@ -802,7 +952,7 @@ class OpenAICodexClient:
         return {
             "id": data.get("id") or "",
             "object": "chat.completion",
-            "model": model,
+            "model": requested_model,
             "choices": [{"index": 0, "message": message, "finish_reason": data.get("status") or "stop"}],
             "usage": {
                 "prompt_tokens": prompt_tokens,

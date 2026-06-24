@@ -4,6 +4,7 @@ import {
   computeCodexAutoSettings,
   computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeSakanaFuguAutoSettings,
   computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -16,12 +17,14 @@ import {
   hasEndpointMetadata,
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
+  SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import {
   chooseCloudAccessProvider,
   getConfiguredCloudAccessProviders,
   isCloudAccessProvider,
   cloudAccessProviderLabel,
+  SAKANA_FUGU_PROVIDER,
   XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
 import HelpTooltip from '../HelpTooltip';
@@ -112,15 +115,15 @@ function AggregatorModelSelector({
               }}
               disabled={configuredOAuthProviders.length === 0}
               className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
-              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in OpenRouter/OAuth first' : 'Use an OAuth subscription provider'}
+              title={configuredOAuthProviders.length === 0 ? 'Set up a cloud provider login or API key first' : 'Use a configured cloud provider'}
             >
-              oAuth
+              Cloud
             </button>
             {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
               <select
                 value={provider}
                 onChange={(event) => onProviderChange(event.target.value)}
-                title="Select OAuth provider"
+                title="Select cloud provider"
                 className="input-dark"
                 style={{ width: 'auto', minWidth: '150px' }}
               >
@@ -202,6 +205,23 @@ function AggregatorModelSelector({
         </div>
       )}
 
+      {effectiveProvider === SAKANA_FUGU_PROVIDER && modelId && (
+        <div className="settings-row">
+          <label>Reasoning Effort</label>
+          <select
+            value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
+            onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
+          >
+            {SAKANA_FUGU_REASONING_EFFORT_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <small className="settings-hint">
+            Sakana Fugu supports high and xhigh reasoning effort only; auto maps to xhigh.
+          </small>
+        </div>
+      )}
+
       {/* LM Studio Fallback (only for cloud providers) */}
       {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
         <div className="settings-row">
@@ -237,6 +257,7 @@ export default function AggregatorSettings({
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [xaiGrokModels, setXaiGrokModels] = useState([]);
+  const [sakanaFuguModels, setSakanaFuguModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({}); // { modelId: { providers: [], endpoints: [] } }
   const [loading, setLoading] = useState(true);
   const [saveMessage, setSaveMessage] = useState('');
@@ -263,8 +284,10 @@ export default function AggregatorSettings({
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
+  const [hasSakanaFuguKey, setHasSakanaFuguKey] = useState(false);
   const [openAICodexModelError, setOpenAICodexModelError] = useState('');
   const [xaiGrokModelError, setXaiGrokModelError] = useState('');
+  const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -278,10 +301,12 @@ export default function AggregatorSettings({
   const genericMode = Boolean(capabilities?.genericMode);
   const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
   const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
+  const sakanaFuguAvailable = !genericMode && capabilities?.sakanaFuguAvailable !== false;
   const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
   const oauthStatusByProvider = {
     openai_codex_oauth: { configured: hasOpenAICodexLogin },
     [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+    [SAKANA_FUGU_PROVIDER]: { configured: hasSakanaFuguKey },
   };
   const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
 
@@ -515,6 +540,26 @@ export default function AggregatorSettings({
       setXaiGrokModels([]);
       setXaiGrokModelError('');
     }
+    if (sakanaFuguAvailable) {
+      try {
+        const sakanaStatus = await cloudAccessAPI.getSakanaFuguStatus();
+        const configured = Boolean(sakanaStatus.status?.configured);
+        setHasSakanaFuguKey(configured);
+        if (configured) {
+          fetchSakanaFuguModels();
+        } else {
+          setSakanaFuguModelError('');
+        }
+      } catch (err) {
+        console.error('Failed to check Sakana Fugu API key status:', err);
+        setHasSakanaFuguKey(false);
+        setSakanaFuguModelError(`Sakana Fugu status could not be checked: ${err.message || 'unknown error'}.`);
+      }
+    } else {
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModels([]);
+      setSakanaFuguModelError('');
+    }
   };
 
   const fetchOpenRouterModels = async (freeFilter = freeOnly) => {
@@ -574,6 +619,30 @@ export default function AggregatorSettings({
       setXaiGrokModels([]);
       setHasXAIGrokLogin(false);
       setXaiGrokModelError(`xAI Grok OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
+    }
+  };
+
+  const fetchSakanaFuguModels = async () => {
+    if (!sakanaFuguAvailable) {
+      setSakanaFuguModels([]);
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModelError('');
+      return;
+    }
+    try {
+      const result = await cloudAccessAPI.getSakanaFuguModels();
+      const models = result.models || [];
+      setSakanaFuguModels(models);
+      setHasSakanaFuguKey(models.length > 0);
+      setSakanaFuguModelError(models.length > 0
+        ? ''
+        : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
+      );
+    } catch (err) {
+      console.error('Failed to fetch Sakana Fugu models:', err);
+      setSakanaFuguModels([]);
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModelError(`Sakana Fugu API key is saved, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
 
@@ -651,6 +720,7 @@ export default function AggregatorSettings({
     const oauthModelsByProvider = {
       openai_codex_oauth: openAICodexModels,
       [XAI_GROK_PROVIDER]: xaiGrokModels,
+      [SAKANA_FUGU_PROVIDER]: sakanaFuguModels,
     };
     const model = (oauthModelsByProvider[provider] || []).find((item) => item.id === modelId);
     if (!model) {
@@ -659,7 +729,9 @@ export default function AggregatorSettings({
     }
     const autoSettings = provider === XAI_GROK_PROVIDER
       ? computeXAIGrokAutoSettings(model)
-      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+      : (provider === SAKANA_FUGU_PROVIDER
+        ? computeSakanaFuguAutoSettings(model)
+        : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider)));
     if (autoSettings.warnings.length > 0) {
       console.warn('[AggregatorOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
     }
@@ -1206,6 +1278,7 @@ export default function AggregatorSettings({
                     oauthModelsByProvider={{
                       openai_codex_oauth: openAICodexModels,
                       [XAI_GROK_PROVIDER]: xaiGrokModels,
+                      [SAKANA_FUGU_PROVIDER]: sakanaFuguModels,
                     }}
                     configuredOAuthProviders={configuredOAuthProviders}
                     oauthStatusByProvider={oauthStatusByProvider}
@@ -1304,6 +1377,7 @@ export default function AggregatorSettings({
                 oauthModelsByProvider={{
                   openai_codex_oauth: openAICodexModels,
                   [XAI_GROK_PROVIDER]: xaiGrokModels,
+                  [SAKANA_FUGU_PROVIDER]: sakanaFuguModels,
                 }}
                 configuredOAuthProviders={configuredOAuthProviders}
                 oauthStatusByProvider={oauthStatusByProvider}
@@ -1450,6 +1524,7 @@ export default function AggregatorSettings({
                   oauthModelsByProvider={{
                     openai_codex_oauth: openAICodexModels,
                     [XAI_GROK_PROVIDER]: xaiGrokModels,
+                    [SAKANA_FUGU_PROVIDER]: sakanaFuguModels,
                   }}
                   configuredOAuthProviders={configuredOAuthProviders}
                   oauthStatusByProvider={oauthStatusByProvider}

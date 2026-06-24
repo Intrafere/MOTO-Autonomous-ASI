@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from backend.shared.config import rag_config, system_config
 from backend.shared.openai_codex_client import OpenAICodexAuthError, openai_codex_client
 from backend.shared.provider_notification_store import list_provider_notifications
+from backend.shared.sakana_fugu_client import SakanaFuguAuthError, SakanaFuguError, sakana_fugu_client
 from backend.shared.xai_grok_client import XAIGrokAuthError, xai_grok_client
 
 router = APIRouter(prefix="/api/cloud-access", tags=["cloud-access"])
@@ -79,6 +80,10 @@ class XAIGrokOAuthExchangeRequest(BaseModel):
     redirect_uri: Optional[str] = None
 
 
+class SakanaFuguApiKeyRequest(BaseModel):
+    api_key: str
+
+
 def _ensure_desktop_codex_allowed() -> None:
     if system_config.generic_mode:
         raise HTTPException(
@@ -97,6 +102,17 @@ def _ensure_desktop_xai_grok_allowed() -> None:
             detail=(
                 "xAI Grok account login is currently desktop-only. "
                 "Hosted mode should use OpenRouter keys until callback/proxy login is designed."
+            ),
+        )
+
+
+def _ensure_desktop_sakana_fugu_allowed() -> None:
+    if system_config.generic_mode:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Sakana Fugu direct subscription API access is currently desktop-only. "
+                "Hosted mode should use OpenRouter keys until direct provider support is designed."
             ),
         )
 
@@ -349,6 +365,10 @@ async def get_cloud_access_status() -> Dict[str, Any]:
         "xAI Grok",
         xai_grok_client.status(),
     )
+    sakana_status = {"configured": False} if system_config.generic_mode else await _safe_oauth_status(
+        "Sakana Fugu",
+        sakana_fugu_client.status(),
+    )
     return {
         "success": True,
         "generic_mode": system_config.generic_mode,
@@ -364,6 +384,11 @@ async def get_cloud_access_status() -> Dict[str, Any]:
             },
             "xai_grok_oauth": {
                 **xai_grok_status,
+                "available": not system_config.generic_mode,
+                "desktop_only": True,
+            },
+            "sakana_fugu": {
+                **sakana_status,
                 "available": not system_config.generic_mode,
                 "desktop_only": True,
             },
@@ -555,3 +580,48 @@ async def clear_xai_grok_oauth() -> Dict[str, Any]:
     _ensure_desktop_xai_grok_allowed()
     await xai_grok_client.clear_tokens()
     return {"success": True, "message": "xAI Grok login cleared"}
+
+
+@router.get("/sakana-fugu/status")
+async def get_sakana_fugu_status() -> Dict[str, Any]:
+    """Return Sakana Fugu API-key status."""
+    if system_config.generic_mode:
+        return {"success": True, "status": {"configured": False, "available": False, "desktop_only": True}}
+    return {"success": True, "status": await sakana_fugu_client.status()}
+
+
+@router.post("/sakana-fugu/api-key")
+async def set_sakana_fugu_api_key(request: SakanaFuguApiKeyRequest) -> Dict[str, Any]:
+    """Store a Sakana Fugu API key in the desktop keyring."""
+    _ensure_desktop_sakana_fugu_allowed()
+    try:
+        key = request.api_key.strip()
+        models = await sakana_fugu_client.list_models(api_key=key)
+        sakana_fugu_client.set_api_key(key)
+    except (ValueError, SakanaFuguAuthError, SakanaFuguError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "provider": "sakana_fugu",
+        "status": await sakana_fugu_client.status(),
+        "models": models,
+    }
+
+
+@router.get("/sakana-fugu/models")
+async def get_sakana_fugu_models() -> Dict[str, Any]:
+    """Return available Sakana Fugu models for the configured API key."""
+    _ensure_desktop_sakana_fugu_allowed()
+    try:
+        models = await sakana_fugu_client.list_models()
+    except SakanaFuguAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, "models": models}
+
+
+@router.delete("/sakana-fugu")
+async def clear_sakana_fugu_api_key() -> Dict[str, Any]:
+    """Clear the stored Sakana Fugu API key."""
+    _ensure_desktop_sakana_fugu_allowed()
+    await sakana_fugu_client.clear_api_key()
+    return {"success": True, "message": "Sakana Fugu API key cleared"}

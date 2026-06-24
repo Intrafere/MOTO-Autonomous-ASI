@@ -982,6 +982,7 @@ async def clear_paper(confirm: bool = False):
                 broadcast=True,
                 reason="compiler_cleared",
             )
+            await assistant_proof_search_coordinator.clear_cooldown_state()
             await clear_manual_compiler_prompt()
         
         # Also clear any paper critiques

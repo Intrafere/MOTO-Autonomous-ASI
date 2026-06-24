@@ -86,7 +86,7 @@ export default function HighlightedModelsSidebar() {
                 <div className="model-item-name">ChatGPT 5.5</div>
                 <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
               </div>
-              <div className="model-item-badge">Powerful and affordable oAuth</div>
+              <div className="model-item-badge">Powerful and affordable OAuth</div>
             </div>
 
             <div className="model-item model-item--ranked model-item--bronze model-item--oa">
@@ -95,7 +95,7 @@ export default function HighlightedModelsSidebar() {
                 <div className="model-item-name">Grok 4.3</div>
                 <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
               </div>
-              <div className="model-item-badge">Powerful and affordable oAuth</div>
+              <div className="model-item-badge">Powerful and affordable OAuth</div>
             </div>
           </div>
 
@@ -161,6 +161,13 @@ export default function HighlightedModelsSidebar() {
             <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
             <div className="model-item-name">ChatGPT</div>
             <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item model-item--oa">
+            <OauthTag stacked />
+            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+            <div className="model-item-name">Sakana Fugu</div>
+            <div className="model-item-badge">Highly knowledgeable model fusion</div>
           </div>
 
           <div className="model-item">

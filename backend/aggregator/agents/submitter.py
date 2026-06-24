@@ -12,7 +12,7 @@ import uuid
 from backend.shared.config import rag_config, system_config
 from backend.shared.models import Submission, SubmitterState
 from backend.shared.lm_studio_client import lm_studio_client
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import OAuthProviderCooldownError, api_client_manager
 from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
@@ -190,6 +190,16 @@ class SubmitterAgent:
                 # All free models exhausted after retries - wait briefly and retry
                 logger.warning(f"Submitter {self.submitter_id}: all free models exhausted: {e}")
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+            except OAuthProviderCooldownError as e:
+                logger.warning(
+                    "Submitter %s paused for OAuth provider cooldown: %s",
+                    self.submitter_id,
+                    e,
+                )
+                await api_client_manager.wait_for_oauth_provider_cooldown(
+                    e,
+                    role_id=self.role_id,
+                )
             except ContextAllocationError as e:
                 logger.error("Submitter %s context overflow: %s", self.submitter_id, e)
                 if self.coordinator and hasattr(self.coordinator, "_handle_context_overflow"):
@@ -384,6 +394,8 @@ class SubmitterAgent:
                         return None  # Return None instead of crashing
                         
                 except FreeModelExhaustedError:
+                    raise
+                except OAuthProviderCooldownError:
                     raise
                 except RuntimeError as e:
                     if "credits exhausted" in str(e).lower():

@@ -10,6 +10,7 @@ import {
   computeCodexAutoSettings,
   computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeSakanaFuguAutoSettings,
   computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -22,12 +23,14 @@ import {
   hasEndpointMetadata,
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
+  SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import {
   chooseCloudAccessProvider,
   getConfiguredCloudAccessProviders,
   isCloudAccessProvider,
   cloudAccessProviderLabel,
+  SAKANA_FUGU_PROVIDER,
   XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
 import {
@@ -44,6 +47,7 @@ import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import ProofStrengthBadge from '../ProofStrengthBadge';
 import RawSettingsEditor from '../RawSettingsEditor';
+import { readBooleanStorage } from '../../utils/safeStorage';
 import './AutonomousResearch.css';
 import '../settings-common.css';
 
@@ -80,10 +84,12 @@ const ModelSelector = ({
   openRouterModels,
   openAICodexModels,
   xaiGrokModels,
+  sakanaFuguModels,
   modelProviders,
   hasOpenRouterKey,
   hasOpenAICodexLogin,
   hasXAIGrokLogin,
+  hasSakanaFuguKey,
   isRunning,
   lmStudioEnabled,
 }) => {
@@ -91,12 +97,15 @@ const ModelSelector = ({
   const oauthStatusByProvider = {
     openai_codex_oauth: { configured: hasOpenAICodexLogin },
     [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+    [SAKANA_FUGU_PROVIDER]: { configured: hasSakanaFuguKey },
   };
   const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
   const currentModels = effectiveProvider === 'openrouter'
     ? openRouterModels
     : (isCloudAccessProvider(effectiveProvider)
-      ? (effectiveProvider === XAI_GROK_PROVIDER ? xaiGrokModels : openAICodexModels)
+      ? (effectiveProvider === XAI_GROK_PROVIDER
+        ? xaiGrokModels
+        : (effectiveProvider === SAKANA_FUGU_PROVIDER ? sakanaFuguModels : openAICodexModels))
       : lmStudioModels);
   const providers = modelId && effectiveProvider === 'openrouter'
     ? getProviderNames(modelProviders[modelId])
@@ -140,16 +149,16 @@ const ModelSelector = ({
               }}
               disabled={isRunning || configuredOAuthProviders.length === 0}
               style={configuredOAuthProviders.length === 0 ? { color: '#666' } : undefined}
-              title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in OpenRouter/OAuth first' : 'Use an OAuth subscription provider'}
+              title={configuredOAuthProviders.length === 0 ? 'Set up a cloud provider login or API key first' : 'Use a configured cloud provider'}
             >
-              oAuth
+              Cloud
             </button>
             {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
               <select
                 value={provider}
                 onChange={(event) => onProviderChange(event.target.value)}
                 disabled={isRunning}
-                title="Select OAuth provider"
+                title="Select cloud provider"
                 className="input-dark"
                 style={{ width: 'auto', minWidth: '150px' }}
               >
@@ -232,6 +241,24 @@ const ModelSelector = ({
         </div>
       )}
 
+      {effectiveProvider === SAKANA_FUGU_PROVIDER && modelId && (
+        <div className="settings-row">
+          <label>Reasoning Effort</label>
+          <select
+            value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
+            onChange={(e) => onOpenrouterReasoningEffortChange(e.target.value)}
+            disabled={isRunning}
+          >
+            {SAKANA_FUGU_REASONING_EFFORT_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <small className="settings-hint">
+            Sakana Fugu supports high and xhigh reasoning effort only; auto maps to xhigh.
+          </small>
+        </div>
+      )}
+
       {/* LM Studio Fallback (if cloud provider) */}
       {effectiveProvider !== 'lm_studio' && lmStudioEnabled && (
         <div className="settings-row">
@@ -269,10 +296,12 @@ const RoleConfig = ({
   openRouterModels,
   openAICodexModels,
   xaiGrokModels,
+  sakanaFuguModels,
   modelProviders,
   hasOpenRouterKey,
   hasOpenAICodexLogin,
   hasXAIGrokLogin,
+  hasSakanaFuguKey,
   lmStudioEnabled,
   developerModeEnabled = false,
   showProofStrengthBadge = false,
@@ -323,10 +352,12 @@ const RoleConfig = ({
         openRouterModels={openRouterModels}
         openAICodexModels={openAICodexModels}
         xaiGrokModels={xaiGrokModels}
+        sakanaFuguModels={sakanaFuguModels}
         modelProviders={modelProviders}
         hasOpenRouterKey={hasOpenRouterKey}
         hasOpenAICodexLogin={hasOpenAICodexLogin}
         hasXAIGrokLogin={hasXAIGrokLogin}
+        hasSakanaFuguKey={hasSakanaFuguKey}
         isRunning={isRunning || disabled}
         lmStudioEnabled={lmStudioEnabled}
       />
@@ -398,12 +429,15 @@ const AutonomousResearchSettings = ({
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [xaiGrokModels, setXaiGrokModels] = useState([]);
+  const [sakanaFuguModels, setSakanaFuguModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
+  const [hasSakanaFuguKey, setHasSakanaFuguKey] = useState(false);
   const [openAICodexModelError, setOpenAICodexModelError] = useState('');
   const [xaiGrokModelError, setXaiGrokModelError] = useState('');
+  const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -414,6 +448,7 @@ const AutonomousResearchSettings = ({
   // Profile management state
   const [userProfiles, setUserProfiles] = useState({});
   const [selectedProfile, setSelectedProfile] = useState('');
+  const [profileApplyError, setProfileApplyError] = useState('');
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
   const [editRawSettings, setEditRawSettings] = useState(false);
@@ -442,6 +477,7 @@ const AutonomousResearchSettings = ({
   const genericMode = Boolean(capabilities?.genericMode);
   const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
   const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
+  const sakanaFuguAvailable = !genericMode && capabilities?.sakanaFuguAvailable !== false;
   const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
   const showLean4Settings = Boolean(lmStudioEnabled && proofStatus?.lean4_path && !genericMode);
 
@@ -675,6 +711,26 @@ const AutonomousResearchSettings = ({
         setHasXAIGrokLogin(false);
         setXaiGrokModels([]);
         setXaiGrokModelError('');
+      }
+      if (sakanaFuguAvailable) {
+        try {
+          const sakanaStatus = await cloudAccessAPI.getSakanaFuguStatus();
+          const configured = Boolean(sakanaStatus.status?.configured);
+          setHasSakanaFuguKey(configured);
+          if (configured) {
+            fetchSakanaFuguModels();
+          } else {
+            setSakanaFuguModelError('');
+          }
+        } catch (err) {
+          console.error('Failed to check Sakana Fugu API key:', err);
+          setHasSakanaFuguKey(false);
+          setSakanaFuguModelError(`Sakana Fugu status could not be checked: ${err.message || 'unknown error'}.`);
+        }
+      } else {
+        setHasSakanaFuguKey(false);
+        setSakanaFuguModels([]);
+        setSakanaFuguModelError('');
       }
       
       // Try to fetch fresh LM Studio models
@@ -945,6 +1001,30 @@ const AutonomousResearchSettings = ({
     }
   };
 
+  const fetchSakanaFuguModels = async () => {
+    if (!sakanaFuguAvailable) {
+      setSakanaFuguModels([]);
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModelError('');
+      return;
+    }
+    try {
+      const result = await cloudAccessAPI.getSakanaFuguModels();
+      const models = result.models || [];
+      setSakanaFuguModels(models);
+      setHasSakanaFuguKey(models.length > 0);
+      setSakanaFuguModelError(models.length > 0
+        ? ''
+        : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
+      );
+    } catch (err) {
+      console.error('Failed to fetch Sakana Fugu models:', err);
+      setSakanaFuguModels([]);
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModelError(`Sakana Fugu API key is saved, but models could not be loaded: ${err.message || 'unknown error'}.`);
+    }
+  };
+
   // Refetch models when free-only toggle changes
   useEffect(() => {
     if (hasOpenRouterKey && isLoadedFromStorage) {
@@ -1056,6 +1136,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const getOAuthModels = (provider) => {
     if (provider === 'openai_codex_oauth') return openAICodexModels;
     if (provider === XAI_GROK_PROVIDER) return xaiGrokModels;
+    if (provider === SAKANA_FUGU_PROVIDER) return sakanaFuguModels;
     return [];
   };
 
@@ -1070,7 +1151,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     }
     const autoSettings = provider === XAI_GROK_PROVIDER
       ? computeXAIGrokAutoSettings(model)
-      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+      : (provider === SAKANA_FUGU_PROVIDER
+        ? computeSakanaFuguAutoSettings(model)
+        : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider)));
     if (autoSettings.warnings.length > 0) {
       console.warn('[AutonomousOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
     }
@@ -1080,6 +1163,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const markProfileAsCustom = () => {
     if (selectedProfile) {
       setSelectedProfile('');
+    }
+    if (profileApplyError) {
+      setProfileApplyError('');
     }
   };
 
@@ -1455,6 +1541,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   // Apply a profile (recommended or user-saved)
   const applyProfile = async (profileKey) => {
     try {
+      setProfileApplyError('');
       const { profile, settings, config: nextConfig } = await applyAutonomousProfileSelection(profileKey, userProfiles);
       const isRecommended = profileKey.startsWith('recommended_');
 
@@ -1472,6 +1559,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       onConfigChange(nextConfig);
     } catch (err) {
       console.error(err.message || 'Failed to apply profile:', err);
+      setProfileApplyError(err.message || 'Failed to apply profile.');
     }
   };
 
@@ -1542,6 +1630,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     const persistedProfiles = persistAutonomousProfiles(updatedProfiles);
     setUserProfiles(persistedProfiles);
     setSelectedProfile(profileKey);
+    setProfileApplyError('');
     setShowSaveDialog(false);
     setNewProfileName('');
   };
@@ -1571,6 +1660,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     
     if (selectedProfile === profileKey) {
       setSelectedProfile('');
+      setProfileApplyError('');
     }
   };
 
@@ -1614,6 +1704,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setTier3Enabled(nextSettings.tier3Enabled);
     setModelProviders(nextSettings.modelProviders || {});
     setSelectedProfile(nextSettings.selectedProfile || '');
+    setProfileApplyError('');
     openRouterAPI
       .setFreeModelSettings(nextSettings.freeModelLooping, nextSettings.freeModelAutoSelector)
       .catch(() => {});
@@ -1676,15 +1767,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               const value = e.target.value;
               if (!value) {
                 setSelectedProfile('');
-                return;
-              }
-
-              if (!hasOpenRouterKey) {
-                alert('OpenRouter API key required to use profiles. Please set your API key first.');
-                return;
-              }
-              if (openRouterModels.length === 0) {
-                alert('Please wait for OpenRouter models to load, or click "Refresh OpenRouter Models" button below.');
+                setProfileApplyError('');
                 return;
               }
               applyProfile(value);
@@ -1713,6 +1796,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               </optgroup>
             )}
           </select>
+          {profileApplyError && (
+            <div className="settings-error" role="alert">
+              {profileApplyError}
+            </div>
+          )}
           
           <button
             className="secondary ml-05"
@@ -1941,10 +2029,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               openRouterModels={openRouterModels}
               openAICodexModels={openAICodexModels}
               xaiGrokModels={xaiGrokModels}
+              sakanaFuguModels={sakanaFuguModels}
               modelProviders={modelProviders}
               hasOpenRouterKey={hasOpenRouterKey}
               hasOpenAICodexLogin={hasOpenAICodexLogin}
               hasXAIGrokLogin={hasXAIGrokLogin}
+              hasSakanaFuguKey={hasSakanaFuguKey}
               isRunning={isRunning}
               lmStudioEnabled={lmStudioEnabled}
             />
@@ -2025,10 +2115,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           openRouterModels={openRouterModels}
           openAICodexModels={openAICodexModels}
           xaiGrokModels={xaiGrokModels}
+          sakanaFuguModels={sakanaFuguModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           hasOpenAICodexLogin={hasOpenAICodexLogin}
           hasXAIGrokLogin={hasXAIGrokLogin}
+          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />
@@ -2048,10 +2140,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           openRouterModels={openRouterModels}
           openAICodexModels={openAICodexModels}
           xaiGrokModels={xaiGrokModels}
+          sakanaFuguModels={sakanaFuguModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           hasOpenAICodexLogin={hasOpenAICodexLogin}
           hasXAIGrokLogin={hasXAIGrokLogin}
+          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
           disabled={!assistantMemoryEnabled}
@@ -2080,10 +2174,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           openRouterModels={openRouterModels}
           openAICodexModels={openAICodexModels}
           xaiGrokModels={xaiGrokModels}
+          sakanaFuguModels={sakanaFuguModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           hasOpenAICodexLogin={hasOpenAICodexLogin}
           hasXAIGrokLogin={hasXAIGrokLogin}
+          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
         />
@@ -2103,10 +2199,12 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           openRouterModels={openRouterModels}
           openAICodexModels={openAICodexModels}
           xaiGrokModels={xaiGrokModels}
+          sakanaFuguModels={sakanaFuguModels}
           modelProviders={modelProviders}
           hasOpenRouterKey={hasOpenRouterKey}
           hasOpenAICodexLogin={hasOpenAICodexLogin}
           hasXAIGrokLogin={hasXAIGrokLogin}
+          hasSakanaFuguKey={hasSakanaFuguKey}
           lmStudioEnabled={lmStudioEnabled}
           developerModeEnabled={developerModeEnabled}
           showProofStrengthBadge
@@ -2444,10 +2542,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               <label className="settings-checkbox-label settings-checkbox-label--stacked">
                 <input
                   type="checkbox"
-                  checked={(() => {
-                    const saved = localStorage.getItem('banner_shimmer_enabled');
-                    return saved !== null ? JSON.parse(saved) : true;
-                  })()}
+                  checked={readBooleanStorage('banner_shimmer_enabled', true)}
                   onChange={(e) => {
                     localStorage.setItem('banner_shimmer_enabled', JSON.stringify(e.target.checked));
                     window.location.reload();

@@ -96,7 +96,16 @@ export default function WolframAlphaAccessModal({
 
   if (!isOpen) return null;
 
-  const hasStoredKey = Boolean(status?.has_key || connectivityStatus?.skills?.wolfram_alpha?.has_key);
+  const wolframConnectivity = connectivityStatus?.skills?.wolfram_alpha;
+  const hasStatusResponse = Boolean(status || wolframConnectivity);
+  const hasStoredKey = Boolean(status?.has_key || wolframConnectivity?.has_key);
+  const keyStatusMessage = hasStatusResponse
+    ? (
+        hasStoredKey
+          ? (enabled ? 'A Wolfram Alpha App ID is configured and enabled.' : 'A Wolfram Alpha App ID is configured but disabled.')
+          : 'No Wolfram Alpha App ID is configured.'
+      )
+    : 'Checking Wolfram Alpha App ID status...';
 
   return (
     <div className="inline-modal-overlay" style={{ zIndex: 10000 }} onClick={(event) => event.target === event.currentTarget && onClose()}>
@@ -126,9 +135,7 @@ export default function WolframAlphaAccessModal({
         )}
 
         <div className={`test-result-banner ${hasStoredKey && enabled ? 'test-result-banner--success' : ''}`} style={{ marginBottom: '1rem' }}>
-          {hasStoredKey
-            ? (enabled ? 'A Wolfram Alpha App ID is configured and enabled.' : 'A Wolfram Alpha App ID is configured but disabled.')
-            : 'No Wolfram Alpha App ID is configured.'}
+          {keyStatusMessage}
           {genericMode && (
             <>
               <br />

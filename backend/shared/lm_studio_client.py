@@ -167,7 +167,7 @@ class LMStudioClient:
             data = response.json()
             return data.get("data", [])
         except Exception as e:
-            logger.error("Failed to list models: %s", redact_log_text(e, 240))
+            logger.debug("Failed to list LM Studio models: %s", redact_log_text(e, 240))
             return []
     
     async def get_loaded_models(self) -> List[str]:
@@ -585,7 +585,7 @@ class LMStudioClient:
         
         raise RuntimeError("Completion generation failed after all retries")
     
-    async def get_embeddings(self, texts: List[str], model: str = None) -> List[List[float]]:
+    async def get_embeddings(self, texts: List[str], model: str = None, quiet: bool = False) -> List[List[float]]:
         """
         Get embeddings using LM Studio API with rate limiting.
         Optimized with batching, retry logic, and performance metrics.
@@ -614,8 +614,9 @@ class LMStudioClient:
                     
                     # Retry logic for transient failures
                     batch_embeddings = await self._get_embeddings_with_retry(
-                        batch_texts, 
-                        embedding_model
+                        batch_texts,
+                        embedding_model,
+                        quiet=quiet,
                     )
                     all_embeddings.extend(batch_embeddings)
                 
@@ -631,7 +632,8 @@ class LMStudioClient:
                 
             except Exception as e:
                 elapsed = time.time() - start_time
-                logger.error(
+                log_method = logger.debug if quiet else logger.error
+                log_method(
                     f"Failed to get embeddings after {elapsed:.2f}s "
                     f"({len(texts)} texts): {e}"
                 )
@@ -640,7 +642,8 @@ class LMStudioClient:
     async def _get_embeddings_with_retry(
         self, 
         texts: List[str], 
-        model: str
+        model: str,
+        quiet: bool = False,
     ) -> List[List[float]]:
         """Get embeddings with retry logic for transient failures."""
         for attempt in range(1, self.MAX_RETRIES + 1):
@@ -666,18 +669,19 @@ class LMStudioClient:
                 
             except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as e:
                 if attempt < self.MAX_RETRIES:
-                    logger.warning(
+                    log_method = logger.debug if quiet else logger.warning
+                    log_method(
                         f"Embedding attempt {attempt}/{self.MAX_RETRIES} failed: {e}. "
                         f"Retrying in {self.RETRY_DELAY}s..."
                     )
                     await asyncio.sleep(self.RETRY_DELAY)
                 else:
-                    logger.error(
-                        f"Embedding failed after {self.MAX_RETRIES} attempts: {e}"
-                    )
+                    log_method = logger.debug if quiet else logger.error
+                    log_method(f"Embedding failed after {self.MAX_RETRIES} attempts: {e}")
                     raise
             except Exception as e:
-                logger.error(f"Embedding failed with unexpected error: {e}")
+                log_method = logger.debug if quiet else logger.error
+                log_method(f"Embedding failed with unexpected error: {e}")
                 raise
         raise RuntimeError("Embedding retry loop exhausted without returning or raising")
     
@@ -686,9 +690,15 @@ class LMStudioClient:
         try:
             # Hard cap the startup probe so a LM Studio process that bound the
             # port but never responds cannot stall the FastAPI lifespan.
-            models = await asyncio.wait_for(self.list_models(), timeout=5.0)
-            logger.info(f"Successfully connected to LM Studio. Found {len(models)} models.")
-            return True
+            result = await asyncio.wait_for(self.check_availability(), timeout=5.0)
+            if result.get("available"):
+                logger.info(
+                    "Successfully connected to LM Studio. Found %s models.",
+                    result.get("model_count", 0),
+                )
+                return True
+            logger.info("LM Studio is unavailable: %s", result.get("error") or "unknown error")
+            return False
         except asyncio.TimeoutError:
             logger.warning("LM Studio startup probe timed out after 5s; treating as unavailable.")
             return False
@@ -758,11 +768,11 @@ class LMStudioClient:
             
         except httpx.ConnectError:
             result["error"] = "Cannot connect to LM Studio server. Please ensure LM Studio is running."
-            logger.warning(f"LM Studio availability check failed: {result['error']}")
+            logger.debug(f"LM Studio availability check failed: {result['error']}")
             return result
         except httpx.TimeoutException:
             result["error"] = "Connection to LM Studio timed out."
-            logger.warning(f"LM Studio availability check failed: {result['error']}")
+            logger.info(f"LM Studio availability check failed: {result['error']}")
             return result
         except Exception as e:
             result["error"] = f"Error checking LM Studio availability: {str(e)}"

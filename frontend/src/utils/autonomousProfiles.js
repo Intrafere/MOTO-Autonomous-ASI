@@ -23,6 +23,7 @@ export const RECOMMENDED_PROFILE_KEYS = [
   RECOMMENDED_LAB_FAST_PROFILE_KEY,
   RECOMMENDED_LAB_MAX_PROFILE_KEY,
 ];
+const CLAUDE_OPUS_LATEST_MODEL = '~anthropic/claude-opus-latest';
 const LEGACY_WRITER_SNAKE_PREFIX = ['high', 'context'].join('_');
 const LEGACY_WRITER_PROFILE_KEY = ['high', 'Context'].join('');
 
@@ -146,13 +147,21 @@ const DEFAULT_LM_LOCAL_CONFIG = {
 };
 
 const DEFAULT_CODEX_STARTUP_MODEL = Object.freeze({
-  id: 'gpt-5.5',
-  name: 'gpt-5.5',
-  context_length: 400000,
-  max_output_tokens: 128000,
+  id: 'gpt-5.3-codex-spark-high',
+  name: 'GPT-5.3 Codex Spark (high)',
+  canonical_model: 'gpt-5.3-codex-spark',
+  reasoning_effort: 'high',
+  context_length: 128000,
+  max_output_tokens: 32768,
 });
 const PUBLIC_CODEX_STARTUP_MODELS = Object.freeze([
   DEFAULT_CODEX_STARTUP_MODEL,
+  Object.freeze({
+    id: 'gpt-5.5',
+    name: 'gpt-5.5',
+    context_length: 400000,
+    max_output_tokens: 128000,
+  }),
   Object.freeze({
     id: 'gpt-5.5-mini',
     name: 'gpt-5.5-mini',
@@ -283,7 +292,7 @@ export const RECOMMENDED_PROFILES = {
       maxOutputTokens: 128000,
     },
     highParam: {
-      modelId: 'anthropic/claude-opus-4.7',
+      modelId: CLAUDE_OPUS_LATEST_MODEL,
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,
@@ -296,7 +305,7 @@ export const RECOMMENDED_PROFILES = {
     numSubmitters: 4,
     submitters: [
       {
-        modelId: 'anthropic/claude-opus-4.7',
+        modelId: CLAUDE_OPUS_LATEST_MODEL,
         provider: 'openrouter',
         openrouterProvider: null,
         lmStudioFallbackId: null,
@@ -332,7 +341,7 @@ export const RECOMMENDED_PROFILES = {
       maxOutputTokens: 128000,
     },
     writer: {
-      modelId: 'anthropic/claude-opus-4.7',
+      modelId: CLAUDE_OPUS_LATEST_MODEL,
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,
@@ -340,7 +349,7 @@ export const RECOMMENDED_PROFILES = {
       maxOutputTokens: 128000,
     },
     highParam: {
-      modelId: 'anthropic/claude-opus-4.7',
+      modelId: CLAUDE_OPUS_LATEST_MODEL,
       provider: 'openrouter',
       openrouterProvider: null,
       lmStudioFallbackId: null,
@@ -483,6 +492,31 @@ const PUBLIC_LOCAL_CONFIG_STORAGE_KEYS = [
 ];
 
 const SECRET_STORAGE_KEY_PATTERN = /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|bearer|password|secret|credential|session|cookie)/i;
+const REFETCHABLE_BULK_STORAGE_KEYS = [
+  'autonomous_live_activity_events',
+  'leanoj_live_activity_events',
+  'compiler_events_log',
+  'aggregator_live_activity_manual_events',
+];
+
+function isStorageQuotaError(error) {
+  return error?.name === 'QuotaExceededError'
+    || error?.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    || error?.code === 22
+    || error?.code === 1014;
+}
+
+function removeStorageKey(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore cleanup failures; the caller still reports the original write error.
+  }
+}
+
+function removeRefetchableBulkStorage() {
+  REFETCHABLE_BULK_STORAGE_KEYS.forEach(removeStorageKey);
+}
 
 function stripSecretLikeStorageFields(value) {
   if (Array.isArray(value)) {
@@ -672,7 +706,9 @@ function normalizeStoredSettings(settings = {}) {
     allowResearchPapers: settings.allowResearchPapers ?? DEFAULT_AUTONOMOUS_SETTINGS.allowResearchPapers,
     tier3Enabled: settings.tier3Enabled ?? DEFAULT_AUTONOMOUS_SETTINGS.tier3Enabled,
     creativityEmphasisBoostEnabled: settings.creativityEmphasisBoostEnabled ?? DEFAULT_AUTONOMOUS_SETTINGS.creativityEmphasisBoostEnabled,
-    modelProviders: settings.modelProviders || DEFAULT_AUTONOMOUS_SETTINGS.modelProviders,
+    // Provider endpoint metadata can be very large and is refetchable.
+    // Never hydrate it from persisted settings into the active settings object.
+    modelProviders: DEFAULT_AUTONOMOUS_SETTINGS.modelProviders,
     selectedProfile: normalizeSelectedProfile(settings.selectedProfile),
   };
 }
@@ -706,7 +742,27 @@ export function persistAutonomousSettings(settings) {
       ? inputSettings.creativityEmphasisBoostEnabled
       : existingSettings.creativityEmphasisBoostEnabled,
   });
-  localStorage.setItem(AUTONOMOUS_SETTINGS_STORAGE_KEY, JSON.stringify(publicAutonomousSettingsForStorage(normalized)));
+  const serialized = JSON.stringify(publicAutonomousSettingsForStorage(normalized));
+  try {
+    localStorage.setItem(AUTONOMOUS_SETTINGS_STORAGE_KEY, serialized);
+  } catch (error) {
+    if (!isStorageQuotaError(error)) {
+      throw error;
+    }
+
+    // Older builds could persist large provider endpoint caches under this key,
+    // and live activity caches are rebuildable from backend/session state.
+    removeStorageKey(AUTONOMOUS_SETTINGS_STORAGE_KEY);
+    removeRefetchableBulkStorage();
+    try {
+      localStorage.setItem(AUTONOMOUS_SETTINGS_STORAGE_KEY, serialized);
+    } catch (retryError) {
+      if (!isStorageQuotaError(retryError)) {
+        throw retryError;
+      }
+      console.error('Failed to save autonomous research settings because browser storage is full:', retryError);
+    }
+  }
   return normalized;
 }
 
@@ -812,7 +868,7 @@ function buildStartupRoleDefaults(providerId = OPENAI_CODEX_STARTUP_CHOICE, mode
     provider: providerId,
     modelId: model.id || (providerId === XAI_GROK_STARTUP_CHOICE ? DEFAULT_XAI_GROK_STARTUP_MODEL.id : DEFAULT_CODEX_STARTUP_MODEL.id),
     openrouterProvider: null,
-    openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    openrouterReasoningEffort: normalizeOpenRouterReasoningEffort(model.reasoning_effort),
     lmStudioFallbackId: null,
     contextWindow: autoSettings.contextWindowKnown ? autoSettings.contextWindow : DEFAULT_CONTEXT_WINDOW,
     maxOutputTokens: autoSettings.outputCapKnown ? autoSettings.maxOutputTokens : DEFAULT_MAX_OUTPUT_TOKENS,
@@ -825,7 +881,7 @@ function buildStartupLocalConfig(roleDefaults = buildStartupRoleDefaults()) {
     validator_provider: roleDefaults.provider,
     validator_model: roleDefaults.modelId,
     validator_openrouter_provider: null,
-    validator_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    validator_openrouter_reasoning_effort: roleDefaults.openrouterReasoningEffort,
     validator_lm_studio_fallback: null,
     validator_context_window: roleDefaults.contextWindow,
     validator_max_tokens: roleDefaults.maxOutputTokens,
@@ -833,7 +889,7 @@ function buildStartupLocalConfig(roleDefaults = buildStartupRoleDefaults()) {
     assistant_provider: roleDefaults.provider,
     assistant_model: roleDefaults.modelId,
     assistant_openrouter_provider: null,
-    assistant_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    assistant_openrouter_reasoning_effort: roleDefaults.openrouterReasoningEffort,
     assistant_lm_studio_fallback: null,
     assistant_context_window: roleDefaults.contextWindow,
     assistant_max_tokens: roleDefaults.maxOutputTokens,
@@ -841,7 +897,7 @@ function buildStartupLocalConfig(roleDefaults = buildStartupRoleDefaults()) {
     writer_provider: roleDefaults.provider,
     writer_model: roleDefaults.modelId,
     writer_openrouter_provider: null,
-    writer_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    writer_openrouter_reasoning_effort: roleDefaults.openrouterReasoningEffort,
     writer_lm_studio_fallback: null,
     writer_context_window: roleDefaults.contextWindow,
     writer_max_tokens: roleDefaults.maxOutputTokens,
@@ -849,7 +905,7 @@ function buildStartupLocalConfig(roleDefaults = buildStartupRoleDefaults()) {
     high_param_provider: roleDefaults.provider,
     high_param_model: roleDefaults.modelId,
     high_param_openrouter_provider: null,
-    high_param_openrouter_reasoning_effort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+    high_param_openrouter_reasoning_effort: roleDefaults.openrouterReasoningEffort,
     high_param_lm_studio_fallback: null,
     high_param_context_window: roleDefaults.contextWindow,
     high_param_max_tokens: roleDefaults.maxOutputTokens,

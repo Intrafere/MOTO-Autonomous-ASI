@@ -2,8 +2,11 @@
 
 CONTEXT_OVERFLOW_STOP_REASON = "context_overflow"
 CONTEXT_OVERFLOW_STOP_MESSAGE = (
-    "Research stopped. Mandatory direct injection content reached the maximum context size."
+    "Research stopped. Some required source content must be injected directly to preserve "
+    "answer quality, and it reached the maximum context size for the selected model. "
+    "Start a new session with a condensed prompt, or choose a model with a higher "
+    "context limit."
 )
 CONTEXT_OVERFLOW_RESOLUTION = (
-    "Condense the prompt and restart, or select a model with a larger context window."
+    "Start a new session with a condensed prompt, or choose a model with a higher context limit."
 )

@@ -1526,6 +1526,36 @@ export const cloudAccessAPI = {
     if (!response.ok) await throwFromResponse(response, 'Failed to clear xAI Grok login');
     return response.json();
   },
+
+  async getSakanaFuguStatus() {
+    const response = await fetch(`${API_BASE}/cloud-access/sakana-fugu/status`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to get Sakana Fugu status');
+    return response.json();
+  },
+
+  async setSakanaFuguApiKey(apiKey) {
+    const response = await fetch(`${API_BASE}/cloud-access/sakana-fugu/api-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to save Sakana Fugu API key');
+    return response.json();
+  },
+
+  async getSakanaFuguModels() {
+    const response = await fetch(`${API_BASE}/cloud-access/sakana-fugu/models`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to fetch Sakana Fugu models');
+    return response.json();
+  },
+
+  async clearSakanaFuguApiKey() {
+    const response = await fetch(`${API_BASE}/cloud-access/sakana-fugu`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) await throwFromResponse(response, 'Failed to clear Sakana Fugu API key');
+    return response.json();
+  },
 };
 
 export const syntheticLib4API = {

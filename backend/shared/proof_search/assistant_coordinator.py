@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from backend.shared.config import system_config
 from backend.shared.json_parser import parse_json
-from backend.shared.proof_search.assistant_cache import AssistantRankCache, goal_hash_for_snapshot
+from backend.shared.proof_search.assistant_cache import AssistantCooldownState, AssistantRankCache, goal_hash_for_snapshot
 from backend.shared.proof_search.assistant_models import AssistantProofPack, AssistantProofSupport, AssistantTargetSnapshot
 from backend.shared.proof_search.assistant_ranker import ranked_candidates_to_cache_rows, score_assistant_proof_candidates, select_assistant_proof_supports
 from backend.shared.proof_search.models import ProofSearchRequest, UnifiedProofSearchRecord, default_proof_search_corpora
@@ -24,6 +26,15 @@ _ASSISTANT_FINAL_PACK_LIMIT = 7
 _ASSISTANT_SELECTION_MAX_OUTPUT_TOKENS = 4096
 _ASSISTANT_SELECTION_CODE_PREVIEW_CHARS = 1200
 _CURRENT_RUN_CORPUS_SCOPES = {"active", "current"}
+_ZERO_BATCH_SIZE = 4
+_STAGNANT_REPEAT_THRESHOLD = 3
+_ASSISTANT_PACK_REFRESH_RECEIVER_READS = 2
+_COOLDOWN_DELAYS = [3, 9, 81]
+_ZERO_STEADY_81_BATCHES_BEFORE_SHUTDOWN = 3
+_NO_EXTERNAL_HISTORY_REASON = (
+    "Assistant memory skipped because no external proof-memory records were available; "
+    "the Assistant only performs proof-memory retrieval for now."
+)
 
 AssistantSelector = Callable[
     [AssistantTargetSnapshot, list[AssistantProofSupport], str, str, str],
@@ -53,7 +64,7 @@ class AssistantProofSearchCoordinator:
         self._lock = asyncio.Lock()
         self._task_sequence = 0
         self._latest_pack_target_hash = ""
-        self._latest_pack_consumed = True
+        self._latest_pack_consumption_count = _ASSISTANT_PACK_REFRESH_RECEIVER_READS
 
     @property
     def enabled(self) -> bool:
@@ -110,22 +121,17 @@ class AssistantProofSearchCoordinator:
                 len(cached_pack.results),
                 cached_pack.freshness,
             )
-            if not cached_pack.results and cached_pack.freshness == "cached":
-                logger.info(
-                    "Assistant memory refresh skipped for %s/%s (target=%s already has an empty Assistant selection)",
-                    snapshot.workflow_mode,
-                    snapshot.target_kind,
-                    target_hash[:12],
-                )
-                return target_hash
-            if cached_pack.freshness == "cached":
+            if _cached_pack_is_reusable(cached_pack):
+                if target_hash != self._latest_pack_target_hash:
+                    self._latest_pack_consumption_count = 0
                 self._latest_pack_target_hash = target_hash
-                self._latest_pack_consumed = not bool(cached_pack.results)
                 logger.info(
-                    "Assistant memory refresh skipped for %s/%s (target=%s exact cached pack is current)",
+                    "Assistant memory refresh skipped for %s/%s (target=%s cached pack is current, mode=%s, results=%s)",
                     snapshot.workflow_mode,
                     snapshot.target_kind,
                     target_hash[:12],
+                    cached_pack.selection_mode,
+                    len(cached_pack.results),
                 )
                 return target_hash
         running_target_hash = self._running_target_hash()
@@ -138,7 +144,7 @@ class AssistantProofSearchCoordinator:
                 target_hash[:12],
             )
             return target_hash
-        if self._latest_pack_target_hash and not self._latest_pack_consumed:
+        if self._latest_pack_target_hash and not self._latest_pack_has_enough_receiver_reads():
             if cached_pack is None:
                 latest_pack = self.get_latest_pack(self._latest_pack_target_hash) or self.get_latest_pack()
                 if latest_pack is not None:
@@ -150,10 +156,12 @@ class AssistantProofSearchCoordinator:
                         }
                     )
             logger.info(
-                "Assistant memory refresh deferred for %s/%s (latest_target=%s has not been consumed by a solver response)",
+                "Assistant memory refresh deferred for %s/%s (latest_target=%s receiver_reads=%s/%s)",
                 snapshot.workflow_mode,
                 snapshot.target_kind,
                 self._latest_pack_target_hash[:12],
+                self._latest_pack_consumption_count,
+                _ASSISTANT_PACK_REFRESH_RECEIVER_READS,
             )
             return target_hash
         existing = self._tasks.get(target_hash)
@@ -202,25 +210,105 @@ class AssistantProofSearchCoordinator:
             self._packs.clear()
             self._goal_target_hashes.clear()
             self._latest_pack_target_hash = ""
-            self._latest_pack_consumed = True
+            self._latest_pack_consumption_count = _ASSISTANT_PACK_REFRESH_RECEIVER_READS
             await asyncio.to_thread(_delete_if_exists, _assistant_pack_path())
         if broadcast:
             await self._broadcast_event("assistant_proof_pack_stopped", {"reason": reason, "cleared": clear_packs})
 
+    async def clear_cooldown_state(self, run_key: str | None = None) -> None:
+        await asyncio.to_thread(self._cache.clear_cooldown_state, run_key)
+
     def mark_pack_consumed_by_solver(self, target_hash: str, *, role_id: str = "", task_id: str = "") -> None:
-        """Allow the next Assistant refresh after a solver used a published pack."""
+        """Track receiver reads so useful packs refresh only after two solver uses."""
         if not target_hash or target_hash not in self._packs:
             return
-        self._latest_pack_consumed = True
+        if target_hash != self._latest_pack_target_hash and not self._pack_matches_latest_pack(target_hash):
+            logger.debug(
+                "Ignoring Assistant memory consumption for stale target role=%s task=%s target=%s latest=%s",
+                role_id or "unknown",
+                task_id or "unknown",
+                target_hash[:12],
+                self._latest_pack_target_hash[:12],
+            )
+            return
+        self._latest_pack_consumption_count = min(
+            self._latest_pack_consumption_count + 1,
+            _ASSISTANT_PACK_REFRESH_RECEIVER_READS,
+        )
         logger.info(
-            "Assistant memory pack consumed by solver role=%s task=%s target=%s",
+            "Assistant memory pack consumed by solver role=%s task=%s target=%s receiver_reads=%s/%s",
             role_id or "unknown",
             task_id or "unknown",
             target_hash[:12],
+            self._latest_pack_consumption_count,
+            _ASSISTANT_PACK_REFRESH_RECEIVER_READS,
         )
+
+    def _latest_pack_has_enough_receiver_reads(self) -> bool:
+        if not self._latest_pack_target_hash:
+            return True
+        latest_pack = self._packs.get(self._latest_pack_target_hash)
+        if latest_pack is None or not latest_pack.results:
+            return True
+        return self._latest_pack_consumption_count >= _ASSISTANT_PACK_REFRESH_RECEIVER_READS
+
+    def _pack_matches_latest_pack(self, target_hash: str) -> bool:
+        latest = self._packs.get(self._latest_pack_target_hash)
+        consumed = self._packs.get(target_hash)
+        if latest is None or consumed is None:
+            return False
+        latest_ids = [support.search_id for support in latest.results]
+        consumed_ids = [support.search_id for support in consumed.results]
+        return bool(latest_ids) and latest_ids == consumed_ids
+
+    def _run_key_for_snapshot(self, snapshot: AssistantTargetSnapshot) -> str:
+        scope_type, source_scope = _cooldown_run_scope(snapshot)
+        return ":".join(
+            part.replace(":", "_")
+            for part in [snapshot.workflow_mode or "unknown", scope_type, source_scope]
+            if part
+        )
+
+    async def _maybe_skip_for_cooldown(self, snapshot: AssistantTargetSnapshot) -> bool:
+        run_key = self._run_key_for_snapshot(snapshot)
+        state = await asyncio.to_thread(self._cache.load_cooldown_state, run_key)
+        if state.zero_shutdown_active:
+            await self._broadcast_event(
+                "assistant_proof_memory_shutdown",
+                _cooldown_payload(
+                    snapshot,
+                    state,
+                    kind="zero_useful",
+                    reason="Assistant proof-memory retrieval is shut off for this run after repeated zero-useful retrieval batches.",
+                ),
+            )
+            return True
+        state, payload = _consume_cooldown_turn(snapshot, state)
+        if payload is None:
+            return False
+        await asyncio.to_thread(self._cache.save_cooldown_state, state)
+        await self._broadcast_event("assistant_proof_memory_cooldown", payload)
+        return True
+
+    async def _record_cooldown_outcome(self, snapshot: AssistantTargetSnapshot, pack: AssistantProofPack) -> None:
+        run_key = self._run_key_for_snapshot(snapshot)
+        state = await asyncio.to_thread(self._cache.load_cooldown_state, run_key)
+        event_name = ""
+        payload: dict[str, Any] | None = None
+        if not pack.results and pack.selection_mode in {"assistant_llm", "no_candidates"}:
+            state, event_name, payload = _advance_zero_useful_state(snapshot, state)
+        elif pack.results:
+            state, event_name, payload = _advance_success_state(snapshot, state, pack)
+        else:
+            return
+        await asyncio.to_thread(self._cache.save_cooldown_state, state)
+        if event_name and payload:
+            await self._broadcast_event(event_name, payload)
 
     async def _refresh_pack(self, snapshot: AssistantTargetSnapshot) -> None:
         async with self._lock:
+            if await self._maybe_skip_for_cooldown(snapshot):
+                return
             warnings: list[str] = []
             corpora = default_proof_search_corpora()
             if not corpora:
@@ -261,12 +349,54 @@ class AssistantProofSearchCoordinator:
                     seen_ids.add(record.search_id)
                     records.append(record)
 
+            if not records:
+                if warnings:
+                    await self._broadcast_event(
+                        "assistant_proof_pack_warning",
+                        {
+                            "target_hash": snapshot.target_hash,
+                            "workflow_mode": snapshot.workflow_mode,
+                            "target_kind": snapshot.target_kind,
+                            "workflow_phase": snapshot.workflow_phase,
+                            "source_type": snapshot.source_type,
+                            "source_id": snapshot.source_id,
+                            "warnings": warnings[-3:],
+                            "reason": "Assistant proof-memory search failed before any external proof-history records could be collected.",
+                        },
+                    )
+                    logger.warning(
+                        "Assistant memory search failed for %s/%s (target=%s) before collecting external records: %s",
+                        snapshot.workflow_mode,
+                        snapshot.target_kind,
+                        snapshot.target_hash[:12],
+                        "; ".join(warnings[-3:]),
+                    )
+                    return
+                await self._broadcast_event(
+                    "assistant_proof_memory_unavailable",
+                    {
+                        "target_hash": snapshot.target_hash,
+                        "workflow_mode": snapshot.workflow_mode,
+                        "target_kind": snapshot.target_kind,
+                        "workflow_phase": snapshot.workflow_phase,
+                        "source_type": snapshot.source_type,
+                        "source_id": snapshot.source_id,
+                        "reason": _NO_EXTERNAL_HISTORY_REASON,
+                    },
+                )
+                logger.info(
+                    "Assistant memory skipped for %s/%s (target=%s): no external proof-memory records after current-run filtering",
+                    snapshot.workflow_mode,
+                    snapshot.target_kind,
+                    snapshot.target_hash[:12],
+                )
+                return
+
             ranked_candidates = score_assistant_proof_candidates(records, snapshot)
             await asyncio.to_thread(self._cache.upsert_candidates, target_hash=snapshot.target_hash, candidates=ranked_candidates_to_cache_rows(ranked_candidates))
             candidate_stats = await asyncio.to_thread(self._cache.load_candidate_stats, snapshot.target_hash)
             shortlist = select_assistant_proof_supports(ranked_candidates, limit=_ASSISTANT_SHORTLIST_TARGET, candidate_stats=candidate_stats)
             if not shortlist:
-                warnings.append("Assistant found no verified proof supports for the current target.")
                 await self._publish_pack(snapshot, [], warnings=warnings, selection_mode="no_candidates", candidate_count=len(records), shortlist_count=0, selection_reasoning="No verified candidate supports were found.")
                 return
             await self._select_and_publish_assistant_pack(snapshot=snapshot, shortlist=shortlist, warnings=warnings, candidate_count=len(records))
@@ -279,6 +409,43 @@ class AssistantProofSearchCoordinator:
             await self._publish_pack(snapshot, [], warnings=warnings, selection_mode="unavailable", assistant_role_id=assistant_role_id, assistant_model_id="", candidate_count=candidate_count, shortlist_count=len(shortlist), selection_reasoning="Configured Assistant role was unavailable.")
             return
 
+        if _assistant_oauth_provider_is_cooling_down(assistant_role_id):
+            latest_pack = self.get_latest_pack()
+            if latest_pack and latest_pack.results:
+                supports = latest_pack.results[:_ASSISTANT_FINAL_PACK_LIMIT]
+                await self._publish_pack(
+                    snapshot,
+                    supports,
+                    warnings=[
+                        *warnings,
+                        "Assistant OAuth provider is in usage-limit cooldown; reusing latest cached proof pack.",
+                    ],
+                    selection_mode="cached_oauth_cooldown",
+                    assistant_role_id=assistant_role_id,
+                    assistant_model_id=assistant_model_id,
+                    candidate_count=candidate_count,
+                    shortlist_count=len(shortlist),
+                    selection_reasoning="Reused latest cached Assistant pack while OAuth provider cooldown is active.",
+                )
+                return
+            if shortlist:
+                selected_supports = shortlist[:_ASSISTANT_FINAL_PACK_LIMIT]
+                await self._publish_pack(
+                    snapshot,
+                    selected_supports,
+                    warnings=[
+                        *warnings,
+                        "Assistant OAuth provider is in usage-limit cooldown; using deterministic shortlist without Assistant LLM selection.",
+                    ],
+                    selection_mode="deterministic_oauth_cooldown",
+                    assistant_role_id=assistant_role_id,
+                    assistant_model_id=assistant_model_id,
+                    candidate_count=candidate_count,
+                    shortlist_count=len(shortlist),
+                    selection_reasoning="Used deterministic proof-support shortlist while OAuth provider cooldown is active.",
+                )
+                return
+
         task_id = self._next_assistant_task_id(snapshot.workflow_mode)
         await self._broadcast_event("assistant_proof_pack_refresh_started", {"target_hash": snapshot.target_hash, "workflow_mode": snapshot.workflow_mode, "target_kind": snapshot.target_kind, "workflow_phase": snapshot.workflow_phase, "source_type": snapshot.source_type, "source_id": snapshot.source_id, "assistant_role_id": assistant_role_id, "assistant_model_id": assistant_model_id, "candidate_count": candidate_count, "shortlist_count": len(shortlist), "max_result_count": _ASSISTANT_FINAL_PACK_LIMIT})
         try:
@@ -290,8 +457,6 @@ class AssistantProofSearchCoordinator:
             return
 
         selected_supports = _supports_for_selected_ids(shortlist, selected_search_ids)
-        if selected_search_ids and not selected_supports:
-            warnings.append("Assistant selected only IDs that were not present in the candidate shortlist.")
         await self._publish_pack(snapshot, selected_supports, warnings=warnings, selection_mode="assistant_llm", assistant_role_id=assistant_role_id, assistant_model_id=assistant_model_id, candidate_count=candidate_count, shortlist_count=len(shortlist), selection_reasoning=selection_reasoning)
 
     def _next_assistant_task_id(self, workflow_mode: str) -> str:
@@ -316,7 +481,7 @@ class AssistantProofSearchCoordinator:
                 assistant_model_id=assistant_model_id,
                 max_tokens=max_tokens,
             )
-            selected_ids = _extract_selected_search_ids(payload)
+            selected_ids = _extract_valid_selected_search_ids(payload, shortlist)
         except _AssistantSelectionOutputError as first_error:
             repair_prompt = _build_assistant_selection_repair_prompt(
                 snapshot,
@@ -331,7 +496,7 @@ class AssistantProofSearchCoordinator:
                     assistant_model_id=assistant_model_id,
                     max_tokens=max_tokens,
                 )
-                selected_ids = _extract_selected_search_ids(payload)
+                selected_ids = _extract_valid_selected_search_ids(payload, shortlist)
             except _AssistantSelectionOutputError as retry_error:
                 raise _AssistantSelectionOutputError(
                     f"{first_error}; retry failed: {retry_error}"
@@ -347,15 +512,28 @@ class AssistantProofSearchCoordinator:
         for support in pack.results:
             source_counts[support.corpus] = source_counts.get(support.corpus, 0) + 1
         logger.info("Assistant memory pack refreshed for %s/%s (target=%s, mode=%s, results=%s, local=%s, syntheticlib4=%s)", snapshot.workflow_mode, snapshot.target_kind, snapshot.target_hash[:12], selection_mode, len(pack.results), sum(count for corpus, count in source_counts.items() if corpus != "syntheticlib4"), source_counts.get("syntheticlib4", 0))
+        if not pack.results and selection_mode in {"assistant_llm", "no_candidates"}:
+            logger.info(
+                "Assistant memory found no useful proof supports for %s/%s (target=%s, candidates=%s, shortlist=%s, mode=%s)",
+                snapshot.workflow_mode,
+                snapshot.target_kind,
+                snapshot.target_hash[:12],
+                candidate_count,
+                shortlist_count,
+                selection_mode,
+            )
         self._packs[snapshot.target_hash] = pack
         self._latest_pack_target_hash = snapshot.target_hash
-        self._latest_pack_consumed = not bool(pack.results)
+        self._latest_pack_consumption_count = (
+            0 if pack.results else _ASSISTANT_PACK_REFRESH_RECEIVER_READS
+        )
         goal_hash = goal_hash_for_snapshot(snapshot)
         if goal_hash:
             self._goal_target_hashes[goal_hash] = snapshot.target_hash
         await asyncio.to_thread(self._cache.record_pack, snapshot=snapshot, pack=pack, selected_search_ids=[support.search_id for support in pack.results])
         await self._persist_pack(pack)
         await self._broadcast_event("assistant_proof_pack_updated", {"target_hash": pack.target_hash, "workflow_mode": pack.workflow_mode, "target_kind": pack.target_kind, "result_count": len(pack.results), "local_result_count": sum(count for corpus, count in source_counts.items() if corpus != "syntheticlib4"), "syntheticlib4_result_count": source_counts.get("syntheticlib4", 0), "source_counts": source_counts, "max_result_count": _ASSISTANT_FINAL_PACK_LIMIT, "workflow_phase": snapshot.workflow_phase, "source_type": snapshot.source_type, "source_id": snapshot.source_id, "warnings": pack.warnings[:3], "selection_mode": pack.selection_mode, "assistant_role_id": pack.assistant_role_id, "assistant_model_id": pack.assistant_model_id, "candidate_count": pack.candidate_count, "shortlist_count": pack.shortlist_count})
+        await self._record_cooldown_outcome(snapshot, pack)
 
     def _on_task_done(self, target_hash: str, task: asyncio.Task) -> None:
         if self._tasks.get(target_hash) is task:
@@ -401,6 +579,10 @@ class AssistantProofSearchCoordinator:
             return None
 
 
+def _cached_pack_is_reusable(pack: AssistantProofPack) -> bool:
+    return pack.freshness == "cached" and bool(pack.results)
+
+
 def _build_query_variants(snapshot: AssistantTargetSnapshot) -> list[str]:
     variants = [snapshot.search_text(), "\n\n".join(part for part in [snapshot.user_prompt, snapshot.current_prompt_or_topic, snapshot.writing_goal, snapshot.outline_summary] if part), "\n\n".join(part for part in [snapshot.user_prompt, snapshot.target_statement] if part), "\n\n".join(part for part in [snapshot.lean_template, snapshot.lean_error] if part), "\n\n".join(part for part in [snapshot.rejection_feedback, snapshot.proof_attempt_feedback] if part), "\n\n".join(part for part in [snapshot.accepted_memory_summary, snapshot.paper_or_proof_draft_summary, snapshot.recent_activity_summary] if part), " ".join([*snapshot.dependency_names, *snapshot.imports]), " ".join(snapshot.source_titles), snapshot.source_title]
     cleaned: list[str] = []
@@ -438,6 +620,31 @@ def _assistant_model_id(role_id: str) -> str:
     return config.openrouter_model_id or config.model_id
 
 
+def _assistant_oauth_provider_key(role_id: str) -> str:
+    try:
+        from backend.shared.api_client_manager import api_client_manager
+        config = api_client_manager.get_role_config(role_id)
+    except Exception:
+        return ""
+    if config is None:
+        return ""
+    provider = str(config.provider or "").strip()
+    if provider in {"openai_codex_oauth", "xai_grok_oauth"}:
+        return provider
+    return ""
+
+
+def _assistant_oauth_provider_is_cooling_down(role_id: str) -> bool:
+    provider = _assistant_oauth_provider_key(role_id)
+    if not provider:
+        return False
+    try:
+        from backend.shared.api_client_manager import api_client_manager
+        return api_client_manager.is_provider_cooling_down(provider)
+    except Exception:
+        return False
+
+
 async def _generate_assistant_selection_payload(
     *,
     prompt: str,
@@ -448,6 +655,13 @@ async def _generate_assistant_selection_payload(
 ) -> dict[str, Any]:
     from backend.shared.api_client_manager import api_client_manager
 
+    response_format = {"type": "json_object"}
+    role_config = api_client_manager.get_role_config(assistant_role_id)
+    if role_config is not None and role_config.provider == "lm_studio":
+        # LM Studio's OpenAI-compatible server rejects json_object on recent builds.
+        # The prompt already requires a compact JSON object, and parse_json enforces it.
+        response_format = {"type": "text"}
+
     response = await api_client_manager.generate_completion(
         task_id=task_id,
         role_id=assistant_role_id,
@@ -455,7 +669,7 @@ async def _generate_assistant_selection_payload(
         messages=[{"role": "user", "content": prompt}],
         temperature=0.0,
         max_tokens=max_tokens,
-        response_format={"type": "json_object"},
+        response_format=response_format,
         _moto_disable_supercharge=True,
         _moto_reasoning_effort_override="none",
     )
@@ -474,6 +688,21 @@ def _extract_selected_search_ids(payload: dict[str, Any]) -> list[Any]:
         selected_ids = payload.get("selected_ids")
     if not isinstance(selected_ids, list):
         raise _AssistantSelectionOutputError("Assistant response missing selected_search_ids array")
+    return selected_ids
+
+
+def _extract_valid_selected_search_ids(payload: dict[str, Any], shortlist: list[AssistantProofSupport]) -> list[Any]:
+    selected_ids = _extract_selected_search_ids(payload)
+    clean_ids = [str(item).strip() for item in selected_ids if str(item).strip()]
+    if not clean_ids:
+        return []
+    valid_ids = {support.search_id for support in shortlist}
+    invalid_ids = [search_id for search_id in clean_ids if search_id not in valid_ids]
+    if invalid_ids:
+        preview = ", ".join(invalid_ids[:3])
+        raise _AssistantSelectionOutputError(
+            f"Assistant selected IDs outside the candidate shortlist: {preview}"
+        )
     return selected_ids
 
 
@@ -602,6 +831,243 @@ def _is_current_run_support(support: AssistantProofSupport) -> bool:
         return support.session_id == active_session_id
     parts = support.search_id.split(":")
     return len(parts) >= 3 and parts[1] == active_session_id
+
+
+def _cooldown_delay_for_stage(stage: int) -> int:
+    if stage <= 0:
+        return 0
+    index = min(stage - 1, len(_COOLDOWN_DELAYS) - 1)
+    return _COOLDOWN_DELAYS[index]
+
+
+def _state_with(state: AssistantCooldownState, **updates: Any) -> AssistantCooldownState:
+    payload = state.to_payload()
+    updates.setdefault("updated_at", _now_iso())
+    payload.update(updates)
+    return AssistantCooldownState(**payload)
+
+
+def _cooldown_payload(
+    snapshot: AssistantTargetSnapshot,
+    state: AssistantCooldownState,
+    *,
+    kind: str,
+    reason: str,
+) -> dict[str, Any]:
+    stage = state.zero_cooldown_stage if kind == "zero_useful" else state.stagnant_cooldown_stage
+    remaining = state.zero_cooldown_skips_remaining if kind == "zero_useful" else state.stagnant_cooldown_skips_remaining
+    attempts = state.zero_attempts_in_batch if kind == "zero_useful" else state.stagnant_attempts_in_batch
+    required = _cooldown_delay_for_stage(stage)
+    return {
+        "target_hash": snapshot.target_hash,
+        "workflow_mode": snapshot.workflow_mode,
+        "target_kind": snapshot.target_kind,
+        "workflow_phase": snapshot.workflow_phase,
+        "source_type": snapshot.source_type,
+        "source_id": snapshot.source_id,
+        "reason": reason,
+        "cooldown_kind": kind,
+        "cooldown_stage": stage,
+        "eligible_turns_skipped": max(0, required - remaining),
+        "eligible_turns_required": required,
+        "eligible_turns_remaining": max(0, remaining),
+        "batch_attempts": attempts,
+        "batch_size": _ZERO_BATCH_SIZE if kind == "zero_useful" else _STAGNANT_REPEAT_THRESHOLD,
+        "shutdown_active": bool(state.zero_shutdown_active),
+    }
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _support_signature(pack: AssistantProofPack) -> str:
+    search_ids = [support.search_id for support in pack.results]
+    if not search_ids:
+        return ""
+    return hashlib.sha256("|".join(search_ids).encode("utf-8")).hexdigest()
+
+
+def _cooldown_run_scope(snapshot: AssistantTargetSnapshot) -> tuple[str, str]:
+    """Group transient role/task IDs so backoff accumulates across a run phase."""
+    source_id = (snapshot.source_id or "").strip()
+    source_type = (snapshot.source_type or "").strip()
+    transient_prefixes = (
+        "agg_sub",
+        "agg_val",
+        "comp_writer",
+        "comp_hp",
+        "comp_val",
+        "assistant_pack",
+        "proof_id",
+        "proof_lemma",
+        "proof_form",
+        "proof_integrity",
+        "proof_novelty",
+        "proof_framing_gate",
+        "leanoj_topic",
+        "leanoj_brainstorm",
+        "leanoj_val",
+        "leanoj_path",
+        "leanoj_final",
+    )
+    if source_id and not source_id.startswith(transient_prefixes):
+        return source_type or "source", source_id
+    workflow_scope = snapshot.active_mode or snapshot.workflow_mode or source_type or "workflow"
+    return "workflow", workflow_scope
+
+
+def _consume_cooldown_turn(
+    snapshot: AssistantTargetSnapshot,
+    state: AssistantCooldownState,
+) -> tuple[AssistantCooldownState, dict[str, Any] | None]:
+    if state.zero_shutdown_active:
+        return state, None
+    if state.zero_cooldown_skips_remaining > 0:
+        new_state = _state_with(
+            state,
+            zero_cooldown_skips_remaining=state.zero_cooldown_skips_remaining - 1,
+            last_reason="zero_useful_cooldown_skip",
+        )
+        return new_state, _cooldown_payload(
+            snapshot,
+            new_state,
+            kind="zero_useful",
+            reason="Assistant proof-memory retrieval is backing off after repeated zero-useful retrieval batches.",
+        )
+    if state.stagnant_cooldown_skips_remaining > 0:
+        new_state = _state_with(
+            state,
+            stagnant_cooldown_skips_remaining=state.stagnant_cooldown_skips_remaining - 1,
+            last_reason="stagnant_cooldown_skip",
+        )
+        return new_state, _cooldown_payload(
+            snapshot,
+            new_state,
+            kind="stagnant",
+            reason="Assistant proof-memory retrieval is backing off because the same proof pack kept repeating.",
+        )
+    return state, None
+
+
+def _advance_zero_useful_state(
+    snapshot: AssistantTargetSnapshot,
+    state: AssistantCooldownState,
+) -> tuple[AssistantCooldownState, str, dict[str, Any] | None]:
+    attempts = state.zero_attempts_in_batch + 1
+    if attempts < _ZERO_BATCH_SIZE:
+        return (
+            _state_with(
+                state,
+                zero_attempts_in_batch=attempts,
+                stagnant_same_count=0,
+                stagnant_attempts_in_batch=0,
+                stagnant_cooldown_stage=0,
+                stagnant_cooldown_skips_remaining=0,
+                last_signature="",
+                last_reason="zero_useful_attempt",
+            ),
+            "",
+            None,
+        )
+
+    already_at_steady_stage = state.zero_cooldown_stage >= len(_COOLDOWN_DELAYS)
+    next_stage = min(state.zero_cooldown_stage + 1, len(_COOLDOWN_DELAYS))
+    steady_batches = state.zero_steady_81_batches + 1 if already_at_steady_stage else 0
+    shutdown = already_at_steady_stage and steady_batches >= _ZERO_STEADY_81_BATCHES_BEFORE_SHUTDOWN
+    new_state = _state_with(
+        state,
+        zero_attempts_in_batch=0,
+        zero_cooldown_stage=next_stage,
+        zero_cooldown_skips_remaining=0 if shutdown else _cooldown_delay_for_stage(next_stage),
+        zero_steady_81_batches=steady_batches,
+        zero_shutdown_active=shutdown,
+        stagnant_same_count=0,
+        stagnant_attempts_in_batch=0,
+        stagnant_cooldown_stage=0,
+        stagnant_cooldown_skips_remaining=0,
+        last_signature="",
+        last_reason="zero_useful_shutdown" if shutdown else "zero_useful_cooldown_entered",
+    )
+    if shutdown:
+        return new_state, "assistant_proof_memory_shutdown", _cooldown_payload(
+            snapshot,
+            new_state,
+            kind="zero_useful",
+            reason="Assistant proof-memory retrieval disabled for this run after repeated empty retrieval batches.",
+        )
+    return new_state, "assistant_proof_memory_cooldown", _cooldown_payload(
+        snapshot,
+        new_state,
+        kind="zero_useful",
+        reason="Assistant proof-memory retrieval is backing off after repeated zero-useful retrieval batches.",
+    )
+
+
+def _advance_success_state(
+    snapshot: AssistantTargetSnapshot,
+    state: AssistantCooldownState,
+    pack: AssistantProofPack,
+) -> tuple[AssistantCooldownState, str, dict[str, Any] | None]:
+    signature = _support_signature(pack)
+    zero_reset = {
+        "zero_attempts_in_batch": 0,
+        "zero_cooldown_stage": 0,
+        "zero_cooldown_skips_remaining": 0,
+        "zero_steady_81_batches": 0,
+        "zero_shutdown_active": False,
+    }
+    if not signature:
+        return _state_with(state, **zero_reset, last_reason="useful_pack_without_signature"), "", None
+
+    if signature != state.last_signature:
+        return (
+            _state_with(
+                state,
+                **zero_reset,
+                stagnant_same_count=1,
+                stagnant_attempts_in_batch=1,
+                stagnant_cooldown_stage=0,
+                stagnant_cooldown_skips_remaining=0,
+                last_signature=signature,
+                last_reason="useful_pack_changed",
+            ),
+            "",
+            None,
+        )
+
+    same_count = state.stagnant_same_count + 1
+    attempts = state.stagnant_attempts_in_batch + 1
+    if attempts < _STAGNANT_REPEAT_THRESHOLD:
+        return (
+            _state_with(
+                state,
+                **zero_reset,
+                stagnant_same_count=same_count,
+                stagnant_attempts_in_batch=attempts,
+                last_reason="stagnant_repeat_observed",
+            ),
+            "",
+            None,
+        )
+
+    next_stage = min(state.stagnant_cooldown_stage + 1, len(_COOLDOWN_DELAYS))
+    new_state = _state_with(
+        state,
+        **zero_reset,
+        stagnant_same_count=same_count,
+        stagnant_attempts_in_batch=0,
+        stagnant_cooldown_stage=next_stage,
+        stagnant_cooldown_skips_remaining=_cooldown_delay_for_stage(next_stage),
+        last_signature=signature,
+        last_reason="stagnant_cooldown_entered",
+    )
+    return new_state, "assistant_proof_memory_cooldown", _cooldown_payload(
+        snapshot,
+        new_state,
+        kind="stagnant",
+        reason="Assistant proof-memory retrieval is backing off because the same proof pack kept repeating.",
+    )
 
 
 def _active_autonomous_session_id() -> str:

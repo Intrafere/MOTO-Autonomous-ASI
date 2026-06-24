@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import AutonomousResearchSettings from './AutonomousResearchSettings';
 import { api, autonomousAPI, cloudAccessAPI, openRouterAPI } from '../../services/api';
 
@@ -148,4 +148,44 @@ test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', asy
   expect(cloudAccessAPI.getXAIGrokStatus).not.toHaveBeenCalled();
   expect(cloudAccessAPI.getOpenAICodexModels).not.toHaveBeenCalled();
   expect(cloudAccessAPI.getXAIGrokModels).not.toHaveBeenCalled();
+});
+
+test('applies a recommended profile even when OpenRouter model list is empty', async () => {
+  openRouterAPI.getModels.mockResolvedValueOnce({ models: [] });
+  const onConfigChange = vi.fn();
+
+  render(
+    <AutonomousResearchSettings
+      config={baseConfig}
+      onConfigChange={onConfigChange}
+      models={[{ id: 'lm-validator' }]}
+      capabilities={{ lmStudioEnabled: true, genericMode: false }}
+      connectivityStatus={{
+        skills: {
+          agent_conversation_memory: {
+            enabled: true,
+          },
+        },
+      }}
+      isRunning={false}
+    />
+  );
+
+  await waitFor(() => {
+    expect(openRouterAPI.getModels).toHaveBeenCalled();
+  });
+
+  const profileSelect = screen.getByText('Select Profile').parentElement.querySelector('select');
+  fireEvent.change(profileSelect, {
+    target: { value: 'recommended_lab_fast_costly_extra_high' },
+  });
+
+  await waitFor(() => {
+    expect(profileSelect.value).toBe('recommended_lab_fast_costly_extra_high');
+  });
+  expect(onConfigChange).toHaveBeenCalledWith(
+    expect.objectContaining({
+      validator_provider: 'openrouter',
+    })
+  );
 });

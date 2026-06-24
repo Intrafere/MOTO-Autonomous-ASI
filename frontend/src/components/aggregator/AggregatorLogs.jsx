@@ -6,9 +6,11 @@ import { MANUAL_AGGREGATOR_PROOF_SOURCE_ID } from '../../hooks/useProofCheckRunt
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  buildRejectionFeedbackNoticeActivity,
   getActivityClass,
   getActivityIcon,
   hasRecentAssistantProofPackDuplicate,
+  shouldAddRejectionFeedbackNotice,
 } from '../../utils/activityStyles';
 import '../settings-common.css';
 
@@ -31,10 +33,7 @@ const MANUAL_PROOF_EVENTS = [
   'proof_check_complete',
 ];
 const ASSISTANT_MEMORY_EVENTS = [
-  'assistant_proof_pack_refresh_started',
   'assistant_proof_pack_updated',
-  'assistant_proof_pack_warning',
-  'assistant_proof_pack_stopped',
 ];
 const HIDDEN_AGGREGATOR_ACTIVITY_EVENTS = new Set(['new_submission']);
 
@@ -98,7 +97,7 @@ const getEventSortTime = (event = {}) => {
   return typeof event.id === 'number' ? event.id : 0;
 };
 
-const compactProofText = (value, maxLength = 1200) => {
+const compactProofText = (value, maxLength = 1800) => {
   const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
   if (!cleaned) {
     return '';
@@ -147,6 +146,22 @@ const mergeEventLists = (...eventLists) => {
     .slice(0, MAX_EVENT_LOG_ENTRIES);
 };
 
+const countLatestRejectionStreak = (events) => {
+  let count = 0;
+  for (let index = 0; index < events.length; index += 1) {
+    const eventName = normalizeAggregatorEventName(events[index]?.type || events[index]?.event || '');
+    if (eventName === 'rejection_feedback_notice') {
+      continue;
+    }
+    if (eventName === 'submission_rejected' || eventName.includes('rejected')) {
+      count += 1;
+      continue;
+    }
+    break;
+  }
+  return count;
+};
+
 export default function AggregatorLogs() {
   const [events, setEvents] = useState([]);
   const [status, setStatus] = useState(null);
@@ -175,10 +190,7 @@ export default function AggregatorLogs() {
       websocket.on('cleanup_review_error', handleCleanupError),
       websocket.on('context_overflow_error', handleContextOverflow),
       websocket.on('hung_connection_alert', handleHungConnectionAlert),
-      websocket.on('assistant_proof_pack_refresh_started', (data) => handleAssistantProofPackEvent('assistant_proof_pack_refresh_started', data)),
       websocket.on('assistant_proof_pack_updated', (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data)),
-      websocket.on('assistant_proof_pack_warning', (data) => handleAssistantProofPackEvent('assistant_proof_pack_warning', data)),
-      websocket.on('assistant_proof_pack_stopped', (data) => handleAssistantProofPackEvent('assistant_proof_pack_stopped', data)),
       ...MANUAL_PROOF_EVENTS.map((eventName) => (
         websocket.on(eventName, (data) => handleManualProofEvent(eventName, data))
       )),
@@ -324,7 +336,7 @@ export default function AggregatorLogs() {
 
   const handleRejection = (data) => {
     const prefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-    addEvent('submission_rejected', `✗ ${prefix}Submission from Submitter ${data.submitter_id} REJECTED: ${data.reasoning.substring(0, 100)}...`, data);
+    addEvent('submission_rejected', `✗ ${prefix}Submission from Submitter ${data.submitter_id} REJECTED WITH FEEDBACK: ${data.reasoning.substring(0, 100)}...`, data);
   };
 
   const handleCorruptionDetected = (data) => {
@@ -436,8 +448,10 @@ export default function AggregatorLogs() {
         return `Novel proof discovered: ${proofTargetLabel(data)}`;
       case 'proof_dependency_added':
         return `Proof dependency added: ${proofTargetLabel(data, 'verified proof')}`;
-      case 'proof_check_complete':
-        return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
+      case 'proof_check_complete': {
+        const detail = data.message ? ` - ${compactProofText(data.message)}` : '';
+        return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
+      }
       default:
         return `Proof event: ${eventName}`;
     }
@@ -463,7 +477,32 @@ export default function AggregatorLogs() {
       if (hasRecentAssistantProofPackDuplicate(prev, type, data, timestamp)) {
         return prev;
       }
-      const updated = mergeEventLists([event], prev);
+      const newEvents = [event];
+      const observedConsecutiveRejections = type === 'submission_rejected'
+        ? countLatestRejectionStreak(prev) + 1
+        : null;
+      const shown = { first: false, tenth: false };
+      for (const existing of prev) {
+        const eventName = normalizeAggregatorEventName(existing?.type || existing?.event || '');
+        if (eventName === 'system_started') {
+          break;
+        }
+        if (eventName !== 'rejection_feedback_notice') {
+          continue;
+        }
+        if (Number(existing?.data?.consecutive_rejections) >= 10) {
+          shown.tenth = true;
+        } else {
+          shown.first = true;
+        }
+      }
+      if (type === 'submission_rejected' && shouldAddRejectionFeedbackNotice(data, observedConsecutiveRejections, shown)) {
+        newEvents.push(buildRejectionFeedbackNoticeActivity(timestamp, {
+          ...data,
+          consecutive_rejections: observedConsecutiveRejections,
+        }));
+      }
+      const updated = mergeEventLists(newEvents, prev);
       if (MANUAL_PROOF_EVENTS.includes(type)) {
         persistManualEvents(updated);
       }

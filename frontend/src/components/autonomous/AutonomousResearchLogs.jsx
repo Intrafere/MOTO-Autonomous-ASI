@@ -156,7 +156,7 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'submission_rejected': {
         const modelName = data.submitter_model ? (data.submitter_model.split('/')[1] || data.submitter_model.substring(0, 15)) : '';
         const creativityPrefix = data.creativity_emphasized ? '(Creativity Emphasized) ' : '';
-        return `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED (total: ${data.total_rejections})`;
+        return `${creativityPrefix}Submitter ${data.submitter_id} [${modelName}]: ✗ REJECTED WITH FEEDBACK (total: ${data.total_rejections})`;
       }
       case 'completion_review_started':
         return `[${data.topic_id}] Completion review at ${data.submission_count} submissions`;
@@ -210,8 +210,10 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         return proofNoveltyMessage();
       case 'proof_registration_duplicate':
         return proofNoveltyMessage();
-      case 'proof_check_complete':
-        return `${proofRoundLabel() || 'Proof check'} complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
+      case 'proof_check_complete': {
+        const detail = data.message ? ` - ${String(data.message).replace(/\s+/g, ' ').trim()}` : '';
+        return `${proofRoundLabel() || 'Proof check'} complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
+      }
       case 'hung_connection_alert': {
         const model = data.model || 'model';
         const provider = data.provider || 'provider';

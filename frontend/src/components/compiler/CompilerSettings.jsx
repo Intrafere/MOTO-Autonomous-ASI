@@ -4,6 +4,7 @@ import {
   computeCodexAutoSettings,
   computeCloudAccessAutoSettings,
   computeOpenRouterAutoSettings,
+  computeSakanaFuguAutoSettings,
   computeXAIGrokAutoSettings,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -16,12 +17,14 @@ import {
   hasEndpointMetadata,
   normalizeOpenRouterReasoningEffort,
   OPENROUTER_REASONING_EFFORT_OPTIONS,
+  SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
 import {
   chooseCloudAccessProvider,
   getConfiguredCloudAccessProviders,
   isCloudAccessProvider,
   cloudAccessProviderLabel,
+  SAKANA_FUGU_PROVIDER,
   XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
 import HelpTooltip from '../HelpTooltip';
@@ -58,12 +61,15 @@ function CompilerSettings({ capabilities, connectivityStatus, developerModeEnabl
   const [openRouterModels, setOpenRouterModels] = useState([]);
   const [openAICodexModels, setOpenAICodexModels] = useState([]);
   const [xaiGrokModels, setXaiGrokModels] = useState([]);
+  const [sakanaFuguModels, setSakanaFuguModels] = useState([]);
   const [modelProviders, setModelProviders] = useState({});
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
   const [hasOpenAICodexLogin, setHasOpenAICodexLogin] = useState(false);
   const [hasXAIGrokLogin, setHasXAIGrokLogin] = useState(false);
+  const [hasSakanaFuguKey, setHasSakanaFuguKey] = useState(false);
   const [openAICodexModelError, setOpenAICodexModelError] = useState('');
   const [xaiGrokModelError, setXaiGrokModelError] = useState('');
+  const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [loadingModels, setLoadingModels] = useState(true);
   const [freeOnly, setFreeOnly] = useState(false);
   const [freeModelLooping, setFreeModelLooping] = useState(true);
@@ -135,10 +141,12 @@ function CompilerSettings({ capabilities, connectivityStatus, developerModeEnabl
   const genericMode = Boolean(capabilities?.genericMode);
   const openAICodexOauthAvailable = !genericMode && capabilities?.openAICodexOauthAvailable !== false;
   const xaiGrokOauthAvailable = !genericMode && capabilities?.xaiGrokOauthAvailable !== false;
+  const sakanaFuguAvailable = !genericMode && capabilities?.sakanaFuguAvailable !== false;
   const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled === true;
   const oauthStatusByProvider = {
     openai_codex_oauth: { configured: hasOpenAICodexLogin },
     [XAI_GROK_PROVIDER]: { configured: hasXAIGrokLogin },
+    [SAKANA_FUGU_PROVIDER]: { configured: hasSakanaFuguKey },
   };
   const configuredOAuthProviders = getConfiguredCloudAccessProviders(oauthStatusByProvider);
 
@@ -212,6 +220,26 @@ function CompilerSettings({ capabilities, connectivityStatus, developerModeEnabl
         setHasXAIGrokLogin(false);
         setXaiGrokModels([]);
         setXaiGrokModelError('');
+      }
+      if (sakanaFuguAvailable) {
+        try {
+          const sakanaStatus = await cloudAccessAPI.getSakanaFuguStatus();
+          const configured = Boolean(sakanaStatus.status?.configured);
+          setHasSakanaFuguKey(configured);
+          if (configured) {
+            fetchSakanaFuguModels();
+          } else {
+            setSakanaFuguModelError('');
+          }
+        } catch (err) {
+          console.error('Failed to check Sakana Fugu API key:', err);
+          setHasSakanaFuguKey(false);
+          setSakanaFuguModelError(`Sakana Fugu status could not be checked: ${err.message || 'unknown error'}.`);
+        }
+      } else {
+        setHasSakanaFuguKey(false);
+        setSakanaFuguModels([]);
+        setSakanaFuguModelError('');
       }
 
       // Fetch LM Studio models
@@ -553,6 +581,30 @@ function CompilerSettings({ capabilities, connectivityStatus, developerModeEnabl
     }
   };
 
+  const fetchSakanaFuguModels = async () => {
+    if (!sakanaFuguAvailable) {
+      setSakanaFuguModels([]);
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModelError('');
+      return;
+    }
+    try {
+      const result = await cloudAccessAPI.getSakanaFuguModels();
+      const models = result.models || [];
+      setSakanaFuguModels(models);
+      setHasSakanaFuguKey(models.length > 0);
+      setSakanaFuguModelError(models.length > 0
+        ? ''
+        : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
+      );
+    } catch (err) {
+      console.error('Failed to fetch Sakana Fugu models:', err);
+      setSakanaFuguModels([]);
+      setHasSakanaFuguKey(false);
+      setSakanaFuguModelError(`Sakana Fugu API key is saved, but models could not be loaded: ${err.message || 'unknown error'}.`);
+    }
+  };
+
   // Refetch models when free-only toggle changes
   useEffect(() => {
     if (hasOpenRouterKey && isLoaded) {
@@ -664,6 +716,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   const getOAuthModels = (provider) => {
     if (provider === 'openai_codex_oauth') return openAICodexModels;
     if (provider === XAI_GROK_PROVIDER) return xaiGrokModels;
+    if (provider === SAKANA_FUGU_PROVIDER) return sakanaFuguModels;
     return [];
   };
 
@@ -678,7 +731,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     }
     const autoSettings = provider === XAI_GROK_PROVIDER
       ? computeXAIGrokAutoSettings(model)
-      : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider));
+      : (provider === SAKANA_FUGU_PROVIDER
+        ? computeSakanaFuguAutoSettings(model)
+        : computeCloudAccessAutoSettings(model, cloudAccessProviderLabel(provider)));
     if (autoSettings.warnings.length > 0) {
       console.warn('[CompilerOAuthAutoFill] auto-settings fallback used:', autoSettings.warnings);
     }
@@ -1005,9 +1060,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                 }}
                 disabled={configuredOAuthProviders.length === 0}
                 className={`provider-toggle-btn${isCloudAccessProvider(provider) ? ' active-or-orange' : ''}`}
-                title={configuredOAuthProviders.length === 0 ? 'Set up an OAuth login in OpenRouter/OAuth first' : 'Use an OAuth subscription provider'}
+                title={configuredOAuthProviders.length === 0 ? 'Set up a cloud provider login or API key first' : 'Use a configured cloud provider'}
               >
-                oAuth
+                Cloud
               </button>
               {isCloudAccessProvider(provider) && configuredOAuthProviders.length > 1 && (
                 <select
@@ -1019,7 +1074,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
                     setOpenrouterReasoningEffort(DEFAULT_OPENROUTER_REASONING_EFFORT);
                     setFallback(null);
                   }}
-                  title="Select OAuth provider"
+                  title="Select cloud provider"
                   className="input-dark"
                   style={{ width: 'auto', minWidth: '150px' }}
                 >
@@ -1127,6 +1182,23 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
               {reasoningInfo.hasEndpointMetadata && !reasoningInfo.supportsReasoning
                 ? 'This selected host does not advertise reasoning support; OpenRouter may ignore the setting.'
                 : 'Auto sends OpenRouter max reasoning effort by default.'}
+            </small>
+          </div>
+        )}
+
+        {effectiveProvider === SAKANA_FUGU_PROVIDER && model && (
+          <div className="settings-row">
+            <label>Reasoning Effort</label>
+            <select
+              value={normalizeOpenRouterReasoningEffort(openrouterReasoningEffort)}
+              onChange={(e) => setOpenrouterReasoningEffort(e.target.value)}
+            >
+              {SAKANA_FUGU_REASONING_EFFORT_OPTIONS.map(option => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <small className="settings-hint">
+              Sakana Fugu supports high and xhigh reasoning effort only; auto maps to xhigh.
             </small>
           </div>
         )}

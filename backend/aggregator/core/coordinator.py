@@ -13,7 +13,7 @@ from backend.shared.config import system_config, rag_config
 from backend.shared.models import SystemStatus, Submission, ValidationResult, SubmitterConfig, WorkflowTask, ModelConfig, ProofAttemptFeedback
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.rag_lock import rag_operation_lock
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import OAuthProviderCooldownError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
@@ -864,6 +864,12 @@ class Coordinator:
                         "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+            except OAuthProviderCooldownError as e:
+                logger.warning("Validator paused for OAuth provider cooldown: %s", e)
+                await api_client_manager.wait_for_oauth_provider_cooldown(
+                    e,
+                    role_id="aggregator_validator",
+                )
             except ContextAllocationError as e:
                 await self._handle_context_overflow(e, role_id="aggregator_validator")
                 break
@@ -974,6 +980,12 @@ class Coordinator:
                         "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+            except OAuthProviderCooldownError as e:
+                logger.warning("Single-model workflow paused for OAuth provider cooldown: %s", e)
+                await api_client_manager.wait_for_oauth_provider_cooldown(
+                    e,
+                    role_id="aggregator_single_model",
+                )
             except ContextAllocationError as e:
                 await self._handle_context_overflow(e, role_id="aggregator_single_model")
                 break
@@ -1239,7 +1251,7 @@ class Coordinator:
         creativity_prefix = "(Creativity Emphasized) " if creativity_emphasized else ""
         await self._add_persisted_event(
             "submission_rejected",
-            f"{creativity_prefix}Submission from Submitter {submission.submitter_id} REJECTED: {rejection_reason}",
+            f"{creativity_prefix}Submission from Submitter {submission.submitter_id} REJECTED WITH FEEDBACK: {rejection_reason}",
             {
                 "submission_id": submission.submission_id,
                 "submitter_id": submission.submitter_id,

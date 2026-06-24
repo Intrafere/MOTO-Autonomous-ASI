@@ -158,6 +158,10 @@ export async function readPromptDraft(key) {
 
 export function savePromptDraft(key, prompt) {
   const normalizedPrompt = String(prompt || '');
+  if (!normalizedPrompt) {
+    removePromptDraft(key);
+    return;
+  }
   let syncStored = false;
 
   if (canUseBrowserStorage()) {

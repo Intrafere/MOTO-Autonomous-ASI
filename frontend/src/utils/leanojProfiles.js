@@ -28,6 +28,7 @@ const MINIMAX_M3_MAX_OUTPUT_TOKENS = 131072;
 const GPT_55_MODEL = 'openai/gpt-5.5';
 const GPT_55_CONTEXT_WINDOW = 400000;
 const GPT_55_MAX_OUTPUT_TOKENS = 65536;
+const CLAUDE_OPUS_LATEST_MODEL = '~anthropic/claude-opus-latest';
 
 const DEFAULT_ROLE_CONFIG = {
   provider: 'lm_studio',
@@ -96,14 +97,14 @@ export const LEANOJ_RECOMMENDED_PROFILES = {
     submitters: [
       gpt55Role(),
       role('deepseek/deepseek-v4-pro', 1048576, 65500),
-      role('anthropic/claude-opus-4.7', 1048576, 65500),
+      role(CLAUDE_OPUS_LATEST_MODEL, 1048576, 65500),
     ],
     roles: {
       topic_generator: gpt55Role(),
       topic_validator: geminiFlashLatestRole(),
       brainstorm_validator: geminiFlashLatestRole(),
       assistant: geminiFlashLatestRole(),
-      final_solver: role('anthropic/claude-opus-4.7', 1048576, 65500),
+      final_solver: role(CLAUDE_OPUS_LATEST_MODEL, 1048576, 65500),
     },
   },
 };

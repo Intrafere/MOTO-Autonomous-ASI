@@ -5,7 +5,7 @@ function statusClass(status) {
   if (normalized === 'active' || normalized === 'ready') return 'connectivity-status--ready';
   if (normalized === 'error') return 'connectivity-status--error';
   if (normalized === 'disabled') return 'connectivity-status--disabled';
-  if (normalized === 'not ready' || normalized === 'outdated' || normalized === 'coming soon') return 'connectivity-status--pending';
+  if (normalized === 'starting' || normalized === 'not ready' || normalized === 'outdated' || normalized === 'coming soon') return 'connectivity-status--pending';
   return 'connectivity-status--inactive';
 }
 
@@ -100,14 +100,16 @@ export default function ConnectivityPanel({
   anyWorkflowRunning = false,
 }) {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const isStarting = !connectivityStatus;
   const inference = connectivityStatus?.inference || {};
   const skills = connectivityStatus?.skills || {};
-  const openRouterStatus = inference.openrouter_oauth?.status || 'inactive';
+  const openRouterStatus = inference.openrouter_oauth?.status || (isStarting ? 'starting' : 'inactive');
   const lmStudioStatus = capabilities?.lmStudioEnabled === false
     ? 'inactive'
-    : (inference.lm_studio?.status || 'inactive');
+    : (inference.lm_studio?.status || (isStarting ? 'starting' : 'inactive'));
   const memoryStatus = skills.agent_conversation_memory || {};
   const wolframStatus = skills.wolfram_alpha || {};
+  const skillFallbackStatus = isStarting ? 'starting' : 'inactive';
 
   return (
     <div className={`connectivity-panel ${isCollapsed ? 'connectivity-panel--collapsed' : ''}`}>
@@ -145,10 +147,10 @@ export default function ConnectivityPanel({
           <section className="connectivity-section">
             <div className="connectivity-section__title">Inference Connectivity</div>
             <ConnectivityRow
-              label="OpenRouter/OAuth"
+              label="OpenRouter & Cloud Subscriptions"
               status={openRouterStatus}
               onOpen={onOpenOpenRouterOAuth}
-              title="Configure OpenRouter and OAuth provider access"
+              title="Configure OpenRouter, OAuth providers, and direct cloud provider API keys"
             />
             <ConnectivityRow
               label="LM Studio"
@@ -171,7 +173,7 @@ export default function ConnectivityPanel({
             <ConnectivityRow
               checkbox
               label="Wolfram Alpha"
-              status={wolframStatus.status || 'inactive'}
+              status={wolframStatus.status || skillFallbackStatus}
               checked={wolframStatus.enabled}
               disabled={anyWorkflowRunning}
               onToggle={onToggleWolfram}
@@ -181,7 +183,7 @@ export default function ConnectivityPanel({
             <ConnectivityRow
               checkbox
               label="Session History Memory"
-              status={memoryStatus.status || 'disabled'}
+              status={memoryStatus.status || (isStarting ? 'starting' : 'disabled')}
               checked={memoryStatus.enabled}
               disabled={anyWorkflowRunning}
               onToggle={onToggleAgentMemory}

@@ -42,6 +42,8 @@ AssistantSelectionMode = Literal[
     "stale-but-best-known",
     "no_candidates",
     "unavailable",
+    "cached_oauth_cooldown",
+    "deterministic_oauth_cooldown",
 ]
 
 

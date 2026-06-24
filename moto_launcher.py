@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 from datetime import datetime
+import importlib
 import json
 import ntpath
 import os
@@ -326,6 +327,63 @@ def resolve_launcher_path(raw: str | None) -> str | None:
     return str((SCRIPT_DIR / path).resolve())
 
 
+def _runtime_lock_path(data_root: str) -> Path:
+    return Path(data_root) / ".moto_runtime.lock"
+
+
+def read_runtime_lock(data_root: str) -> dict[str, object]:
+    try:
+        payload = json.loads(_runtime_lock_path(data_root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def read_runtime_lock_pid(data_root: str) -> int | None:
+    payload = read_runtime_lock(data_root)
+    if not payload:
+        return None
+    try:
+        pid = int(payload.get("backend_pid"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def assert_runtime_lock_available(data_root: str) -> None:
+    payload = read_runtime_lock(data_root)
+    pid = read_runtime_lock_pid(data_root)
+    if pid is not None and is_pid_running(pid):
+        backend_port = int(payload.get("backend_port") or 0)
+        if backend_port > 0 and not port_in_use(backend_port):
+            try:
+                _runtime_lock_path(data_root).unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        raise RuntimeError(
+            "The default MOTO data root is already in use by another backend process. "
+            "Close the existing MOTO backend/frontend windows, then launch again."
+        )
+
+
+def write_runtime_lock(data_root: str, backend_pid: int, instance_id: str, backend_port: int | None = None) -> None:
+    lock_path = _runtime_lock_path(data_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(
+            {
+                "backend_pid": backend_pid,
+                "backend_port": backend_port,
+                "instance_id": instance_id,
+                "updated_at": datetime.now().isoformat(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def sanitize_instance_id(raw: str | None) -> str | None:
     if not raw or not raw.strip():
         return None
@@ -366,11 +424,11 @@ def resolve_instance_runtime() -> InstanceRuntime:
             explicit_backend_port = int(value)
             break
 
-    explicit_frontend_port = None
+    requested_frontend_port = None
     for variable in ("MOTO_FRONTEND_PORT", "FRONTEND_PORT"):
         value = os.environ.get(variable)
         if value:
-            explicit_frontend_port = int(value)
+            requested_frontend_port = int(value)
             break
 
     default_data = str((SCRIPT_DIR / "backend" / "data").resolve())
@@ -378,78 +436,67 @@ def resolve_instance_runtime() -> InstanceRuntime:
     default_backend = 8000
     default_frontend = 5173
 
-    has_explicit_runtime = any(
+    has_explicit_identity = any(
         value is not None
         for value in (
             explicit_id,
             explicit_data,
             explicit_log,
-            explicit_backend_port,
-            explicit_frontend_port,
             explicit_secret,
             explicit_storage,
         )
     )
+    explicit_frontend_port = requested_frontend_port if has_explicit_identity else None
 
     # ------------------------------------------------------------------
-    # CRITICAL: keyring namespace stability across every relaunch.
+    # CRITICAL: keyring/data/browser-storage stability across every plain
+    # consumer relaunch.
     #
-    # Previously, a "fresh" launch with free default ports would mint
-    # `instance_id="default"` with `secret_namespace=None` but never record
-    # that choice. If the very next launch happened to find default ports
-    # busy (e.g. Windows TIME_WAIT on 8000/5173), the launcher fell back to
-    # minting a brand-new timestamped instance_id and therefore a brand-new
-    # keyring service name, which made the saved OpenRouter / Wolfram keys
-    # look like they had disappeared. A third launch would flip back to the
-    # default namespace and "rediscover" the original key. This is the
-    # 1/3-startup key-loss symptom.
-    #
-    # Fix: `save_last_instance_record` is invoked for EVERY non-explicit
-    # launch (including default), and here on every non-explicit relaunch we
-    # prefer the recorded runtime when it is not currently live — regardless
-    # of whether the default ports are free. This keeps the keyring service
-    # name and data root perfectly stable across restarts.
+    # A normal launch must always point at the shared default runtime:
+    # `backend/data`, `backend/logs`, no keyring namespace, and no frontend
+    # storage prefix. Port availability is not user identity. If backend port
+    # 8000 is busy, only the backend port may move. The default frontend origin
+    # stays on 5173 so browser profiles/prompts remain visible.
+    # Isolated `.moto_instances/*` roots are reserved for explicit identity /
+    # storage overrides. Port-only overrides are not identity overrides.
     # ------------------------------------------------------------------
     reused_record: dict | None = None
-    blocked_record_instance_id: str | None = None
-    if not has_explicit_runtime:
+    active_plain_instance_ids: set[str] = set()
+    if not has_explicit_identity:
+        active_plain_instance_ids = {
+            str(active.get("instance_id") or "").strip()
+            for active in cleanup_launcher_state()
+            if isinstance(active, dict)
+        }
+        if "default" in active_plain_instance_ids:
+            raise RuntimeError(
+                "The default MOTO instance already appears to be running. Close the existing "
+                "MOTO backend/frontend windows, then launch again. A plain launch will not "
+                "create a separate empty data/keyring namespace."
+            )
+
         last_record = load_last_instance_record()
         if last_record is not None:
             candidate_id = sanitize_instance_id(last_record.get("instance_id")) or "default"
-            live_instance_ids = {
-                str(active.get("instance_id") or "").strip()
-                for active in cleanup_launcher_state()
-                if isinstance(active, dict)
-            }
-            if candidate_id not in live_instance_ids:
+            if candidate_id == "default":
                 reused_record = {
                     "instance_id": candidate_id,
-                    "data_root": last_record.get("data_root") or None,
-                    "log_root": last_record.get("log_root") or None,
-                    "keyring_namespace": _stored_keyring_namespace(last_record),
-                    "storage_prefix": last_record.get("storage_prefix"),
+                    "data_root": None,
+                    "log_root": None,
+                    "keyring_namespace": None,
+                    "storage_prefix": None,
                 }
-            else:
-                blocked_record_instance_id = candidate_id
 
     # Decide the instance identity.
-    if has_explicit_runtime:
+    if has_explicit_identity:
         instance_id = explicit_id or new_instance_id()
     elif reused_record is not None:
         instance_id = reused_record["instance_id"]
     else:
-        # Very first launch on this install (no recorded runtime yet).
-        # Only "adopt" the default instance if the default ports are
-        # currently free AND the recorded live instance is not already using
-        # the default identity. Otherwise mint a fresh namespace so we do not
-        # collide with an active default data root/keyring namespace, or with
-        # whatever process is holding 8000/5173.
-        defaults_free = not port_in_use(default_backend) and not port_in_use(default_frontend)
-        instance_id = (
-            "default"
-            if defaults_free and blocked_record_instance_id != "default"
-            else new_instance_id()
-        )
+        # No stored runtime yet. Adopt the shared default identity; later
+        # backend port selection may choose a free port. Do not make a plain
+        # relaunch look like a brand-new user.
+        instance_id = "default"
 
     is_default_instance = instance_id == "default"
 
@@ -485,6 +532,18 @@ def resolve_instance_runtime() -> InstanceRuntime:
         if port_in_use(explicit_frontend_port):
             raise RuntimeError(f"Requested frontend port {explicit_frontend_port} is already in use.")
         frontend_port = explicit_frontend_port
+    elif requested_frontend_port is not None and is_default_instance and not has_explicit_identity:
+        raise RuntimeError(
+            "Frontend port overrides are disabled for normal default launches because changing "
+            "the localhost port hides browser-saved profiles/prompts. Close the process using "
+            f"port {default_frontend}, or use explicit instance/data-root overrides for an isolated run."
+        )
+    elif is_default_instance and not has_explicit_identity and port_in_use(default_frontend):
+        raise RuntimeError(
+            f"Frontend port {default_frontend} is already in use. Close the existing MOTO "
+            "frontend/browser launch and start again so saved browser profiles/prompts stay "
+            "on the normal localhost:5173 origin."
+        )
     else:
         if not port_in_use(default_frontend) and default_frontend != backend_port:
             frontend_port = default_frontend
@@ -523,7 +582,7 @@ def resolve_instance_runtime() -> InstanceRuntime:
         secret_namespace=secret_namespace,
         storage_prefix=storage_prefix,
         is_default=is_default_instance,
-        explicit_override=has_explicit_runtime,
+        explicit_override=has_explicit_identity,
     )
 
 
@@ -1545,6 +1604,18 @@ def install_z3(runtime: InstanceRuntime, env: dict[str, str]) -> None:
     print()
 
 
+def npm_output_reports_vulnerabilities(output: str) -> bool:
+    normalized = (output or "").lower()
+    return (
+        "vulnerabilit" in normalized
+        and (
+            "npm audit fix" in normalized
+            or "severity" in normalized
+            or "to address all issues" in normalized
+        )
+    )
+
+
 def install_frontend_dependencies() -> tuple[str, bool]:
     cprint("[5/8] Checking Node.js dependencies...", YELLOW)
     frontend_path = str(SCRIPT_DIR / "frontend")
@@ -1591,57 +1662,52 @@ def install_frontend_dependencies() -> tuple[str, bool]:
 
     # ──────────────────────────────────────────────────────────────────────
     # SECURITY-CRITICAL: Automatic npm vulnerability remediation.
-    # This block MUST NOT be removed, disabled, or bypassed for any reason what-so-ever. Do not remove this system for any update or change at all.
+    # PERMANENT LAUNCHER INVARIANT: Do not remove, disable, weaken, or bypass
+    # this npm audit-fix system. If an agent accidentally removes or breaks it,
+    # the agent must restore it immediately with no exceptions before continuing
+    # any other launcher/updater work.
     # npm audit fix is the program's self-healing mechanism for dependency
     # CVEs. Removing it leaves the runtime exposed to known exploits with
     # no user-visible signal that remediation has stopped occurring.
     # ──────────────────────────────────────────────────────────────────────
-    vulnerability_warning = "vulnerability" in npm_output.lower() and "severity" in npm_output.lower()
+    vulnerability_warning = npm_output_reports_vulnerabilities(npm_output)
     if vulnerability_warning:
         print()
-        active_instances = cleanup_launcher_state()
-        install_state = classify_install_state(active_instances)
-        updater_eligible = install_state.can_auto_apply and install_state.kind == "clean_git_clone"
+        cprint("npm reported vulnerabilities — running `npm audit fix`...", YELLOW)
+        fix_result = subprocess.run(
+            [npm_cmd, "audit", "fix"],
+            cwd=frontend_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        fix_output = (fix_result.stdout or "").strip()
+        if fix_output:
+            print(fix_output)
 
-        if updater_eligible:
-            cprint("NOTE: npm reported vulnerabilities, but skipping auto-fix to keep this clean main checkout updater-eligible.", YELLOW)
-            cprint("Run `npm audit fix` manually inside `frontend/` if you want to address them.", YELLOW)
-        else:
-            cprint("npm reported vulnerabilities — running `npm audit fix`...", YELLOW)
-            fix_result = subprocess.run(
-                [npm_cmd, "audit", "fix"],
+        still_vulnerable = npm_output_reports_vulnerabilities(fix_output)
+        if fix_result.returncode != 0 or still_vulnerable:
+            cprint("Standard fix insufficient — running `npm audit fix --force`...", YELLOW)
+            force_result = subprocess.run(
+                [npm_cmd, "audit", "fix", "--force"],
                 cwd=frontend_path,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 check=False,
             )
-            fix_output = (fix_result.stdout or "").strip()
-            if fix_output:
-                print(fix_output)
-
-            still_vulnerable = "vulnerability" in (fix_output).lower() and "severity" in (fix_output).lower()
-            if fix_result.returncode != 0 or still_vulnerable:
-                cprint("Standard fix insufficient — running `npm audit fix --force`...", YELLOW)
-                force_result = subprocess.run(
-                    [npm_cmd, "audit", "fix", "--force"],
-                    cwd=frontend_path,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    check=False,
-                )
-                force_output = (force_result.stdout or "").strip()
-                if force_output:
-                    print(force_output)
-                if force_result.returncode == 0:
-                    cprint("npm audit fix --force completed.", GREEN)
-                    vulnerability_warning = False
-                else:
-                    cprint("npm audit fix --force could not fully resolve all vulnerabilities.", YELLOW)
-            else:
-                cprint("npm audit fix completed.", GREEN)
+            force_output = (force_result.stdout or "").strip()
+            if force_output:
+                print(force_output)
+            if force_result.returncode == 0:
+                cprint("npm audit fix --force completed.", GREEN)
                 vulnerability_warning = False
+            else:
+                cprint("npm audit fix --force could not fully resolve all vulnerabilities.", YELLOW)
+        else:
+            cprint("npm audit fix completed.", GREEN)
+            vulnerability_warning = False
 
     cprint("Node.js dependencies up to date", GREEN)
     print()
@@ -1682,8 +1748,7 @@ def check_lm_studio() -> None:
 def check_secure_keyring() -> None:
     cprint("[6b/8] Checking secure credential storage...", YELLOW)
     try:
-        import keyring
-
+        keyring = importlib.import_module("keyring")
         backend = keyring.get_keyring()
         backend_name = f"{backend.__class__.__module__}.{backend.__class__.__name__}"
         if backend.__class__.__module__.startswith("keyring.backends.fail"):
@@ -1702,6 +1767,8 @@ def check_secure_keyring() -> None:
 
 def verify_instance_ports(runtime: InstanceRuntime) -> None:
     cprint("[7/8] Final launch checks...", YELLOW)
+    if runtime.is_default and not runtime.explicit_override:
+        assert_runtime_lock_available(runtime.data_root)
     if port_in_use(runtime.backend_port):
         raise RuntimeError(f"Backend port {runtime.backend_port} became occupied before launch.")
     if port_in_use(runtime.frontend_port):
@@ -1772,6 +1839,9 @@ def start_services(
     if backend_service.mode != "window" and not is_pid_running(backend_service.pid):
         log_hint = f" Check {backend_service.log_path} for details." if backend_service.log_path else ""
         raise RuntimeError(f"{backend_service.title} exited during startup.{log_hint}")
+
+    if runtime.is_default and not runtime.explicit_override:
+        write_runtime_lock(runtime.data_root, backend_service.pid, runtime.instance_id, runtime.backend_port)
 
     frontend_service = launch_service(
         title=f"MOTO Frontend [{runtime.instance_id}]",

@@ -488,6 +488,7 @@ async def clear_all_submissions():
                 broadcast=True,
                 reason="aggregator_cleared",
             )
+            await assistant_proof_search_coordinator.clear_cooldown_state()
             await clear_manual_aggregator_prompt()
         
         return {

@@ -5,7 +5,6 @@ import json
 import logging
 import threading
 import time
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -95,33 +94,59 @@ def _safe_string(value: Any, max_chars: int = 700) -> str:
     return text
 
 
+def _stable_notification_key(provider: str, role_id: str, reason: str, model: str) -> str:
+    parts = [provider, role_id, reason, model or "*"]
+    return ":".join(part.replace(":", "_") for part in parts)
+
+
 def record_provider_notification(event_type: str, payload: Dict[str, Any]) -> dict[str, Any]:
     """Persist a recoverable provider/OAuth notification and return the stored payload."""
     provider = _safe_string(payload.get("provider"), 120) or "oauth"
     role_id = _safe_string(payload.get("role_id"), 160) or provider
     reason = _safe_string(payload.get("reason"), 160) or "provider_error"
+    model = _safe_string(payload.get("model"), 240)
     created_at = _coerce_created_at(payload.get("created_at") or payload.get("_serverTimestamp"))
-    notification_id = _safe_string(payload.get("id"), 160) or f"{provider}:{role_id}:{reason}:{uuid.uuid4().hex[:12]}"
+    key_model = model
+    if reason == "usage_limit_reached" and payload.get("cooldown_until") is not None:
+        key_model = f"{model or '*'}@{payload.get('cooldown_until')}"
+    notification_key = _stable_notification_key(provider, role_id, reason, key_model)
+    notification_id = _safe_string(payload.get("id"), 240) or notification_key
 
     notification = {
         "id": notification_id,
+        "notification_key": notification_key,
         "event_type": _safe_string(event_type, 120),
         "created_at": created_at,
         "provider": provider,
         "provider_label": _safe_string(payload.get("provider_label"), 120),
         "role_id": role_id,
-        "model": _safe_string(payload.get("model"), 240),
+        "model": model,
         "reason": reason,
         "recoverable": bool(payload.get("recoverable", False)),
         "message": _safe_string(payload.get("message"), 700),
         "error_summary": _safe_string(payload.get("error_summary"), 700),
-        "oauth_error_message": _safe_string(payload.get("oauth_error_message"), 250),
+        "oauth_error_message": _safe_string(payload.get("oauth_error_message"), 1800),
     }
+    for numeric_key in ("resets_at", "resets_in_seconds", "cooldown_until"):
+        raw_value = payload.get(numeric_key)
+        if raw_value is None:
+            continue
+        try:
+            notification[numeric_key] = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+    if "fallback_model" in payload:
+        notification["fallback_model"] = _safe_string(payload.get("fallback_model"), 240)
+    if "plan_type" in payload:
+        notification["plan_type"] = _safe_string(payload.get("plan_type"), 120)
 
     with _store_lock:
         stored_payload = _read_payload()
         notifications = _clean_notifications(stored_payload.get("notifications") or [])
-        notifications = [item for item in notifications if item.get("id") != notification_id]
+        notifications = [
+            item for item in notifications
+            if item.get("notification_key") != notification_key and item.get("id") != notification_id
+        ]
         notifications.append(notification)
         stored_payload["notifications"] = notifications[-MAX_PROVIDER_NOTIFICATIONS:]
         _write_payload(stored_payload)

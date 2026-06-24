@@ -39,6 +39,7 @@ project-root/
 │   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion detection + model/endpoint metadata)
 │   │   ├── openai_codex_client.py       # Desktop-only OpenAI Codex/ChatGPT OAuth client, Codex backend adapter, and Codex model metadata normalizer
 │   │   ├── xai_grok_client.py           # Desktop-only xAI Grok/SuperGrok `auth.x.ai` PKCE OAuth client and Grok model metadata normalizer
+│   │   ├── sakana_fugu_client.py        # Desktop-only Sakana Fugu subscription API client (Responses-first, chat-completions fallback, model metadata)
 │   │   ├── api_client_manager.py        # Unified API router (Supercharge wrapper + OpenRouter/OAuth/LM Studio fallback + boost)
 │   │   ├── boost_manager.py             # Singleton boost manager (tracks boost modes: next-count, always-prefer, category; aliases absorbed LeanOJ path-decision tasks into Final Solver boost category)
 │   │   ├── boost_logger.py              # Boost API call logger (persists redacted/default-safe entries to boost_api_log.txt)
@@ -329,7 +330,7 @@ project-root/
 │   │   ├── StartupProviderSetupModal.jsx # Post-disclaimer startup chooser for OpenRouter or LM Studio setup; desktop OAuth is shown only as an after-startup add-on because embeddings require OpenRouter/LM Studio (OpenRouter-only in generic mode)
 │   │   ├── ConnectivityPanel.jsx        # Grouped top-right connectivity launcher for inference providers and optional skills
 │   │   ├── OpenRouterApiKeyModal.jsx    # OpenRouter/OAuth modal for OpenRouter API key and desktop OAuth logins
-│   │   ├── SyntheticLib4AccessModal.jsx # SyntheticLib4 proof-corpus snapshot/auth/index modal
+│   │   ├── SyntheticLib4AccessModal.jsx # SyntheticLib4 coming-soon proof-corpus explainer
 │   │   ├── WolframAlphaAccessModal.jsx  # Wolfram Alpha App ID and enable/disable modal
 │   │   ├── LMStudioConnectivityModal.jsx # LM Studio status/setup modal
 │   │   ├── AgentConversationMemoryModal.jsx # User-facing stored-proof memory toggle/status modal
@@ -361,6 +362,8 @@ project-root/
 │   │   │   ├── openRouterSelection.js   # Shared OpenRouter selector auto-fill helpers (context/output from model + host metadata)
 │   │   │   ├── autonomousProfiles.js    # Shared autonomous recommended-profile definitions and persistence helpers
 │   │   │   ├── leanojProfiles.js        # LeanOJ-specific recommended/user profile definitions, persistence helpers, and request builder (topic generation uses all submitters; legacy topic_generator/selector is sourced from Brainstorm Submitter 1; legacy path_decider request field is derived from Final Proof Solver)
+│   │   │   ├── safeStorage.js           # Defensive browser-storage readers for small UI preferences
+│   │   │   ├── activityStyles.js        # Shared live-activity formatting/styling helpers
 │   │   │   ├── runtimeConfig.js         # Frontend runtime helpers (instance storage prefix, active data-root display, instance ID)
 │   │   │   ├── researchRunHistory.js    # Groups Tier 2 papers + final answers into per-run history entries for Stage2PaperHistory/FinalAnswerLibrary
 │   │   │   └── disclaimerHelper.js      # Frontend-only disclaimer injection for brainstorm/paper views
@@ -420,6 +423,7 @@ project-root/
 - `lm_studio_client.py`: LM Studio HTTP client (completions, embeddings, model listing, same-base numeric `:#` instance sharing for independent calls); generic-mode inference and embeddings bypass it, though shared legacy diagnostics may still exist
 - `openrouter_client.py`: OpenRouter HTTP client (credit exhaustion detection, fallback, model/provider endpoint metadata)
 - `openai_codex_client.py`: Desktop-only OpenAI Codex/ChatGPT OAuth token lifecycle, Codex backend Responses adapter (`stream=true`, strips unsupported output-limit/temperature knobs, local event aggregation), and Codex model context/output metadata normalizer; not the regular OpenAI API-key billing path
+- `sakana_fugu_client.py`: Desktop-only Sakana Fugu subscription API client; stores API key in keyring, prefers `/responses`, falls back to `/chat/completions` for tool turns, normalizes to Chat-Completions-compatible responses, and exposes model metadata for role auto-fill
 - `api_client_manager.py`: Unified API router (optional per-role Supercharge wrapper, OpenRouter/desktop OAuth/LM Studio fallback, boost, and model tracking); generic mode early-returns FastEmbed for embeddings
 - `boost_manager.py`: Singleton boost manager (next-count, always-prefer, category, and per-task boost routing; broadcasts events)
 - `boost_logger.py`: Boost API call logger (persists boost-routed calls for the combined API log view)
@@ -440,7 +444,7 @@ project-root/
 - `runtime_settings.py`: Persists non-secret process settings such as free-model looping, desktop/default-mode proof runtime flags/timeouts, and connectivity feature toggles under the active data root
 - `provider_notification_store.py`: Persists recent non-secret provider/OAuth failure notifications so missed live popups can hydrate after reconnect/reload
 - `build_info.py`: Build identity helper that reads the committed manifest contract, resolves git HEAD or ZIP-stamped build commits, and applies optional env overrides for runtime version/build stamping
-- `proof_search/assistant_coordinator.py` / `assistant_ranker.py` / `assistant_cache.py` / `assistant_models.py`: Shared Assistant memory-support infrastructure. Assistant is a configured LLM role, not just a local search helper or per-lane submitter clone: it observes eligible non-validator, non-critique workflow prompts/phases, uses verified proof-history corpora plus rebuildable SQLite candidate/pack/goal-cache state for P-UCB/MMR support, refreshes the final up-to-7 proof pack without blocking the parent workflow, exposes compact status, waits for one eligible solver/writer/brainstorm response after pack injection before refreshing another non-empty pack, and cancels/clears stale live packs when parent workflows or manual proof checks stop/clear. It disables when Session History Memory is off.
+- `proof_search/assistant_coordinator.py` / `assistant_ranker.py` / `assistant_cache.py` / `assistant_models.py`: Shared Assistant memory-support infrastructure. Assistant is a configured non-blocking LLM role that selects up to 7 verified proof supports from enabled proof-history corpora, reuses useful packs for two eligible receiver reads before refresh, persists cooldown/shutdown state for repeated unhelpful retrieval, clears stale live packs on reset/clear paths, and disables when Session History Memory is off.
 - `fastembed_provider.py`: FastEmbed embedding wrapper (generic mode only); lazy-imported so default installs are unaffected
 - `lean4_client.py`: Lean 4 proof checker client. Subprocess mode by default; optional persistent LSP mode when `lean4_lsp_enabled`. When `lean4_enabled=False`, proof checks return explicit disabled/error results rather than invoking Lean. Never bundled into the hosted image.
 - `smt_client.py`: Optional Z3/SMT launcher-managed subprocess wrapper. When `smt_enabled=False`, SMT checks return explicit disabled/error results rather than invoking Z3. SMT results are hint-only; Lean 4 remains authoritative. Never bundled into the hosted image.
@@ -495,4 +499,4 @@ project-root/
 - **LeanOJ**: `LeanOJInterface.jsx`, `LeanOJBrainstorms.jsx`, `LeanOJLogs.jsx`, `LeanOJMasterProof.jsx`, `LeanOJMathematicalProofs.jsx`, `LeanOJProofLibrary.jsx`, `LeanOJSettings.jsx`
 - **Shared**: `StartupProviderSetupModal.jsx`, `ConnectivityPanel.jsx`, `OpenRouterApiKeyModal.jsx`, `SyntheticLib4AccessModal.jsx`, `WolframAlphaAccessModal.jsx`, `LMStudioConnectivityModal.jsx`, `AgentConversationMemoryModal.jsx`, `PaperCritiqueModal.jsx`, `CritiqueNotificationStack.jsx`, `CreditExhaustionNotificationStack.jsx`, `BoostControlModal.jsx`, `WorkflowPanel.jsx`, `TextFileUploader.jsx`, `OpenRouterPrivacyWarningModal.jsx`, `UpdateNotificationBanner.jsx`, `LatexRenderer.jsx` (dual view, KaTeX, theorem parsing), `LatexRenderer.css`
 - **Hooks**: `useProofCheckRuntime.js` (reads `/api/proofs/status` + runtime config so UI can enable/disable manual proof-check controls)
-- **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `openRouterSelection.js` (shared OpenRouter selector auto-fill helpers using model context and provider endpoint caps), `autonomousProfiles.js` (shared recommended-profile definitions + persistence helpers; when editing a preset, anchor to the exact profile block and exact nested role such as `validator` or `writer`, never to a shared literal alone, then verify the diff only touched that intended profile/role), `disclaimerHelper.js` (frontend-only disclaimer injection), `api.js`, `websocket.js`
+- **Utils**: `downloadHelpers.js` (PDF/raw download), `modelCache.js` (display_name → api_id lookup), `openRouterSelection.js` (shared OpenRouter selector auto-fill helpers using model context and provider endpoint caps), `autonomousProfiles.js` (shared recommended-profile definitions + persistence helpers; when editing a preset, anchor to the exact profile block and exact nested role such as `validator` or `writer`, never to a shared literal alone, then verify the diff only touched that intended profile/role), `leanojProfiles.js` (LeanOJ profile helpers), `safeStorage.js` (defensive localStorage reads), `activityStyles.js` (live-activity messages/classes), `runtimeConfig.js`, `researchRunHistory.js`, `disclaimerHelper.js`, `api.js`, `websocket.js`

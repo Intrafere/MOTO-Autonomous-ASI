@@ -316,7 +316,9 @@ async def lifespan(app: FastAPI):
     clear_lean4_client()
     await lm_studio_client.close()
     from backend.shared.openai_codex_client import openai_codex_client
+    from backend.shared.sakana_fugu_client import sakana_fugu_client
     await openai_codex_client.close()
+    await sakana_fugu_client.close()
     logger.info("Shutdown complete")
 
 

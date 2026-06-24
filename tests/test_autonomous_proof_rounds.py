@@ -112,7 +112,6 @@ class _ErrorProofStage(_FakeProofStage):
             error_message="retryable proof stage error",
         )
 
-
 def _configured_coordinator(fake_stage, *, allow_research_papers=True):
     coordinator = AutonomousCoordinator()
     coordinator._allow_mathematical_proofs = True
@@ -129,6 +128,36 @@ def _configured_coordinator(fake_stage, *, allow_research_papers=True):
     coordinator._validator_max_tokens = 1000
     coordinator._proof_verification_stage = fake_stage
     return coordinator
+
+
+class AutonomousAbstractExtractionTests(unittest.TestCase):
+    def test_extract_abstract_from_plain_heading_after_attribution_header(self):
+        coordinator = AutonomousCoordinator()
+
+        abstract = coordinator._extract_abstract(
+            "=" * 80
+            + "\nAUTONOMOUS AI SOLUTION\n\n"
+            + "Paper Title: Example\n"
+            + "=" * 80
+            + "\n\nAbstract\n\n"
+            + "This is the real abstract paragraph. It should be stored, not the heading.\n\n"
+            + "A second abstract paragraph should be preserved before the intro.\n\n"
+            + "I. Introduction\n\nBody starts here."
+        )
+
+        self.assertIn("This is the real abstract paragraph", abstract)
+        self.assertIn("A second abstract paragraph", abstract)
+        self.assertNotEqual(abstract, "Abstract")
+        self.assertNotIn("I. Introduction", abstract)
+
+    def test_extract_abstract_from_markdown_heading(self):
+        coordinator = AutonomousCoordinator()
+
+        abstract = coordinator._extract_abstract(
+            "# Abstract\n\nMarkdown abstract content.\n\n# Introduction\n\nIntro content."
+        )
+
+        self.assertEqual(abstract, "Markdown abstract content.")
 
 
 class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
@@ -400,6 +429,50 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "error_preserved")
         self.assertTrue(coordinator._stop_event.is_set())
         self.assertEqual(coordinator_module.research_metadata.clear_calls, [])
+
+    async def test_proofs_only_handoff_saves_topic_boundary_without_paper_state(self):
+        fake_stage = _FakeProofStage([0])
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=False)
+        coordinator._running = True
+        coordinator._state.current_tier = "tier2_paper_writing"
+        coordinator._current_topic_id = "topic_done"
+        coordinator._current_paper_id = "paper_should_not_resume"
+        coordinator._current_paper_title = "Should Not Resume"
+        coordinator._current_reference_papers = ["paper_ref"]
+        coordinator._current_reference_brainstorms = ["brainstorm_ref"]
+        coordinator._brainstorm_paper_count = 2
+        coordinator._current_brainstorm_paper_ids = ["paper_a"]
+        coordinator._last_completed_paper_id = "paper_a"
+        events = []
+
+        async def capture_event(event, data):
+            events.append((event, data))
+
+        coordinator.set_broadcast_callback(capture_event)
+
+        await coordinator._handle_papers_disabled_after_brainstorm()
+
+        self.assertEqual(coordinator._state.current_tier, "tier1_aggregation")
+        self.assertIsNone(coordinator._current_topic_id)
+        self.assertIsNone(coordinator._current_paper_id)
+        self.assertIsNone(coordinator._current_paper_title)
+        self.assertEqual(coordinator._current_reference_papers, [])
+        self.assertEqual(coordinator._current_reference_brainstorms, [])
+        self.assertEqual(coordinator._brainstorm_paper_count, 0)
+        self.assertEqual(coordinator._current_brainstorm_paper_ids, [])
+        self.assertIsNone(coordinator._last_completed_paper_id)
+        self.assertEqual(events[0][0], "research_papers_disabled_brainstorm_complete")
+        self.assertEqual(
+            coordinator_module.research_metadata.workflow_states[-1]["current_tier"],
+            "tier1_aggregation",
+        )
+        self.assertEqual(
+            coordinator_module.research_metadata.workflow_states[-1]["paper_phase"],
+            "topic_exploration",
+        )
+        self.assertIsNone(
+            coordinator_module.research_metadata.workflow_states[-1]["current_paper_id"]
+        )
 
     async def test_paper_proof_error_does_not_clear_or_retry_checkpoint(self):
         fake_stage = _ErrorProofStage([])

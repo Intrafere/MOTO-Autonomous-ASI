@@ -166,7 +166,7 @@ CORRECT RESPONSE:
 - Maintain existing prompt assembly order: System → JSON Schema → User Prompt → Context → RAG → Final Instruction
 - **MATH VARIANT**: Mathematical theorem/exposition validation focuses on rigor, logical correctness, and established mathematical principles rather than mandatory citation format. Empirical, artifact, and literature claims still require explicit support/citations or conservative wording where compiler validators enforce claim provenance. Models with web search capabilities are encouraged to use them for verification.
 - **Proof Candidate JSON Contract**: Automated proof identification is impact-first, not a known-knowledge-base builder. Candidate JSON must use `{"has_provable_theorems": bool, "theorems": [{"theorem_id": str, "statement": str, "formal_sketch": str, "expected_novelty_tier": "major_mathematical_discovery|mathematical_discovery|novel_variant|novel_formulation", "prompt_relevance_rationale": str, "novelty_rationale": str, "why_not_standard_known_result": str}]}`. Every automated proof JSON prompt must treat the USER RESEARCH PROMPT as the primary filter; bounded source-title/brainstorm-topic metadata is context only. Order candidates by direct impact on the user's prompt: direct solutions or impossibility results first, then decisive reductions, obstructions, and structural theorems that themselves make major progress. The three rationale fields must be non-empty or the candidate is skipped before Lean cost. Reject supporting lemmas, routine helpers, standard/textbook/Mathlib restatements, program-local firsts, minor reformulations/local formalizations, trivial/easy proofs, single-tactic/routine proof goals, and general verified background-library entries. Never impose an artificial theorem-count cap unless explicitly requested; user-configurable proof concurrency batching limits simultaneous attempts only and must not truncate identified candidates.
-- **Assistant Proof-Support Pack Contract**: Assistant is a separate shared non-blocking proof-support role for the active workflow, not a per-submitter role, proof candidate identifier, or validator. Assistant prompt/output schemas should keep the final model-visible pack capped at 7 fully Lean-verified proof supports by default, each with source/provenance, theorem statement/name, relevance/transfer reason, dependencies/imports, code/hash metadata, and target/freshness metadata. Assistant may use current solver feedback/rejections/Lean errors as query material, but outputs must state when support is stale/cached and must not broaden proof-candidate eligibility beyond the user's prompt. Partial/failed artifacts are excluded from the final support pack unless a future explicit obstruction-debug mode says otherwise.
+- **Assistant Proof-Support Pack Contract**: Assistant is a separate shared non-blocking proof-support role for the active workflow, not a per-submitter role, proof candidate identifier, or validator. Assistant prompt/output schemas should keep the final model-visible pack capped at 7 fully Lean-verified proof supports by default, each with source/provenance, theorem statement/name, relevance/transfer reason, dependencies/imports, code/hash metadata, and target/freshness metadata. Useful packs are reused for two eligible receiver reads before refresh. Assistant skips true no-external-history targets because it only performs proof-memory retrieval for now. Durable run-scoped cooldown backs off repeated zero-useful retrieval and may shut off Assistant for that run; repeated stagnant same-pack retrieval backs off without shutdown. User live activity should show normal Assistant retrieval result summaries only, not skip/backoff/shutdown turns. Assistant may use current solver feedback/rejections/Lean errors as query material, but outputs must state when support is stale/cached and must not broaden proof-candidate eligibility beyond the user's prompt. Partial/failed artifacts are excluded from the final support pack unless a future explicit obstruction-debug mode says otherwise.
 - **Optional `lean_proof` Submission Contract**: Aggregator and LeanOJ brainstorm submitters that choose `submission_type="lean_proof"` should include the same novelty fields (`expected_novelty_tier`, `prompt_relevance_rationale`, `novelty_rationale`, `why_not_standard_known_result`) as ranking context. Submitter-side novelty means public/citable prompt-relevant novelty absent from standard references or Mathlib; program-local firsts do not qualify. The shared Lean proof gate rejects missing/invalid novelty tiers and missing prompt-relevance/novelty/anti-standard-result rationales before Lean cost, in addition to malformed submissions, failed Lean attempts, placeholders, and fake proof devices. Once Lean accepts real proof code, preserve/register the artifact and let novelty/triviality ranking decide context retention, even for not-novel or downshifted actual-theorem artifacts. This preservation rule is not permission to target supporting lemmas. Normal Aggregator validation may reject Lean-verified proof artifacts from the accepted-submission database when the actual theorem is low-impact, trivial, routine, or redundant. LeanOJ brainstorm flow is template-solution-specific: proof-gated `lean_proof` artifacts may be accepted only when useful for exact template obligations. LeanOJ final master-proof editing is template-solution-first and may use standard facts inline when they directly solve current obligations, but it must not accumulate a general known-knowledge library in `master_proof.lean`.
 - **Compiler Outline Injection**: The compiler outline is always fully injected (never truncated, never RAGed) for all modes because it provides the structural framework for document construction and validation.
 - **TEMPERATURE POLICY**: Default all prompts to `temperature=0.0`. Only two exceptions are allowed: Supercharge candidate attempts and parallel brainstorm submitter lanes. Validators, compiler roles, proof/final roles, and JSON retries must stay deterministic.
@@ -1688,7 +1688,7 @@ Output your response ONLY as JSON in this exact format:
 
 ## 8. CRITIQUE & SELF-REVIEW PHASE (POST-BODY CONSTRUCTION)
 
-**File:** `backend/compiler/prompts/critique_prompts.py`
+**Owner:** Rigor & Proofs Submitter generation (`backend/compiler/agents/high_param_submitter.py`) with Validator-owned acceptance/cleanup.
 
 ### Overview
 
@@ -1700,9 +1700,8 @@ After the body section is complete (before conclusion), the system enters a **Cr
    - Rigor & Proofs Submitter generates peer review feedback on body section; legacy critique role fields are compatibility aliases
    - **Decline Mechanism**: Submitter can assess "no critique needed" when body is academically acceptable (counts toward 3 total attempts)
    - Validator validates critiques/declines (accept/reject with feedback loop)
-   - Pruning occurs on the child Aggregator's run-local 7-acceptance cleanup cadence
    - Target: 3 total attempts (accepted + rejected + declined attempts)
-   - Uses aggregator workflow with critique-specific prompts
+   - Runs inside the compiler critique phase, not as a separate Aggregator workflow
 
 2. **Self-Review Append**:
    - If at least 1 critique is accepted: append accepted critiques as `AI Self-Review and Limitations`
@@ -1736,110 +1735,14 @@ After the body section is complete (before conclusion), the system enters a **Cr
 - If accepted critiques exist: append `AI Self-Review and Limitations`, then transition to conclusion
 - Rationale: With only 3 attempts, no early termination mechanism is needed
 
-### Complete Prompt Structure - Critique Generation
-
-**Function:** `get_critique_submitter_system_prompt()`
-
-```python
-def get_critique_submitter_system_prompt() -> str:
-    return """You are a peer reviewer generating constructive criticism of a mathematical document's body section.
-
-[... INTERNAL CONTENT WARNING ...]
-
-YOUR TASK:
-Identify specific issues, errors, gaps, or improvements needed in the body section.
-
-WHAT TO CRITIQUE:
-- Mathematical errors or unsound reasoning
-- Missing proofs or incomplete arguments  
-- Logical gaps or unclear transitions
-- Redundancy or verbosity
-- Structural issues (sections out of order)
-- Missing content per outline
-- Content misaligned with paper title
-
-WHAT NOT TO CRITIQUE:
-- Conclusion/intro/abstract (not written yet)
-- Stylistic preferences
-- Minor formatting issues
-
-Output as JSON:
-{
-  "critique_needed": true or false,
-  "submission": "Detailed critique (empty string if critique_needed=false)",
-  "reasoning": "Why critique is/isn't needed"
-}
-
-Examples:
-- Critique needed: {"critique_needed": true, "submission": "Section III has flawed proof...", "reasoning": "Critical error"}
-- Decline: {"critique_needed": false, "submission": "", "reasoning": "Body is academically acceptable, no substantive issues"}
-  (Note: Counts as 1 attempt toward 10 total)
-"""
-```
-
-### Complete Prompt Structure - Critique Validation
-
-**Function:** `get_critique_validator_system_prompt()`
-
-```python
-def get_critique_validator_system_prompt() -> str:
-    return """You are validating peer review critiques.
-
-[... INTERNAL CONTENT WARNING ...]
-
-YOUR TASK:
-Decide if critique identifies legitimate issue that would improve the paper.
-
-ACCEPT if:
-- Identifies real mathematical error
-- Points out missing content per outline
-- Identifies structural issues
-- Is specific and actionable
-
-REJECT if:
-- Vague or unhelpful
-- Redundant with existing critiques
-- Stylistic preference
-- Incorrect (body is fine)
-
-Output as JSON:
-{
-  "decision": "accept or reject",
-  "reasoning": "Detailed explanation",
-  "summary": "Brief summary if rejected (max 750 chars)"
-}
-"""
-```
-
-### Assembly in `build_critique_prompt()`
-
-```python
-# Parts assembled in order:
-1. get_critique_submitter_system_prompt()
-2. "\n---\n"
-3. get_critique_json_schema()
-4. "\n---\n"
-5. f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}"  # ALWAYS direct
-6. "\n---\n"
-7. f"CURRENT OUTLINE:\n{current_outline}"  # ALWAYS fully injected
-8. "\n---\n"
-9. f"CURRENT BODY SECTION (to critique):\n{current_body}"  # Direct if fits, RAG if large
-10. "\n---\n"
-11. f"AGGREGATOR DATABASE:\n{aggregator_db}"  # RAG retrieved
-12. if reference_papers: "\n---\nREFERENCE PAPERS:\n{reference_papers}"
-13. if existing_critiques: "\n---\nEXISTING ACCEPTED CRITIQUES:\n{existing_critiques}"
-14. if rejection_feedback: "\n---\nYOUR LAST 5 REJECTIONS (Learn from these):\n{rejection_feedback}"
-15. "\n---\n"
-16. "Now generate your critique as JSON:"
-```
-
 ### JSON Schemas
 
 **Critique Submission:**
 ```json
 {
-  "submission": "Detailed critique of specific issue",
-  "reasoning": "Why this is important"
+  "critique_needed": true,
+  "submission": "Specific critique, or empty string when critique_needed=false",
+  "reasoning": "Why critique is or is not needed"
 }
 ```
 

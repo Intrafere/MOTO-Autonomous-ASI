@@ -58,6 +58,41 @@ class ProviderNotificationStoreTests(IsolatedAsyncioTestCase):
                 route_payload = await cloud_access_route.get_provider_notifications()
                 self.assertTrue(route_payload["success"])
                 self.assertEqual(route_payload["notifications"][0]["id"], stored["id"])
+                self.assertEqual(route_payload["notifications"][0]["notification_key"], stored["notification_key"])
+            finally:
+                system_config.data_dir = old_data_dir
+
+    async def test_provider_notifications_dedupe_by_stable_logical_key(self) -> None:
+        old_data_dir = system_config.data_dir
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_config.data_dir = temp_dir
+            try:
+                first = record_provider_notification(
+                    "openai_codex_oauth_error",
+                    {
+                        "role_id": "agg_sub2",
+                        "model": "gpt-5.5",
+                        "provider": "openai_codex_oauth",
+                        "reason": "unrecoverable_codex_error",
+                        "message": "first message",
+                    },
+                )
+                second = record_provider_notification(
+                    "openai_codex_oauth_error",
+                    {
+                        "role_id": "agg_sub2",
+                        "model": "gpt-5.5",
+                        "provider": "openai_codex_oauth",
+                        "reason": "unrecoverable_codex_error",
+                        "message": "second message",
+                    },
+                )
+
+                self.assertEqual(first["notification_key"], second["notification_key"])
+                listed = list_provider_notifications()
+                self.assertEqual(len(listed), 1)
+                self.assertEqual(listed[0]["notification_key"], first["notification_key"])
+                self.assertEqual(listed[0]["message"], "second message")
             finally:
                 system_config.data_dir = old_data_dir
 
@@ -104,11 +139,11 @@ class ProviderNotificationStoreTests(IsolatedAsyncioTestCase):
                         "provider": "openai_codex_oauth",
                         "role_id": "autonomous_proof_identification_manual_brainstorm",
                         "reason": "unrecoverable_codex_error",
-                        "oauth_error_message": "x" * 400,
+                        "oauth_error_message": "x" * 2200,
                     },
                 )
 
-                self.assertLessEqual(len(stored["oauth_error_message"]), 250)
+                self.assertLessEqual(len(stored["oauth_error_message"]), 1800)
                 self.assertTrue(stored["oauth_error_message"].endswith("..."))
             finally:
                 system_config.data_dir = old_data_dir
@@ -127,14 +162,14 @@ class OAuthLiveActivityErrorTests(IsolatedAsyncioTestCase):
             message,
             "context_length_exceeded: Your input exceeds the context window of this model. Please adjust your input and try again.",
         )
-        self.assertLessEqual(len(message), 250)
+        self.assertLessEqual(len(message), 1800)
 
     async def test_grok_plain_error_is_capped_for_live_activity(self) -> None:
         message = oauth_live_activity_error_message(
-            RuntimeError("xAI Grok completion failed: " + ("subscription quota exceeded " * 30))
+            RuntimeError("xAI Grok completion failed: " + ("subscription quota exceeded " * 120))
         )
 
-        self.assertLessEqual(len(message), 250)
+        self.assertLessEqual(len(message), 1800)
         self.assertTrue(message.endswith("..."))
 
 
@@ -293,7 +328,7 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(models[0]["effective_input_context_window"], 258400)
         self.assertEqual(models[0]["max_output_tokens"], 128000)
 
-    async def test_list_models_returns_empty_catalog_without_guessing_models(self) -> None:
+    async def test_list_models_includes_codex_spark_high_catalog_fallback(self) -> None:
         client = OpenAICodexClient()
 
         class FakeHttp:
@@ -310,7 +345,50 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
         with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
             models = await client.list_models()
 
-        self.assertEqual(models, [])
+        self.assertEqual(models[0]["id"], "gpt-5.3-codex-spark-high")
+        self.assertEqual(models[0]["canonical_model"], "gpt-5.3-codex-spark")
+        self.assertEqual(models[0]["reasoning_effort"], "high")
+        self.assertEqual(models[0]["context_length"], 128000)
+        self.assertEqual(models[0]["max_output_tokens"], 32768)
+
+    async def test_generate_completion_maps_codex_spark_high_alias(self) -> None:
+        client = OpenAICodexClient()
+
+        class FakeHttp:
+            async def post(self, url, json=None, headers=None):
+                import json as json_module
+
+                self.payload = json
+                response_text = json_module.dumps({
+                    "id": "resp_1",
+                    "output_text": "hello",
+                    "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                })
+
+                class Response:
+                    status_code = 200
+                    text = response_text
+
+                    def json(self):
+                        return {
+                            "id": "resp_1",
+                            "output_text": "hello",
+                            "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                        }
+
+                return Response()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            response = await client.generate_completion(
+                model="gpt-5.3-codex-spark-high",
+                messages=[{"role": "user", "content": "user"}],
+            )
+
+        self.assertEqual(fake_http.payload["model"], "gpt-5.3-codex-spark")
+        self.assertEqual(fake_http.payload["reasoning"]["effort"], "high")
+        self.assertEqual(response["model"], "gpt-5.3-codex-spark-high")
 
     async def test_list_models_retries_with_newer_stored_token_after_revocation(self) -> None:
         client = OpenAICodexClient()
@@ -833,6 +911,8 @@ class FeaturesContractTests(IsolatedAsyncioTestCase):
         self.assertTrue(payload["openai_codex_oauth_available"])
         self.assertIn("xai_grok_oauth_available", payload)
         self.assertTrue(payload["xai_grok_oauth_available"])
+        self.assertIn("sakana_fugu_available", payload)
+        self.assertTrue(payload["sakana_fugu_available"])
 
 
 class CloudAccessStatusTests(IsolatedAsyncioTestCase):

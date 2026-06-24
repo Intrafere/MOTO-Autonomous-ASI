@@ -72,7 +72,7 @@ export default function SyntheticLib4AccessModal({
       <div
         className="inline-modal-content"
         style={{
-          width: '1173px',
+          width: '1408px',
           maxWidth: '96vw',
           maxHeight: '88vh',
           overflowY: 'auto',
@@ -150,23 +150,23 @@ export default function SyntheticLib4AccessModal({
         </div>
 
         <p style={{ ...bodyTextStyle, fontSize: '1.08rem', textAlign: 'center', maxWidth: '760px', margin: '0 auto 1.45rem' }}>
-          SyntheticLib4 is a private, contribution-based Lean 4 proof ecosystem: users share novel verified discoveries for exclusive access to a relentlessly updated and pruned research memory, so every contribution strengthens the library that every participating MOTO can build from.
+          SyntheticLib4 is an online, private, contribution-based Lean 4 proof ecosystem that only contains novel and verified solutions: proofs not known to other databases and likely too new for models to have trained on yet. Your MOTO can search it while researching your prompts, helping it build from discoveries other systems have already verified.
         </p>
 
         <div style={sectionStyle}>
           <h3 style={sectionHeadingStyle}>What It Is</h3>
           <p style={bodyTextStyle}>
-            Your unused proofs now have value to provide you! We came up with a way for consenting users to trade discoveries with each other. SyntheticLib4 is a novel proof database: a super-MOTO brainstorm database of Lean 4 proofs that is relentlessly combed, vetted, updated, and pruned by state-of-the-art models. Old, weak, redundant, and newly outdated ideas are removed as stronger contributions arrive. Once filtered and processed, this information is organized into an easy-to-navigate library that your MOTO can read from autonomously while it researches your prompt! This gives users' MOTOs the ability to leapfrog off of each other's discoveries.
+            Your unused proofs can now provide value back to you. SyntheticLib4 is an optional shared memory extension where consenting users contribute novel Lean 4 proofs and, in return, gain access to discoveries from other contributors. Your MOTO's Assistant role can search this library while researching your prompt, helping it avoid retracing solved paths and leapfrog from proofs that are likely too new for current models to know.
           </p>
           <p style={{ ...bodyTextStyle, marginBottom: 0 }}>
-            Contributors receive value for their data with their consent. In exchange for contributing proof knowledge to the SyntheticLib4 ecosystem, users get shared insights from all contributors. Keeping the database private preserves that reciprocal exchange, so contributors are not asked to give without others returning value back into the ecosystem. SyntheticLib4 prevents MOTO users from retracing each other's steps. Users choose the proofs they want to contribute, and in exchange, those contributions keep the ecosystem alive.
+            SyntheticLib4 is continuously vetted, updated, and pruned by state-of-the-art models. Old, weak, redundant, or outdated ideas are removed as stronger contributions arrive, keeping the database focused on high-value novel proofs.
           </p>
         </div>
 
         <div style={sectionStyle}>
           <h3 style={sectionHeadingStyle}>Contribution And Access</h3>
           <p style={bodyTextStyle}>
-            Users will be able to select 30 novel proofs to contribute. Your local system must first deem them novel, then the SyntheticLib4 vetting system will double-check the results and decide whether they are contribution-worthy. If accepted, the contribution grants one month of access. Users can continue to contribute to extend their subscription beyond their initial month.
+            Users will be able to select 30 novel proofs to contribute. The database is only for novel solutions that are not already known to other proof databases, and many accepted solutions are expected to be too new for models to have trained on yet. Your local system must first deem them novel, then the SyntheticLib4 vetting system will double-check the results and decide whether they are contribution-worthy. If accepted, the contribution grants one month of access. Users can continue to contribute to extend their subscription beyond their initial month.
           </p>
           <p style={{ ...bodyTextStyle, marginBottom: 0 }}>
             Users who do not want to share proof data for access will be able to pay a small monthly fee instead. That fee supports ongoing model review, pruning, infrastructure, and ecosystem maintenance. The only data shared with our system is proof data manually selected by users; all other data remains private and local to users' computers.

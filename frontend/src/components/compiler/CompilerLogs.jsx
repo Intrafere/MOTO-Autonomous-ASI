@@ -32,7 +32,7 @@ const MANUAL_PROOF_EVENTS = [
   'proof_check_complete',
 ];
 
-const compactProofText = (value, maxLength = 1200) => {
+const compactProofText = (value, maxLength = 1800) => {
   const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
   if (!cleaned) {
     return '';
@@ -51,7 +51,7 @@ const leanProofResponse = (data = {}) => {
   if (data.proof_verified === true) {
     return 'Lean 4 response: proof verified.';
   }
-  const error = compactProofText(data.error_summary || data.error_output || data.reason, 960);
+  const error = compactProofText(data.error_summary || data.error_output || data.reason, 1800);
   return error ? `Lean 4 response: ${error} - proof not verified.` : '';
 };
 
@@ -178,10 +178,7 @@ function CompilerLogs() {
       }
       addEvent({ type: eventName, data });
     };
-    const handleAssistantProofPackRefreshStarted = (data) => handleAssistantProofPackEvent('assistant_proof_pack_refresh_started', data);
     const handleAssistantProofPackUpdated = (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data);
-    const handleAssistantProofPackWarning = (data) => handleAssistantProofPackEvent('assistant_proof_pack_warning', data);
-    const handleAssistantProofPackStopped = (data) => handleAssistantProofPackEvent('assistant_proof_pack_stopped', data);
 
     // Handler for critique progress to update stats display
     const handleCritiqueProgress = (data) => {
@@ -220,10 +217,7 @@ function CompilerLogs() {
     websocket.on('model_recovery_success', handleRecoverySuccess);
     websocket.on('model_recovery_failed', handleRecoveryFailed);
     websocket.on('hung_connection_alert', handleHungConnectionAlert);
-    websocket.on('assistant_proof_pack_refresh_started', handleAssistantProofPackRefreshStarted);
     websocket.on('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
-    websocket.on('assistant_proof_pack_warning', handleAssistantProofPackWarning);
-    websocket.on('assistant_proof_pack_stopped', handleAssistantProofPackStopped);
 
     // Critique phase events
     websocket.on('critique_phase_started', handleCritiquePhaseStarted);
@@ -264,10 +258,7 @@ function CompilerLogs() {
       websocket.off('model_recovery_success', handleRecoverySuccess);
       websocket.off('model_recovery_failed', handleRecoveryFailed);
       websocket.off('hung_connection_alert', handleHungConnectionAlert);
-      websocket.off('assistant_proof_pack_refresh_started', handleAssistantProofPackRefreshStarted);
       websocket.off('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
-      websocket.off('assistant_proof_pack_warning', handleAssistantProofPackWarning);
-      websocket.off('assistant_proof_pack_stopped', handleAssistantProofPackStopped);
 
       // Critique phase events cleanup
       websocket.off('critique_phase_started', handleCritiquePhaseStarted);
@@ -412,9 +403,6 @@ function CompilerLogs() {
     if (type === 'assistant_proof_pack_updated') {
       return formatAssistantProofPackEventMessage(type, data);
     }
-    if (type === 'assistant_proof_pack_refresh_started' || type === 'assistant_proof_pack_warning' || type === 'assistant_proof_pack_stopped') {
-      return formatAssistantProofPackEventMessage(type, data);
-    }
 
     // Phase transitions
     if (type === 'phase_transition') {
@@ -496,7 +484,8 @@ function CompilerLogs() {
       return `Proof dependency added: ${proofTargetLabel(data, 'verified proof')}`;
     }
     if (type === 'proof_check_complete') {
-      return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel`;
+      const detail = data.message ? ` - ${compactProofText(data.message)}` : '';
+      return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
     }
     if (type === 'hung_connection_alert') {
       const model = data.model || 'model';

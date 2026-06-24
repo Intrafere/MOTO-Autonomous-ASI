@@ -24,7 +24,7 @@ export default function LMStudioConnectivityModal({
 
         {genericMode ? (
           <div className="test-result-banner test-result-banner--error" style={{ marginBottom: '1rem' }}>
-            LM Studio is disabled in hosted/generic mode. Use OpenRouter/OAuth for inference.
+            LM Studio is disabled in hosted/generic mode. Use OpenRouter for inference.
           </div>
         ) : (
           <>
