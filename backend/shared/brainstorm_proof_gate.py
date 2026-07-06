@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from backend.autonomous.prompts.proof_prompts import LEAN4_COMMON_PITFALLS
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.config import system_config
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
@@ -490,7 +490,7 @@ async def verify_brainstorm_proof_candidate(
                 "reasoning": str(repaired.get("reasoning") or "").strip(),
             }
         except Exception as exc:
-            if is_non_retryable_model_error(exc):
+            if isinstance(exc, RetryableProviderError) or is_non_retryable_model_error(exc):
                 raise
             logger.warning("Brainstorm proof repair attempt setup failed: %s", exc)
             current = {

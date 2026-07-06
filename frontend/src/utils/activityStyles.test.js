@@ -1,9 +1,11 @@
 import {
   ASSISTANT_PROOF_PACK_EVENTS,
   REJECTION_FEEDBACK_NOTICE,
+  buildAutonomousProofProviderPauseActivity,
   buildRejectionFeedbackNoticeActivity,
   formatAssistantProofPackEventMessage,
   formatAssistantProofPackMessage,
+  getActivityClass,
   getAssistantProofPackDuplicateKey,
   shouldAddRejectionFeedbackNotice,
 } from './activityStyles';
@@ -45,6 +47,24 @@ test('keeps Assistant warning count when backend reports a real warning', () => 
   expect(message).toContain('(1 warning)');
 });
 
+test('formats Assistant model-output failure as an error activity', () => {
+  const data = {
+    candidate_count: 64,
+    shortlist_count: 20,
+    target_kind: 'brainstorm_context',
+    workflow_phase: 'brainstorm',
+    assistant_role_id: 'autonomous_assistant',
+    assistant_model_id: 'google/gemma-4-26b-a4b',
+    reason: 'assistant_llm_selection_failed',
+    error_message: 'No JSON found in response',
+  };
+
+  expect(formatAssistantProofPackEventMessage('assistant_proof_pack_failed', data)).toBe(
+    'Assistant memory model call failed for brainstorm context during brainstorm via Assistant (google/gemma-4-26b-a4b) from 64 candidates (20 shortlisted): No JSON found in response'
+  );
+  expect(getActivityClass('assistant_proof_pack_failed')).toBe('activity-reject');
+});
+
 test('adds rejection feedback notice on first and tenth consecutive rejection only', () => {
   expect(shouldAddRejectionFeedbackNotice({ total_rejections: 1 })).toBe(true);
   expect(shouldAddRejectionFeedbackNotice({ total_rejections: 7, consecutive_rejections: 10 })).toBe(true);
@@ -68,8 +88,46 @@ test('does not treat Assistant skip or cooldown events as displayable live activ
   expect(ASSISTANT_PROOF_PACK_EVENTS.has('assistant_proof_memory_unavailable')).toBe(false);
   expect(ASSISTANT_PROOF_PACK_EVENTS.has('assistant_proof_memory_cooldown')).toBe(false);
   expect(ASSISTANT_PROOF_PACK_EVENTS.has('assistant_proof_memory_shutdown')).toBe(false);
+  expect(ASSISTANT_PROOF_PACK_EVENTS.has('assistant_proof_pack_failed')).toBe(true);
   expect(getAssistantProofPackDuplicateKey('assistant_proof_memory_cooldown', {
     target_hash: 'target',
     cooldown_kind: 'zero_useful',
   })).toBe('');
+});
+
+test('keeps distinct Assistant failure details out of duplicate suppression', () => {
+  const base = {
+    target_hash: 'target-1',
+    workflow_mode: 'autonomous',
+    target_kind: 'brainstorm_context',
+    workflow_phase: 'brainstorm',
+    source_type: 'brainstorm',
+    source_id: 'topic_1',
+    reason: 'assistant_llm_selection_failed',
+  };
+
+  expect(getAssistantProofPackDuplicateKey('assistant_proof_pack_failed', {
+    ...base,
+    error_message: 'No JSON found in response',
+  })).not.toBe(getAssistantProofPackDuplicateKey('assistant_proof_pack_failed', {
+    ...base,
+    error_message: 'Response exceeded context window',
+  }));
+});
+
+test('distinguishes autonomous proof transient provider pauses from credit pauses', () => {
+  const transient = buildAutonomousProofProviderPauseActivity({
+    reason: 'transient_provider_error',
+    message: 'OpenRouter gateway timeout',
+  });
+  expect(transient.isCreditPause).toBe(false);
+  expect(transient.message).toContain('will retry automatically');
+  expect(transient.message).not.toContain('credits are reset');
+
+  const credit = buildAutonomousProofProviderPauseActivity({
+    reason: 'openrouter_credit_exhaustion',
+    message: 'credits exhausted',
+  });
+  expect(credit.isCreditPause).toBe(true);
+  expect(credit.message).toContain('credits are reset');
 });

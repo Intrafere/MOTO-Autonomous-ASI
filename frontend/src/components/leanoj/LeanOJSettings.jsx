@@ -19,6 +19,7 @@ import {
   OPENROUTER_REASONING_EFFORT_OPTIONS,
   SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
+import { refreshCredentialProviderState } from '../../utils/credentialProviderRefresh';
 import {
   chooseCloudAccessProvider,
   getConfiguredCloudAccessProviders,
@@ -329,6 +330,7 @@ export default function LeanOJSettings({
   onSettingsChange,
   capabilities,
   connectivityStatus,
+  credentialStatusRefreshToken = 0,
   isRunning,
   developerModeEnabled = false,
 }) {
@@ -391,7 +393,7 @@ export default function LeanOJSettings({
             const codexModels = await cloudAccessAPI.getOpenAICodexModels();
             const models = codexModels.models || [];
             setOpenAICodexModels(models);
-            setHasOpenAICodexLogin(models.length > 0);
+            setHasOpenAICodexLogin(true);
             setOpenAICodexModelError(models.length > 0
               ? ''
               : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
@@ -401,7 +403,6 @@ export default function LeanOJSettings({
           }
         } catch (error) {
           console.error('Failed to load OpenAI Codex state for Proof Solver:', error);
-          setHasOpenAICodexLogin(false);
           setOpenAICodexModels([]);
           setOpenAICodexModelError(`OpenAI Codex OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
         }
@@ -420,7 +421,7 @@ export default function LeanOJSettings({
             const xaiModels = await cloudAccessAPI.getXAIGrokModels();
             const models = xaiModels.models || [];
             setXaiGrokModels(models);
-            setHasXAIGrokLogin(models.length > 0);
+            setHasXAIGrokLogin(true);
             setXaiGrokModelError(models.length > 0
               ? ''
               : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
@@ -430,7 +431,6 @@ export default function LeanOJSettings({
           }
         } catch (error) {
           console.error('Failed to load xAI Grok state for Proof Solver:', error);
-          setHasXAIGrokLogin(false);
           setXaiGrokModels([]);
           setXaiGrokModelError(`xAI Grok OAuth models could not be loaded: ${error.message || 'unknown error'}.`);
         }
@@ -449,7 +449,7 @@ export default function LeanOJSettings({
             const sakanaModels = await cloudAccessAPI.getSakanaFuguModels();
             const models = sakanaModels.models || [];
             setSakanaFuguModels(models);
-            setHasSakanaFuguKey(models.length > 0);
+            setHasSakanaFuguKey(true);
             setSakanaFuguModelError(models.length > 0
               ? ''
               : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
@@ -459,7 +459,6 @@ export default function LeanOJSettings({
           }
         } catch (error) {
           console.error('Failed to load Sakana Fugu state for Proof Solver:', error);
-          setHasSakanaFuguKey(false);
           setSakanaFuguModels([]);
           setSakanaFuguModelError(`Sakana Fugu models could not be loaded: ${error.message || 'unknown error'}.`);
         }
@@ -486,6 +485,36 @@ export default function LeanOJSettings({
     };
     load();
   }, [lmStudioEnabled, settings.freeOnly, openAICodexOauthAvailable, xaiGrokOauthAvailable, sakanaFuguAvailable]);
+
+  useEffect(() => {
+    if (credentialStatusRefreshToken === 0) {
+      return;
+    }
+
+    let isCurrent = true;
+    refreshCredentialProviderState({
+      freeOnly: settings.freeOnly,
+      openAICodexOauthAvailable,
+      xaiGrokOauthAvailable,
+      sakanaFuguAvailable,
+      setHasOpenRouterKey,
+      setOpenRouterModels,
+      setHasOpenAICodexLogin,
+      setOpenAICodexModels,
+      setOpenAICodexModelError,
+      setHasXAIGrokLogin,
+      setXaiGrokModels,
+      setXaiGrokModelError,
+      setHasSakanaFuguKey,
+      setSakanaFuguModels,
+      setSakanaFuguModelError,
+      shouldApply: () => isCurrent,
+      logContext: 'Proof Solver settings',
+    });
+    return () => {
+      isCurrent = false;
+    };
+  }, [credentialStatusRefreshToken]);
 
   useEffect(() => {
     setSelectedProfile(settings.selectedProfile || '');

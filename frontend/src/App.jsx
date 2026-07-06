@@ -68,6 +68,7 @@ import { CLOUD_ACCESS_PROVIDERS, isCloudAccessProvider } from './utils/oauthProv
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  buildAutonomousProofProviderPauseActivity,
   buildRejectionFeedbackNoticeActivity,
   hasRecentAssistantProofPackDuplicate,
   shouldAddRejectionFeedbackNotice,
@@ -653,6 +654,7 @@ function App() {
   const [hasOpenRouterKey, setHasOpenRouterKey] = useState(null);
   const [hasCloudAccess, setHasCloudAccess] = useState(null);
   const [capabilities, setCapabilities] = useState(DEFAULT_CAPABILITIES);
+  const [credentialStatusRefreshToken, setCredentialStatusRefreshToken] = useState(0);
   
   // Track if any workflow is running (for WorkflowPanel visibility)
   const [anyWorkflowRunning, setAnyWorkflowRunning] = useState(false);
@@ -1865,7 +1867,7 @@ function App() {
 
     const handleAutonomousAssistantEvent = (eventName, data) => {
       const workflowMode = String(data.workflow_mode || '');
-      if (!['autonomous', 'aggregator', 'compiler'].includes(workflowMode)) {
+      if (workflowMode !== 'autonomous') {
         return;
       }
       if (!autonomousRunningRef.current) {
@@ -1880,6 +1882,9 @@ function App() {
     };
     unsubscribers.push(websocket.on('assistant_proof_pack_updated', (data) => {
       handleAutonomousAssistantEvent('assistant_proof_pack_updated', data);
+    }));
+    unsubscribers.push(websocket.on('assistant_proof_pack_failed', (data) => {
+      handleAutonomousAssistantEvent('assistant_proof_pack_failed', data);
     }));
 
     unsubscribers.push(websocket.on('proof_check_started', (data) => {
@@ -2485,13 +2490,17 @@ function App() {
     }));
 
     unsubscribers.push(websocket.on('autonomous_proof_provider_paused', (data) => {
-      console.warn('Autonomous proof verification paused for provider credits:', data);
+      const { isCreditPause, message } = buildAutonomousProofProviderPauseActivity(data);
+      console.warn('Autonomous proof verification paused for provider retry:', data);
       addActivity({
         event: 'autonomous_proof_provider_paused',
         timestamp: getTimestamp(data),
-        message: `Autonomous proof verification paused until OpenRouter credits are reset: ${data.message || data.source_id || 'provider credits exhausted'}`,
+        message,
         ...data
       });
+      if (!isCreditPause) {
+        return;
+      }
       setCreditExhaustionNotifications(prev => {
         const roleId = `Autonomous Proof (${data.source_id || data.source_type || 'checkpoint'})`;
         if (prev.some(n => n.role_id === roleId && n.reason === 'provider_paused')) return prev;
@@ -2803,6 +2812,10 @@ function App() {
       ['assistant_proof_pack_updated', (data) => {
         if (data.workflow_mode !== 'leanoj') return;
         addLeanOJActivity('assistant_proof_pack_updated', data, formatAssistantProofPackEventMessage('assistant_proof_pack_updated', data));
+      }],
+      ['assistant_proof_pack_failed', (data) => {
+        if (data.workflow_mode !== 'leanoj') return;
+        addLeanOJActivity('assistant_proof_pack_failed', data, formatAssistantProofPackEventMessage('assistant_proof_pack_failed', data));
       }],
       ['leanoj_stopped', (data) => {
         setLeanojRunning(false);
@@ -3537,6 +3550,9 @@ function App() {
   };
 
   const handleCloudAccessChanged = async (configured, provider = 'cloud', options = {}) => {
+    setCredentialStatusRefreshToken((token) => token + 1);
+    refreshConnectivityStatus();
+
     if (isCloudAccessProvider(provider) && options.modelsReady === false) {
       setHasCloudAccess(Boolean(hasOpenRouterKey));
       return;
@@ -3574,7 +3590,21 @@ function App() {
     setHasOpenRouterKey(true);
     setHasCloudAccess(true);
     console.log('OpenRouter API key set successfully');
+    setCredentialStatusRefreshToken((token) => token + 1);
     refreshConnectivityStatus();
+  };
+
+  const handleOpenRouterKeyCleared = async () => {
+    setHasOpenRouterKey(false);
+    setCredentialStatusRefreshToken((token) => token + 1);
+    refreshConnectivityStatus();
+
+    try {
+      const cloudStatus = await cloudAccessAPI.getStatus();
+      setHasCloudAccess(hasConfiguredCloudAccessProvider(cloudStatus));
+    } catch {
+      setHasCloudAccess(false);
+    }
   };
 
   const handleConnectivityToggle = async (toggles) => {
@@ -4083,6 +4113,7 @@ function App() {
           models={models}
           capabilities={capabilities}
           connectivityStatus={connectivityStatus}
+          credentialStatusRefreshToken={credentialStatusRefreshToken}
           isRunning={autonomousRunning}
           developerModeEnabled={developerModeEnabled}
         />
@@ -4094,6 +4125,7 @@ function App() {
           onSettingsChange={setLeanojSettings}
           capabilities={capabilities}
           connectivityStatus={connectivityStatus}
+          credentialStatusRefreshToken={credentialStatusRefreshToken}
           isRunning={leanojRunning}
           developerModeEnabled={developerModeEnabled}
         />
@@ -4105,6 +4137,7 @@ function App() {
           setConfig={setConfig}
           capabilities={capabilities}
           connectivityStatus={connectivityStatus}
+          credentialStatusRefreshToken={credentialStatusRefreshToken}
           developerModeEnabled={developerModeEnabled}
         />
       )}
@@ -4113,6 +4146,7 @@ function App() {
         <CompilerSettings
           capabilities={capabilities}
           connectivityStatus={connectivityStatus}
+          credentialStatusRefreshToken={credentialStatusRefreshToken}
           developerModeEnabled={developerModeEnabled}
         />
       )}
@@ -4213,6 +4247,7 @@ function App() {
         isOpen={showOpenRouterKeyModal}
         onClose={handleCloseOpenRouterKeyModal}
         onKeySet={handleOpenRouterKeySet}
+        onKeyCleared={handleOpenRouterKeyCleared}
         onCloudAccessChanged={handleCloudAccessChanged}
         reason={openRouterKeyReason}
         capabilities={capabilities}

@@ -451,9 +451,40 @@ class AssistantProofSearchCoordinator:
         try:
             selected_search_ids, selection_reasoning = await self._select_with_assistant(snapshot, shortlist, assistant_role_id=assistant_role_id, assistant_model_id=assistant_model_id, task_id=task_id)
         except Exception as exc:
-            warnings.append(f"Assistant LLM selection failed: {exc}")
-            await self._broadcast_event("assistant_proof_pack_warning", {"target_hash": snapshot.target_hash, "workflow_mode": snapshot.workflow_mode, "target_kind": snapshot.target_kind, "workflow_phase": snapshot.workflow_phase, "source_type": snapshot.source_type, "source_id": snapshot.source_id, "warnings": warnings[-3:], "assistant_role_id": assistant_role_id, "assistant_model_id": assistant_model_id, "candidate_count": candidate_count, "shortlist_count": len(shortlist)})
-            await self._publish_pack(snapshot, [], warnings=warnings, selection_mode="unavailable", assistant_role_id=assistant_role_id, assistant_model_id=assistant_model_id, candidate_count=candidate_count, shortlist_count=len(shortlist), selection_reasoning="Assistant LLM selection failed.")
+            error_message = _compact_for_assistant_selection(str(exc), 240)
+            failure_warning = f"Assistant LLM selection failed: {error_message}"
+            await self._broadcast_event(
+                "assistant_proof_pack_failed",
+                {
+                    "target_hash": snapshot.target_hash,
+                    "workflow_mode": snapshot.workflow_mode,
+                    "target_kind": snapshot.target_kind,
+                    "workflow_phase": snapshot.workflow_phase,
+                    "source_type": snapshot.source_type,
+                    "source_id": snapshot.source_id,
+                    "assistant_role_id": assistant_role_id,
+                    "assistant_model_id": assistant_model_id,
+                    "candidate_count": candidate_count,
+                    "shortlist_count": len(shortlist),
+                    "reason": "assistant_llm_selection_failed",
+                    "error_message": error_message,
+                },
+            )
+            latest_pack = self.get_latest_pack(snapshot.target_hash)
+            if latest_pack and latest_pack.results:
+                return
+            await self._publish_pack(
+                snapshot,
+                [],
+                warnings=[*warnings, failure_warning],
+                selection_mode="unavailable",
+                assistant_role_id=assistant_role_id,
+                assistant_model_id=assistant_model_id,
+                candidate_count=candidate_count,
+                shortlist_count=len(shortlist),
+                selection_reasoning="Assistant LLM selection failed; no proof supports were published.",
+                broadcast_update=False,
+            )
             return
 
         selected_supports = _supports_for_selected_ids(shortlist, selected_search_ids)
@@ -506,7 +537,7 @@ class AssistantProofSearchCoordinator:
         reasoning = _compact_for_assistant_selection(reasoning, 300)
         return clean_ids[:_ASSISTANT_FINAL_PACK_LIMIT], reasoning
 
-    async def _publish_pack(self, snapshot: AssistantTargetSnapshot, supports: list[AssistantProofSupport], *, warnings: list[str], selection_mode: str, assistant_role_id: str = "", assistant_model_id: str = "", candidate_count: int, shortlist_count: int, selection_reasoning: str = "") -> None:
+    async def _publish_pack(self, snapshot: AssistantTargetSnapshot, supports: list[AssistantProofSupport], *, warnings: list[str], selection_mode: str, assistant_role_id: str = "", assistant_model_id: str = "", candidate_count: int, shortlist_count: int, selection_reasoning: str = "", broadcast_update: bool = True) -> None:
         pack = AssistantProofPack(workflow_mode=snapshot.workflow_mode, target_kind=snapshot.target_kind, target_hash=snapshot.target_hash, query_summary=_compact_query_summary(snapshot), results=supports[:_ASSISTANT_FINAL_PACK_LIMIT], warnings=warnings, selection_mode=selection_mode, assistant_role_id=assistant_role_id, assistant_model_id=assistant_model_id, candidate_count=candidate_count, shortlist_count=shortlist_count, selection_reasoning=selection_reasoning)
         source_counts: dict[str, int] = {}
         for support in pack.results:
@@ -532,7 +563,8 @@ class AssistantProofSearchCoordinator:
             self._goal_target_hashes[goal_hash] = snapshot.target_hash
         await asyncio.to_thread(self._cache.record_pack, snapshot=snapshot, pack=pack, selected_search_ids=[support.search_id for support in pack.results])
         await self._persist_pack(pack)
-        await self._broadcast_event("assistant_proof_pack_updated", {"target_hash": pack.target_hash, "workflow_mode": pack.workflow_mode, "target_kind": pack.target_kind, "result_count": len(pack.results), "local_result_count": sum(count for corpus, count in source_counts.items() if corpus != "syntheticlib4"), "syntheticlib4_result_count": source_counts.get("syntheticlib4", 0), "source_counts": source_counts, "max_result_count": _ASSISTANT_FINAL_PACK_LIMIT, "workflow_phase": snapshot.workflow_phase, "source_type": snapshot.source_type, "source_id": snapshot.source_id, "warnings": pack.warnings[:3], "selection_mode": pack.selection_mode, "assistant_role_id": pack.assistant_role_id, "assistant_model_id": pack.assistant_model_id, "candidate_count": pack.candidate_count, "shortlist_count": pack.shortlist_count})
+        if broadcast_update:
+            await self._broadcast_event("assistant_proof_pack_updated", {"target_hash": pack.target_hash, "workflow_mode": pack.workflow_mode, "target_kind": pack.target_kind, "result_count": len(pack.results), "local_result_count": sum(count for corpus, count in source_counts.items() if corpus != "syntheticlib4"), "syntheticlib4_result_count": source_counts.get("syntheticlib4", 0), "source_counts": source_counts, "max_result_count": _ASSISTANT_FINAL_PACK_LIMIT, "workflow_phase": snapshot.workflow_phase, "source_type": snapshot.source_type, "source_id": snapshot.source_id, "warnings": pack.warnings[:3], "selection_mode": pack.selection_mode, "assistant_role_id": pack.assistant_role_id, "assistant_model_id": pack.assistant_model_id, "candidate_count": pack.candidate_count, "shortlist_count": pack.shortlist_count})
         await self._record_cooldown_outcome(snapshot, pack)
 
     def _on_task_done(self, target_hash: str, task: asyncio.Task) -> None:
@@ -697,13 +729,28 @@ def _extract_valid_selected_search_ids(payload: dict[str, Any], shortlist: list[
     if not clean_ids:
         return []
     valid_ids = {support.search_id for support in shortlist}
-    invalid_ids = [search_id for search_id in clean_ids if search_id not in valid_ids]
+    proof_id_to_search_ids: dict[str, list[str]] = {}
+    for support in shortlist:
+        proof_id = str(support.proof_id or "").strip()
+        if proof_id:
+            proof_id_to_search_ids.setdefault(proof_id, []).append(support.search_id)
+    normalized_ids: list[str] = []
+    invalid_ids: list[str] = []
+    for search_id in clean_ids:
+        if search_id in valid_ids:
+            normalized_ids.append(search_id)
+            continue
+        proof_id_matches = proof_id_to_search_ids.get(search_id, [])
+        if len(proof_id_matches) == 1:
+            normalized_ids.append(proof_id_matches[0])
+            continue
+        invalid_ids.append(search_id)
     if invalid_ids:
         preview = ", ".join(invalid_ids[:3])
         raise _AssistantSelectionOutputError(
             f"Assistant selected IDs outside the candidate shortlist: {preview}"
         )
-    return selected_ids
+    return normalized_ids
 
 
 def _assistant_selection_max_tokens(configured_max_tokens: int | None) -> int:
@@ -751,8 +798,8 @@ def _assistant_selection_prompt(
     target = _compact_for_assistant_selection(snapshot.search_text(), 2400)
     return (
         f"{prefix}\n"
-        'Required schema: {"selected_search_ids":["<exact listed id>"],"reasoning":"<=160 chars"}\n'
-        f"Rules: select at most {_ASSISTANT_FINAL_PACK_LIMIT}; use only exact listed IDs; use [] if no listed proof support is genuinely useful for the target; no markdown.\n\n"
+        'Required schema: {"selected_search_ids":["<exact SELECT_ID>"],"reasoning":"<=160 chars"}\n'
+        f"Rules: select at most {_ASSISTANT_FINAL_PACK_LIMIT}; copy only exact SELECT_ID values; do not return proof_id/display IDs; use [] if no listed proof support is genuinely useful for the target; no markdown.\n\n"
         f"TARGET:\n{target}\n\n"
         f"CANDIDATES:\n{ids}\n"
     )
@@ -761,7 +808,11 @@ def _assistant_selection_prompt(
 def _format_assistant_candidate(support: AssistantProofSupport) -> str:
     label = support.theorem_name or support.theorem_statement or support.proof_id
     statement = "" if label == support.theorem_statement else support.theorem_statement
-    parts = [f"- id: {support.search_id}", f"  label: {_compact_for_assistant_selection(label, 180)}"]
+    parts = [
+        f"- SELECT_ID: {support.search_id}",
+        f"  proof_id: {support.proof_id}",
+        f"  label: {_compact_for_assistant_selection(label, 180)}",
+    ]
     if statement:
         parts.append(f"  statement: {_compact_for_assistant_selection(statement, 220)}")
     return "\n".join(parts)

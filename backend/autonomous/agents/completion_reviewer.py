@@ -11,7 +11,7 @@ import json
 import logging
 from typing import Optional, Tuple, Callable
 
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
@@ -282,6 +282,8 @@ class CompletionReviewerAgent:
                 
         except FreeModelExhaustedError:
             raise
+        except RetryableProviderError:
+            raise
         except Exception as e:
             logger.error(f"CompletionReviewer: Error generating assessment: {e}")
             if self.task_tracking_callback and 'task_id' in dir():
@@ -392,6 +394,8 @@ class CompletionReviewerAgent:
                 return False
                 
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except Exception as e:
             logger.error(f"CompletionReviewer: Error in self-validation: {e}")

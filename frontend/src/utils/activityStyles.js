@@ -35,6 +35,8 @@ export const getActivityIcon = (event = '') => {
   switch (event) {
     case 'assistant_proof_pack_updated':
       return 'A';
+    case 'assistant_proof_pack_failed':
+      return '!';
     case 'brainstorm_submission_accepted':
     case 'submission_accepted':
     case 'compiler_acceptance':
@@ -317,6 +319,7 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'tier3_rejection' ||
     event === 'proof_attempt_failed' ||
     event === 'proof_attempts_exhausted' ||
+    event === 'assistant_proof_pack_failed' ||
     event === 'proof_integrity_rejected' ||
     event === 'smt_check_error' ||
     event === 'context_overflow_error' ||
@@ -431,6 +434,7 @@ export const formatAssistantProofPackMessage = (data = {}) => {
 
 export const ASSISTANT_PROOF_PACK_EVENTS = new Set([
   'assistant_proof_pack_updated',
+  'assistant_proof_pack_failed',
 ]);
 
 export const ASSISTANT_PROOF_PACK_DUPLICATE_WINDOW_MS = 15000;
@@ -462,6 +466,7 @@ export const getAssistantProofPackDuplicateKey = (event = '', data = {}) => {
     data.batch_attempts ?? '',
     data.batch_size ?? '',
     data.reason || '',
+    data.error_message || '',
     Array.isArray(data.warnings) ? data.warnings.join('|') : '',
   ].join('::');
 };
@@ -532,8 +537,23 @@ export const formatAssistantProofPackEventMessage = (event = '', data = {}) => {
     const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean).join('; ') : '';
     return `Assistant memory refresh warning for ${target}${phaseText}: ${warnings || 'proof-search support could not be refreshed'}`;
   }
+  if (event === 'assistant_proof_pack_failed') {
+    const detail = String(data.error_message || data.reason || '').trim();
+    const failureText = detail ? `: ${detail}` : '';
+    return `Assistant memory model call failed for ${target}${phaseText}${modelText}${candidateText}${failureText}`;
+  }
   if (event === 'assistant_proof_pack_stopped') {
     return `Assistant memory stopped (${data.reason || 'parent stopped'})`;
   }
   return formatAssistantProofPackMessage(data);
+};
+
+export const buildAutonomousProofProviderPauseActivity = (data = {}) => {
+  const isCreditPause = data.reason === 'openrouter_credit_exhaustion';
+  return {
+    isCreditPause,
+    message: isCreditPause
+      ? `Autonomous proof verification paused until OpenRouter credits are reset: ${data.message || data.source_id || 'provider credits exhausted'}`
+      : `Autonomous proof verification paused for a transient provider error and will retry automatically: ${data.message || data.source_id || 'provider retry pending'}`,
+  };
 };

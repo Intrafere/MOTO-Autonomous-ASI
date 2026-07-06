@@ -19,6 +19,7 @@ import {
   OPENROUTER_REASONING_EFFORT_OPTIONS,
   SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
+import { refreshCredentialProviderState } from '../../utils/credentialProviderRefresh';
 import {
   chooseCloudAccessProvider,
   getConfiguredCloudAccessProviders,
@@ -251,6 +252,7 @@ export default function AggregatorSettings({
   setConfig,
   capabilities,
   connectivityStatus,
+  credentialStatusRefreshToken = 0,
   developerModeEnabled = false,
 }) {
   const [lmStudioModels, setLmStudioModels] = useState([]);
@@ -424,6 +426,37 @@ export default function AggregatorSettings({
   }, [lmStudioEnabled]);
 
   useEffect(() => {
+    if (credentialStatusRefreshToken === 0) {
+      return;
+    }
+
+    let isCurrent = true;
+    refreshCredentialProviderState({
+      freeOnly,
+      openAICodexOauthAvailable,
+      xaiGrokOauthAvailable,
+      sakanaFuguAvailable,
+      setHasOpenRouterKey,
+      setOpenRouterModels,
+      setLoadingOpenRouter,
+      setHasOpenAICodexLogin,
+      setOpenAICodexModels,
+      setOpenAICodexModelError,
+      setHasXAIGrokLogin,
+      setXaiGrokModels,
+      setXaiGrokModelError,
+      setHasSakanaFuguKey,
+      setSakanaFuguModels,
+      setSakanaFuguModelError,
+      shouldApply: () => isCurrent,
+      logContext: 'Aggregator settings',
+    });
+    return () => {
+      isCurrent = false;
+    };
+  }, [credentialStatusRefreshToken]);
+
+  useEffect(() => {
     if (lmStudioEnabled) {
       return;
     }
@@ -512,7 +545,6 @@ export default function AggregatorSettings({
         }
       } catch (err) {
         console.error('Failed to check OpenAI Codex login status:', err);
-        setHasOpenAICodexLogin(false);
         setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
       }
     } else {
@@ -532,7 +564,6 @@ export default function AggregatorSettings({
         }
       } catch (err) {
         console.error('Failed to check xAI Grok login status:', err);
-        setHasXAIGrokLogin(false);
         setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
       }
     } else {
@@ -552,7 +583,6 @@ export default function AggregatorSettings({
         }
       } catch (err) {
         console.error('Failed to check Sakana Fugu API key status:', err);
-        setHasSakanaFuguKey(false);
         setSakanaFuguModelError(`Sakana Fugu status could not be checked: ${err.message || 'unknown error'}.`);
       }
     } else {
@@ -585,7 +615,7 @@ export default function AggregatorSettings({
       const result = await cloudAccessAPI.getOpenAICodexModels();
       const models = result.models || [];
       setOpenAICodexModels(models);
-      setHasOpenAICodexLogin(models.length > 0);
+      setHasOpenAICodexLogin(true);
       setOpenAICodexModelError(models.length > 0
         ? ''
         : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
@@ -593,7 +623,7 @@ export default function AggregatorSettings({
     } catch (err) {
       console.error('Failed to fetch OpenAI Codex models:', err);
       setOpenAICodexModels([]);
-      setHasOpenAICodexLogin(false);
+      setHasOpenAICodexLogin(true);
       setOpenAICodexModelError(`OpenAI Codex OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
@@ -609,7 +639,7 @@ export default function AggregatorSettings({
       const result = await cloudAccessAPI.getXAIGrokModels();
       const models = result.models || [];
       setXaiGrokModels(models);
-      setHasXAIGrokLogin(models.length > 0);
+      setHasXAIGrokLogin(true);
       setXaiGrokModelError(models.length > 0
         ? ''
         : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
@@ -617,7 +647,7 @@ export default function AggregatorSettings({
     } catch (err) {
       console.error('Failed to fetch xAI Grok models:', err);
       setXaiGrokModels([]);
-      setHasXAIGrokLogin(false);
+      setHasXAIGrokLogin(true);
       setXaiGrokModelError(`xAI Grok OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
@@ -633,7 +663,7 @@ export default function AggregatorSettings({
       const result = await cloudAccessAPI.getSakanaFuguModels();
       const models = result.models || [];
       setSakanaFuguModels(models);
-      setHasSakanaFuguKey(models.length > 0);
+      setHasSakanaFuguKey(true);
       setSakanaFuguModelError(models.length > 0
         ? ''
         : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
@@ -641,7 +671,7 @@ export default function AggregatorSettings({
     } catch (err) {
       console.error('Failed to fetch Sakana Fugu models:', err);
       setSakanaFuguModels([]);
-      setHasSakanaFuguKey(false);
+      setHasSakanaFuguKey(true);
       setSakanaFuguModelError(`Sakana Fugu API key is saved, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };

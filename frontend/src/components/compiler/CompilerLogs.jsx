@@ -179,6 +179,7 @@ function CompilerLogs() {
       addEvent({ type: eventName, data });
     };
     const handleAssistantProofPackUpdated = (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data);
+    const handleAssistantProofPackFailed = (data) => handleAssistantProofPackEvent('assistant_proof_pack_failed', data);
 
     // Handler for critique progress to update stats display
     const handleCritiqueProgress = (data) => {
@@ -218,6 +219,7 @@ function CompilerLogs() {
     websocket.on('model_recovery_failed', handleRecoveryFailed);
     websocket.on('hung_connection_alert', handleHungConnectionAlert);
     websocket.on('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
+    websocket.on('assistant_proof_pack_failed', handleAssistantProofPackFailed);
 
     // Critique phase events
     websocket.on('critique_phase_started', handleCritiquePhaseStarted);
@@ -259,6 +261,7 @@ function CompilerLogs() {
       websocket.off('model_recovery_failed', handleRecoveryFailed);
       websocket.off('hung_connection_alert', handleHungConnectionAlert);
       websocket.off('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
+      websocket.off('assistant_proof_pack_failed', handleAssistantProofPackFailed);
 
       // Critique phase events cleanup
       websocket.off('critique_phase_started', handleCritiquePhaseStarted);
@@ -400,7 +403,7 @@ function CompilerLogs() {
     if (type === 'self_review_appended') {
       return `AI self-review appended (${data.critique_count || 0} accepted critique${data.critique_count === 1 ? '' : 's'})`;
     }
-    if (type === 'assistant_proof_pack_updated') {
+    if (type === 'assistant_proof_pack_updated' || type === 'assistant_proof_pack_failed') {
       return formatAssistantProofPackEventMessage(type, data);
     }
 

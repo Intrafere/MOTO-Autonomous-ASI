@@ -25,6 +25,7 @@ import {
   OPENROUTER_REASONING_EFFORT_OPTIONS,
   SAKANA_FUGU_REASONING_EFFORT_OPTIONS,
 } from '../../utils/openRouterSelection';
+import { refreshCredentialProviderState } from '../../utils/credentialProviderRefresh';
 import {
   chooseCloudAccessProvider,
   getConfiguredCloudAccessProviders,
@@ -421,6 +422,7 @@ const AutonomousResearchSettings = ({
   models,
   capabilities,
   connectivityStatus,
+  credentialStatusRefreshToken = 0,
   isRunning,
   developerModeEnabled = false,
 }) => {
@@ -684,7 +686,6 @@ const AutonomousResearchSettings = ({
           }
         } catch (err) {
           console.error('Failed to check OpenAI Codex login:', err);
-          setHasOpenAICodexLogin(false);
           setOpenAICodexModelError(`OpenAI Codex OAuth status could not be checked: ${err.message || 'unknown error'}.`);
         }
       } else {
@@ -704,7 +705,6 @@ const AutonomousResearchSettings = ({
           }
         } catch (err) {
           console.error('Failed to check xAI Grok login:', err);
-          setHasXAIGrokLogin(false);
           setXaiGrokModelError(`xAI Grok OAuth status could not be checked: ${err.message || 'unknown error'}.`);
         }
       } else {
@@ -724,7 +724,6 @@ const AutonomousResearchSettings = ({
           }
         } catch (err) {
           console.error('Failed to check Sakana Fugu API key:', err);
-          setHasSakanaFuguKey(false);
           setSakanaFuguModelError(`Sakana Fugu status could not be checked: ${err.message || 'unknown error'}.`);
         }
       } else {
@@ -964,7 +963,7 @@ const AutonomousResearchSettings = ({
       const result = await cloudAccessAPI.getOpenAICodexModels();
       const models = result.models || [];
       setOpenAICodexModels(models);
-      setHasOpenAICodexLogin(models.length > 0);
+      setHasOpenAICodexLogin(true);
       setOpenAICodexModelError(models.length > 0
         ? ''
         : 'OpenAI Codex OAuth is connected, but no Codex models were returned. Reconnect OAuth or check account access.'
@@ -972,7 +971,7 @@ const AutonomousResearchSettings = ({
     } catch (err) {
       console.error('Failed to fetch OpenAI Codex models:', err);
       setOpenAICodexModels([]);
-      setHasOpenAICodexLogin(false);
+      setHasOpenAICodexLogin(true);
       setOpenAICodexModelError(`OpenAI Codex OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
@@ -988,7 +987,7 @@ const AutonomousResearchSettings = ({
       const result = await cloudAccessAPI.getXAIGrokModels();
       const models = result.models || [];
       setXaiGrokModels(models);
-      setHasXAIGrokLogin(models.length > 0);
+      setHasXAIGrokLogin(true);
       setXaiGrokModelError(models.length > 0
         ? ''
         : 'xAI Grok OAuth is connected, but no Grok models were returned. Reconnect OAuth or check account access.'
@@ -996,7 +995,7 @@ const AutonomousResearchSettings = ({
     } catch (err) {
       console.error('Failed to fetch xAI Grok models:', err);
       setXaiGrokModels([]);
-      setHasXAIGrokLogin(false);
+      setHasXAIGrokLogin(true);
       setXaiGrokModelError(`xAI Grok OAuth is connected, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
@@ -1012,7 +1011,7 @@ const AutonomousResearchSettings = ({
       const result = await cloudAccessAPI.getSakanaFuguModels();
       const models = result.models || [];
       setSakanaFuguModels(models);
-      setHasSakanaFuguKey(models.length > 0);
+      setHasSakanaFuguKey(true);
       setSakanaFuguModelError(models.length > 0
         ? ''
         : 'Sakana Fugu API key is saved, but no Fugu models were returned. Check your Sakana subscription access.'
@@ -1020,10 +1019,41 @@ const AutonomousResearchSettings = ({
     } catch (err) {
       console.error('Failed to fetch Sakana Fugu models:', err);
       setSakanaFuguModels([]);
-      setHasSakanaFuguKey(false);
+      setHasSakanaFuguKey(true);
       setSakanaFuguModelError(`Sakana Fugu API key is saved, but models could not be loaded: ${err.message || 'unknown error'}.`);
     }
   };
+
+  useEffect(() => {
+    if (credentialStatusRefreshToken === 0) {
+      return;
+    }
+
+    let isCurrent = true;
+    refreshCredentialProviderState({
+      freeOnly,
+      openAICodexOauthAvailable,
+      xaiGrokOauthAvailable,
+      sakanaFuguAvailable,
+      setHasOpenRouterKey,
+      setOpenRouterModels,
+      setLoadingOpenRouter,
+      setHasOpenAICodexLogin,
+      setOpenAICodexModels,
+      setOpenAICodexModelError,
+      setHasXAIGrokLogin,
+      setXaiGrokModels,
+      setXaiGrokModelError,
+      setHasSakanaFuguKey,
+      setSakanaFuguModels,
+      setSakanaFuguModelError,
+      shouldApply: () => isCurrent,
+      logContext: 'Autonomous settings',
+    });
+    return () => {
+      isCurrent = false;
+    };
+  }, [credentialStatusRefreshToken]);
 
   // Refetch models when free-only toggle changes
   useEffect(() => {

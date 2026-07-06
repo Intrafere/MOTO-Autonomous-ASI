@@ -34,6 +34,7 @@ const MANUAL_PROOF_EVENTS = [
 ];
 const ASSISTANT_MEMORY_EVENTS = [
   'assistant_proof_pack_updated',
+  'assistant_proof_pack_failed',
 ];
 const HIDDEN_AGGREGATOR_ACTIVITY_EVENTS = new Set(['new_submission']);
 
@@ -191,6 +192,7 @@ export default function AggregatorLogs() {
       websocket.on('context_overflow_error', handleContextOverflow),
       websocket.on('hung_connection_alert', handleHungConnectionAlert),
       websocket.on('assistant_proof_pack_updated', (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data)),
+      websocket.on('assistant_proof_pack_failed', (data) => handleAssistantProofPackEvent('assistant_proof_pack_failed', data)),
       ...MANUAL_PROOF_EVENTS.map((eventName) => (
         websocket.on(eventName, (data) => handleManualProofEvent(eventName, data))
       )),

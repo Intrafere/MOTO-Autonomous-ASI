@@ -8,7 +8,7 @@ import hashlib
 import logging
 from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import get_lean4_client
@@ -71,10 +71,6 @@ _MALFORMED_MODEL_OUTPUT_REASON = "Model returned malformed output (not valid JSO
 _INCOMPLETE_MODEL_OUTPUT_ERROR = (
     "MODEL OUTPUT INCOMPLETE: provider stopped before returning usable proof output "
     "(max_output_tokens). Preserve the proof checkpoint and retry with adjusted output budget or prompt size."
-)
-_TRANSIENT_PROVIDER_ERROR = (
-    "TRANSIENT PROVIDER ERROR: provider connection failed before usable proof output. "
-    "Preserve the proof checkpoint and retry later."
 )
 _LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
 _MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX = "MANDATORY FULL SOURCE CONTEXT OVERFLOW"
@@ -419,13 +415,22 @@ class ProofFormalizationAgent:
             return theorem_name, source_excerpt, feedback
         except FreeModelExhaustedError:
             raise
+        except RetryableProviderError:
+            raise
         except Exception as exc:
             if is_non_retryable_model_error(exc):
                 raise
             if is_retryable_model_output_error(exc):
                 raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
             if is_transient_model_call_error(exc):
-                raise RuntimeError(format_transient_provider_error(exc)) from exc
+                raise RetryableProviderError(
+                    provider="unknown",
+                    provider_label="Inference provider",
+                    role_id=self.role_id,
+                    model=self.model_id,
+                    reason="transient_provider_error",
+                    message=format_transient_provider_error(exc),
+                ) from exc
             is_parse_error = _is_json_parse_error(exc)
             feedback = ProofAttemptFeedback(
                 attempt=attempt_number,
@@ -835,13 +840,22 @@ class ProofFormalizationAgent:
                 attempt_offset += 1
             except FreeModelExhaustedError:
                 raise
+            except RetryableProviderError:
+                raise
             except Exception as exc:
                 if is_non_retryable_model_error(exc):
                     raise
                 if is_retryable_model_output_error(exc):
                     raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
                 if is_transient_model_call_error(exc):
-                    raise RuntimeError(format_transient_provider_error(exc)) from exc
+                    raise RetryableProviderError(
+                        provider="unknown",
+                        provider_label="Inference provider",
+                        role_id=self.role_id,
+                        model=self.model_id,
+                        reason="transient_provider_error",
+                        message=format_transient_provider_error(exc),
+                    ) from exc
                 is_parse_error = _is_json_parse_error(exc)
                 feedback = ProofAttemptFeedback(
                     attempt=attempt_number,

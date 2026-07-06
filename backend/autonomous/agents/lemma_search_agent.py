@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from backend.autonomous.prompts.proof_prompts import build_lemma_search_prompt
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.lean4_client import get_lean4_client
@@ -304,6 +304,8 @@ class MathlibLemmaSearchAgent:
 
             return confirmed_hits[:max_candidates]
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except Exception as exc:
             if is_non_retryable_model_error(exc):

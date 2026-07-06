@@ -22,7 +22,7 @@ CONTEXT HANDLING:
 import logging
 from typing import Optional, Dict, Any, List, Callable
 
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
@@ -47,7 +47,8 @@ logger = logging.getLogger(__name__)
 def _is_reference_model_call_failure(exc: Exception) -> bool:
     message = str(exc or "").lower()
     return (
-        is_non_retryable_model_error(exc)
+        isinstance(exc, RetryableProviderError)
+        or is_non_retryable_model_error(exc)
         or is_transient_model_call_error(exc)
         or "upstream provider timeout" in message
         or "response missing 'choices'" in message

@@ -12,7 +12,7 @@ from datetime import datetime
 
 from backend.shared.config import system_config, rag_config
 from backend.shared.models import CompilerState, CompilerSubmission, CompilerValidationResult, WorkflowTask, ValidationResult, ModelConfig
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
 from backend.shared.brainstorm_proof_gate import BRAINSTORM_LEAN_PROOF_MARKER
 from backend.shared.free_model_manager import free_model_manager
@@ -53,9 +53,11 @@ MAX_RIGOR_CYCLES_PER_LOOP = 5
 
 def _is_rigor_model_call_failure(exc: Exception) -> bool:
     """Return true for provider/config failures that must not become proof declines."""
+    from backend.shared.api_client_manager import RetryableProviderError
+
     message = str(exc or "").lower()
     return (
-        isinstance(exc, OpenRouterInvalidResponseError)
+        isinstance(exc, (OpenRouterInvalidResponseError, RetryableProviderError))
         or is_non_retryable_model_error(exc)
         or is_transient_model_call_error(exc)
         or "model output incomplete" in message
@@ -877,6 +879,15 @@ class CompilerCoordinator:
                 "message": "All free models exhausted, waiting to retry",
             })
             await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+            if self.is_running:
+                self._main_task = asyncio.create_task(self._main_workflow())
+        except RetryableProviderError as e:
+            logger.warning("Compiler paused for retryable provider failure: %s", e)
+            await api_client_manager.wait_for_retryable_provider_error(
+                e,
+                role_id=e.role_id or "compiler",
+                should_stop=lambda: not self.is_running,
+            )
             if self.is_running:
                 self._main_task = asyncio.create_task(self._main_workflow())
         except ValueError as e:

@@ -341,6 +341,80 @@ class LauncherDependencyVersionTests(TestCase):
 
         installer.assert_called_once()
 
+    def test_install_windows_nodejs_tries_user_scope_lts_after_source_refresh(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "resolve_command", return_value="winget"):
+                with mock.patch.object(moto_launcher, "run_visible", side_effect=[0, 0]) as run_visible:
+                    self.assertTrue(moto_launcher.install_windows_nodejs())
+
+        self.assertEqual(run_visible.call_args_list[0].args[0], ["winget", "source", "update", "--name", "winget"])
+        self.assertEqual(
+            run_visible.call_args_list[1].args[0],
+            [
+                "winget",
+                "install",
+                "--id",
+                "OpenJS.NodeJS.LTS",
+                "-e",
+                "--source",
+                "winget",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--scope",
+                "user",
+            ],
+        )
+
+    def test_install_windows_nodejs_falls_back_to_lts_default_then_non_lts_user_scope(self) -> None:
+        with mock.patch.object(moto_launcher.sys, "platform", "win32"):
+            with mock.patch.object(moto_launcher, "resolve_command", return_value="winget"):
+                with mock.patch.object(moto_launcher, "run_visible", side_effect=[0, 1, 1, 0]) as run_visible:
+                    self.assertTrue(moto_launcher.install_windows_nodejs())
+
+        self.assertEqual(
+            [call.args[0] for call in run_visible.call_args_list],
+            [
+                ["winget", "source", "update", "--name", "winget"],
+                [
+                    "winget",
+                    "install",
+                    "--id",
+                    "OpenJS.NodeJS.LTS",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--scope",
+                    "user",
+                ],
+                [
+                    "winget",
+                    "install",
+                    "--id",
+                    "OpenJS.NodeJS.LTS",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ],
+                [
+                    "winget",
+                    "install",
+                    "--id",
+                    "OpenJS.NodeJS",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--scope",
+                    "user",
+                ],
+            ],
+        )
+
     def test_check_node_installation_prepends_detected_node_dir_for_npm_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             node_dir = Path(temp_dir) / "nodejs"

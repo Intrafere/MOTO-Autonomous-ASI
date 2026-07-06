@@ -46,7 +46,7 @@ from backend.leanoj.prompts import (
 )
 from backend.autonomous.memory.autonomous_api_logger import autonomous_api_logger
 from backend.autonomous.memory.proof_database import proof_database
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.config import rag_config, system_config
 from backend.shared.context_overflow import (
@@ -4904,6 +4904,34 @@ class LeanOJCoordinator:
                 raise
             except LeanOJConfigurationError:
                 raise
+            except RetryableProviderError as exc:
+                duration_ms = round((time.monotonic() - started) * 1000)
+                message = self._summarize_error(str(exc), limit=700)
+                logger.warning(
+                    "Proof Solver model call paused for retryable provider failure (role=%s, task=%s, phase=%s, duration_ms=%s): %s",
+                    role_id,
+                    task_id,
+                    call_payload["phase"],
+                    duration_ms,
+                    message,
+                )
+                await self._broadcast(
+                    "leanoj_model_call_failed",
+                    {
+                        **call_payload,
+                        "duration_ms": duration_ms,
+                        "retryable": True,
+                        "reason": exc.reason or "transient_provider_error",
+                        "message": message,
+                    },
+                )
+                await api_client_manager.wait_for_retryable_provider_error(
+                    exc,
+                    role_id=exc.role_id or role_id,
+                    should_stop=lambda: not self._running or self._stop_event.is_set(),
+                )
+                current_prompt = prompt
+                continue
             except Exception as exc:
                 duration_ms = round((time.monotonic() - started) * 1000)
                 if is_provider_credit_pause_error(exc):

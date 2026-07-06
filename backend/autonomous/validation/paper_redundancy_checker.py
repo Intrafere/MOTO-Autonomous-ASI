@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Optional, Dict, Any, List, Callable
 
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
@@ -156,6 +156,8 @@ class PaperRedundancyChecker:
                 return self._create_no_removal(f"JSON parse error: {str(e)}")
                 
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except Exception as e:
             logger.error(f"PaperRedundancyChecker: Error during check: {e}")

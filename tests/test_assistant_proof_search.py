@@ -444,6 +444,64 @@ class AssistantProofCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         finally:
             restore()
 
+    async def test_assistant_selector_canonicalizes_unique_bare_proof_ids(self) -> None:
+        restore = _preserve_role_config("manual_proof_assistant")
+        try:
+            api_client_manager.configure_role(
+                "manual_proof_assistant",
+                ModelConfig(
+                    provider="openrouter",
+                    model_id="assistant-model",
+                    context_window=4096,
+                    max_output_tokens=2048,
+                ),
+            )
+            coordinator = AssistantProofSearchCoordinator(service=_FakeProofSearchService([]))
+            snapshot = AssistantTargetSnapshot(
+                workflow_mode="manual_proof_check",
+                target_kind="proof_candidate",
+                user_prompt="Prove the manual target.",
+                target_statement="theorem target : True",
+            )
+            shortlist = [
+                AssistantProofSupport.from_record(
+                    _record(44, search_id="manual:archived_session:proof_44", corpus="manual")
+                ),
+                AssistantProofSupport.from_record(
+                    _record(11, search_id="manual:archived_session:proof_11", corpus="manual")
+                ),
+            ]
+
+            with mock.patch.object(
+                api_client_manager,
+                "generate_completion",
+                new=mock.AsyncMock(
+                    return_value=_response_json(
+                        '{"selected_search_ids":["proof_44","proof_11"],"reasoning":"use residue certificates"}'
+                    )
+                ),
+            ) as generate_completion:
+                selected_ids, reasoning = await coordinator._select_with_assistant(
+                    snapshot,
+                    shortlist,
+                    assistant_role_id="manual_proof_assistant",
+                    assistant_model_id="assistant-model",
+                    task_id="assistant_pack_manual_001",
+                )
+
+            self.assertEqual(
+                selected_ids,
+                ["manual:archived_session:proof_44", "manual:archived_session:proof_11"],
+            )
+            self.assertEqual(reasoning, "use residue certificates")
+            self.assertEqual(generate_completion.await_count, 1)
+            prompt = generate_completion.await_args.kwargs["messages"][0]["content"]
+            self.assertIn("SELECT_ID: manual:archived_session:proof_44", prompt)
+            self.assertIn("proof_id: proof_44", prompt)
+            self.assertIn("do not return proof_id/display IDs", prompt)
+        finally:
+            restore()
+
     async def test_assistant_selector_valid_empty_selection_is_not_retried(self) -> None:
         restore = _preserve_role_config("manual_proof_assistant")
         try:
@@ -503,7 +561,7 @@ class AssistantProofCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 )
                 coordinator = AssistantProofSearchCoordinator(
                     service=_FakeProofSearchService(
-                        [_record(index, corpus="manual") for index in range(3)]
+                        [_record(index, corpus="manual") for index in range(1, 4)]
                     )
                 )
                 snapshot = AssistantTargetSnapshot(
@@ -854,7 +912,7 @@ class AssistantProofCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("LM Studio rejected response_format")
 
             first = AssistantProofSearchCoordinator(
-                service=_FakeProofSearchService([_record(index, corpus="manual") for index in range(3)]),
+                service=_FakeProofSearchService([_record(index, corpus="manual") for index in range(1, 4)]),
                 assistant_selector=failing_selector,
             )
             failed_pack = await first.refresh_now(snapshot)
@@ -862,7 +920,7 @@ class AssistantProofCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(failed_pack.results, [])
             self.assertGreater(failed_pack.candidate_count, 0)
 
-            second_service = _FakeProofSearchService([_record(index, corpus="manual") for index in range(3)])
+            second_service = _FakeProofSearchService([_record(index, corpus="manual") for index in range(1, 4)])
             second = AssistantProofSearchCoordinator(
                 service=second_service,
                 assistant_selector=_fake_assistant_selector,

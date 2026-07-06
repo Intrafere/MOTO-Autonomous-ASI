@@ -10,7 +10,7 @@ import httpx
 from backend.shared.config import rag_config
 from backend.shared.models import Submission, ValidationResult
 from backend.shared.lm_studio_client import lm_studio_client
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
@@ -111,7 +111,7 @@ class ValidatorAgent:
             
             return quality_result
             
-        except (FreeModelExhaustedError, ContextAllocationError):
+        except (FreeModelExhaustedError, ContextAllocationError, RetryableProviderError):
             raise
         except Exception as e:
             logger.error(f"Validation failed: {e}")
@@ -271,6 +271,8 @@ class ValidatorAgent:
                             json_valid=False
                         )
                         
+                except RetryableProviderError:
+                    raise
                 except Exception as e:
                     logger.error(f"Validator: Unexpected error during validation: {e}")
                     # Notify task completed (failed but still completed)
@@ -396,6 +398,8 @@ class ValidatorAgent:
                             logger.warning(f"Validator: Retry failed - {error}")
                     else:
                         logger.warning("Validator: Retry request returned no choices")
+                except RetryableProviderError:
+                    raise
                 except Exception as e:
                     logger.error(f"Validator: Retry request failed - {e}")
                 
@@ -763,7 +767,7 @@ class ValidatorAgent:
             
             return results
             
-        except (FreeModelExhaustedError, ContextAllocationError):
+        except (FreeModelExhaustedError, ContextAllocationError, RetryableProviderError):
             raise
         except Exception as e:
             error_text = str(e)
@@ -891,6 +895,8 @@ class ValidatorAgent:
                 parsed = parse_json(retry_output)
                 logger.info("Batch validator: Conversational retry succeeded!")
                 return parsed, call_metadata
+        except RetryableProviderError:
+            raise
         except Exception as e:
             logger.warning(f"Batch validator: Retry failed - {e}")
         
@@ -1105,6 +1111,8 @@ class ValidatorAgent:
             
         except FreeModelExhaustedError:
             raise
+        except RetryableProviderError:
+            raise
         except Exception as e:
             logger.error(f"CLEANUP DEBUG: EXCEPTION in perform_cleanup_review: {e}", exc_info=True)
             logger.error(f"Cleanup review failed: {e}", exc_info=True)
@@ -1291,6 +1299,8 @@ class ValidatorAgent:
                 return False
                 
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except Exception as e:
             logger.error(f"CLEANUP DEBUG: EXCEPTION in validate_removal: {e}", exc_info=True)
