@@ -29,6 +29,7 @@ from backend.compiler.memory.manual_prompt import (
     save_manual_compiler_prompt,
 )
 from backend.shared.config import system_config
+from backend.shared.api_client_manager import RetryableProviderError
 from backend.shared.models import (
     ProofCandidate,
     ProofCheckRequest,
@@ -1418,33 +1419,32 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         stage._prepare_candidate = fake_prepare_candidate
         stage._run_smt_check = fake_smt_check
         try:
-            result = await stage.run(
-                content="brainstorm source",
-                source_type="brainstorm",
-                source_id="topic_001",
-                user_prompt="prove things",
-                submitter_model="model",
-                submitter_context=4000,
-                submitter_max_tokens=1000,
-                validator_model="validator",
-                validator_context=4000,
-                validator_max_tokens=1000,
-                broadcast_fn=broadcast,
-                novel_proofs_db=FakeProofDb(),
-                theorem_candidates=[candidate],
-                append_to_source=False,
-                checkpoint_callback=checkpoint,
-            )
+            with self.assertRaises(RetryableProviderError) as exc:
+                await stage.run(
+                    content="brainstorm source",
+                    source_type="brainstorm",
+                    source_id="topic_001",
+                    user_prompt="prove things",
+                    submitter_model="model",
+                    submitter_context=4000,
+                    submitter_max_tokens=1000,
+                    validator_model="validator",
+                    validator_context=4000,
+                    validator_max_tokens=1000,
+                    broadcast_fn=broadcast,
+                    novel_proofs_db=FakeProofDb(),
+                    theorem_candidates=[candidate],
+                    append_to_source=False,
+                    checkpoint_callback=checkpoint,
+                )
         finally:
             proof_formalization_module.api_client_manager.generate_completion = old_generate_completion
             system_config.lean4_enabled = old_lean4_enabled
 
-        self.assertTrue(result.had_error)
-        self.assertIn("TRANSIENT PROVIDER ERROR", result.error_message)
-        self.assertEqual(result.total_candidates, 1)
-        self.assertIn("error", checkpoint_statuses)
-        self.assertIn("proof_check_complete", events)
+        self.assertIn("TRANSIENT PROVIDER ERROR", str(exc.exception))
+        self.assertIn("provider_paused", checkpoint_statuses)
         self.assertNotIn("proof_attempts_exhausted", events)
+        self.assertNotIn("proof_check_complete", events)
 
     async def test_codex_transient_identification_error_does_not_mark_no_candidates(self):
         old_lean4_enabled = system_config.lean4_enabled
@@ -1473,30 +1473,30 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         old_generate_completion = proof_identification_module.api_client_manager.generate_completion
         proof_identification_module.api_client_manager.generate_completion = raise_codex_gateway_timeout
         try:
-            result = await stage.run(
-                content="brainstorm source",
-                source_type="brainstorm",
-                source_id="topic_identification_timeout",
-                user_prompt="prove things",
-                submitter_model="model",
-                submitter_context=4000,
-                submitter_max_tokens=1000,
-                validator_model="validator",
-                validator_context=4000,
-                validator_max_tokens=1000,
-                broadcast_fn=broadcast,
-                novel_proofs_db=FakeProofDb(),
-                append_to_source=False,
-                checkpoint_callback=checkpoint,
-            )
+            with self.assertRaises(RetryableProviderError) as exc:
+                await stage.run(
+                    content="brainstorm source",
+                    source_type="brainstorm",
+                    source_id="topic_identification_timeout",
+                    user_prompt="prove things",
+                    submitter_model="model",
+                    submitter_context=4000,
+                    submitter_max_tokens=1000,
+                    validator_model="validator",
+                    validator_context=4000,
+                    validator_max_tokens=1000,
+                    broadcast_fn=broadcast,
+                    novel_proofs_db=FakeProofDb(),
+                    append_to_source=False,
+                    checkpoint_callback=checkpoint,
+                )
         finally:
             proof_identification_module.api_client_manager.generate_completion = old_generate_completion
             system_config.lean4_enabled = old_lean4_enabled
 
-        self.assertTrue(result.had_error)
-        self.assertIn("OpenAI Codex failed", result.error_message)
-        self.assertIn("error", checkpoint_statuses)
-        self.assertIn("proof_check_complete", events)
+        self.assertIn("OpenAI Codex failed", str(exc.exception))
+        self.assertEqual(checkpoint_statuses, [])
+        self.assertNotIn("proof_check_complete", events)
         self.assertNotIn("proof_check_no_candidates", events)
 
     async def test_malformed_identification_output_does_not_mark_no_candidates(self):
