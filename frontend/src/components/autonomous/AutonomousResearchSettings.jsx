@@ -460,7 +460,7 @@ const AutonomousResearchSettings = ({
 
   const [proofStatus, setProofStatus] = useState(null);
   const [proofSettingsEnabled, setProofSettingsEnabled] = useState(false);
-  const [proofSettingsTimeout, setProofSettingsTimeout] = useState('600');
+  const [proofSettingsTimeout, setProofSettingsTimeout] = useState('900');
   const [proofSettingsLspEnabled, setProofSettingsLspEnabled] = useState(false);
   const [proofSettingsLspIdleTimeout, setProofSettingsLspIdleTimeout] = useState('600');
   const [proofSettingsMaxParallelCandidates, setProofSettingsMaxParallelCandidates] = useState('6');
@@ -760,7 +760,7 @@ const AutonomousResearchSettings = ({
         const status = await autonomousAPI.getProofStatus();
         setProofStatus(status);
         setProofSettingsEnabled(Boolean(status.lean4_enabled));
-        setProofSettingsTimeout(String(status.lean4_proof_timeout ?? 600));
+        setProofSettingsTimeout(String(status.lean4_proof_timeout ?? 900));
         setProofSettingsLspEnabled(Boolean(status.lean4_lsp_enabled));
         setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? 600));
         setProofSettingsMaxParallelCandidates(String(status.proof_max_parallel_candidates ?? 6));
@@ -1518,7 +1518,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
   
   const handleSaveProofSettings = async () => {
     const parsedTimeout = parseInt(proofSettingsTimeout, 10);
-    const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 600;
+    const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 900;
     const parsedLspIdleTimeout = parseInt(proofSettingsLspIdleTimeout, 10);
     const lspIdleTimeout = Number.isFinite(parsedLspIdleTimeout) ? parsedLspIdleTimeout : 600;
     const parsedMaxParallelCandidates = parseInt(proofSettingsMaxParallelCandidates, 10);

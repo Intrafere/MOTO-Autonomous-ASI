@@ -141,13 +141,18 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
 
     def _lean_response() -> str:
         if data.get("lean_response"):
-            return _compact(data.get("lean_response"))
+            response = _compact(data.get("lean_response"))
+            if "timed out after" in response.lower() and "Advanced Settings" not in response:
+                response = f"{response} You can change this timeout in Advanced Settings."
+            return response
         if data.get("proof_verified") is True:
             return "Lean 4 response: proof verified."
         error = _compact(
             data.get("error_summary") or data.get("error_output") or data.get("reason"),
             limit=1800,
         )
+        if error and "timed out after" in error.lower() and "Advanced Settings" not in error:
+            error = f"{error} You can change this timeout in Advanced Settings."
         return f"Lean 4 response: {error} - proof not verified." if error else ""
 
     def _attempt_message(prefix: str) -> str:

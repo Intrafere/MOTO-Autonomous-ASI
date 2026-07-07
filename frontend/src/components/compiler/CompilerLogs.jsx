@@ -46,12 +46,19 @@ const proofTargetLabel = (data = {}, fallback = 'candidate') => (
 
 const leanProofResponse = (data = {}) => {
   if (data.lean_response) {
-    return compactProofText(data.lean_response);
+    let response = compactProofText(data.lean_response);
+    if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
+      response = `${response} You can change this timeout in Advanced Settings.`;
+    }
+    return response;
   }
   if (data.proof_verified === true) {
     return 'Lean 4 response: proof verified.';
   }
-  const error = compactProofText(data.error_summary || data.error_output || data.reason, 1800);
+  let error = compactProofText(data.error_summary || data.error_output || data.reason, 1800);
+  if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
+    error = `${error} You can change this timeout in Advanced Settings.`;
+  }
   return error ? `Lean 4 response: ${error} - proof not verified.` : '';
 };
 

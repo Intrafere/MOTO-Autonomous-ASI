@@ -905,6 +905,8 @@ class HighParamSubmitter:
             if len(error) > 960:
                 error = f"{error[:960]}..."
             if error:
+                if "timed out after" in error.lower() and "Advanced Settings" not in error:
+                    error = f"{error} You can change this timeout in Advanced Settings."
                 return f"Lean 4 response: {error} - proof not verified."
             return "Lean 4 response: proof not verified."
 

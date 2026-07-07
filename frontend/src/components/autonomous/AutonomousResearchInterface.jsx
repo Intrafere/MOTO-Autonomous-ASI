@@ -207,7 +207,7 @@ const AutonomousResearchInterface = ({
       const status = await api.getProofStatus();
       const updatedStatus = await api.updateProofSettings({
         enabled,
-        timeout: status.lean4_proof_timeout ?? 600,
+        timeout: status.lean4_proof_timeout ?? 900,
         lean4_lsp_enabled: Boolean(status.lean4_lsp_enabled),
         lean4_lsp_idle_timeout: status.lean4_lsp_idle_timeout ?? 600,
         max_parallel_candidates: status.proof_max_parallel_candidates ?? 6,

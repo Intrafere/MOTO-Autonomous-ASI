@@ -201,6 +201,8 @@ class ProofVerificationStage:
             return "Lean 4 response: proof verified."
         error_summary = self._summarize_error(feedback.error_output, limit=960)
         if error_summary:
+            if "timed out after" in error_summary.lower() and "Advanced Settings" not in error_summary:
+                error_summary = f"{error_summary} You can change this timeout in Advanced Settings."
             return f"Lean 4 response: {error_summary} - proof not verified."
         return "Lean 4 response: proof not verified."
 

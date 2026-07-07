@@ -1516,9 +1516,18 @@ function App() {
       return `Proof round ${round}/${maxRounds}`;
     };
     const proofLeanResponse = (data = {}) => {
-      if (data.lean_response) return data.lean_response;
+      if (data.lean_response) {
+        let response = data.lean_response;
+        if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
+          response = `${response} You can change this timeout in Advanced Settings.`;
+        }
+        return response;
+      }
       if (data.proof_verified === true) return 'Lean 4 response: proof verified.';
-      const error = formatReason(data.error_summary || data.error_output || data.reason || '', 960);
+      let error = formatReason(data.error_summary || data.error_output || data.reason || '', 960);
+      if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
+        error = `${error} You can change this timeout in Advanced Settings.`;
+      }
       return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
     };
     const formatProofNoveltyTier = (tier) => {
@@ -2747,12 +2756,21 @@ function App() {
     };
     const leanOJLeanResponse = (data = {}) => {
       const attempt = data.attempt || {};
-      if (data.lean_response) return data.lean_response;
+      if (data.lean_response) {
+        let response = data.lean_response;
+        if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
+          response = `${response} You can change this timeout in Advanced Settings.`;
+        }
+        return response;
+      }
       if (data.proof_verified === true || attempt.success === true) return 'Lean 4 response: proof verified.';
-      const error = summarizeLeanOJText(
+      let error = summarizeLeanOJText(
         attempt.error_output || data.error_summary || data.error_output || data.reason || data.message || '',
         960
       );
+      if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
+        error = `${error} You can change this timeout in Advanced Settings.`;
+      }
       return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
     };
     const formatLeanOJNoveltyTier = (tier) => {
