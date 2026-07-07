@@ -872,18 +872,37 @@ def install_windows_nodejs() -> bool:
         return False
 
     cprint("Attempting to install Node.js LTS with winget...", YELLOW)
-    command = [
+    run_visible(
+        [winget_cmd, "source", "update", "--name", "winget"],
+        cwd=str(SCRIPT_DIR),
+        check=False,
+    )
+
+    base_command = [
         winget_cmd,
         "install",
         "--id",
-        "OpenJS.NodeJS.LTS",
+        "",
         "-e",
         "--source",
         "winget",
         "--accept-package-agreements",
         "--accept-source-agreements",
     ]
-    return run_visible(command, cwd=str(SCRIPT_DIR), check=False) == 0
+    package_ids = ("OpenJS.NodeJS.LTS", "OpenJS.NodeJS")
+    scope_args = (["--scope", "user"], [])
+
+    for package_id in package_ids:
+        for scope_arg in scope_args:
+            command = list(base_command)
+            command[3] = package_id
+            command.extend(scope_arg)
+            scope_label = "user scope" if scope_arg else "default scope"
+            cprint(f"Trying winget package {package_id} ({scope_label})...", YELLOW)
+            if run_visible(command, cwd=str(SCRIPT_DIR), check=False) == 0:
+                return True
+
+    return False
 
 
 def check_node_installation() -> None:
@@ -904,7 +923,7 @@ def check_node_installation() -> None:
             else:
                 cprint("Please install Node.js 20.19+ or 22.12+ from:", YELLOW)
                 cprint("https://nodejs.org/", YELLOW)
-                cprint("The Windows launcher tried `winget install OpenJS.NodeJS.LTS`, but it was unavailable or failed.", YELLOW)
+                cprint("The Windows launcher tried winget packages `OpenJS.NodeJS.LTS` and `OpenJS.NodeJS`, but they were unavailable or failed.", YELLOW)
             exit_with_pause(1)
 
     npm_cmd = get_npm_command()
@@ -1311,7 +1330,7 @@ def _set_lean_env_flags(
     env["MOTO_LEAN4_ENABLED"] = "1" if enabled else "0"
     env["MOTO_LEAN4_PATH"] = lean_path
     env["MOTO_LEAN4_WORKSPACE_DIR"] = workspace_dir
-    env["MOTO_LEAN4_PROOF_TIMEOUT"] = env.get("MOTO_LEAN4_PROOF_TIMEOUT", "").strip() or "600"
+    env["MOTO_LEAN4_PROOF_TIMEOUT"] = env.get("MOTO_LEAN4_PROOF_TIMEOUT", "").strip() or "900"
     env["MOTO_LEAN4_LSP_ENABLED"] = (
         env.get("MOTO_LEAN4_LSP_ENABLED", "").strip()
         if enabled and env.get("MOTO_LEAN4_LSP_ENABLED", "").strip()

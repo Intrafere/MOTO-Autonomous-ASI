@@ -387,6 +387,105 @@ class AssistantCooldownCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([event for event, _ in events], ["assistant_proof_pack_warning"])
             self.assertIn("search failed", events[0][1]["reason"].lower())
 
+    async def test_assistant_selector_failure_emits_failure_not_empty_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = AssistantRankCache(Path(temp_dir) / "assistant_ranker.sqlite")
+
+            async def _failing_selector(*args) -> tuple[list[str], str]:
+                raise RuntimeError("No JSON found in response")
+
+            snapshot = _snapshot()
+            coordinator = AssistantProofSearchCoordinator(
+                service=_NoCandidateProofSearchService(),
+                cache=cache,
+                assistant_selector=_failing_selector,
+            )
+            await coordinator._publish_pack(
+                snapshot,
+                [_support("manual:prior_good")],
+                warnings=[],
+                selection_mode="assistant_llm",
+                assistant_role_id="autonomous_assistant",
+                assistant_model_id="good-assistant",
+                candidate_count=1,
+                shortlist_count=1,
+                selection_reasoning="seed good pack",
+            )
+            events: list[tuple[str, dict]] = []
+
+            async def _capture(event_type: str, payload: dict) -> None:
+                events.append((event_type, payload))
+
+            with mock.patch("backend.api.routes.websocket.broadcast_event", new=_capture):
+                await coordinator.refresh_now(snapshot)
+
+            self.assertEqual(
+                [event for event, _ in events],
+                ["assistant_proof_pack_refresh_started", "assistant_proof_pack_failed"],
+            )
+            self.assertNotIn("assistant_proof_pack_updated", [event for event, _ in events])
+            self.assertEqual(events[-1][1]["reason"], "assistant_llm_selection_failed")
+            self.assertIn("No JSON found", events[-1][1]["error_message"])
+            latest_pack = coordinator.get_latest_pack()
+            self.assertIsNotNone(latest_pack)
+            self.assertEqual([support.search_id for support in latest_pack.results], ["manual:prior_good"])
+            state = cache.load_cooldown_state(coordinator._run_key_for_snapshot(snapshot))
+            self.assertEqual(state.zero_attempts_in_batch, 0)
+            self.assertEqual(state.zero_cooldown_stage, 0)
+            self.assertFalse(state.zero_shutdown_active)
+
+    async def test_assistant_selector_failure_does_not_reuse_unrelated_latest_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache = AssistantRankCache(Path(temp_dir) / "assistant_ranker.sqlite")
+
+            async def _failing_selector(*args) -> tuple[list[str], str]:
+                raise RuntimeError("No JSON found in response")
+
+            seed_snapshot = _snapshot()
+            failed_snapshot = _snapshot().model_copy(
+                update={
+                    "source_id": "topic_999",
+                    "target_statement": "theorem unrelated_target : True",
+                    "target_hash": "",
+                }
+            )
+            failed_target_hash = failed_snapshot.stable_hash()
+            coordinator = AssistantProofSearchCoordinator(
+                service=_NoCandidateProofSearchService(),
+                cache=cache,
+                assistant_selector=_failing_selector,
+            )
+            await coordinator._publish_pack(
+                seed_snapshot,
+                [_support("manual:prior_unrelated")],
+                warnings=[],
+                selection_mode="assistant_llm",
+                assistant_role_id="autonomous_assistant",
+                assistant_model_id="good-assistant",
+                candidate_count=1,
+                shortlist_count=1,
+                selection_reasoning="seed unrelated pack",
+            )
+            events: list[tuple[str, dict]] = []
+
+            async def _capture(event_type: str, payload: dict) -> None:
+                events.append((event_type, payload))
+
+            with mock.patch("backend.api.routes.websocket.broadcast_event", new=_capture):
+                pack = await coordinator.refresh_now(failed_snapshot)
+
+            self.assertEqual(
+                [event for event, _ in events],
+                ["assistant_proof_pack_refresh_started", "assistant_proof_pack_failed"],
+            )
+            self.assertIsNotNone(pack)
+            self.assertEqual(pack.target_hash, failed_target_hash)
+            self.assertEqual(pack.results, [])
+            latest_pack = coordinator.get_latest_pack()
+            self.assertIsNotNone(latest_pack)
+            self.assertEqual(latest_pack.target_hash, failed_target_hash)
+            self.assertEqual(latest_pack.results, [])
+
     async def test_compiler_zero_useful_batches_accumulate_across_transient_task_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             cache = AssistantRankCache(Path(temp_dir) / "assistant_ranker.sqlite")

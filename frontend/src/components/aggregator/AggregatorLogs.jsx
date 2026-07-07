@@ -34,6 +34,7 @@ const MANUAL_PROOF_EVENTS = [
 ];
 const ASSISTANT_MEMORY_EVENTS = [
   'assistant_proof_pack_updated',
+  'assistant_proof_pack_failed',
 ];
 const HIDDEN_AGGREGATOR_ACTIVITY_EVENTS = new Set(['new_submission']);
 
@@ -111,12 +112,19 @@ const proofTargetLabel = (data = {}, fallback = 'candidate') => (
 
 const leanProofResponse = (data = {}) => {
   if (data.lean_response) {
-    return compactProofText(data.lean_response);
+    let response = compactProofText(data.lean_response);
+    if (/timed out after/i.test(response) && !/Advanced Settings/.test(response)) {
+      response = `${response} You can change this timeout in Advanced Settings.`;
+    }
+    return response;
   }
   if (data.proof_verified === true) {
     return 'Lean 4 response: proof verified.';
   }
-  const error = compactProofText(data.error_summary || data.error_output || data.reason, 960);
+  let error = compactProofText(data.error_summary || data.error_output || data.reason, 960);
+  if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
+    error = `${error} You can change this timeout in Advanced Settings.`;
+  }
   return error ? `Lean 4 response: ${error} - proof not verified.` : '';
 };
 
@@ -191,6 +199,7 @@ export default function AggregatorLogs() {
       websocket.on('context_overflow_error', handleContextOverflow),
       websocket.on('hung_connection_alert', handleHungConnectionAlert),
       websocket.on('assistant_proof_pack_updated', (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data)),
+      websocket.on('assistant_proof_pack_failed', (data) => handleAssistantProofPackEvent('assistant_proof_pack_failed', data)),
       ...MANUAL_PROOF_EVENTS.map((eventName) => (
         websocket.on(eventName, (data) => handleManualProofEvent(eventName, data))
       )),

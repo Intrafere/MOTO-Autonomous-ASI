@@ -6,7 +6,7 @@ import logging
 import uuid
 from typing import Optional, Dict, Any, Callable, Tuple
 
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission, CompilerValidationResult
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
@@ -557,6 +557,8 @@ class CompilerValidator:
                     logger.warning(f"CompilerValidator: Retry parse failed: {retry_parse_error}")
                     return self._fallback_parse(response)
                     
+            except RetryableProviderError:
+                raise
             except Exception as retry_error:
                 logger.error(f"CompilerValidator: Retry request failed - {retry_error}")
                 return self._fallback_parse(response)
@@ -1173,6 +1175,8 @@ class CompilerValidator:
             
         except FreeModelExhaustedError:
             raise
+        except RetryableProviderError:
+            raise
         except Exception as e:
             logger.error(f"Validation failed: {e}")
             if self.task_tracking_callback:
@@ -1274,6 +1278,8 @@ class CompilerValidator:
             return result
             
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except Exception as e:
             logger.error(f"Brainstorm operation validation failed: {e}")

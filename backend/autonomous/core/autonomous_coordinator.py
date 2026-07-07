@@ -24,7 +24,7 @@ from backend.shared.models import (
     WorkflowTask,
     ModelConfig
 )
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.token_tracker import token_tracker
@@ -92,6 +92,7 @@ logger = logging.getLogger(__name__)
 _PARENT_PHASE_SHUTDOWN_TIMEOUT_SECONDS = 60 * 60
 _WORKFLOW_PHASE_UNSET = object()
 _BRAINSTORM_ACCEPTANCE_HARD_LIMIT = 30
+_BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF = 7
 _TIER2_RESUME_PHASES = {
     "outline",
     "body",
@@ -103,6 +104,16 @@ _TIER2_RESUME_PHASES = {
     "paper_proof_verification",
     "paper_title_exploration",
 }
+
+
+def _brainstorm_rejection_handoff_allowed(
+    consecutive_rejections: int,
+    acceptance_count: int,
+) -> bool:
+    return (
+        consecutive_rejections >= 10
+        and acceptance_count >= _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF
+    )
 _TIER1_RESUME_PHASES = {
     "topic_exploration",
 }
@@ -740,6 +751,56 @@ class AutonomousCoordinator:
                             "proof_round_index": proof_round_index,
                             "proof_max_rounds": proof_max_rounds,
                             "reason": "openrouter_credit_exhaustion",
+                        },
+                    )
+                except RetryableProviderError as exc:
+                    checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
+                    if checkpoint and checkpoint.get("trigger") == round_trigger:
+                        (
+                            checkpoint_candidates,
+                            proof_candidate_indexes,
+                            checkpoint_attempts,
+                            checkpoint_theorem_names,
+                        ) = self._deserialize_proof_checkpoint(checkpoint)
+                        retry_candidates = checkpoint_candidates or retry_candidates
+                    message = str(exc)
+                    logger.warning(
+                        "Autonomous proof verification paused for retryable provider failure (%s %s): %s",
+                        source_type,
+                        source_id,
+                        message,
+                    )
+                    await self._save_workflow_state(phase=f"{source_type}_proof_verification")
+                    await self._broadcast(
+                        "autonomous_proof_provider_paused",
+                        {
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "source_title": source_title,
+                            "trigger": round_trigger,
+                            "proof_round_index": proof_round_index,
+                            "proof_max_rounds": proof_max_rounds,
+                            "reason": exc.reason or "transient_provider_error",
+                            "message": message,
+                        },
+                    )
+                    await api_client_manager.wait_for_retryable_provider_error(
+                        exc,
+                        role_id=exc.role_id or role_suffix_override or "autonomous_proof",
+                        should_stop=self._stop_event.is_set,
+                    )
+                    if self._stop_event.is_set():
+                        return "stopped", None
+                    await self._broadcast(
+                        "autonomous_proof_provider_resumed",
+                        {
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "source_title": source_title,
+                            "trigger": round_trigger,
+                            "proof_round_index": proof_round_index,
+                            "proof_max_rounds": proof_max_rounds,
+                            "reason": exc.reason or "transient_provider_error",
                         },
                     )
                 except Exception as exc:
@@ -3126,6 +3187,15 @@ class AutonomousCoordinator:
                     "message": "All free models exhausted, waiting to retry",
                 })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
+              except RetryableProviderError as e:
+                logger.warning("AutonomousCoordinator paused for retryable provider failure: %s", e)
+                await self._save_workflow_state()
+                await api_client_manager.wait_for_retryable_provider_error(
+                    e,
+                    role_id=e.role_id or "autonomous",
+                    should_stop=self._stop_event.is_set,
+                )
+                continue
 
         except Exception as e:
             logger.error(f"AutonomousCoordinator error: {e}")
@@ -4768,11 +4838,26 @@ class AutonomousCoordinator:
                         proof_status = await self._run_brainstorm_completion_proofs()
                         return proof_status == "complete"
                     
-                    # Check for early completion triggers
-                    early_trigger = await self._check_early_completion_triggers()
+                    # Model-driven completion handoff is only allowed after the
+                    # minimum accepted brainstorm size. Manual overrides and the
+                    # hard cap are handled separately above/below.
+                    handoff_minimum_met = (
+                        self._acceptance_count >= _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF
+                    )
+                    early_trigger = False
+                    if handoff_minimum_met:
+                        early_trigger = await self._check_early_completion_triggers()
+                    elif self._consecutive_rejections >= 10:
+                        logger.info(
+                            "Deferring early completion review: %s consecutive rejections "
+                            "but only %s/%s acceptances",
+                            self._consecutive_rejections,
+                            self._acceptance_count,
+                            _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF,
+                        )
                     
                     # Check for completion review trigger (regular interval OR early trigger)
-                    if self._should_run_completion_review() or early_trigger:
+                    if handoff_minimum_met and (self._should_run_completion_review() or early_trigger):
                         if early_trigger:
                             logger.info("EARLY completion trigger detected - bypassing interval check")
                         
@@ -4806,9 +4891,12 @@ class AutonomousCoordinator:
                     # NOTE: Don't broadcast here - the aggregator already broadcasts 
                     # individual 'submission_rejected' events with submitter_id per submission
                     
-                    # Check for hard limit of 10 consecutive rejections (with minimum 5 acceptances)
+                    # Check for hard limit of 10 consecutive rejections (with minimum 7 acceptances)
                     # This FORCES paper writing, similar to the 30 acceptance hard limit
-                    if self._consecutive_rejections >= 10 and self._acceptance_count >= 5:
+                    if _brainstorm_rejection_handoff_allowed(
+                        self._consecutive_rejections,
+                        self._acceptance_count,
+                    ):
                         logger.info(f"Hard limit: {self._consecutive_rejections} consecutive rejections with {self._acceptance_count} acceptances. Forcing paper writing.")
                         
                         # Broadcast rejection hard limit event

@@ -37,6 +37,8 @@ _PROOF_INT_FIELDS = {
     "smt_timeout": (1, 600),
 }
 
+_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT = 600
+
 _CONNECTIVITY_BOOL_FIELDS = {
     "syntheticlib4_enabled",
     "agent_conversation_memory_enabled",
@@ -190,12 +192,19 @@ def apply_persisted_runtime_settings() -> None:
                     )
             for field, (minimum, maximum) in _PROOF_INT_FIELDS.items():
                 if field in proof_settings:
+                    default = int(getattr(system_config, field))
+                    if (
+                        field == "lean4_proof_timeout"
+                        and default != _LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT
+                        and str(proof_settings[field]).strip() == str(_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT)
+                    ):
+                        proof_settings[field] = default
                     setattr(
                         system_config,
                         field,
                         _coerce_int(
                             proof_settings[field],
-                            int(getattr(system_config, field)),
+                            default,
                             minimum,
                             maximum,
                         ),

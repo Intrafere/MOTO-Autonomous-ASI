@@ -22,6 +22,7 @@ export default function OpenRouterApiKeyModal({
   isOpen,
   onClose,
   onKeySet,
+  onKeyCleared,
   onCloudAccessChanged,
   reason = 'setup',
   capabilities,
@@ -482,6 +483,9 @@ export default function OpenRouterApiKeyModal({
       setTestResult(null);
       setError('');
       setHasStoredKey(false);
+      if (onKeyCleared) {
+        await onKeyCleared();
+      }
     } catch (err) {
       setError(err.message || 'Failed to clear API key');
     }

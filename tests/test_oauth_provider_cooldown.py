@@ -2,8 +2,13 @@ import tempfile
 import time
 from unittest import IsolatedAsyncioTestCase, mock
 
-from backend.shared.api_client_manager import APIClientManager, OAuthProviderCooldownError
+from backend.shared.api_client_manager import (
+    APIClientManager,
+    OAuthProviderCooldownError,
+    RetryableProviderError,
+)
 from backend.shared.config import system_config
+from backend.shared.model_error_utils import is_transient_model_call_error
 from backend.shared.models import ModelConfig
 from backend.shared.openai_codex_client import OAuthUsageLimitError, OpenAICodexClient
 from backend.shared.provider_notification_store import record_provider_notification
@@ -129,15 +134,105 @@ class APIClientManagerOAuthCooldownTests(IsolatedAsyncioTestCase):
             resets_at=int(time.time()) + 300,
             resets_in_seconds=1,
         )
-        async def expire_after_sleep(_seconds: int) -> None:
+        async def expire_after_sleep(_seconds: int, _should_stop=None) -> None:
             self.manager._oauth_provider_cooldowns["openai_codex_oauth"]["cooldown_until"] = int(time.time()) - 1
 
-        with mock.patch(
-            "backend.shared.api_client_manager.asyncio.sleep",
+        with mock.patch.object(
+            self.manager,
+            "_sleep_with_optional_stop",
             new=mock.AsyncMock(side_effect=expire_after_sleep),
         ) as sleep_mock:
             await self.manager.wait_for_oauth_provider_cooldown(error, role_id="agg_sub1")
         sleep_mock.assert_awaited()
+
+    async def test_retryable_provider_error_uses_shared_exponential_backoff(self) -> None:
+        error = RetryableProviderError(
+            provider="openai_codex_oauth",
+            provider_label="OpenAI Codex",
+            role_id="autonomous_proof_formalization_brainstorm",
+            model="gpt-5.5",
+            reason="transient_provider_error",
+            message="OpenAI Codex transient transport failure",
+        )
+
+        with mock.patch.object(
+            self.manager,
+            "_sleep_with_optional_stop",
+            new=mock.AsyncMock(),
+        ) as sleep_mock:
+            await self.manager.wait_for_retryable_provider_error(error)
+            await self.manager.wait_for_retryable_provider_error(error)
+
+        sleep_mock.assert_has_awaits([
+            mock.call(60, None),
+            mock.call(120, None),
+        ])
+
+    async def test_retryable_provider_backoff_clears_after_success_with_display_role_override(self) -> None:
+        error = RetryableProviderError(
+            provider="openrouter",
+            provider_label="OpenRouter",
+            role_id="agg_val",
+            model="openrouter/model",
+            reason="transient_provider_error",
+            message="OpenRouter transient provider failure",
+        )
+
+        with mock.patch.object(
+            self.manager,
+            "_sleep_with_optional_stop",
+            new=mock.AsyncMock(),
+        ) as sleep_mock:
+            await self.manager.wait_for_retryable_provider_error(
+                error,
+                role_id="aggregator_validator",
+            )
+            self.manager._clear_retryable_provider_backoff(
+                "openrouter",
+                "agg_val",
+                "openrouter/model",
+            )
+            await self.manager.wait_for_retryable_provider_error(
+                error,
+                role_id="aggregator_validator",
+            )
+
+        sleep_mock.assert_has_awaits([
+            mock.call(60, None),
+            mock.call(60, None),
+        ])
+
+    async def test_retryable_provider_backoff_stop_returns_without_cancellation(self) -> None:
+        error = RetryableProviderError(
+            provider="openrouter",
+            provider_label="OpenRouter",
+            role_id="agg_val",
+            model="openrouter/model",
+            reason="transient_provider_error",
+            message="OpenRouter transient provider failure",
+        )
+
+        await self.manager.wait_for_retryable_provider_error(
+            error,
+            should_stop=lambda: True,
+        )
+
+        self.assertEqual(
+            self.manager._retryable_provider_backoff_state[
+                "openrouter|agg_val|openrouter/model|transient_provider_error"
+            ],
+            1,
+        )
+
+    def test_transient_classifier_does_not_retry_sakana_auth_failure(self) -> None:
+        error = RuntimeError("Sakana Fugu request failed: HTTP 401: invalid api key")
+
+        self.assertFalse(is_transient_model_call_error(error))
+
+    def test_transient_classifier_retries_sakana_server_failure(self) -> None:
+        error = RuntimeError("Sakana Fugu request failed: HTTP 503: service unavailable")
+
+        self.assertTrue(is_transient_model_call_error(error))
 
     def test_provider_notification_preserves_cooldown_metadata(self) -> None:
         old_data_dir = system_config.data_dir

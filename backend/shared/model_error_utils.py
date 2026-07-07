@@ -4,6 +4,7 @@ from __future__ import annotations
 from backend.shared.openrouter_client import (
     CreditExhaustionError,
     FreeModelExhaustedError,
+    OpenRouterInvalidResponseError,
     OpenRouterPrivacyPolicyError,
 )
 
@@ -36,12 +37,20 @@ _TRANSIENT_MODEL_CALL_MARKERS = (
     "connection timeout",
     "disconnect/reset before headers",
     "gateway timeout",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
     "incomplete chunked read",
     "openai codex connection failed",
     "openai codex transient",
+    "openrouter connection failed",
     "peer closed connection",
     "readerror",
     "remoteprotocolerror",
+    "response missing 'choices'",
+    "sakana fugu connection failed",
+    "sakana fugu transient",
     "server_error",
     "service unavailable",
     "temporarily unavailable",
@@ -55,10 +64,21 @@ _TRANSIENT_MODEL_CALL_MARKERS = (
 _TRANSIENT_MODEL_PROVIDER_MARKERS = (
     "codex",
     "grok",
+    "openrouter",
+    "sakana",
     "xai",
 )
 
 _TRANSIENT_PROVIDER_ERROR_PREFIX = "TRANSIENT PROVIDER ERROR"
+_TRANSIENT_INVALID_RESPONSE_BODY_MARKERS = (
+    "bad gateway",
+    "cloudflare",
+    "gateway error",
+    "gateway timeout",
+    "service unavailable",
+    "temporarily unavailable",
+    "upstream connect error",
+)
 
 
 def format_transient_provider_error(exc: Exception) -> str:
@@ -81,6 +101,13 @@ def is_retryable_model_output_error(exc: Exception) -> bool:
 
 def is_transient_model_call_error(exc: Exception) -> bool:
     """Return true for provider/network failures that should not be treated as config errors."""
+    if isinstance(exc, OpenRouterInvalidResponseError):
+        content_type = str(getattr(exc, "content_type", "") or "").lower()
+        body_preview = str(getattr(exc, "body_preview", "") or "").lower()
+        status_code = int(getattr(exc, "status_code", 0) or 0)
+        if status_code >= 500:
+            return True
+        return any(marker in body_preview for marker in _TRANSIENT_INVALID_RESPONSE_BODY_MARKERS)
     message = str(exc or "").lower()
     if not any(marker in message for marker in _TRANSIENT_MODEL_PROVIDER_MARKERS):
         return False

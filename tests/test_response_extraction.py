@@ -62,6 +62,20 @@ class ResponseExtractionTests(unittest.TestCase):
 
         self.assertEqual(text, "part one part two")
 
+    def test_parses_lm_studio_legacy_channel_json_after_private_thought(self):
+        text = (
+            '<|channel>thought\n'
+            'The model considered proof_044 and proof_011 first, with many '
+            'private notes containing non-json braces like {not valid json}.\n'
+            '<channel|>{"selected_search_ids":["proof_044","proof_011"],'
+            '"reasoning":"Relevant modular certificate proofs."}'
+        )
+
+        parsed = parse_json(text)
+
+        self.assertEqual(parsed["selected_search_ids"], ["proof_044", "proof_011"])
+        self.assertEqual(parsed["reasoning"], "Relevant modular certificate proofs.")
+
 
 if __name__ == "__main__":
     unittest.main()

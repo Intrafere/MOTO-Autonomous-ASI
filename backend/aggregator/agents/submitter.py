@@ -12,7 +12,7 @@ import uuid
 from backend.shared.config import rag_config, system_config
 from backend.shared.models import Submission, SubmitterState
 from backend.shared.lm_studio_client import lm_studio_client
-from backend.shared.api_client_manager import OAuthProviderCooldownError, api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.brainstorm_proof_gate import is_lean_proof_submission, verify_brainstorm_proof_candidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
@@ -190,15 +190,16 @@ class SubmitterAgent:
                 # All free models exhausted after retries - wait briefly and retry
                 logger.warning(f"Submitter {self.submitter_id}: all free models exhausted: {e}")
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
-            except OAuthProviderCooldownError as e:
+            except RetryableProviderError as e:
                 logger.warning(
-                    "Submitter %s paused for OAuth provider cooldown: %s",
+                    "Submitter %s paused for retryable provider failure: %s",
                     self.submitter_id,
                     e,
                 )
-                await api_client_manager.wait_for_oauth_provider_cooldown(
+                await api_client_manager.wait_for_retryable_provider_error(
                     e,
                     role_id=self.role_id,
+                    should_stop=lambda: not self.is_running,
                 )
             except ContextAllocationError as e:
                 logger.error("Submitter %s context overflow: %s", self.submitter_id, e)
@@ -360,6 +361,23 @@ class SubmitterAgent:
                 except (httpx.HTTPStatusError, ValueError) as e:
                     error_msg = str(e)
                     is_400_or_context = "400" in error_msg or "context" in error_msg.lower()
+
+                    if "context" in error_msg.lower():
+                        if self.task_tracking_callback:
+                            self.task_tracking_callback("completed", task_id)
+                        raise ContextAllocationError(
+                            f"Submitter {self.submitter_id} context overflow or provider context mismatch: "
+                            f"the assembled prompt requires {actual_prompt_tokens:,} tokens and the configured "
+                            f"input budget is {max_allowed_tokens:,} tokens (context window: {self.context_window:,}, "
+                            f"output reserve: {self.max_output_tokens:,}). The provider rejected the request "
+                            "as too large, so the loaded/provider context is smaller than configured. Please condense "
+                            "into a new prompt and restart, select a larger-context model, or reload the local model "
+                            "with the configured context window.",
+                            required_tokens=actual_prompt_tokens,
+                            available_tokens=max_allowed_tokens,
+                            context_window=self.context_window,
+                            output_reserve=self.max_output_tokens,
+                        ) from e
                     
                     if is_400_or_context and attempt < max_retries - 1:
                         backoff_time = min(2 ** attempt, 16)
@@ -374,20 +392,6 @@ class SubmitterAgent:
                         logger.error(
                             f"Submitter {self.submitter_id}: Failed to generate completion after {attempt + 1} attempts: {e}"
                         )
-                        if "context" in error_msg.lower():
-                            raise ContextAllocationError(
-                                f"Submitter {self.submitter_id} context overflow or provider context mismatch: "
-                                f"the assembled prompt requires {actual_prompt_tokens:,} tokens and the configured "
-                                f"input budget is {max_allowed_tokens:,} tokens (context window: {self.context_window:,}, "
-                                f"output reserve: {self.max_output_tokens:,}). The provider still rejected the request "
-                                "as too large, so the loaded/provider context is smaller than configured. Please condense "
-                                "into a new prompt and restart, select a larger-context model, or reload the local model "
-                                "with the configured context window.",
-                                required_tokens=actual_prompt_tokens,
-                                available_tokens=max_allowed_tokens,
-                                context_window=self.context_window,
-                                output_reserve=self.max_output_tokens,
-                            ) from e
                         # Notify task completed (failed but still completed)
                         if self.task_tracking_callback:
                             self.task_tracking_callback("completed", task_id)
@@ -395,7 +399,7 @@ class SubmitterAgent:
                         
                 except FreeModelExhaustedError:
                     raise
-                except OAuthProviderCooldownError:
+                except RetryableProviderError:
                     raise
                 except RuntimeError as e:
                     if "credits exhausted" in str(e).lower():

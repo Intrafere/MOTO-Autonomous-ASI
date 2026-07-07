@@ -13,7 +13,7 @@ from backend.shared.config import system_config, rag_config
 from backend.shared.models import SystemStatus, Submission, ValidationResult, SubmitterConfig, WorkflowTask, ModelConfig, ProofAttemptFeedback
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.rag_lock import rag_operation_lock
-from backend.shared.api_client_manager import OAuthProviderCooldownError, api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
@@ -864,11 +864,12 @@ class Coordinator:
                         "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
-            except OAuthProviderCooldownError as e:
-                logger.warning("Validator paused for OAuth provider cooldown: %s", e)
-                await api_client_manager.wait_for_oauth_provider_cooldown(
+            except RetryableProviderError as e:
+                logger.warning("Validator paused for retryable provider failure: %s", e)
+                await api_client_manager.wait_for_retryable_provider_error(
                     e,
                     role_id="aggregator_validator",
+                    should_stop=lambda: not self.is_running,
                 )
             except ContextAllocationError as e:
                 await self._handle_context_overflow(e, role_id="aggregator_validator")
@@ -980,11 +981,12 @@ class Coordinator:
                         "message": "All free models exhausted, waiting to retry",
                     })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
-            except OAuthProviderCooldownError as e:
-                logger.warning("Single-model workflow paused for OAuth provider cooldown: %s", e)
-                await api_client_manager.wait_for_oauth_provider_cooldown(
+            except RetryableProviderError as e:
+                logger.warning("Single-model workflow paused for retryable provider failure: %s", e)
+                await api_client_manager.wait_for_retryable_provider_error(
                     e,
                     role_id="aggregator_single_model",
+                    should_stop=lambda: not self.is_running,
                 )
             except ContextAllocationError as e:
                 await self._handle_context_overflow(e, role_id="aggregator_single_model")

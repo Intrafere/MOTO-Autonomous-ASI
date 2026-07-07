@@ -1,10 +1,7 @@
 {
   "manifest_version": 1,
-  "version": "1.1.01",
-  "build_commit": "7d86e422f615dcea682160126ae88006699aff34",
+  "version": "1.1.02",
+  "build_commit": "40be14c63aee7027f02d36479416e1341385b6e3",
   "update_channel": "main",
-  "api_contract_version": "build5-v53"
+  "api_contract_version": "build5-v54"
 }
-
-
-

@@ -2,7 +2,11 @@ import unittest
 from importlib import import_module
 from types import SimpleNamespace
 
-from backend.autonomous.core.autonomous_coordinator import AutonomousCoordinator
+from backend.autonomous.core.autonomous_coordinator import (
+    _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF,
+    _brainstorm_rejection_handoff_allowed,
+    AutonomousCoordinator,
+)
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
 from backend.autonomous.prompts.proof_prompts import build_proof_identification_prompt
 from backend.shared.config import system_config
@@ -176,6 +180,44 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         coordinator_module.research_metadata = self.old_research_metadata
         coordinator_module.proof_database = self.old_proof_database
         coordinator_module.brainstorm_memory = self.old_brainstorm_memory
+
+    def test_brainstorm_handoff_minimum_is_seven_acceptances(self):
+        self.assertEqual(_BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF, 7)
+
+    def test_rejection_limit_handoff_waits_for_seven_acceptances(self):
+        self.assertFalse(
+            _brainstorm_rejection_handoff_allowed(
+                consecutive_rejections=10,
+                acceptance_count=_BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF - 1,
+            )
+        )
+        self.assertTrue(
+            _brainstorm_rejection_handoff_allowed(
+                consecutive_rejections=10,
+                acceptance_count=_BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF,
+            )
+        )
+
+    def test_regular_completion_review_waits_for_handoff_minimum(self):
+        coordinator = AutonomousCoordinator()
+        coordinator._acceptance_count = _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF - 1
+        coordinator._last_completion_review_at = 0
+
+        self.assertFalse(
+            coordinator._acceptance_count >= _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF
+            and coordinator._should_run_completion_review()
+        )
+
+        coordinator._acceptance_count = _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF
+        coordinator._last_completion_review_at = (
+            _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF
+            - system_config.autonomous_completion_review_interval
+        )
+
+        self.assertTrue(
+            coordinator._acceptance_count >= _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF
+            and coordinator._should_run_completion_review()
+        )
 
     def test_follow_up_prompt_uses_strict_question(self):
         prompt = build_proof_identification_prompt(

@@ -8,7 +8,7 @@ from datetime import datetime
 
 from backend.shared.config import rag_config
 from backend.shared.models import Submission
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
@@ -213,6 +213,8 @@ class CritiqueSubmitterAgent:
             return submission
             
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except RuntimeError as e:
             if "credits exhausted" in str(e).lower():

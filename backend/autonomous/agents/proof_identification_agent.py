@@ -4,7 +4,7 @@ Proof identification agent for Lean 4 verification checkpoints.
 import logging
 from typing import List, Tuple
 
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.model_error_utils import (
@@ -125,7 +125,11 @@ class ProofIdentificationAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as exc:
-            if is_non_retryable_model_error(exc) or is_transient_model_call_error(exc):
+            if (
+                isinstance(exc, RetryableProviderError)
+                or is_non_retryable_model_error(exc)
+                or is_transient_model_call_error(exc)
+            ):
                 raise
             logger.debug(
                 "ProofIdentificationAgent SMT translation failed for theorem %s: %s",
@@ -286,7 +290,11 @@ class ProofIdentificationAgent:
         except FreeModelExhaustedError:
             raise
         except Exception as exc:
-            if is_non_retryable_model_error(exc) or is_transient_model_call_error(exc):
+            if (
+                isinstance(exc, RetryableProviderError)
+                or is_non_retryable_model_error(exc)
+                or is_transient_model_call_error(exc)
+            ):
                 raise
             logger.error(
                 "ProofIdentificationAgent failed for %s %s: %s",

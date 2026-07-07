@@ -269,6 +269,7 @@ code {
   position: fixed;
   top: 8px;
   right: 350px; /* Positioned next to expanded panel (320px + 30px margin) */
+  max-width: calc(100vw - 40px);
   z-index: 1001;
   display: flex;
   flex-direction: column;
@@ -354,7 +355,8 @@ code {
 }
 
 .connectivity-panel {
-  width: 330px;
+  width: min(330px, calc(100vw - 40px));
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -466,6 +468,7 @@ code {
 
 .connectivity-row__left {
   min-width: 0;
+  flex: 1 1 auto;
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
@@ -473,6 +476,7 @@ code {
 }
 
 .connectivity-label {
+  min-width: 0;
   color: rgba(255, 255, 255, 0.92);
   font-size: 0.8rem;
   font-weight: 650;
@@ -489,16 +493,16 @@ code {
   display: inline-grid;
   place-content: center;
   box-sizing: border-box;
-  border: 1px solid rgba(30, 255, 28, 0.52);
+  border: 1px solid rgba(76, 175, 80, 0.62);
   border-radius: 3px;
   background: rgba(4, 12, 6, 0.84);
-  accent-color: #1eff1c;
+  accent-color: var(--accent-green);
   cursor: pointer;
 }
 
 .connectivity-checkbox:checked {
-  background: #1eff1c;
-  border-color: #1eff1c;
+  background: var(--accent-green);
+  border-color: var(--accent-green);
 }
 
 .connectivity-checkbox:checked::after {
@@ -1236,9 +1240,25 @@ button.danger:hover {
   .mode-switch-control {
     min-width: 220px;
   }
+
+  .connectivity-panel .mode-switch-control--compact {
+    min-width: 0;
+  }
   
   .app-header {
-    right: 20px;
+    top: 12px;
+    right: 12px;
+    max-width: calc(100vw - 24px);
+  }
+
+  .app-header.panel-collapsed {
+    right: 12px;
+  }
+
+  .connectivity-panel {
+    width: min(300px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
   }
 }
 

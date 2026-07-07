@@ -23,6 +23,7 @@ from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
 )
+from backend.shared.api_client_manager import RetryableProviderError
 from backend.shared.models import ProofAttemptFeedback, ProofAttemptResult, ProofCandidate, ProofStageResult, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.provider_pause import is_provider_credit_pause_error
@@ -50,7 +51,7 @@ class _LeanVerificationOutcome:
 
 
 class ProofVerificationProviderPause(Exception):
-    """Raised when proof verification must pause for provider credits."""
+    """Raised when proof verification must pause for provider retry/resume."""
 
     def __init__(self, message: str, remaining_candidates: Optional[list[ProofCandidate]] = None):
         super().__init__(message)
@@ -200,6 +201,8 @@ class ProofVerificationStage:
             return "Lean 4 response: proof verified."
         error_summary = self._summarize_error(feedback.error_output, limit=960)
         if error_summary:
+            if "timed out after" in error_summary.lower() and "Advanced Settings" not in error_summary:
+                error_summary = f"{error_summary} You can change this timeout in Advanced Settings."
             return f"Lean 4 response: {error_summary} - proof not verified."
         return "Lean 4 response: proof not verified."
 
@@ -761,6 +764,10 @@ class ProofVerificationStage:
                                 str(exc),
                                 remaining_unprocessed_candidates(),
                             ) from exc
+                        except RetryableProviderError:
+                            await cancel_and_drain(set(done_tasks) - {future})
+                            await save_checkpoint("provider_paused")
+                            raise
                         except asyncio.CancelledError:
                             continue
                         except Exception as exc:
@@ -1107,6 +1114,9 @@ class ProofVerificationStage:
             return result
         except ProofVerificationProviderPause:
             raise
+        except RetryableProviderError:
+            await save_checkpoint("provider_paused")
+            raise
         except FreeModelExhaustedError:
             await save_checkpoint("provider_paused")
             raise
@@ -1115,36 +1125,22 @@ class ProofVerificationStage:
                 await save_checkpoint("provider_paused")
                 raise
             if is_transient_model_call_error(exc):
-                await save_checkpoint("error")
-                result.had_error = True
-                result.error_message = format_transient_provider_error(exc)
+                await save_checkpoint("provider_paused")
                 logger.warning(
                     "Proof verification transient provider failure for %s %s; preserving checkpoint: %s",
                     source_type,
                     source_id,
                     exc,
                 )
-                await self._broadcast(
-                    broadcast_fn,
-                    "proof_check_complete",
-                    {
-                        "source_type": source_type,
-                        "source_id": source_id,
-                        "source_title": source_title,
-                        "trigger": trigger,
-                        "proof_round_index": proof_round_index,
-                        "proof_max_rounds": proof_max_rounds,
-                        "novel_count": result.novel_count,
-                        "verified_count": result.verified_count,
-                        "total_candidates": result.total_candidates,
-                        "message": (
-                            "Proof verification hit a transient provider error after retries; "
-                            "the proof checkpoint was preserved for retry: "
-                            f"{self._summarize_error(str(exc), limit=1800)}"
-                        ),
-                    },
-                )
-                return result
+                role_suffix = self._role_suffix(source_type, role_suffix_override)
+                raise RetryableProviderError(
+                    provider="unknown",
+                    provider_label="Inference provider",
+                    role_id=f"autonomous_proof_{role_suffix}",
+                    model=submitter_model,
+                    reason="transient_provider_error",
+                    message=format_transient_provider_error(exc),
+                ) from exc
             await save_checkpoint("error")
             result.had_error = True
             result.error_message = str(exc)

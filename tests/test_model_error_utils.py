@@ -5,6 +5,7 @@ from backend.shared.model_error_utils import (
     is_retryable_model_output_error,
     is_transient_model_call_error,
 )
+from backend.shared.openrouter_client import OpenRouterInvalidResponseError
 
 
 class ModelErrorUtilsTests(unittest.TestCase):
@@ -70,14 +71,62 @@ class ModelErrorUtilsTests(unittest.TestCase):
         self.assertTrue(is_transient_model_call_error(exc))
         self.assertFalse(is_non_retryable_model_error(exc))
 
-    def test_openrouter_missing_fallback_remains_non_retryable(self) -> None:
+    def test_openrouter_upstream_connect_without_fallback_is_transient(self) -> None:
         exc = RuntimeError(
             "OpenRouter error for role 'agg_sub1': upstream connect error "
             "and no LM Studio fallback configured"
         )
 
+        self.assertTrue(is_transient_model_call_error(exc))
+        self.assertFalse(is_non_retryable_model_error(exc))
+
+    def test_openrouter_invalid_response_is_transient(self) -> None:
+        exc = OpenRouterInvalidResponseError(
+            "OpenRouter returned non-JSON body after 3 attempts",
+            status_code=200,
+            content_type="text/html",
+            body_preview="<html>gateway error</html>",
+        )
+
+        self.assertTrue(is_transient_model_call_error(exc))
+        self.assertFalse(is_non_retryable_model_error(exc))
+
+    def test_openrouter_non_json_success_without_transient_body_is_not_transient(self) -> None:
+        exc = OpenRouterInvalidResponseError(
+            "OpenRouter returned non-JSON body after 3 attempts",
+            status_code=200,
+            content_type="text/html",
+            body_preview="<html><title>Sign in</title><body>Login required</body></html>",
+        )
+
+        self.assertFalse(is_transient_model_call_error(exc))
+
+    def test_openrouter_json_labeled_invalid_response_is_not_transient_by_default(self) -> None:
+        exc = OpenRouterInvalidResponseError(
+            "OpenRouter returned malformed JSON after 3 attempts",
+            status_code=200,
+            content_type="application/json",
+            body_preview='{"unexpected":"shape"}',
+        )
+
+        self.assertFalse(is_transient_model_call_error(exc))
+
+    def test_openrouter_auth_without_fallback_remains_non_retryable(self) -> None:
+        exc = RuntimeError(
+            "OpenRouter error for role 'agg_sub1': HTTP 401 unauthorized "
+            "and no LM Studio fallback configured"
+        )
+
         self.assertFalse(is_transient_model_call_error(exc))
         self.assertTrue(is_non_retryable_model_error(exc))
+
+    def test_openrouter_rate_limit_is_not_generic_transient(self) -> None:
+        exc = RuntimeError(
+            "OpenRouter error for role 'agg_sub1': OpenRouter rate limit: retry later "
+            "and no LM Studio fallback configured"
+        )
+
+        self.assertFalse(is_transient_model_call_error(exc))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from backend.autonomous.prompts.proof_prompts import build_proof_statement_alignment_prompt
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.config import rag_config
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
@@ -243,7 +243,7 @@ async def validate_lean_statement_alignment(
         if not isinstance(data, dict):
             data = {}
     except Exception as exc:
-        if is_non_retryable_model_error(exc):
+        if isinstance(exc, RetryableProviderError) or is_non_retryable_model_error(exc):
             raise
         logger.warning("Lean statement alignment validation failed: %s", exc)
         return LeanProofIntegrityResult(

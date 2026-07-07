@@ -8,7 +8,7 @@ import logging
 import uuid
 from typing import Optional, Dict, Any, List, Callable
 
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.models import CompilerSubmission, ContextPack
 from backend.shared.config import system_config, rag_config
@@ -366,6 +366,8 @@ class WritingSubmitter:
             
         except FreeModelExhaustedError:
             raise
+        except RetryableProviderError:
+            raise
         except Exception as e:
             logger.error(f"Failed to generate outline creation submission: {e}", exc_info=True)
             # Notify task completed (failed but still completed)
@@ -518,6 +520,8 @@ class WritingSubmitter:
             return submission
             
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except Exception as e:
             logger.error(f"Failed to generate outline update submission: {e}", exc_info=True)
@@ -701,6 +705,8 @@ class WritingSubmitter:
                     task_id=task_id,
                     initial_prompt=prompt,
                 )
+            except RetryableProviderError:
+                raise
             except Exception as exc:
                 # Any tool-loop failure falls back to the plain single-shot
                 # path so construction still makes forward progress.
@@ -839,6 +845,8 @@ class WritingSubmitter:
             return submission
             
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except ValueError:
             raise
@@ -1002,6 +1010,8 @@ class WritingSubmitter:
             return submission
             
         except FreeModelExhaustedError:
+            raise
+        except RetryableProviderError:
             raise
         except ValueError:
             raise
@@ -1323,6 +1333,8 @@ class WritingSubmitter:
             else:
                 logger.warning(f"Compiler writing submitter ({mode}): Retry returned empty response")
                 
+        except RetryableProviderError:
+            raise
         except Exception as e:
             if "retry prompt exceeds context limit" in str(e).lower():
                 raise

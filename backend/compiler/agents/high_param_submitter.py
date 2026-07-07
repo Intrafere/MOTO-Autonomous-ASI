@@ -76,9 +76,11 @@ _NOVEL_PROOF_TIERS = {
 
 def _is_rigor_model_call_failure(exc: Exception) -> bool:
     """Return true for provider/config failures that must not become declines."""
+    from backend.shared.api_client_manager import RetryableProviderError
+
     message = str(exc or "").lower()
     return (
-        isinstance(exc, OpenRouterInvalidResponseError)
+        isinstance(exc, (OpenRouterInvalidResponseError, RetryableProviderError))
         or is_non_retryable_model_error(exc)
         or is_transient_model_call_error(exc)
         or "model output incomplete" in message
@@ -903,6 +905,8 @@ class HighParamSubmitter:
             if len(error) > 960:
                 error = f"{error[:960]}..."
             if error:
+                if "timed out after" in error.lower() and "Advanced Settings" not in error:
+                    error = f"{error} You can change this timeout in Advanced Settings."
                 return f"Lean 4 response: {error} - proof not verified."
             return "Lean 4 response: proof not verified."
 

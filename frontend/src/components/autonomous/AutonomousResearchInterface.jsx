@@ -207,7 +207,7 @@ const AutonomousResearchInterface = ({
       const status = await api.getProofStatus();
       const updatedStatus = await api.updateProofSettings({
         enabled,
-        timeout: status.lean4_proof_timeout ?? 600,
+        timeout: status.lean4_proof_timeout ?? 900,
         lean4_lsp_enabled: Boolean(status.lean4_lsp_enabled),
         lean4_lsp_idle_timeout: status.lean4_lsp_idle_timeout ?? 600,
         max_parallel_candidates: status.proof_max_parallel_candidates ?? 6,
@@ -532,7 +532,7 @@ const AutonomousResearchInterface = ({
                       <span className="force-paper-text">
                         <span className="force-paper-action">Skip AI Autonomy</span>
                         <span className="force-paper-hint" role="tooltip">
-                          We recommend at minimum 5 ACCEPTED submissions. A very low acceptance rate is normal because the validator is seeking novel solutions. Higher parameter models may improve acceptance, though optimizing for both speed and knowledge can also work well. Validator feedback on rejections helps avoid rejection loops. Harder problems may require hundreds or more rejections before a single acceptance, and the first acceptance often takes the longest. View brainstorms in the brainstorm tab.
+                          We recommend at minimum 7 ACCEPTED submissions. A very low acceptance rate is normal because the validator is seeking novel solutions. Higher parameter models may improve acceptance, though optimizing for both speed and knowledge can also work well. Validator feedback on rejections helps avoid rejection loops. Harder problems may require hundreds or more rejections before a single acceptance, and the first acceptance often takes the longest. View brainstorms in the brainstorm tab.
                         </span>
                       </span>
                     )}

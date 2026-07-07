@@ -99,7 +99,7 @@ beforeEach(() => {
   autonomousAPI.getProofStatus.mockResolvedValue({
     lean4_enabled: false,
     lean4_path: '',
-    lean4_proof_timeout: 600,
+    lean4_proof_timeout: 900,
     lean4_lsp_enabled: false,
     proof_max_parallel_candidates: 6,
     smt_enabled: false,

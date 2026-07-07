@@ -172,6 +172,22 @@ def _strip_control_tokens_outside_json_strings(content: str) -> str:
     return "".join(result)
 
 
+def _strip_leading_private_channel_for_json(content: str) -> str:
+    """Keep the answer payload after private channel transcripts."""
+    final_matches = _find_matches_outside_json_strings(_FINAL_CHANNEL_PATTERN, content)
+    if final_matches:
+        return content[final_matches[-1].end():].strip()
+
+    if not _has_match_outside_json_strings(_PRIVATE_CHANNEL_PATTERN, content):
+        return content
+
+    legacy_boundaries = _find_matches_outside_json_strings(_LEGACY_CHANNEL_BOUNDARY_PATTERN, content)
+    if legacy_boundaries:
+        return content[legacy_boundaries[-1].end():].strip()
+
+    return content
+
+
 def _strip_leading_private_reasoning_blocks(content: str) -> str:
     """
     Remove leading private reasoning transcript blocks without touching visible content.
@@ -375,12 +391,13 @@ def sanitize_json_response(raw_content: str) -> str:
                 content = '\n'.join(content_lines).strip()
                 logger.debug(f"Stripped markdown code block wrapper")
     
-    # STEP 3: Strip control tokens that some models emit
+    # STEP 3: Strip private channel transcripts and control tokens that some models emit
     # Common patterns: <|channel|>...<|message|>, <|constrain|>JSON, etc.
     # Some models emit these BEFORE the JSON, some WITHIN the content
     # Strategy: Remove ALL control token patterns using regex
     
     original_content = content
+    content = _strip_leading_private_channel_for_json(content).strip()
     content = _strip_control_tokens_outside_json_strings(content).strip()
     if content != original_content:
         logger.debug(
