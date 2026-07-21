@@ -1,0 +1,23 @@
+{
+  "adapter": "real_route",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "concurrent_start_race",
+    "one_winner"
+  ],
+  "fields": [
+    "runtime_exclusivity",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_shared_start_guard_representative_race",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+}

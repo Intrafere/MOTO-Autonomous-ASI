@@ -22,6 +22,7 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_RESOLUTION,
     CONTEXT_OVERFLOW_STOP_MESSAGE,
     CONTEXT_OVERFLOW_STOP_REASON,
+    context_overflow_model_payload,
 )
 from backend.aggregator.agents.submitter import SubmitterAgent
 from backend.aggregator.agents.validator import ValidatorAgent
@@ -89,9 +90,6 @@ class Coordinator:
         self.validator: Optional[ValidatorAgent] = None
         self.is_running = False
         
-        # Stats file path
-        self.stats_file_path = Path(system_config.data_dir) / "aggregator_stats.json"
-        
         # Stats
         self.total_submissions = 0
         self.total_acceptances = 0
@@ -109,6 +107,7 @@ class Coordinator:
         self._validator_task: Optional[asyncio.Task] = None
         self._main_task: Optional[asyncio.Task] = None  # For single-model mode
         self._rechunk_task: Optional[asyncio.Task] = None
+        self._rechunk_follow_up_requested = False
         self._rechunk_callback_set = False
         
         # Chunk size cycling for incremental re-chunking
@@ -141,12 +140,27 @@ class Coordinator:
         self.persist_event_log = True
         self.fatal_error_message: Optional[str] = None
         self.fatal_error_type: Optional[str] = None
+        self.fatal_error_payload: Optional[Dict[str, Any]] = None
 
         # Optional source-level hard cap used by autonomous brainstorm mode.
         self.max_total_acceptances: Optional[int] = None
         self.acceptance_count_offset: int = 0
         self.acceptance_cap_callback: Optional[Callable[[int], Any]] = None
         self._acceptance_cap_reached = False
+        self.top_level_terminal_callback: Optional[Callable[[], Any]] = None
+
+    def _notify_top_level_terminal(self) -> None:
+        """Notify a route-owned top-level lifecycle without affecting child coordinators."""
+        if self.top_level_terminal_callback:
+            try:
+                self.top_level_terminal_callback()
+            except Exception:
+                logger.exception("Aggregator top-level terminal callback failed")
+
+    @property
+    def stats_file_path(self) -> Path:
+        """Resolve manual Aggregator stats against the active runtime root."""
+        return Path(system_config.data_dir) / "aggregator_stats.json"
     
     async def _load_stats(self) -> None:
         """Load persisted stats from file."""
@@ -244,6 +258,8 @@ class Coordinator:
         trusted_context_texts: Optional[Dict[str, str]] = None,
         proof_database_store: Optional[Any] = None,
         local_rejection_log_dir: Optional[str] = None,
+        solution_path_manager: Optional[Any] = None,
+        solution_path_acceptance_count_owner: bool = True,
         local_rejection_log_template: Optional[str] = None,
         reset_local_rejection_logs_on_start: bool = False,
         assistant_workflow_mode_override: Optional[str] = None,
@@ -277,6 +293,10 @@ class Coordinator:
             local_rejection_log_dir: Optional directory for submitter rejection
                 logs. Internal child aggregators use this to avoid sharing the
                 manual Aggregator rejection files.
+            solution_path_acceptance_count_owner: Whether this coordinator may
+                advance the shared path activation count. Autonomous child
+                aggregators receive the manager for context/proposals while
+                the autonomous parent remains the sole count owner.
             local_rejection_log_template: Optional filename template containing
                 ``{submitter_id}``.
             reset_local_rejection_logs_on_start: Clear the scoped local
@@ -291,6 +311,8 @@ class Coordinator:
         self.acceptance_count_offset = max(0, acceptance_count_offset)
         self.acceptance_cap_callback = acceptance_cap_callback
         self._acceptance_cap_reached = False
+        self.solution_path_manager = solution_path_manager
+        self.solution_path_acceptance_count_owner = solution_path_acceptance_count_owner
         self.persist_event_log = not skip_stats_load
         
         # Validate submitter count
@@ -397,7 +419,7 @@ class Coordinator:
             # CRITICAL: Clear RAG for manual mode to prevent cross-contamination
             # from autonomous brainstorm content that may have been loaded in a prior session
             logger.info("Clearing RAG for fresh Part 1 aggregator session...")
-            await asyncio.to_thread(rag_manager.clear_all_documents)
+            await rag_manager.clear_all_documents_async()
             logger.info("RAG cleared successfully for Part 1 aggregator")
             await self._rebuild_shared_training_rag_after_cleanup()
             logger.info("Persisted Part 1 accepted submissions re-indexed after RAG clear")
@@ -471,6 +493,7 @@ class Coordinator:
                 local_rejection_log_template=local_rejection_log_template,
                 reset_local_rejection_log_on_initialize=reset_local_rejection_logs_on_start,
                 assistant_workflow_mode_override=assistant_workflow_mode_override,
+                solution_path_manager=solution_path_manager,
             )
             await submitter.initialize()
             # Set callback to add submissions to queue
@@ -508,6 +531,7 @@ class Coordinator:
             user_files_content=user_files_content,
             websocket_broadcaster=self.websocket_broadcaster,
             proof_database_store=proof_database_store,
+            solution_path_manager=solution_path_manager,
         )
         await self.validator.initialize()
         # Set task tracking callback for workflow panel integration
@@ -725,34 +749,48 @@ class Coordinator:
         self.fatal_error_type = None
         logger.info("Starting coordinator...")
         
-        # Reset free model manager state for fresh start
-        free_model_manager.reset()
-        
-        # Refresh workflow predictions at start
-        await self.refresh_workflow_predictions()
-        
-        if self.single_model_mode:
-            # Single-model mode: Round-based sequential workflow
-            logger.info("Starting single-model workflow (sequential submitters + validator)")
-            self._main_task = asyncio.create_task(self._single_model_workflow())
-        else:
-            # Multi-model mode: Parallel submitters + independent validator
-            logger.info("Starting multi-model workflow (parallel submitters)")
+        try:
+            free_model_manager.reset()
+            await self.refresh_workflow_predictions()
+
+            if self.single_model_mode:
+                logger.info("Starting single-model workflow (sequential submitters + validator)")
+                self._main_task = asyncio.create_task(self._single_model_workflow())
+            else:
+                logger.info("Starting multi-model workflow (parallel submitters)")
+                for submitter in self.submitters:
+                    await submitter.start()
+                self._validator_task = asyncio.create_task(self._validator_loop())
+
+            await self._broadcast("system_started", {"message": "Aggregator system started"})
+            await self._add_persisted_event(
+                "system_started",
+                "Aggregator system started",
+                {"single_model_mode": self.single_model_mode, "submitter_count": len(self.submitters)},
+            )
+            logger.info("Coordinator started successfully")
+        except BaseException:
+            self.is_running = False
             for submitter in self.submitters:
-                await submitter.start()
-            self._validator_task = asyncio.create_task(self._validator_loop())
-        
-        await self._broadcast("system_started", {"message": "Aggregator system started"})
-        await self._add_persisted_event(
-            "system_started",
-            "Aggregator system started",
-            {"single_model_mode": self.single_model_mode, "submitter_count": len(self.submitters)},
-        )
-        logger.info("Coordinator started successfully")
+                try:
+                    await submitter.stop()
+                except Exception:
+                    logger.exception("Failed to roll back submitter startup")
+            for task in (self._main_task, self._validator_task):
+                if task and not task.done():
+                    await _cancel_and_drain_task(task)
+            self._main_task = None
+            self._validator_task = None
+            raise
     
     async def stop(self) -> None:
         """Stop the aggregator system."""
-        if not self.is_running:
+        tasks_alive = any(
+            task is not None and not task.done()
+            for task in (self._main_task, self._validator_task, self._rechunk_task)
+        )
+        if not self.is_running and not tasks_alive:
+            self._notify_top_level_terminal()
             return
         
         self.is_running = False
@@ -762,6 +800,7 @@ class Coordinator:
             # Single-model mode: Cancel main task
             if self._main_task:
                 await _cancel_and_drain_task(self._main_task)
+            self._main_task = None
         else:
             # Multi-model mode: Stop submitters and validator task
             for submitter in self.submitters:
@@ -769,11 +808,13 @@ class Coordinator:
             
             if self._validator_task:
                 await _cancel_and_drain_task(self._validator_task)
+            self._validator_task = None
         
         # Cancel re-chunking task if running
         if self._rechunk_task and not self._rechunk_task.done():
             logger.info("Cancelling background re-chunking task...")
             await _cancel_and_drain_task(self._rechunk_task)
+        self._rechunk_task = None
 
         # The queue manager is process-global. Clear it on stop so submissions
         # from a stopped mini-aggregator cannot be validated under a later phase.
@@ -786,6 +827,7 @@ class Coordinator:
             {"total_acceptances": self.total_acceptances, "total_rejections": self.total_rejections},
         )
         logger.info("Coordinator stopped")
+        self._notify_top_level_terminal()
     
     async def add_submission_to_queue(self, submission: Submission) -> None:
         """Add a submission to the queue (called by submitters)."""
@@ -1011,6 +1053,14 @@ class Coordinator:
 
         self.total_acceptances += 1
         total_acceptances_with_offset = self.acceptance_count_offset + self.total_acceptances
+        if (
+            self.solution_path_manager is not None
+            and self.solution_path_acceptance_count_owner
+        ):
+            from backend.shared.solution_path.integration import note_acceptances
+            await note_acceptances(
+                self.solution_path_manager, total_acceptances_with_offset
+            )
         
         # Add to shared training
         await shared_training_memory.add_accepted_submission(submission.content)
@@ -1090,6 +1140,7 @@ class Coordinator:
 
         self._acceptance_cap_reached = True
         self.is_running = False
+        self._notify_top_level_terminal()
 
         logger.info(
             "Acceptance cap reached at %s total acceptances; stopping aggregator at source",
@@ -1270,6 +1321,7 @@ class Coordinator:
         self.fatal_error_type = "context_overflow"
         self.fatal_error_message = str(error)
         self.is_running = False
+        self._notify_top_level_terminal()
 
         logger.error("Fatal context overflow in %s: %s", role_id, error)
 
@@ -1290,8 +1342,16 @@ class Coordinator:
 
         await queue_manager.clear()
 
+        config_role_id = role_id
+        if role_id == "aggregator_single_model":
+            config_role_id = "aggregator_validator"
         payload = {
+            "workflow_mode": "aggregator" if self.persist_event_log else "autonomous",
             "role_id": role_id,
+            **context_overflow_model_payload(
+                api_client_manager.get_role_config(config_role_id),
+                route=getattr(error, "route", None),
+            ),
             "reason": CONTEXT_OVERFLOW_STOP_REASON,
             "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
             "error_detail": str(error),
@@ -1301,6 +1361,7 @@ class Coordinator:
             "output_reserve": getattr(error, "output_reserve", None),
             "resolution": CONTEXT_OVERFLOW_RESOLUTION,
         }
+        self.fatal_error_payload = dict(payload)
         await self._broadcast("context_overflow_error", payload)
         await self._add_persisted_event("context_overflow_error", payload["message"], payload)
     
@@ -1467,12 +1528,10 @@ class Coordinator:
     
     async def _on_training_update(self) -> None:
         """Callback when shared training is updated - trigger NON-BLOCKING re-chunking."""
-        # Cancel previous re-chunking task if still running
-        # CRITICAL: Don't await the cancellation - that would block the validator loop!
         if self._rechunk_task and not self._rechunk_task.done():
-            logger.warning("Previous re-chunking still in progress, cancelling it...")
-            self._rechunk_task.cancel()
-            # Task will catch CancelledError and clean up in background
+            self._rechunk_follow_up_requested = True
+            logger.info("Coalesced training update behind the active RAG commit")
+            return
         
         # Launch re-chunking in background task
         self._rechunk_task = asyncio.create_task(self._rechunk_training_data())
@@ -1481,24 +1540,22 @@ class Coordinator:
     async def _rechunk_training_data(self) -> None:
         """Background task for incremental re-chunking training data with global lock."""
         try:
-            # ACQUIRE GLOBAL RAG LOCK
-            await rag_operation_lock.acquire("Aggregator immediate re-chunk")
-            
-            logger.info("Background incremental re-chunking started...")
+            async with rag_operation_lock.operation("Aggregator immediate re-chunk"):
+                logger.info("Background incremental re-chunking started...")
             
             # Get only new submissions since last RAG
-            new_submissions = await shared_training_memory.get_new_submissions_since_last_rag()
+                new_submissions = await shared_training_memory.get_new_submissions_since_last_rag()
             
-            if not new_submissions:
-                logger.info("Incremental re-chunking: No new submissions to process")
-                await self._broadcast("rechunk_complete", {
-                    "chunk_size": None,
-                    "new_submissions": 0,
-                    "mode": "incremental"
-                })
-                return
+                if not new_submissions:
+                    logger.info("Incremental re-chunking: No new submissions to process")
+                    await self._broadcast("rechunk_complete", {
+                        "chunk_size": None,
+                        "new_submissions": 0,
+                        "mode": "incremental"
+                    })
+                    return
             
-            logger.info(f"Incremental re-chunking: Processing {len(new_submissions)} new submissions")
+                logger.info(f"Incremental re-chunking: Processing {len(new_submissions)} new submissions")
             
             # DESIGN NOTE: Incremental re-chunking intentionally accumulates chunks over time.
             # Each batch is added with source name "rag_shared_training_update_{chunk_size}".
@@ -1509,38 +1566,38 @@ class Coordinator:
             # - Simpler than periodic full re-chunk with no risk of data loss during cleanup
             
             # Determine chunk size using coordinator-level cycling
-            chunk_size = rag_config.submitter_chunk_intervals[self.current_rechunk_index]
-            self.current_rechunk_index = (self.current_rechunk_index + 1) % len(rag_config.submitter_chunk_intervals)
-            logger.info(f"Incremental re-chunking: Using chunk_size={chunk_size}")
+                chunk_size = rag_config.submitter_chunk_intervals[self.current_rechunk_index]
+                self.current_rechunk_index = (self.current_rechunk_index + 1) % len(rag_config.submitter_chunk_intervals)
+                logger.info(f"Incremental re-chunking: Using chunk_size={chunk_size}")
             
             # Add each new submission as text chunks
             # Combine all new submissions into single text to add
-            combined_new_content = "\n\n".join([
-                f"{'=' * 80}\nSUBMISSION #{sub.get('number') or idx+self.last_ragged_submission_count} | Accepted: {sub.get('timestamp', 'Unknown')}\n{'=' * 80}\n\n{sub['content']}\n"
-                for idx, sub in enumerate(new_submissions)
-            ])
+                combined_new_content = "\n\n".join([
+                    f"{'=' * 80}\nSUBMISSION #{sub.get('number') or idx+self.last_ragged_submission_count} | Accepted: {sub.get('timestamp', 'Unknown')}\n{'=' * 80}\n\n{sub['content']}\n"
+                    for idx, sub in enumerate(new_submissions)
+                ])
             
             # Add the combined new submissions with current chunk size
-            await rag_manager.add_text(
-                combined_new_content,
-                f"rag_shared_training_update_{chunk_size}",  # Unique name per chunk size
-                chunk_sizes=[chunk_size],
-                is_permanent=False
-            )
+                await rag_manager.add_text(
+                    combined_new_content,
+                    f"rag_shared_training_update_{chunk_size}",
+                    chunk_sizes=[chunk_size],
+                    is_permanent=False
+                )
             
             # Mark submissions as RAG'd
-            current_count = await shared_training_memory.get_insights_count()
-            await shared_training_memory.mark_submissions_ragged(current_count)
+                current_count = await shared_training_memory.get_insights_count()
+                await shared_training_memory.mark_submissions_ragged(current_count)
             
-            logger.info(f"Incremental re-chunking COMPLETE - {len(new_submissions)} submissions added, chunk_size={chunk_size}")
+                logger.info(f"Incremental re-chunking COMPLETE - {len(new_submissions)} submissions added, chunk_size={chunk_size}")
             
             # Broadcast success
-            await self._broadcast("rechunk_complete", {
-                "chunk_size": chunk_size,
-                "new_submissions": len(new_submissions),
-                "total_submissions": current_count,
-                "mode": "incremental"
-            })
+                await self._broadcast("rechunk_complete", {
+                    "chunk_size": chunk_size,
+                    "new_submissions": len(new_submissions),
+                    "total_submissions": current_count,
+                    "mode": "incremental"
+                })
             
         except asyncio.CancelledError:
             logger.info("Incremental re-chunking cancelled (newer update triggered)")
@@ -1552,8 +1609,9 @@ class Coordinator:
                 "message": "Incremental re-chunking failed but system continues"
             })
         finally:
-            # ALWAYS RELEASE LOCK
-            rag_operation_lock.release()
+            if self._rechunk_follow_up_requested and self.is_running:
+                self._rechunk_follow_up_requested = False
+                self._rechunk_task = asyncio.create_task(self._rechunk_training_data())
     
     async def _rebuild_shared_training_rag_after_cleanup(self) -> None:
         """Full RAG rebuild of shared-training content after a cleanup removal.
@@ -1566,8 +1624,7 @@ class Coordinator:
         current_path = Path(shared_training_memory.file_path)
         current_count = await shared_training_memory.get_insights_count()
         
-        await rag_operation_lock.acquire("Aggregator cleanup full re-rag")
-        try:
+        async with rag_operation_lock.operation("Aggregator cleanup full re-rag"):
             # Collect every source name that could contain shared-training chunks
             candidate_sources = [current_path.name, current_path.with_suffix(".tmp").name]
             for size in rag_config.submitter_chunk_intervals:
@@ -1586,11 +1643,6 @@ class Coordinator:
             
             await shared_training_memory.mark_submissions_ragged(current_count)
             logger.info(f"Cleanup full re-RAG complete: {current_count} live submissions re-indexed")
-        except Exception as e:
-            logger.error(f"Cleanup full re-RAG failed: {e}", exc_info=True)
-            raise
-        finally:
-            rag_operation_lock.release()
     
     async def get_status(self) -> SystemStatus:
         """Get current system status."""
@@ -1667,7 +1719,7 @@ class Coordinator:
         
         # Clear RAG database
         try:
-            await asyncio.to_thread(rag_manager.clear_all_documents)
+            await rag_manager.clear_all_documents_async()
             logger.info("Cleared RAG database")
         except Exception as e:
             logger.error(f"Failed to clear RAG database: {e}")

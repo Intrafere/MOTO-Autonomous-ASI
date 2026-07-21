@@ -5,7 +5,7 @@ python-multipart>=0.0.6
 websockets>=12.0
 
 # RAG and embeddings  
-chromadb>=0.4.22
+chromadb>=0.4.22,<=1.5.9
 sentence-transformers>=2.3.1
 rank-bm25>=0.2.2
 

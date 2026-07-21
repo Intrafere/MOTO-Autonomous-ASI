@@ -326,10 +326,22 @@ class LeanOJContextManager:
 
     async def _remove_rag_sources(self, sources: list[str] | set[str]) -> None:
         for source_name in sorted({source for source in sources if source}):
+            is_known = (
+                source_name in self._indexed_hashes
+                or source_name in rag_manager.document_access_order
+                or any(
+                    chunk.source_file == source_name
+                    for chunks in rag_manager.chunks_by_size.values()
+                    for chunk in chunks
+                )
+            )
+            if not is_known:
+                continue
             try:
                 await rag_manager.remove_document(source_name)
             except Exception as exc:
                 logger.warning("Failed to remove LeanOJ RAG source %s: %s", source_name, exc)
+                continue
             self._indexed_hashes.pop(source_name, None)
 
     async def _ensure_source_indexed(self, source_name: str, text: str) -> None:

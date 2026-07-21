@@ -29,6 +29,8 @@ import {
   LeanOJSettings,
 } from './components/leanoj';
 import WorkflowPanel from './components/WorkflowPanel';
+import SolutionPathModal from './components/SolutionPathModal';
+import { solutionPathEventMatches } from './utils/solutionPathPresentation';
 import BoostControlModal from './components/BoostControlModal';
 import StartupProviderSetupModal from './components/StartupProviderSetupModal';
 import OpenRouterApiKeyModal from './components/OpenRouterApiKeyModal';
@@ -44,8 +46,18 @@ import CreditExhaustionNotificationStack from './components/CreditExhaustionNoti
 import CodexOAuthNotificationStack from './components/CodexOAuthNotificationStack';
 import UpdateNotificationBanner from './components/UpdateNotificationBanner';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
+import intrafereLogoMark from './assets/brand/intrafere-logo-no-text.png';
 import { websocket } from './services/websocket';
-import { api, autonomousAPI, cloudAccessAPI, compilerAPI, connectivityAPI, leanojAPI, openRouterAPI } from './services/api';
+import {
+  API_ERROR_KINDS,
+  api,
+  autonomousAPI,
+  cloudAccessAPI,
+  compilerAPI,
+  connectivityAPI,
+  leanojAPI,
+  openRouterAPI,
+} from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
   RECOMMENDED_PROFILE_KEY,
@@ -68,6 +80,7 @@ import { CLOUD_ACCESS_PROVIDERS, isCloudAccessProvider } from './utils/oauthProv
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  formatSolutionPathEventMessage,
   buildAutonomousProofProviderPauseActivity,
   buildRejectionFeedbackNoticeActivity,
   hasRecentAssistantProofPackDuplicate,
@@ -362,7 +375,9 @@ function buildAggregatorConfigFromStorage() {
     assistantMaxOutput: settings.assistantMaxOutput ?? legacy.assistantMaxOutput ?? settings.validatorMaxOutput ?? legacy.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS,
     assistantSuperchargeEnabled: Boolean(settings.assistantSuperchargeEnabled ?? legacy.assistantSuperchargeEnabled),
     creativityEmphasisBoostEnabled: Boolean(settings.creativityEmphasisBoostEnabled ?? legacy.creativityEmphasisBoostEnabled),
-    uploadedFiles: [],
+    uploadedFiles: Array.isArray(settings.uploadedFiles)
+      ? settings.uploadedFiles
+      : (Array.isArray(legacy.uploadedFiles) ? legacy.uploadedFiles : []),
   };
 }
 
@@ -513,7 +528,7 @@ function coercePositiveIntegerSetting(value, fallback) {
   return fallback;
 }
 
-function readPersistedLiveActivity(storageKey) {
+export function readPersistedLiveActivity(storageKey) {
   try {
     const savedEvents = localStorage.getItem(storageKey);
     if (!savedEvents) {
@@ -521,12 +536,32 @@ function readPersistedLiveActivity(storageKey) {
     }
     const parsed = JSON.parse(savedEvents);
     return Array.isArray(parsed)
-      ? parsed.filter((event) => event && typeof event === 'object').slice(-MAX_LIVE_ACTIVITY_EVENTS)
+      ? parsed
+        .filter((event) => event && typeof event === 'object')
+        .map((event) => {
+          const eventName = event.event || event.type;
+          const isOverflow = eventName === 'context_overflow_error'
+            || (
+              (eventName === 'auto_research_stopped' || eventName === 'leanoj_stopped')
+              && event?.data?.reason === 'context_overflow'
+            );
+          return isOverflow
+            ? { ...event, message: formatContextOverflowActivityMessage(event.data || {}) }
+            : event;
+        })
+        .slice(-MAX_LIVE_ACTIVITY_EVENTS)
       : [];
   } catch (error) {
     console.error(`Failed to load ${storageKey}:`, error);
     return [];
   }
+}
+
+export function shouldRecordWorkflowStoppedActivity(eventName, data = {}) {
+  return !(
+    (eventName === 'auto_research_stopped' || eventName === 'leanoj_stopped')
+    && data?.reason === 'context_overflow'
+  );
 }
 
 function compactPersistedActivityValue(value, depth = 0) {
@@ -658,6 +693,8 @@ function App() {
   
   // Track if any workflow is running (for WorkflowPanel visibility)
   const [anyWorkflowRunning, setAnyWorkflowRunning] = useState(false);
+  const [solutionPathSnapshot, setSolutionPathSnapshot] = useState(null);
+  const solutionPathFenceRef = useRef(null);
   
   // Track WorkflowPanel collapse state for sliding boost buttons
   const [workflowPanelCollapsed, setWorkflowPanelCollapsed] = useState(() => {
@@ -814,6 +851,7 @@ function App() {
       assistantMaxOutput: config.assistantMaxOutput,
       assistantSuperchargeEnabled: config.assistantSuperchargeEnabled,
       creativityEmphasisBoostEnabled: config.creativityEmphasisBoostEnabled,
+      uploadedFiles: config.uploadedFiles || [],
     };
     try {
       // Save to both old and new keys.
@@ -822,10 +860,11 @@ function App() {
     } catch (error) {
       console.warn('Could not persist Aggregator settings to localStorage:', error);
     }
-  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorOpenrouterReasoningEffort, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput, config.validatorSuperchargeEnabled, config.assistantModel, config.assistantProvider, config.assistantOpenrouterProvider, config.assistantOpenrouterReasoningEffort, config.assistantLmStudioFallback, config.assistantContextSize, config.assistantMaxOutput, config.assistantSuperchargeEnabled, config.creativityEmphasisBoostEnabled]);
+  }, [config.userPrompt, config.submitterConfigs, config.validatorModel, config.validatorProvider, config.validatorOpenrouterProvider, config.validatorOpenrouterReasoningEffort, config.validatorLmStudioFallback, config.validatorContextSize, config.validatorMaxOutput, config.validatorSuperchargeEnabled, config.assistantModel, config.assistantProvider, config.assistantOpenrouterProvider, config.assistantOpenrouterReasoningEffort, config.assistantLmStudioFallback, config.assistantContextSize, config.assistantMaxOutput, config.assistantSuperchargeEnabled, config.creativityEmphasisBoostEnabled, config.uploadedFiles]);
 
   // Autonomous mode state
   const [autonomousRunning, setAutonomousRunning] = useState(false);
+  const [autonomousStarting, setAutonomousStarting] = useState(false);
   const [autonomousStopping, setAutonomousStopping] = useState(false);
   const [autonomousStatus, setAutonomousStatus] = useState(null);
   const [autonomousActivity, setAutonomousActivity] = useState(() => (
@@ -864,6 +903,7 @@ function App() {
   const [proofNotifications, setProofNotifications] = useState([]);
   const [selectedProofId, setSelectedProofId] = useState(null);
   const [selectedProofScope, setSelectedProofScope] = useState('autonomous');
+  const [selectedHistoryProof, setSelectedHistoryProof] = useState(null);
   const [proofRefreshToken, setProofRefreshToken] = useState(0);
   const [latestProofDependencyEvent, setLatestProofDependencyEvent] = useState(null);
 
@@ -882,6 +922,8 @@ function App() {
   // Live refs used by websocket listeners (which are registered once)
   const autonomousRunningRef = useRef(autonomousRunning);
   const autonomousTierRef = useRef(autonomousStatus?.current_tier || null);
+  const autonomousLifecycleGenerationRef = useRef(0);
+  const leanojLifecycleGenerationRef = useRef(0);
   const openRouterKeyJustSavedRef = useRef(false);
   const cloudAccessJustConfiguredRef = useRef(false);
   const seenHighScoreCritiquesRef = useRef(null);
@@ -1515,6 +1557,13 @@ function App() {
       if (round <= 0 || maxRounds <= 1) return '';
       return `Proof round ${round}/${maxRounds}`;
     };
+    const formatProofCandidatesFoundMessage = (data = {}) => {
+      const count = Number(data.count || 0);
+      const roundLabel = proofRoundLabel(data);
+      const subject = count === 1 ? 'proof candidate' : 'proof candidates';
+      const prefix = roundLabel ? `${roundLabel} discovery` : 'Proof discovery';
+      return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
+    };
     const proofLeanResponse = (data = {}) => {
       if (data.lean_response) {
         let response = data.lean_response;
@@ -1640,6 +1689,36 @@ function App() {
         data
       });
     }));
+
+    [
+      'solution_path_activated',
+      'solution_path_proposal_queued',
+      'solution_path_proposal_reviewing',
+      'solution_path_updated',
+      'solution_path_proposal_rejected',
+      'solution_path_proposal_retry_queued',
+      'solution_path_proposal_user_repair_required',
+      'solution_path_proposal_resumed',
+    ].forEach((eventName) => {
+      unsubscribers.push(websocket.on(eventName, (data = {}) => {
+        const expectedMode = String(data.workflow_mode || data.mode || '');
+        if (
+          solutionPathFenceRef.current
+          && !solutionPathEventMatches(data, solutionPathFenceRef.current, expectedMode)
+        ) return;
+        const activityEvent = {
+          event: eventName,
+          message: formatSolutionPathEventMessage(eventName, data),
+          timestamp: new Date().toISOString(),
+          ...data,
+        };
+        if (data.workflow_mode === 'leanoj') {
+          setLeanojActivity((prev) => [...prev, activityEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+        } else if (data.workflow_mode === 'autonomous') {
+          setAutonomousActivity((prev) => [...prev, activityEvent].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+        }
+      }));
+    });
     
     unsubscribers.push(websocket.on('paper_title_exploration_progress', (data) => {
       addActivity({
@@ -1910,10 +1989,26 @@ function App() {
 
     unsubscribers.push(websocket.on('proof_check_no_candidates', (data) => {
       setProofRefreshToken((prev) => prev + 1);
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+      const roundLabel = proofRoundLabel(data);
+      addActivity({
+        event: 'proof_check_no_candidates',
+        timestamp: getTimestamp(data),
+        message: `${roundLabel ? `${roundLabel} discovery` : 'Proof discovery'} found 0 proof candidates; no proofs will be attempted`,
+        data
+      });
     }));
 
     unsubscribers.push(websocket.on('proof_check_candidates_found', (data) => {
       setProofRefreshToken((prev) => prev + 1);
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+      if (data.source_type === 'compiler_rigor' && !isAutonomousTier2Active()) return;
+      addActivity({
+        event: 'proof_check_candidates_found',
+        timestamp: getTimestamp(data),
+        message: formatProofCandidatesFoundMessage(data),
+        data
+      });
     }));
 
     unsubscribers.push(websocket.on('proof_attempt_started', (data) => {
@@ -1948,6 +2043,16 @@ function App() {
 
     unsubscribers.push(websocket.on('proof_verified', (data) => {
       setProofRefreshToken((prev) => prev + 1);
+    }));
+
+    unsubscribers.push(websocket.on('proof_context_overflow', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+      addActivity({
+        event: 'proof_context_overflow',
+        timestamp: getTimestamp(data),
+        message: formatContextOverflowActivityMessage(data),
+        data
+      });
     }));
 
     unsubscribers.push(websocket.on('proof_lean_accepted', (data) => {
@@ -2066,6 +2171,7 @@ function App() {
     }));
     
     unsubscribers.push(websocket.on('auto_research_started', (data = {}) => {
+      setAutonomousStarting(false);
       setAutonomousRunning(true);
       setAnyWorkflowRunning(true);
       setAutonomousStopping(false);
@@ -2080,6 +2186,7 @@ function App() {
     unsubscribers.push(websocket.on('auto_research_resumed', (data) => {
       // Handle resume after crash/restart - sync running state
       console.log('Autonomous research resumed:', data);
+      setAutonomousStarting(false);
       setAutonomousRunning(true);
       setAnyWorkflowRunning(true);
       setAutonomousStopping(false);
@@ -2099,16 +2206,20 @@ function App() {
     }));
     
     unsubscribers.push(websocket.on('auto_research_stopped', (data = {}) => {
+      autonomousLifecycleGenerationRef.current += 1;
+      setAutonomousStarting(false);
       setAutonomousRunning(false);
       setAutonomousStopping(false);
       setAnyWorkflowRunning(false);
       autonomousTierRef.current = null;
-      addActivity({
-        event: 'auto_research_stopped',
-        timestamp: getTimestamp(data),
-        message: data.message || `Research stopped. Total: ${data.final_stats?.total_papers_completed || 0} papers`,
-        data
-      });
+      if (shouldRecordWorkflowStoppedActivity('auto_research_stopped', data)) {
+        addActivity({
+          event: 'auto_research_stopped',
+          timestamp: getTimestamp(data),
+          message: data.message || `Research stopped. Total: ${data.final_stats?.total_papers_completed || 0} papers`,
+          data
+        });
+      }
     }));
     
     // Tier 3 events
@@ -2351,7 +2462,7 @@ function App() {
       };
       if (workflowMode === 'leanoj' || roleId.startsWith('leanoj_')) {
         addLeanOJActivityFromGlobalAlert(event);
-      } else if (autonomousRunningRef.current || shouldAddHungAlertToAutonomousFeed(data)) {
+      } else if (workflowMode === 'autonomous' || shouldAddHungAlertToAutonomousFeed(data)) {
         addActivity(event);
       }
     }));
@@ -2836,9 +2947,16 @@ function App() {
         addLeanOJActivity('assistant_proof_pack_failed', data, formatAssistantProofPackEventMessage('assistant_proof_pack_failed', data));
       }],
       ['leanoj_stopped', (data) => {
+        leanojLifecycleGenerationRef.current += 1;
         setLeanojRunning(false);
         setAnyWorkflowRunning(false);
-        addLeanOJActivity('leanoj_stopped', data, data?.message || 'Proof Solver stopped');
+        if (shouldRecordWorkflowStoppedActivity('leanoj_stopped', data)) {
+          addLeanOJActivity(
+            'leanoj_stopped',
+            data,
+            data?.message || 'Proof Solver stopped'
+          );
+        }
         leanojAPI.getStatus().then(setLeanojStatus).catch(console.error);
       }],
       ['leanoj_status_updated', (data) => setLeanojStatus(data)],
@@ -2996,6 +3114,7 @@ function App() {
 
   // Autonomous handlers
   const handleAutonomousStart = async (researchPrompt) => {
+    const startGeneration = autonomousLifecycleGenerationRef.current;
     try {
       const lmStudioEnabled = capabilities.lmStudioEnabled;
       const superchargeAllowed = developerModeEnabled;
@@ -3107,11 +3226,16 @@ function App() {
         allow_research_papers: autonomousConfig.allow_research_papers ?? true,
         tier3_enabled: autonomousConfig.tier3_enabled ?? false
       });
+      if (startGeneration !== autonomousLifecycleGenerationRef.current) {
+        return false;
+      }
       setAutonomousRunning(true);
+      setAutonomousStarting(false);
       setAutonomousStopping(false);
       setAnyWorkflowRunning(true);
       return true;
     } catch (error) {
+      setAutonomousStarting(false);
       alert(`Failed to start autonomous research: ${error.details || error.message}`);
       return false;
     }
@@ -3125,11 +3249,27 @@ function App() {
     setAutonomousStopping(true);
     try {
       await autonomousAPI.stop();
+      autonomousLifecycleGenerationRef.current += 1;
       setAutonomousRunning(false);
       setAnyWorkflowRunning(false);
-      const status = await autonomousAPI.getStatus();
-      setAutonomousStatus(status);
+      autonomousAPI.getStatus().then(setAutonomousStatus).catch((error) => {
+        console.warn('Autonomous research stopped, but status refresh failed:', error);
+      });
     } catch (error) {
+      if (error.kind === API_ERROR_KINDS.AMBIGUOUS_TRANSPORT) {
+        try {
+          const status = await autonomousAPI.getStatus();
+          setAutonomousStatus(status);
+          setAutonomousRunning(Boolean(status.is_running));
+          setAnyWorkflowRunning(Boolean(status.is_running));
+          if (!status.is_running) {
+            autonomousLifecycleGenerationRef.current += 1;
+            return;
+          }
+        } catch (statusError) {
+          console.error('Could not reconcile indeterminate autonomous stop:', statusError);
+        }
+      }
       alert(`Failed to stop autonomous research: ${error.message}`);
     } finally {
       setAutonomousStopping(false);
@@ -3198,11 +3338,16 @@ function App() {
   });
 
   const handleLeanOJStart = async (request) => {
+    const startGeneration = leanojLifecycleGenerationRef.current;
     try {
       await leanojAPI.start(normalizeLeanOJRequestForCapabilities(request));
+      if (startGeneration !== leanojLifecycleGenerationRef.current) {
+        return;
+      }
       setLeanojRunning(true);
-      const status = await leanojAPI.getStatus();
-      setLeanojStatus(status);
+      leanojAPI.getStatus().then(setLeanojStatus).catch((error) => {
+        console.warn('Proof Solver started, but status refresh failed:', error);
+      });
       setLeanojProofRefreshToken((prev) => prev + 1);
       setAnyWorkflowRunning(true);
     } catch (error) {
@@ -3213,11 +3358,27 @@ function App() {
   const handleLeanOJStop = async () => {
     try {
       await leanojAPI.stop();
+      leanojLifecycleGenerationRef.current += 1;
       setLeanojRunning(false);
       setAnyWorkflowRunning(false);
-      const status = await leanojAPI.getStatus();
-      setLeanojStatus(status);
+      leanojAPI.getStatus().then(setLeanojStatus).catch((error) => {
+        console.warn('Proof Solver stopped, but status refresh failed:', error);
+      });
     } catch (error) {
+      if (error.kind === API_ERROR_KINDS.AMBIGUOUS_TRANSPORT) {
+        try {
+          const status = await leanojAPI.getStatus();
+          setLeanojStatus(status);
+          setLeanojRunning(Boolean(status.is_running));
+          setAnyWorkflowRunning(Boolean(status.is_running));
+          if (!status.is_running) {
+            leanojLifecycleGenerationRef.current += 1;
+            return;
+          }
+        } catch (statusError) {
+          console.error('Could not reconcile indeterminate Proof Solver stop:', statusError);
+        }
+      }
       alert(`Failed to stop Proof Solver: ${error.message}`);
     }
   };
@@ -3342,6 +3503,34 @@ function App() {
       return;
     }
     handleAutonomousTabSelect('auto-proofs');
+  };
+
+  const handleOpenAssistantProof = (support = {}) => {
+    const corpus = String(support.corpus || '').toLowerCase();
+    const proofId = support.proof_id || support.search_id || null;
+    const nextSelection = {
+      corpus,
+      proofId,
+      sessionId: support.session_id || '',
+      runId: support.run_id || '',
+    };
+    setSelectedHistoryProof(nextSelection);
+    if (proofId) {
+      setSelectedProofId(proofId);
+      setSelectedProofScope(corpus === 'manual' ? 'manual' : 'autonomous');
+    }
+    if (corpus === 'manual') {
+      handleManualTabSelect('compiler-proof-history');
+      return;
+    }
+    if (corpus === 'leanoj') {
+      handleLeanOJTabSelect('leanoj-completed-proof-works');
+      return;
+    }
+    if (corpus === 'moto') {
+      handleAutonomousTabSelect('auto-completed-works');
+      setCompletedWorksSubTab('proof-library');
+    }
   };
 
   const handleModeChange = (nextMode) => {
@@ -3665,7 +3854,7 @@ function App() {
   ];
 
   const autonomousSettingsTabs = [
-    { id: 'auto-completed-works', label: 'Your Completed Works Library', group: 'autonomous-settings' },
+    { id: 'auto-completed-works', label: 'Completed Works Library', group: 'autonomous-settings' },
     { id: 'auto-logs', label: 'API Call Logs', group: 'autonomous-settings' },
     { id: 'auto-settings', label: 'Autonomous Model Selection & Settings', group: 'autonomous-settings' },
   ];
@@ -3678,6 +3867,7 @@ function App() {
     { id: 'compiler-interface', label: 'Compiler', subtext: 'Part 2', subtextClass: 'green', group: 'compiler' },
     { id: 'compiler-live-paper', label: 'Live Paper', subtext: 'Part 2 Live Results', subtextClass: 'green', group: 'compiler' },
     { id: 'compiler-proofs', label: 'Mathematical Proofs', subtext: 'Manual Proofs', subtextClass: 'green', group: 'compiler' },
+    { id: 'compiler-proof-history', label: 'Completed Proof Works', subtext: 'Manual History', group: 'compiler' },
     { id: 'compiler-logs', label: 'Compiler Logs', group: 'compiler' },
     { id: 'compiler-settings', label: 'Compiler Settings', group: 'compiler' },
   ];
@@ -3704,18 +3894,23 @@ function App() {
   // Check if any workflow is running
   useEffect(() => {
     const checkWorkflowStatus = async () => {
-      try {
-        const [aggStatus, compStatus, autoStatus, leanojCurrentStatus] = await Promise.all([
-          api.get('/api/aggregator/status').catch(() => ({ is_running: false })),
-          api.get('/api/compiler/status').catch(() => ({ is_running: false })),
-          autonomousAPI.getStatus().catch(() => ({ is_running: false })),
-          leanojAPI.getStatus().catch(() => ({ is_running: false }))
-        ]);
-        
-        const running = aggStatus.is_running || compStatus.is_running || autoStatus.is_running || leanojCurrentStatus.is_running;
-        setAnyWorkflowRunning(running);
-      } catch (error) {
-        console.error('Failed to check workflow status:', error);
+      const results = await Promise.allSettled([
+        api.get('/api/aggregator/status'),
+        api.get('/api/compiler/status'),
+        autonomousAPI.getStatus(),
+        leanojAPI.getStatus(),
+      ]);
+      const fulfilled = results.filter((result) => result.status === 'fulfilled');
+      const hasRunning = fulfilled.some((result) => Boolean(result.value?.is_running));
+      if (hasRunning) {
+        setAnyWorkflowRunning(true);
+      } else if (fulfilled.length === results.length) {
+        setAnyWorkflowRunning(false);
+      }
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          console.warn('Partial workflow status reconciliation failure:', result.reason);
+        }
       }
     };
     
@@ -3726,21 +3921,40 @@ function App() {
 
   return (
     <div className={`app ${workflowPanelCollapsed ? 'workflow-panel-collapsed' : 'workflow-panel-expanded'}`}>
-      {/* Banner Section */}
+      {/* Product Brand Header */}
       <div className={`app-banner ${shimmerAccentsEnabled ? '' : 'no-shimmer'}`}>
         <div className="banner-content">
-          <h1 className="banner-title">
-            <span className="banner-moto" aria-label="M.O.T.O.">M.O.T.O.</span>
-            <span className="banner-subtitle">Autonomous ASI</span>
-          </h1>
-          <p className="banner-company">By Intrafere Research Group</p>
-          <p className="banner-variant">A Prototype Artificial Superintelligence - Novelty Seeking Autonomous S.T.E.M. Researcher For Automated Theorem Generation</p>
-          <p
-            className={`banner-mode-subtitle ${appMode === 'manual' || appMode === 'leanoj' ? '' : 'banner-mode-subtitle--hidden'}`}
-            aria-hidden={appMode !== 'manual' && appMode !== 'leanoj'}
-          >
-            {appMode === 'manual' ? 'MANUAL S.T.E.M. WRITER' : 'Proof Solver Mode'}
-          </p>
+          <div className="banner-brand">
+            <a
+              className="banner-logo-link"
+              href="https://intrafere.com"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Visit Intrafere"
+            >
+              <img
+                className="banner-logo"
+                src={intrafereLogoMark}
+                alt=""
+                aria-hidden="true"
+              />
+            </a>
+            <div className="banner-identity">
+              <h1 className="banner-title">
+                <span className="banner-moto" aria-label="MOTO">MOTO</span>
+                <span className="banner-subtitle">Autonomous ASI</span>
+              </h1>
+              <p className="banner-company">By Intrafere</p>
+            </div>
+          </div>
+          <div className="banner-positioning">
+            <p
+              className={`banner-mode-subtitle ${appMode === 'manual' || appMode === 'leanoj' ? '' : 'banner-mode-subtitle--hidden'}`}
+              aria-hidden={appMode !== 'manual' && appMode !== 'leanoj'}
+            >
+              {appMode === 'manual' ? 'Manual S.T.E.M. Writer' : 'Proof Solver Mode'}
+            </p>
+          </div>
         </div>
       </div>
 
@@ -3909,6 +4123,7 @@ function App() {
               status={autonomousStatus}
               activity={autonomousActivity}
               onStart={handleAutonomousStart}
+              onStartingChange={setAutonomousStarting}
               onStop={handleAutonomousStop}
               onClear={handleAutonomousClear}
               config={autonomousConfig}
@@ -3963,7 +4178,7 @@ function App() {
           {activeTab === 'auto-completed-works' && (
             <div className="completed-works-library">
               <div className="completed-works-header">
-                <h2 className="completed-works-title">Your Completed Works Library</h2>
+                <h2 className="completed-works-title">Completed Works Library</h2>
                 <p className="completed-works-subtitle">
                   Browse all research outputs across every session — papers, final answers, and verified proofs.
                 </p>
@@ -4001,7 +4216,11 @@ function App() {
                   <FinalAnswerLibrary capabilities={capabilities} />
                 )}
                 {completedWorksSubTab === 'proof-library' && (
-                  <ProofLibrary />
+                  <ProofLibrary
+                    selectedProofId={selectedHistoryProof?.corpus === 'moto' ? selectedHistoryProof.proofId : null}
+                    selectedSessionId={selectedHistoryProof?.corpus === 'moto' ? selectedHistoryProof.sessionId : ''}
+                    selectedRunId={selectedHistoryProof?.corpus === 'moto' ? selectedHistoryProof.runId : ''}
+                  />
                 )}
               </div>
             </div>
@@ -4051,6 +4270,9 @@ function App() {
             <LeanOJProofLibrary
               api={leanojAPI}
               refreshToken={leanojProofRefreshToken}
+              selectedProofId={selectedHistoryProof?.corpus === 'leanoj' ? selectedHistoryProof.proofId : null}
+              selectedSessionId={selectedHistoryProof?.corpus === 'leanoj' ? selectedHistoryProof.sessionId : ''}
+              selectedRunId={selectedHistoryProof?.corpus === 'leanoj' ? selectedHistoryProof.runId : ''}
             />
           )}
           {activeTab === 'leanoj-logs' && (
@@ -4103,70 +4325,81 @@ function App() {
           {activeTab === 'compiler-logs' && <CompilerLogs />}
           {activeTab === 'compiler-live-paper' && <LivePaper capabilities={capabilities} />}
           {activeTab === 'compiler-proofs' && (
-            <>
-              <MathematicalProofs
-                api={autonomousAPI}
-                refreshToken={proofRefreshToken}
-                selectedProofId={selectedProofScope === 'manual' ? selectedProofId : null}
-                proofScope="manual"
-                title="Manual Mathematical Proofs"
-                description="Active-run Lean 4 proofs generated from the manual Aggregator and manual Compiler. Clearing the manual run archives these proofs and removes them from future prompt context."
-                defaultSourceType="paper"
-              />
-              <ProofLibrary
-                proofScope="manual"
-                title="Manual Proof Run History"
-                description="Archived manual proof runs. These proofs are available for review and download only; they are not injected into new manual runs."
-              />
-            </>
+            <MathematicalProofs
+              api={autonomousAPI}
+              refreshToken={proofRefreshToken}
+              selectedProofId={selectedProofScope === 'manual' ? selectedProofId : null}
+              proofScope="manual"
+              title="Manual Mathematical Proofs"
+              description="Active-run Lean 4 proofs generated from the manual Aggregator and manual Compiler. Clearing the manual run archives these proofs and removes them from future prompt context."
+              defaultSourceType="paper"
+            />
+          )}
+          {activeTab === 'compiler-proof-history' && (
+            <ProofLibrary
+              proofScope="manual"
+              title="Manual Proof Run History"
+              description="Archived manual proof runs. These proofs are available for review and download only; they are not injected into new manual runs."
+              selectedProofId={selectedHistoryProof?.corpus === 'manual' ? selectedHistoryProof.proofId : null}
+              selectedSessionId={selectedHistoryProof?.corpus === 'manual' ? selectedHistoryProof.sessionId : ''}
+              selectedRunId={selectedHistoryProof?.corpus === 'manual' ? selectedHistoryProof.runId : ''}
+            />
           )}
         </div>
       </div>
       
       {/* Autonomous Settings - Rendered OUTSIDE tab-content to allow full-width sidebar layout */}
       {activeTab === 'auto-settings' && (
-        <AutonomousResearchSettings
-          config={autonomousConfig}
-          onConfigChange={setAutonomousConfig}
-          models={models}
-          capabilities={capabilities}
-          connectivityStatus={connectivityStatus}
-          credentialStatusRefreshToken={credentialStatusRefreshToken}
-          isRunning={autonomousRunning}
-          developerModeEnabled={developerModeEnabled}
-        />
+        <div className="settings-overlay-safe-area">
+          <AutonomousResearchSettings
+            config={autonomousConfig}
+            onConfigChange={setAutonomousConfig}
+            models={models}
+            capabilities={capabilities}
+            connectivityStatus={connectivityStatus}
+            credentialStatusRefreshToken={credentialStatusRefreshToken}
+            isRunning={autonomousRunning || autonomousStarting || autonomousStopping}
+            developerModeEnabled={developerModeEnabled}
+          />
+        </div>
       )}
 
       {activeTab === 'leanoj-settings' && (
-        <LeanOJSettings
-          settings={leanojSettings}
-          onSettingsChange={setLeanojSettings}
-          capabilities={capabilities}
-          connectivityStatus={connectivityStatus}
-          credentialStatusRefreshToken={credentialStatusRefreshToken}
-          isRunning={leanojRunning}
-          developerModeEnabled={developerModeEnabled}
-        />
+        <div className="settings-overlay-safe-area">
+          <LeanOJSettings
+            settings={leanojSettings}
+            onSettingsChange={setLeanojSettings}
+            capabilities={capabilities}
+            connectivityStatus={connectivityStatus}
+            credentialStatusRefreshToken={credentialStatusRefreshToken}
+            isRunning={leanojRunning}
+            developerModeEnabled={developerModeEnabled}
+          />
+        </div>
       )}
 
       {activeTab === 'aggregator-settings' && (
-        <AggregatorSettings
-          config={config}
-          setConfig={setConfig}
-          capabilities={capabilities}
-          connectivityStatus={connectivityStatus}
-          credentialStatusRefreshToken={credentialStatusRefreshToken}
-          developerModeEnabled={developerModeEnabled}
-        />
+        <div className="settings-overlay-safe-area">
+          <AggregatorSettings
+            config={config}
+            setConfig={setConfig}
+            capabilities={capabilities}
+            connectivityStatus={connectivityStatus}
+            credentialStatusRefreshToken={credentialStatusRefreshToken}
+            developerModeEnabled={developerModeEnabled}
+          />
+        </div>
       )}
 
       {activeTab === 'compiler-settings' && (
-        <CompilerSettings
-          capabilities={capabilities}
-          connectivityStatus={connectivityStatus}
-          credentialStatusRefreshToken={credentialStatusRefreshToken}
-          developerModeEnabled={developerModeEnabled}
-        />
+        <div className="settings-overlay-safe-area">
+          <CompilerSettings
+            capabilities={capabilities}
+            connectivityStatus={connectivityStatus}
+            credentialStatusRefreshToken={credentialStatusRefreshToken}
+            developerModeEnabled={developerModeEnabled}
+          />
+        </div>
       )}
       
       {/* WorkflowPanel is ETERNAL - always visible for boost controls */}
@@ -4175,9 +4408,45 @@ function App() {
       <WorkflowPanel
         isRunning={anyWorkflowRunning}
         onOpenBoostSettings={() => setShowBoostModal(true)}
+        onOpenAssistantProof={handleOpenAssistantProof}
+        onOpenSolutionPath={(snapshot) => {
+          solutionPathFenceRef.current = snapshot;
+          setSolutionPathSnapshot(snapshot);
+        }}
+        onSolutionPathSnapshotChange={(snapshot) => {
+          solutionPathFenceRef.current = snapshot;
+          setSolutionPathSnapshot((current) => (
+            current && current.run_id === snapshot?.run_id ? snapshot : current
+          ));
+        }}
         collapsed={workflowPanelCollapsed}
         onCollapseChange={setWorkflowPanelCollapsed}
       />
+      {solutionPathSnapshot && (
+        <SolutionPathModal
+          snapshot={solutionPathSnapshot}
+          onClose={() => setSolutionPathSnapshot(null)}
+          onSnapshotChange={(snapshot) => {
+            solutionPathFenceRef.current = snapshot;
+            setSolutionPathSnapshot((current) => (
+              !current || current.run_id === snapshot?.run_id ? snapshot : current
+            ));
+          }}
+          onOpenSettings={(mode) => {
+            setSolutionPathSnapshot(null);
+            if (mode === 'leanoj') {
+              setAppMode('leanoj');
+              setLeanojActiveTab('leanoj-settings');
+            } else if (mode === 'autonomous') {
+              setAppMode('autonomous');
+              setAutonomousActiveTab('auto-settings');
+            } else {
+              setAppMode('manual');
+              setManualActiveTab(mode === 'compiler' ? 'compiler-settings' : 'aggregator-settings');
+            }
+          }}
+        />
+      )}
       
       {/* Disclaimer Modal - Shows on every app load */}
       {showDisclaimer && (

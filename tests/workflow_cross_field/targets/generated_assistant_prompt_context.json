@@ -1,0 +1,24 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "assistant_memory",
+    "prompt_context"
+  ],
+  "invariants": [
+    "assistant.disable_clears_live_pack",
+    "assistant.no_validator_injection",
+    "prompt.validator_excludes_assistant_memory"
+  ],
+  "max_steps": 12,
+  "must_exercise": [
+    "assistant_pack",
+    "prompt_context",
+    "assistant_disable"
+  ],
+  "result_ids": [
+    "generated_assistant_prompt_context_seed_7",
+    "generated_assistant_prompt_context_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_assistant_prompt_context"
+}

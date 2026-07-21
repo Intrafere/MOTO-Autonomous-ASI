@@ -43,15 +43,40 @@ class PaperMemory:
     """
     
     def __init__(self):
-        self.file_path = Path(system_config.compiler_paper_file)
         self.version = 0
         self.rechunk_callback: Optional[Callable] = None
         self._lock = asyncio.Lock()
         self._initialized = False
+        self._root_generation = system_config.runtime_root_generation
+        self._file_path_override: Optional[Path] = None
+
+    @property
+    def file_path(self) -> Path:
+        if self._file_path_override is not None:
+            return self._file_path_override
+        return Path(system_config.compiler_paper_file)
+
+    @file_path.setter
+    def file_path(self, value: str | Path) -> None:
+        path = Path(value)
+        default_path = Path(system_config.compiler_paper_file)
+        self._file_path_override = (
+            None
+            if path.resolve(strict=False) == default_path.resolve(strict=False)
+            else path
+        )
+
+    def _refresh_root(self) -> None:
+        if self._root_generation != system_config.runtime_root_generation:
+            self.version = 0
+            self._initialized = False
+            self._file_path_override = None
+            self._root_generation = system_config.runtime_root_generation
     
     async def initialize(self) -> None:
         """Initialize paper memory."""
         async with self._lock:
+            self._refresh_root()
             if self._initialized:
                 return
             
@@ -350,9 +375,9 @@ class PaperMemory:
         """
         return []
     
-    def _extract_body_and_appendix(self, paper: str) -> tuple[str, str]:
+    def _extract_document_regions(self, paper: str) -> tuple[str, str, str]:
         """
-        Split existing paper into (body_lines_text, appendix_body_text).
+        Split a paper into main body, appendix body, and post-appendix content.
         
         The "body" is all non-marker content that sits OUTSIDE the
         THEOREMS_APPENDIX_START / THEOREMS_APPENDIX_END brackets. The
@@ -367,12 +392,14 @@ class PaperMemory:
             paper: Raw paper content
         
         Returns:
-            (body_text, appendix_body_text). Both stripped. Either may be "".
+            (body_text, appendix_body_text, post_appendix_text), each stripped.
         """
         lines = paper.split('\n')
         body_lines: list[str] = []
         appendix_lines: list[str] = []
+        post_appendix_lines: list[str] = []
         in_appendix = False
+        appendix_finished = False
         
         for line in lines:
             if THEOREMS_APPENDIX_START in line:
@@ -380,10 +407,16 @@ class PaperMemory:
                 continue
             if THEOREMS_APPENDIX_END in line:
                 in_appendix = False
+                appendix_finished = True
                 continue
             
             if in_appendix:
                 appendix_lines.append(line)
+                continue
+
+            if appendix_finished:
+                if PAPER_ANCHOR not in line:
+                    post_appendix_lines.append(line)
                 continue
             
             # Outside the appendix: skip structural markers
@@ -395,7 +428,11 @@ class PaperMemory:
             
             body_lines.append(line)
         
-        return '\n'.join(body_lines).strip(), '\n'.join(appendix_lines).strip()
+        return (
+            '\n'.join(body_lines).strip(),
+            '\n'.join(appendix_lines).strip(),
+            '\n'.join(post_appendix_lines).strip(),
+        )
     
     def _build_appendix_block(self, appendix_body: str) -> str:
         """
@@ -455,7 +492,7 @@ class PaperMemory:
                 )
                 return False
             
-            body_text, appendix_body = self._extract_body_and_appendix(paper)
+            _, appendix_body, _ = self._extract_document_regions(paper)
             proof_id_match = re.search(r"(?m)^\s*Proof ID:\s*(\S+)\s*$", entry)
             if proof_id_match and re.search(
                 rf"(?m)^\s*Proof ID:\s*{re.escape(proof_id_match.group(1))}\s*$",
@@ -523,10 +560,16 @@ class PaperMemory:
         if start > 0 and content[start] == "\n":
             start += 1
 
-        anchor_match = re.search(re.escape(PAPER_ANCHOR), content[match.end():])
-        end = len(content)
-        if anchor_match:
-            end = match.end() + anchor_match.start()
+        tail = content[match.end():]
+        boundaries = [
+            boundary.start()
+            for pattern in (
+                re.escape(THEOREMS_APPENDIX_START),
+                re.escape(PAPER_ANCHOR),
+            )
+            if (boundary := re.search(pattern, tail))
+        ]
+        end = match.end() + min(boundaries) if boundaries else len(content)
 
         return (content[:start].rstrip() + "\n\n" + content[end:].lstrip()).strip()
 
@@ -683,7 +726,9 @@ class PaperMemory:
             
             # Need to add missing placeholders. Preserve any existing appendix
             # body content while we rebuild the skeleton.
-            body_content, appendix_body = self._extract_body_and_appendix(paper)
+            body_content, appendix_body, post_appendix_content = (
+                self._extract_document_regions(paper)
+            )
             
             if not body_content:
                 logger.warning("No body content found - cannot add placeholders to empty paper")
@@ -717,6 +762,10 @@ class PaperMemory:
             # insert the empty placeholder line inside the bracket pair)
             new_paper_parts.append(self._build_appendix_block(appendix_body))
             new_paper_parts.append("")
+
+            if post_appendix_content:
+                new_paper_parts.append(post_appendix_content)
+                new_paper_parts.append("")
             
             # Anchor at end
             new_paper_parts.append(PAPER_ANCHOR)
@@ -820,7 +869,9 @@ class PaperMemory:
                 return False
             
             # Need to repair - preserve body + appendix body across the rebuild
-            body_content, appendix_body = self._extract_body_and_appendix(paper)
+            body_content, appendix_body, post_appendix_content = (
+                self._extract_document_regions(paper)
+            )
             
             if not body_content:
                 # Empty paper - just ensure anchor exists
@@ -856,6 +907,10 @@ class PaperMemory:
             # Theorems Appendix (preserve existing entries, default otherwise)
             new_paper_parts.append(self._build_appendix_block(appendix_body))
             new_paper_parts.append("")
+
+            if post_appendix_content:
+                new_paper_parts.append(post_appendix_content)
+                new_paper_parts.append("")
             
             # Anchor at end
             new_paper_parts.append(PAPER_ANCHOR)

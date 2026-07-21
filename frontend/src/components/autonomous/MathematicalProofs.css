@@ -6,6 +6,68 @@
   color: var(--text-primary, #e5e7eb);
 }
 
+.math-proof-prompt-groups {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.proof-prompt-group {
+  overflow: hidden;
+  border: 1px solid var(--border-default, #374151);
+  border-radius: 0.85rem;
+  background: var(--surface-2, #111827);
+}
+
+.proof-prompt-group-header {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary, #f3f4f6);
+  padding: 1rem 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.proof-prompt-group-header:hover {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.proof-prompt-group-header:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: -2px;
+}
+
+.proof-prompt-group-copy {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.proof-prompt-group-copy strong {
+  overflow-wrap: anywhere;
+}
+
+.proof-prompt-group-copy span {
+  color: var(--text-secondary, #9ca3af);
+  font-size: 0.88rem;
+}
+
+.proof-prompt-group-chevron {
+  flex: 0 0 auto;
+  color: var(--text-secondary, #9ca3af);
+}
+
+.proof-prompt-group > .math-proofs-list,
+.proof-prompt-group > .run-history-group-body {
+  border-top: 1px solid var(--border-default, #374151);
+  padding: 1rem;
+}
+
 .math-proofs-header {
   display: flex;
   justify-content: space-between;
@@ -207,6 +269,11 @@
   color: #e8a060;
 }
 
+.math-proofs-filter--duplicate-novel.active {
+  background: rgba(168, 85, 247, 0.14);
+  color: #c4b5fd;
+}
+
 .math-proofs-filter:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -246,6 +313,10 @@
 
 .math-proof-card.known {
   border-color: rgba(96, 165, 250, 0.28);
+}
+
+.math-proof-card.duplicate-novel {
+  border-color: rgba(168, 85, 247, 0.38);
 }
 
 .math-proof-card.platinum {
@@ -326,6 +397,12 @@
 .math-proof-badge.known {
   color: #18cc17;
   border-color: rgba(96, 165, 250, 0.35);
+}
+
+.math-proof-badge.duplicate-novel {
+  color: #c4b5fd;
+  border-color: rgba(168, 85, 247, 0.45);
+  background: rgba(168, 85, 247, 0.08);
 }
 
 .math-proof-badge.platinum {

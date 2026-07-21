@@ -1,0 +1,27 @@
+{
+  "adapter": "browser_smoke",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "autonomous_default_mode",
+    "manual_mode_switch",
+    "leanoj_hidden_before_developer_gate",
+    "leanoj_visible_after_developer_gate",
+    "reload_restores_autonomous_mode"
+  ],
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "browser_mode_switching_preserves_in_memory_default_and_developer_gate",
+  "schema_version": 1,
+  "seed": null,
+  "source": "browser_smoke",
+  "test_file": "tests/workflow_browser_smoke/mode-switching.spec.js"
+}

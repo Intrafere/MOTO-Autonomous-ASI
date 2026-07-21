@@ -1,0 +1,27 @@
+{
+  "actions": [
+    "start_autonomous_no_outputs",
+    "start_autonomous_papers_only",
+    "complete_topic_exploration",
+    "complete_brainstorm"
+  ],
+  "adapter": "model",
+  "artifact_type": "scenario",
+  "expected_result": "passed",
+  "fields": [
+    "proof_runtime_gating",
+    "allowed_outputs"
+  ],
+  "invariants": [
+    "outputs.at_least_one_output_enabled",
+    "outputs.papers_only_skips_proof_work",
+    "proof_runtime.no_lean_when_disabled",
+    "proof_runtime.no_smt_when_disabled"
+  ],
+  "must_exercise": [
+    "no_outputs_rejected",
+    "papers_only"
+  ],
+  "scenario_id": "model_proof_runtime_gating_allowed_outputs",
+  "schema_version": 1
+}

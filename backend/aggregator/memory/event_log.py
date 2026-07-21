@@ -23,12 +23,30 @@ class EventLog:
     """
     
     def __init__(self):
-        self.file_path = Path(system_config.data_dir) / "aggregator_event_log.txt"
         self.events: List[Dict[str, Any]] = []
         self._lock = asyncio.Lock()
+        self._root_generation = system_config.runtime_root_generation
+        self._file_path_override: Path | None = None
+
+    @property
+    def file_path(self) -> Path:
+        return self._file_path_override or Path(system_config.data_dir) / "aggregator_event_log.txt"
+
+    @file_path.setter
+    def file_path(self, value: str | Path) -> None:
+        """Allow focused tests/custom stores to override without stale default-root capture."""
+        self._file_path_override = Path(value)
+        self._root_generation = system_config.runtime_root_generation
+
+    def _refresh_root(self) -> None:
+        if self._root_generation != system_config.runtime_root_generation:
+            self.events = []
+            self._file_path_override = None
+            self._root_generation = system_config.runtime_root_generation
     
     async def initialize(self) -> None:
         """Initialize event log, loading existing events from file."""
+        self._refresh_root()
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         
         if self.file_path.exists():
@@ -65,6 +83,7 @@ class EventLog:
             metadata: Optional additional data (submitter_id, submission_number, etc.)
         """
         async with self._lock:
+            self._refresh_root()
             event = {
                 'id': len(self.events) + 1,
                 'type': event_type,
@@ -85,11 +104,13 @@ class EventLog:
     async def get_all_events(self) -> List[Dict[str, Any]]:
         """Get all events from the log."""
         async with self._lock:
+            self._refresh_root()
             return list(self.events)
     
     async def clear(self) -> None:
         """Clear all events from the log."""
         async with self._lock:
+            self._refresh_root()
             self.events = []
             try:
                 async with aiofiles.open(self.file_path, 'w', encoding='utf-8') as f:

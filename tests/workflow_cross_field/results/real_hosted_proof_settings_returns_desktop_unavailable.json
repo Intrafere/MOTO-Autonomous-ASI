@@ -1,0 +1,24 @@
+{
+  "adapter": "real_route",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "hosted_mode",
+    "http_501"
+  ],
+  "fields": [
+    "proof_runtime_gating",
+    "websocket_api_contracts",
+    "allowed_outputs"
+  ],
+  "invariants": [
+    "proof_runtime.hosted_proof_settings_unavailable"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_hosted_proof_settings_returns_desktop_unavailable",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+}

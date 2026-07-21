@@ -1,0 +1,42 @@
+{
+  "action_ids": [
+    "start_autonomous_papers_and_proofs",
+    "attempt_conflicting_start"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "autonomous",
+    "final_phase": "topic_exploration"
+  },
+  "evidence": [
+    "start_blocked"
+  ],
+  "exercised_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "fields": [
+    "runtime_exclusivity",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "observed_fields": [
+    "allowed_outputs",
+    "assistant_memory",
+    "prompt_context",
+    "runtime_exclusivity",
+    "websocket_api_contracts"
+  ],
+  "replay": [
+    "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
+    "start_manual_compiler()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_runtime_start_exclusivity_seed_29",
+  "schema_version": 1,
+  "seed": 29,
+  "target_artifact": "targets/generated_runtime_start_exclusivity.json",
+  "target_id": "generated_runtime_start_exclusivity"
+}

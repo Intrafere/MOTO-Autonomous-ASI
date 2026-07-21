@@ -104,21 +104,33 @@ code {
 }
 
 .app {
+  --workflow-panel-width: 320px;
+  --workflow-panel-gap: 30px;
+  --workflow-panel-safe-area: calc(var(--workflow-panel-width) + var(--workflow-panel-gap));
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   position: relative;
 }
 
+.app.workflow-panel-collapsed {
+  --workflow-panel-width: 50px;
+  --workflow-panel-gap: 10px;
+}
+
 /* ============================================
    Banner & Logo Section
    ============================================ */
 .app-banner {
-  background: linear-gradient(160deg, var(--surface-1) 0%, var(--surface-3) 50%, var(--surface-1) 100%);
-  border-bottom: 1px solid var(--gold-dim);
-  box-shadow: 0 2px 20px rgba(30, 255, 28, 0.08);
-  padding: 1.5rem 2rem;
-  text-align: center;
+  background:
+    radial-gradient(circle at 18% 15%, rgba(212, 175, 55, 0.14), transparent 34%),
+    radial-gradient(circle at 82% 0%, rgba(30, 255, 28, 0.08), transparent 30%),
+    linear-gradient(135deg, rgba(8, 10, 13, 0.98) 0%, rgba(17, 20, 24, 0.96) 48%, rgba(8, 10, 13, 0.98) 100%);
+  border-bottom: 1px solid rgba(212, 175, 55, 0.28);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 14px 36px rgba(0, 0, 0, 0.32);
+  padding: 0.6rem 2rem;
   position: relative;
   overflow: hidden;
   isolation: isolate;
@@ -135,12 +147,12 @@ code {
   background: linear-gradient(
     90deg,
     transparent 0%,
-    rgba(30, 255, 28, 0.03) 25%,
-    rgba(30, 255, 28, 0.06) 50%,
-    rgba(30, 255, 28, 0.03) 75%,
+    rgba(212, 175, 55, 0.025) 25%,
+    rgba(255, 255, 255, 0.035) 50%,
+    rgba(30, 255, 28, 0.025) 75%,
     transparent 100%
   );
-  animation: banner-shimmer 8s ease-in-out infinite;
+  animation: banner-shimmer 12s ease-in-out infinite;
   pointer-events: none;
 }
 
@@ -160,68 +172,121 @@ code {
 }
 
 .banner-content {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+  justify-content: center;
+  margin: 0 auto;
+  max-width: 1180px;
   position: relative;
+  text-align: center;
   z-index: 1;
   transform: translateZ(0);
   backface-visibility: hidden;
 }
 
-.banner-title {
-  font-size: 1.75rem;
-  font-weight: 700;
-  margin: 0 0 0.35rem 0;
-  letter-spacing: 0.5px;
-  display: flex;
+.banner-brand {
   align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 1rem;
   justify-content: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.banner-logo-link {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  line-height: 0;
+  transition: transform 0.18s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.banner-logo-link:hover {
+  transform: translateY(-1px);
+}
+
+.banner-logo-link:focus-visible {
+  outline: 2px solid rgba(30, 255, 28, 0.75);
+  outline-offset: 4px;
+}
+
+.banner-logo {
+  display: block;
+  filter:
+    brightness(1.55)
+    contrast(1.22)
+    drop-shadow(0 0 12px rgba(255, 255, 255, 0.32))
+    drop-shadow(0 10px 20px rgba(0, 0, 0, 0.55));
+  height: auto;
+  object-fit: contain;
+  width: clamp(68px, 6vw, 92px);
+}
+
+.banner-identity {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+}
+
+.banner-title {
+  align-items: flex-start;
+  color: #f7f8f4;
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  font-size: clamp(1.45rem, 2.1vw, 2rem);
+  font-weight: 760;
+  letter-spacing: 0.01em;
+  line-height: 1.05;
+  margin: 0;
 }
 
 .banner-moto {
-  color: #1eff1c;
-  text-shadow: 
-    0 0 10px rgba(30, 255, 28, 0.4),
-    0 0 20px rgba(30, 255, 28, 0.2);
-  letter-spacing: 3px;
-  font-weight: 800;
+  color: #ffffff;
   display: inline-flex;
   align-items: center;
+  font-weight: 850;
+  letter-spacing: 0.18em;
+  text-shadow: 0 0 18px rgba(30, 255, 28, 0.18);
   user-select: none;
   -webkit-user-select: none;
 }
 
 .banner-subtitle {
-  color: #1eff1c;
-  text-shadow:
-    0 0 10px rgba(30, 255, 28, 0.4),
-    0 0 20px rgba(30, 255, 28, 0.2);
-  font-weight: 500;
+  color: rgba(247, 248, 244, 0.82);
+  font-size: 0.76em;
+  font-weight: 560;
+  letter-spacing: 0.03em;
 }
 
-.banner-variant {
-  color: #18cc17;
-  font-size: 0.95rem;
-  margin: 0.85rem 0 0 0;
-  font-weight: 500;
-  letter-spacing: 0.5px;
-  font-style: italic;
-  transform: translateZ(0);
-  backface-visibility: hidden;
+.banner-positioning {
+  align-self: center;
+  min-width: 0;
+  text-align: center;
 }
 
 .banner-mode-subtitle {
   color: #1eff1c;
-  font-size: 0.9rem;
-  line-height: 1.25;
-  min-height: 1.125rem;
-  margin: 0.35rem 0 0 0;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  display: inline-flex;
+  font-size: 0.73rem;
+  line-height: 1.2;
+  margin: 0.18rem 0 0 0;
+  min-height: 0.95rem;
+  font-weight: 780;
+  letter-spacing: 0.12em;
+  padding: 0.28rem 0.52rem;
+  border: 1px solid rgba(30, 255, 28, 0.25);
+  border-radius: 999px;
+  background: rgba(30, 255, 28, 0.055);
   text-transform: uppercase;
-  text-shadow:
-    0 0 10px rgba(30, 255, 28, 0.35),
-    0 0 18px rgba(30, 255, 28, 0.18);
+  text-shadow: 0 0 12px rgba(30, 255, 28, 0.22);
 }
 
 .banner-mode-subtitle--hidden {
@@ -229,39 +294,58 @@ code {
 }
 
 .banner-company {
-  color: #ffffff;
-  font-size: 0.85rem;
-  margin: 0.1rem 0 0;
-  letter-spacing: 1px;
-  font-weight: 400;
+  color: rgba(212, 175, 55, 0.92);
+  font-size: 0.78rem;
+  font-weight: 640;
+  letter-spacing: 0.12em;
+  line-height: 1.2;
+  margin: 0.38rem 0 0;
+  text-transform: uppercase;
 }
 
 @media (max-width: 768px) {
   .app-banner {
-    padding: 1rem 1.5rem;
+    padding: 0.5rem 1rem;
   }
-  
+
+  .banner-content {
+    align-items: center;
+    gap: 0.42rem;
+  }
+
+  .banner-brand {
+    gap: 0.7rem;
+    width: auto;
+  }
+
+  .banner-logo {
+    width: 58px;
+  }
+
   .banner-title {
-    font-size: 1.35rem;
-    flex-direction: column;
-    gap: 0.25rem;
+    font-size: 1.25rem;
+    gap: 0.12rem;
   }
-  
+
   .banner-moto {
-    letter-spacing: 2px;
+    letter-spacing: 0.1em;
   }
-  
+
+  .banner-positioning {
+    max-width: none;
+    text-align: center;
+  }
+
   .banner-variant {
-    font-size: 0.85rem;
-    margin-top: 0.65rem;
+    font-size: clamp(0.68rem, 2.7vw, 0.8rem);
   }
 
   .banner-mode-subtitle {
-    font-size: 0.78rem;
+    font-size: 0.68rem;
   }
-  
+
   .banner-company {
-    font-size: 0.8rem;
+    font-size: 0.62rem;
   }
 }
 
@@ -868,7 +952,7 @@ button.header-status-chip:focus-visible {
   background: var(--surface-1);
   padding: 0.75rem 1rem;
   padding-left: calc(1rem + 84px);
-  padding-right: 150px;
+  padding-right: var(--workflow-panel-safe-area);
   border-bottom: 1px solid var(--border-subtle);
   flex-wrap: nowrap;
 }
@@ -945,7 +1029,9 @@ button.header-status-chip:focus-visible {
   padding: 2rem 3rem;
   overflow-y: auto;
   scrollbar-gutter: stable;
-  max-width: 100%;
+  width: calc(100% - var(--workflow-panel-safe-area));
+  max-width: calc(100% - var(--workflow-panel-safe-area));
+  box-sizing: border-box;
 }
 
 .container {
@@ -954,19 +1040,24 @@ button.header-status-chip:focus-visible {
   padding: 0 1rem;
 }
 
+.settings-overlay-safe-area {
+  width: 100%;
+}
+
 .workflow-main-interface > * {
   transition:
     filter var(--transition-normal),
     opacity var(--transition-normal);
 }
 
-.workflow-main-interface--running > :not(.autonomous-header):not(.button-group):not(.activity-section):not(.tier3-dialog-overlay) {
+.workflow-main-interface--running > :not(.autonomous-header):not(.button-group):not(.prompt-composer-section):not(.activity-section):not(.tier3-dialog-overlay) {
   filter: brightness(0.72);
   opacity: 0.78;
 }
 
 .workflow-main-interface--running > .autonomous-header,
 .workflow-main-interface--running > .button-group,
+.workflow-main-interface--running > .prompt-composer-section,
 .workflow-main-interface--running > .activity-section,
 .workflow-main-interface--running > .tier3-dialog-overlay {
   filter: none;
@@ -1223,6 +1314,10 @@ button.danger:hover {
 }
 
 @media (max-width: 768px) {
+  .app {
+    --workflow-panel-safe-area: 0px;
+  }
+
   .grid-2, .grid-3 {
     grid-template-columns: 1fr;
   }
@@ -1230,6 +1325,12 @@ button.danger:hover {
   .tabs {
     flex-wrap: wrap;
     padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .tab-content {
+    width: 100%;
+    max-width: 100%;
   }
   
   .tab {

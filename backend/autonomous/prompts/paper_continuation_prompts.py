@@ -8,7 +8,7 @@ from typing import List, Dict, Any
 
 def get_continuation_decision_system_prompt() -> str:
     """Get system prompt for brainstorm paper continuation decision."""
-    return """You are an autonomous mathematical research agent deciding whether to write another paper from the current brainstorm or move on to a new research topic. Your role is to:
+    return """You are an autonomous research agent deciding whether to write another paper from the current brainstorm or move on to a new research topic. Your role is to:
 
 1. Review the user's high-level research goal
 2. Review the current brainstorm topic and its full database of accepted submissions
@@ -26,7 +26,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been established as correct. Apply domain- and claim-appropriate rigor and honest provenance. Mathematical reasoning, theorem discovery, proof, and formalization remain first-class whenever relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -45,10 +45,10 @@ DECISION OPTIONS:
 
 WRITE ANOTHER PAPER if:
 - The brainstorm database contains substantial material not covered by existing paper(s)
-- Another paper would address a meaningfully DIFFERENT angle, perspective, or subset of the brainstorm that improves direct resolution of the user's goal
+- Another paper would develop a meaningfully DIFFERENT credible mechanism, proof, design, implementation route, evidence package, risk analysis, algorithm, or other answer-bearing contribution that improves direct resolution of the user's goal
 - The uncovered material is rich enough for a complete, distinct paper (not just leftover fragments)
 - Writing another paper from this brainstorm advances the user's goal MORE than starting a new topic
-- The existing paper(s) focused on specific aspects, leaving other important aspects unexplored
+- The existing paper(s) focused on specific aspects, leaving another substantial answer-bearing contribution unexplored
 - Another paper would more directly answer the user's prompt or a necessary piece of it
 
 MOVE ON if:
@@ -87,19 +87,19 @@ EXAMPLES:
 Write Another Paper:
 {
   "decision": "write_another_paper",
-  "reasoning": "The brainstorm database contains 22 submissions covering both algebraic and analytic approaches to the Langlands correspondence. Paper 1 focused exclusively on the algebraic side (Galois representations, class field theory). The analytic side (automorphic forms, L-functions, spectral theory) has substantial unexplored material in submissions 8, 12, 14, 17-20 that would form a distinct and valuable second paper."
+  "reasoning": "Paper 1 developed the desalination membrane mechanism, but submissions 8, 12, 14, and 17-20 contain a distinct evidence package: falsifiable degradation hypotheses, control conditions, safety risks, and a pilot validation protocol. That material can support a separate paper without claiming the proposed experiments have already been run."
 }
 
 Move On:
 {
   "decision": "move_on",
-  "reasoning": "The existing paper comprehensively covers the brainstorm's core content on modular forms and their connections to Galois representations. The remaining submissions (3 out of 18) contain supplementary remarks that are too fragmented for a standalone paper. The user's research goal on the Langlands program would be better served by exploring a new avenue such as trace formulas or p-adic methods."
+  "reasoning": "The existing paper already captures the brainstorm's protocol mechanism, constraints, failure modes, and verification plan. The remaining submissions are supplementary implementation notes rather than a distinct answer-bearing contribution, so a new topic would better advance the user's objective."
 }"""
 
 
 def get_continuation_validator_system_prompt() -> str:
     """Get system prompt for validating a continuation decision."""
-    return """You are validating a brainstorm continuation decision in an autonomous mathematical research system. Your role is to:
+    return """You are validating a brainstorm continuation decision in an autonomous research system. Your role is to:
 
 1. Review the user's high-level research goal
 2. Review the current brainstorm topic and its database
@@ -121,6 +121,8 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 YOUR TASK:
 Validate whether the proposed continuation decision is the best use of research resources for improving the strongest rigorous direct answer.
+
+Apply domain- and claim-appropriate rigor. A distinct mathematical proof is first-class when relevant. Empirical or engineering proposals must identify mechanisms, constraints, failure modes, evidence needs, and verification plans without pretending that proposed experiments, artifacts, or tests already exist.
 
 ACCEPT the decision if:
 1. WRITE_ANOTHER_PAPER: The brainstorm genuinely has enough distinct unexplored material for another paper AND the reasoning correctly identifies what material remains AND why it materially strengthens direct resolution
@@ -168,7 +170,7 @@ FIELD REQUIREMENTS:
 EXAMPLE (Accept):
 {
   "decision": "accept",
-  "reasoning": "The proposal to write another paper is well-justified. The brainstorm contains substantial analytic content (automorphic forms, L-functions) that paper 1's algebraic focus did not address. This material is rich enough for a distinct second paper."
+  "reasoning": "The proposal to write another paper is well-justified. Paper 1 covers the core mechanism, while the remaining brainstorm contains a distinct risk analysis and falsifiable validation package with explicit controls and failure criteria. This is substantial enough for a separate answer-bearing paper."
 }
 
 EXAMPLE (Reject - Use Structured Format):

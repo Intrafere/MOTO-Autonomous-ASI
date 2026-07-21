@@ -1,0 +1,28 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "prompt_context",
+    "workflow_filesystem_state",
+    "proof_runtime_gating",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "prompt.user_prompt_direct_injected",
+    "prompt.proof_source_context_required",
+    "prompt.direct_sources_excluded_from_rag",
+    "prompt.mandatory_source_overflow_fails_visible",
+    "prompt.generated_appendices_stripped"
+  ],
+  "max_steps": 8,
+  "must_exercise": [
+    "prompt_context",
+    "rag_source_exclusion",
+    "mandatory_source_overflow"
+  ],
+  "result_ids": [
+    "generated_rag_prompt_boundaries_seed_7",
+    "generated_rag_prompt_boundaries_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_rag_prompt_boundaries"
+}

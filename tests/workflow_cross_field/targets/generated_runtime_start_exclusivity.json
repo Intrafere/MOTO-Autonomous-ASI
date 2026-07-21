@@ -1,0 +1,20 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "runtime_exclusivity",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "max_steps": 8,
+  "must_exercise": [
+    "start_blocked"
+  ],
+  "result_ids": [
+    "generated_runtime_start_exclusivity_seed_7",
+    "generated_runtime_start_exclusivity_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_runtime_start_exclusivity"
+}

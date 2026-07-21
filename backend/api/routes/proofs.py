@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -26,6 +26,12 @@ from backend.autonomous.core.proof_verification_stage import ProofVerificationSt
 from backend.autonomous.memory.brainstorm_memory import BrainstormMemory, brainstorm_memory
 from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.memory.proof_database import ProofDatabase, manual_proof_database, proof_database
+from backend.autonomous.memory.proof_database import (
+    is_duplicate_novel_tier,
+    is_not_novel_tier,
+    is_prompt_injection_novel_tier,
+    normalize_proof_library_category,
+)
 from backend.autonomous.memory.research_metadata import research_metadata
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.compiler.memory.manual_prompt import load_manual_compiler_prompt
@@ -42,6 +48,9 @@ from backend.shared.lean4_client import (
 from backend.shared.models import (
     ModelConfig,
     ProofCheckRequest,
+    ProofCertificateResponse,
+    ProofLibraryEntry,
+    ProofLibraryResponse,
     ProofRoleConfigSnapshot,
     ProofRuntimeConfigSnapshot,
     ProofSettingsUpdateRequest,
@@ -61,6 +70,7 @@ MANUAL_AGGREGATOR_SOURCE_ID = "manual_aggregator"
 MANUAL_COMPILER_CURRENT_SOURCE_ID = "manual_compiler_current"
 PROOF_SCOPE_AUTONOMOUS = "autonomous"
 PROOF_SCOPE_MANUAL = "manual"
+ProofLibraryCategory = Literal["novel", "duplicate_novel", "not_novel", "all"]
 _manual_proof_run_lock = asyncio.Lock()
 _LEAN_STATUS_STARTING_LOG_INTERVAL_SECONDS = 60.0
 _last_lean_status_starting_log_at = 0.0
@@ -164,9 +174,11 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
     if event_type == "proof_check_started":
         return "Proof check started for the manual Aggregator database"
     if event_type == "proof_check_no_candidates":
-        return "No formal theorem candidates found in the manual Aggregator database"
+        return "Proof discovery found 0 proof candidates; no proofs will be attempted"
     if event_type == "proof_check_candidates_found":
-        return f"Proof candidates found: {data.get('count') or 0}"
+        count = int(data.get("count") or 0)
+        subject = "proof candidate" if count == 1 else "proof candidates"
+        return f"Proof discovery found {count} {subject}; {count} will be attempted"
     if event_type == "proof_attempt_started":
         return f"Lean proof attempt started: {target}"
     if event_type == "proof_lean_accepted":
@@ -218,6 +230,39 @@ def _get_scoped_proof_database(scope: str = PROOF_SCOPE_AUTONOMOUS) -> ProofData
     return proof_database
 
 
+def _normalize_proof_response_provenance(proof) -> dict:
+    """Normalize legacy provenance at response time without mutating stored records."""
+    if hasattr(proof, "model_dump"):
+        payload = proof.model_dump(mode="json")
+    else:
+        payload = dict(proof or {})
+    run_id = str(payload.get("run_id") or payload.get("session_id") or "").strip()
+    if not run_id:
+        source_type = str(payload.get("source_type") or "proof").strip()
+        source_id = str(payload.get("source_id") or payload.get("proof_id") or "legacy").strip()
+        run_id = f"legacy:{source_type}:{source_id}"
+    payload["run_id"] = run_id
+    payload["user_prompt"] = str(
+        payload.get("user_prompt")
+        or payload.get("source_title")
+        or payload.get("theorem_statement")
+        or ""
+    )
+    tier = str(payload.get("novelty_tier") or "").strip().lower()
+    if not tier:
+        tier = "novel_formulation" if bool(payload.get("novel")) else "not_novel"
+    payload["novelty_tier"] = tier
+    payload["independent_novelty_tier"] = str(
+        payload.get("independent_novelty_tier") or tier
+    )
+    payload["independent_novelty_reasoning"] = str(
+        payload.get("independent_novelty_reasoning")
+        or payload.get("novelty_reasoning")
+        or ""
+    )
+    return payload
+
+
 def _get_request_proof_database(request: ProofCheckRequest) -> ProofDatabase:
     if (
         (request.source_type == "brainstorm" and request.source_id == MANUAL_AGGREGATOR_SOURCE_ID)
@@ -225,17 +270,6 @@ def _get_request_proof_database(request: ProofCheckRequest) -> ProofDatabase:
     ):
         return manual_proof_database
     return proof_database
-
-
-def _schedule_lean4_warm_start(client) -> None:
-    """Warm the Lean workspace without blocking a settings/status request."""
-    async def _warm_start() -> None:
-        try:
-            await client.warm_start()
-        except Exception as exc:  # pragma: no cover - defensive background task
-            logger.warning("Lean 4 client warm start failed: %s", exc)
-
-    asyncio.create_task(_warm_start())
 
 
 def _schedule_lean4_warm_start(client) -> None:
@@ -278,6 +312,26 @@ async def _get_export_lean_code(
         return await scoped_proof_database.get_lean_code(proof_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Proof not found")
+
+
+async def _get_archived_export(
+    session_id: str,
+    proof_id: str,
+    scope: str,
+) -> tuple[dict, str]:
+    normalized_scope = (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower()
+    if normalized_scope == PROOF_SCOPE_MANUAL:
+        payload = await manual_proof_database.get_library_proof_from_history(
+            _manual_proof_history_root(), session_id, proof_id
+        )
+    elif normalized_scope == PROOF_SCOPE_AUTONOMOUS:
+        payload = await proof_database.get_library_proof(session_id, proof_id)
+    else:
+        raise HTTPException(status_code=400, detail="Proof scope must be 'autonomous' or 'manual'.")
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Proof not found")
+    normalized = _normalize_proof_response_provenance(payload)
+    return normalized, str(normalized.get("lean_code") or "")
 
 
 def _build_model_config(role: ProofRoleConfigSnapshot) -> ModelConfig:
@@ -514,13 +568,13 @@ async def _refresh_manual_assistant_memory(
     source_content: str,
     user_prompt: str,
 ) -> None:
-    """Run Try-to-Prove Assistant memory even before proof prompt preflight.
+    """Schedule Try-to-Prove Assistant memory before proof prompt preflight.
 
     Manual proof discovery may fail during mandatory-source context validation
     before it reaches ``api_client_manager.generate_completion()``, so the
     normal central Assistant injection hook never fires. This preflight refresh
-    keeps the user-triggered proof-check button covered by Assistant memory and
-    leaves a visible log/event trail.
+    keeps the user-triggered proof-check button covered by Assistant memory
+    without delaying mandatory proof work.
     """
     if not system_config.agent_conversation_memory_enabled:
         logger.info(
@@ -530,6 +584,7 @@ async def _refresh_manual_assistant_memory(
         )
         return
 
+    run_id = await manual_proof_database.get_or_create_active_run_id()
     snapshot = AssistantTargetSnapshot(
         workflow_mode="manual_proof_check",
         target_kind="proof_candidate",
@@ -545,21 +600,22 @@ async def _refresh_manual_assistant_memory(
         source_title=source_title,
         source_type=f"manual_{source_type}",
         source_id=source_id,
+        run_id=run_id,
         source_titles=[source_title] if source_title else [],
         imports=["Mathlib"],
     )
     logger.info(
-        "Assistant memory preflight starting for manual proof check %s:%s (%s)",
+        "Assistant memory preflight scheduling for manual proof check %s:%s (%s)",
         source_type,
         source_id,
         source_title or "untitled source",
     )
-    pack = await assistant_proof_search_coordinator.refresh_now(snapshot)
+    target_hash = assistant_proof_search_coordinator.submit_target(snapshot)
     logger.info(
-        "Assistant memory preflight complete for manual proof check %s:%s (results=%s)",
+        "Assistant memory preflight scheduled for manual proof check %s:%s (target=%s)",
         source_type,
         source_id,
-        len(pack.results) if pack else 0,
+        target_hash[:12],
     )
 
 
@@ -818,6 +874,20 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
             request,
             scoped_proof_database,
         )
+        if request.source_id == MANUAL_AGGREGATOR_SOURCE_ID:
+            canonical_user_prompt = await _manual_aggregator_prompt()
+        elif request.source_id == MANUAL_COMPILER_CURRENT_SOURCE_ID:
+            canonical_user_prompt = (
+                compiler_coordinator.user_prompt or await load_manual_compiler_prompt()
+            )
+        elif ":" in request.source_id and request.source_type == "paper":
+            session_id, paper_id = request.source_id.split(":", 1)
+            history_paper = await paper_library.get_history_paper(session_id, paper_id)
+            canonical_user_prompt = str(
+                (history_paper or {}).get("user_prompt", "") or ""
+            )
+        else:
+            canonical_user_prompt = await research_metadata.get_user_prompt()
         snapshot = await _get_runtime_snapshot(request)
         if snapshot is None:
             if _is_non_appending_manual_source(request):
@@ -848,6 +918,8 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
                 source_type=request.source_type,
                 source_id=request.source_id,
                 user_prompt=user_prompt,
+                canonical_user_prompt=canonical_user_prompt,
+                run_id=await scoped_proof_database.get_or_create_active_run_id(),
                 submitter_model=role_config.model_id,
                 submitter_context=role_config.context_window,
                 submitter_max_tokens=role_config.max_output_tokens,
@@ -898,7 +970,7 @@ async def list_proofs(scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS)):
     scoped_proof_database = _get_scoped_proof_database(scope)
     proofs = await scoped_proof_database.get_all_proofs()
     return {
-        "proofs": [proof.model_dump(mode="json") for proof in proofs],
+        "proofs": [_normalize_proof_response_provenance(proof) for proof in proofs],
         "counts": scoped_proof_database.count_proofs(),
         "scope": (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower(),
     }
@@ -910,7 +982,7 @@ async def list_novel_proofs(scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS)):
     scoped_proof_database = _get_scoped_proof_database(scope)
     proofs = await scoped_proof_database.get_all_proofs(novel_only=True)
     return {
-        "proofs": [proof.model_dump(mode="json") for proof in proofs],
+        "proofs": [_normalize_proof_response_provenance(proof) for proof in proofs],
         "counts": scoped_proof_database.count_proofs(),
         "scope": (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower(),
     }
@@ -922,7 +994,7 @@ async def list_known_proofs(scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS)):
     scoped_proof_database = _get_scoped_proof_database(scope)
     proofs = await scoped_proof_database.get_all_proofs(novel_only=False)
     return {
-        "proofs": [proof.model_dump(mode="json") for proof in proofs],
+        "proofs": [_normalize_proof_response_provenance(proof) for proof in proofs],
         "counts": scoped_proof_database.count_proofs(),
         "scope": (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower(),
     }
@@ -1249,35 +1321,64 @@ async def run_manual_proof_check(request: ProofCheckRequest, background_tasks: B
     }
 
 
-@router.get("/library")
+@router.get("/library", response_model=ProofLibraryResponse)
 async def get_proof_library(
-    novel_only: bool = True,
+    novel_only: Optional[bool] = None,
+    category: Optional[ProofLibraryCategory] = Query(default=None),
     scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
 ):
     """Return archived proofs for the selected proof-library scope."""
     normalized_scope = (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower()
+    normalized_category = normalize_proof_library_category(category, novel_only)
     if normalized_scope == PROOF_SCOPE_MANUAL:
+        all_proofs = await manual_proof_database.list_proof_library_from_history(
+            _manual_proof_history_root(),
+            novel_only=None,
+            category="all",
+        )
         proofs = await manual_proof_database.list_proof_library_from_history(
             _manual_proof_history_root(),
             novel_only=novel_only,
+            category=normalized_category,
         )
     elif normalized_scope == PROOF_SCOPE_AUTONOMOUS:
-        proofs = await proof_database.list_proof_library(novel_only=novel_only)
+        all_proofs = await proof_database.list_proof_library(
+            novel_only=None,
+            category="all",
+        )
+        proofs = await proof_database.list_proof_library(
+            novel_only=novel_only,
+            category=normalized_category,
+        )
     else:
         raise HTTPException(status_code=400, detail="Proof scope must be 'autonomous' or 'manual'.")
-    novel_count = sum(1 for p in proofs if p.get("novel"))
+    novel_count = sum(
+        1 for p in all_proofs
+        if p.get("novel") and is_prompt_injection_novel_tier(p.get("novelty_tier", ""))
+    )
+    duplicate_novel_count = sum(
+        1 for p in all_proofs if is_duplicate_novel_tier(p.get("novelty_tier", ""))
+    )
+    not_novel_count = sum(
+        1 for p in all_proofs if is_not_novel_tier(p.get("novelty_tier", "not_novel"))
+    )
+    normalized_all = [_normalize_proof_response_provenance(p) for p in all_proofs]
+    normalized_proofs = [_normalize_proof_response_provenance(p) for p in proofs]
     return {
-        "proofs": proofs,
+        "proofs": normalized_proofs,
         "counts": {
-            "total": len(proofs) if not novel_only else None,
-            "listed": len(proofs),
+            "total": len(normalized_all),
+            "listed": len(normalized_proofs),
             "novel": novel_count,
+            "duplicate_novel": duplicate_novel_count,
+            "not_novel": not_novel_count,
         },
         "scope": normalized_scope,
+        "category": normalized_category,
     }
 
 
-@router.get("/library/{session_id}/{proof_id}")
+@router.get("/library/{session_id}/{proof_id}", response_model=ProofLibraryEntry)
 async def get_library_proof(
     session_id: str,
     proof_id: str,
@@ -1297,18 +1398,36 @@ async def get_library_proof(
         raise HTTPException(status_code=400, detail="Proof scope must be 'autonomous' or 'manual'.")
     if proof is None:
         raise HTTPException(status_code=404, detail="Proof not found")
-    return proof
+    return _normalize_proof_response_provenance(proof)
 
 
-@router.get("/{proof_id}/certificate")
-async def get_proof_certificate(
+@router.get("/library/{session_id}/{proof_id}/certificate", response_model=ProofCertificateResponse)
+async def get_library_proof_certificate(
+    session_id: str,
     proof_id: str,
     scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
 ):
-    """Return a machine-readable proof certificate JSON payload."""
-    scoped_proof_database = _get_scoped_proof_database(scope)
-    proof = await _get_export_proof_or_404(proof_id, scoped_proof_database)
+    """Export an archived proof certificate keyed by its validated run and proof IDs."""
+    proof, lean_code = await _get_archived_export(session_id, proof_id, scope)
+    return await _certificate_response(proof, lean_code)
 
+
+@router.get("/library/{session_id}/{proof_id}/certificate.lean")
+async def get_library_proof_certificate_lean(
+    session_id: str,
+    proof_id: str,
+    scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
+    """Export archived Lean source keyed by its validated run and proof IDs."""
+    proof, lean_code = await _get_archived_export(session_id, proof_id, scope)
+    return PlainTextResponse(
+        content=lean_code,
+        headers={"Content-Disposition": f'attachment; filename="{proof["proof_id"]}.lean"'},
+    )
+
+
+async def _certificate_response(proof, lean_code: str) -> JSONResponse:
+    """Build the common typed certificate payload for live and archived proofs."""
     lean_version = ""
     mathlib_commit = ""
     if system_config.lean4_enabled:
@@ -1318,32 +1437,59 @@ async def get_proof_certificate(
             mathlib_commit = client.get_mathlib_commit()
         except (asyncio.TimeoutError, Exception) as exc:
             logger.warning("Lean 4 certificate metadata lookup timed out or failed: %s", exc)
+    normalized = _normalize_proof_response_provenance(proof)
+    payload = ProofCertificateResponse(
+        proof_id=normalized["proof_id"],
+        theorem_statement=normalized["theorem_statement"],
+        theorem_name=normalized.get("theorem_name", ""),
+        lean_code=lean_code,
+        solver=normalized.get("solver") or "Lean 4",
+        lean_version=lean_version,
+        mathlib_commit=mathlib_commit,
+        verified_at=(
+            normalized["created_at"].isoformat()
+            if normalized.get("created_at") and hasattr(normalized["created_at"], "isoformat")
+            else str(normalized.get("created_at") or "") or None
+        ),
+        source_type=normalized.get("source_type", ""),
+        source_id=normalized.get("source_id", ""),
+        source_title=normalized.get("source_title", ""),
+        run_id=normalized["run_id"],
+        user_prompt=normalized["user_prompt"],
+        novel=bool(normalized.get("novel")),
+        novelty_tier=normalized["novelty_tier"],
+        novelty_reasoning=normalized.get("novelty_reasoning", ""),
+        independent_novelty_tier=normalized["independent_novelty_tier"],
+        independent_novelty_reasoning=normalized["independent_novelty_reasoning"],
+        exact_duplicate_proof_id=normalized.get("exact_duplicate_proof_id", ""),
+        exact_duplicate_run_id=normalized.get("exact_duplicate_run_id", ""),
+        artifact_purpose=normalized.get("artifact_purpose") or "verified_occurrence",
+        canonical_identity_version=normalized.get("canonical_identity_version", ""),
+        canonical_theorem_statement_hash=normalized.get(
+            "canonical_theorem_statement_hash",
+            "",
+        ),
+        canonical_lean_code_hash=normalized.get("canonical_lean_code_hash", ""),
+        attempt_count=normalized.get("attempt_count") or 0,
+        solver_hints=list(normalized.get("solver_hints") or []),
+        dependencies=list(normalized.get("dependencies") or []),
+    )
+    return JSONResponse(content=payload.model_dump(mode="json"))
+
+
+@router.get("/{proof_id}/certificate", response_model=ProofCertificateResponse)
+async def get_proof_certificate(
+    proof_id: str,
+    scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
+    """Return a machine-readable proof certificate JSON payload."""
+    scoped_proof_database = _get_scoped_proof_database(scope)
+    proof = await _get_export_proof_or_404(proof_id, scoped_proof_database)
 
     lean_code = await _get_export_lean_code(proof_id, scoped_proof_database)
-    payload = {
-        "proof_id": proof.proof_id,
-        "theorem_statement": proof.theorem_statement,
-        "theorem_name": proof.theorem_name,
-        "lean_code": lean_code,
-        "solver": proof.solver or "Lean 4",
-        "lean_version": lean_version,
-        "mathlib_commit": mathlib_commit,
-        "verified_at": proof.created_at.isoformat() if proof.created_at else None,
-        "source_type": proof.source_type,
-        "source_id": proof.source_id,
-        "source_title": proof.source_title,
-        "novel": proof.novel,
-        "novelty_reasoning": proof.novelty_reasoning,
-        "attempt_count": proof.attempt_count,
-        "solver_hints": list(proof.solver_hints or []),
-        "dependencies": [dependency.model_dump(mode="json") for dependency in (proof.dependencies or [])],
-    }
-    return JSONResponse(
-        content=payload,
-        headers={
-            "Content-Disposition": f'attachment; filename="{proof_id}_certificate.json"',
-        },
-    )
+    response = await _certificate_response(proof, lean_code)
+    response.headers["Content-Disposition"] = f'attachment; filename="{proof_id}_certificate.json"'
+    return response
 
 
 @router.get("/{proof_id}/certificate.lean")
@@ -1477,4 +1623,4 @@ async def get_proof(
     proof = await scoped_proof_database.get_proof(proof_id)
     if proof is None:
         raise HTTPException(status_code=404, detail="Proof not found")
-    return proof.model_dump(mode="json")
+    return _normalize_proof_response_provenance(proof)

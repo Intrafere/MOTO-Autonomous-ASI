@@ -51,9 +51,16 @@ class AutonomousAPILogger:
             return
         
         self._initialized = True
+        self._prepared_root_identity = None
+        logger.info("AutonomousAPILogger initialized")
+
+    def _prepare_active_root(self) -> None:
+        identity = system_config.runtime_root_identity()
+        if self._prepared_root_identity == identity:
+            return
         self._ensure_log_file()
         self._scrub_persisted_full_payloads()
-        logger.info("AutonomousAPILogger initialized")
+        self._prepared_root_identity = identity
     
     def _ensure_log_file(self) -> None:
         """Ensure the log file and directory exist."""
@@ -159,6 +166,7 @@ class AutonomousAPILogger:
         """
         async with self._lock:
             try:
+                self._prepare_active_root()
                 prompt_meta = _payload_metadata(prompt, 1000)
                 response_meta = _payload_metadata(response_content, 2000)
                 store_full_payloads = bool(system_config.api_log_store_full_payloads)
@@ -230,6 +238,7 @@ class AutonomousAPILogger:
         """
         async with self._lock:
             try:
+                self._prepare_active_root()
                 log_path = self._get_log_path()
                 if not os.path.exists(log_path):
                     return []
@@ -282,6 +291,7 @@ class AutonomousAPILogger:
         """Clear autonomous API logs, optionally scoped to one workflow."""
         async with self._lock:
             try:
+                self._prepare_active_root()
                 if workflow:
                     log_path = self._get_log_path()
                     if not os.path.exists(log_path):

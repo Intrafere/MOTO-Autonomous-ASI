@@ -1,0 +1,24 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "master_proof_persisted",
+    "session_isolation"
+  ],
+  "fields": [
+    "workflow_filesystem_state",
+    "proof_scope_isolation",
+    "runtime_exclusivity"
+  ],
+  "invariants": [
+    "proof_scope.autonomous_events_not_manual"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_leanoj_master_proof_stop_resume_preserves_isolated_state",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+}

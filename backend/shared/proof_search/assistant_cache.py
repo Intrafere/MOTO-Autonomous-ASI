@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 from backend.shared.config import system_config
 from backend.shared.proof_search.assistant_models import (
+    ASSISTANT_PROOF_PACK_SCHEMA_VERSION,
     AssistantProofPack,
     AssistantTargetSnapshot,
 )
@@ -121,6 +122,8 @@ class AssistantRankCache:
         try:
             pack = AssistantProofPack.model_validate_json(row["pack_json"])
         except Exception:
+            return None
+        if pack.schema_version != ASSISTANT_PROOF_PACK_SCHEMA_VERSION:
             return None
         freshness = "cached" if pack.target_hash == target_hash else "stale-but-best-known"
         return pack.model_copy(update={"target_hash": target_hash, "freshness": freshness})

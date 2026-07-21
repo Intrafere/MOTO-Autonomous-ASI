@@ -83,7 +83,7 @@ export default function HighlightedModelsSidebar() {
               <OauthTag stacked />
               <div className="flex-row-center">
                 <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-                <div className="model-item-name">ChatGPT 5.5</div>
+                <div className="model-item-name">GPT 5.6</div>
                 <div className="ranking-badge ranking-badge--silver">🥈 SILVER</div>
               </div>
               <div className="model-item-badge">Powerful and affordable OAuth</div>
@@ -92,7 +92,7 @@ export default function HighlightedModelsSidebar() {
             <div className="model-item model-item--ranked model-item--bronze model-item--oa">
               <OauthTag />
               <div className="flex-row-center">
-                <div className="model-item-name">Grok 4.3</div>
+                <div className="model-item-name">Grok 4.5</div>
                 <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
               </div>
               <div className="model-item-badge">Powerful and affordable OAuth</div>
@@ -105,24 +105,50 @@ export default function HighlightedModelsSidebar() {
           </div>
 
           <div className="model-item">
-            <div className="model-item-name">Amazon Nova Pro/Premier</div>
+            <div className="model-item-name">Amazon's Nova</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
           <div className="model-item">
             <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-            <div className="model-item-name">Claude Opus/Sonnet/Haiku</div>
+            <div className="model-item-name">Anthropic's Claude</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item">
+            <div className="model-item-name">Cohere's Command A</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item">
+            <div className="model-item-name">Mistral AI's Mistral Large</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">DeepSeek</div>
+            <div className="model-item-name">Meta's Llama</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
           <div className="model-item">
-            <div className="model-item-name">Gemini Pro</div>
+            <div className="model-item-name">Moonshot AI's Kimi</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item">
+            <div className="model-item-name">AI21's Jamba</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item model-item--os">
+            <OsTag />
+            <div className="model-item-name">DeepSeek's DeepSeek</div>
+            <div className="model-item-badge">Highly knowledgeable</div>
+          </div>
+
+          <div className="model-item">
+            <div className="model-item-name">Google's Gemini Pro</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
@@ -134,13 +160,13 @@ export default function HighlightedModelsSidebar() {
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">GLM</div>
+            <div className="model-item-name">Z.AI's GLM</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">GLM Turbo</div>
+            <div className="model-item-name">Z.AI's GLM Turbo</div>
             <div className="model-item-badge">Fast validator</div>
           </div>
 
@@ -152,21 +178,21 @@ export default function HighlightedModelsSidebar() {
 
           <div className="model-item model-item--oa">
             <OauthTag />
-            <div className="model-item-name">Grok</div>
+            <div className="model-item-name">xAI's Grok</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
           <div className="model-item model-item--oa">
             <OauthTag stacked />
             <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-            <div className="model-item-name">ChatGPT</div>
+            <div className="model-item-name">OpenAI's ChatGPT</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
           <div className="model-item model-item--oa">
             <OauthTag stacked />
             <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
-            <div className="model-item-name">Sakana Fugu</div>
+            <div className="model-item-name">Sakana AI's Fugu</div>
             <div className="model-item-badge">Highly knowledgeable model fusion</div>
           </div>
 
@@ -177,13 +203,13 @@ export default function HighlightedModelsSidebar() {
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">Nemotron Super</div>
+            <div className="model-item-name">NVIDIA's Nemotron Super</div>
             <div className="model-item-badge">Balanced knowledge and speed</div>
           </div>
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">Nous Hermes</div>
+            <div className="model-item-name">Nous Research's Hermes</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
@@ -199,19 +225,19 @@ export default function HighlightedModelsSidebar() {
           </div>
 
           <div className="model-item">
-            <div className="model-item-name">MiniMax</div>
+            <div className="model-item-name">MiniMax's MiniMax</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">Qwen Coder</div>
+            <div className="model-item-name">Alibaba's Qwen Coder</div>
             <div className="model-item-badge">Computer science</div>
           </div>
 
           <div className="model-item model-item--os">
             <OsTag />
-            <div className="model-item-name">Qwen</div>
+            <div className="model-item-name">Alibaba's Qwen</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>
         </div>

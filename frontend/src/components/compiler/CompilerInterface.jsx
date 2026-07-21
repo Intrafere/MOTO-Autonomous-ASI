@@ -237,11 +237,13 @@ function CompilerInterface({
     }
   };
 
-  const handleTextFileLoaded = (content) => {
-    // Append to existing prompt with separator
-    const separator = compilerPrompt.trim() ? '\n\n' : '';
-    const newPrompt = compilerPrompt + separator + content;
-    setCompilerPrompt(newPrompt);
+  const handleTextFileLoaded = (content, filename = 'uploaded-file') => {
+    const isLeanFile = filename.toLowerCase().endsWith('.lean');
+    const labeledContext = `[UPLOADED ${isLeanFile ? 'LEAN FILE' : 'TEXT FILE'}: ${filename}]\n${content}`;
+    setCompilerPrompt(prevPrompt => {
+      const separator = prevPrompt.trim() ? '\n\n' : '';
+      return prevPrompt + separator + labeledContext;
+    });
   };
 
   const handleStart = async () => {
@@ -388,7 +390,7 @@ function CompilerInterface({
         lean4_lsp_idle_timeout: status.lean4_lsp_idle_timeout ?? 600,
         max_parallel_candidates: status.proof_max_parallel_candidates ?? 6,
         smt_enabled: Boolean(status.smt_enabled),
-        smt_timeout: status.smt_timeout ?? 30,
+        smt_timeout: status.smt_timeout ?? 300,
       });
       if (enabled) {
         const leanVersion = String(updatedStatus.lean4_version || updatedStatus.lean_version || '').trim();
@@ -450,64 +452,8 @@ function CompilerInterface({
         <div>
           <h2>Single Paper Writer</h2>
           <p className="settings-hint">
-            Compile the accepted aggregator database into one live mathematical paper.
+            Compile the accepted aggregator database into one live rigorous research paper or solution report.
           </p>
-        </div>
-        <div className="autonomous-controls-stack">
-          <div className="autonomous-controls">
-            {!status.is_running ? (
-              <button
-                onClick={handleStart}
-                className="btn-start"
-                disabled={isStarting || (anyWorkflowRunning && !status.is_running)}
-              >
-                {isStarting ? 'Starting...' : 'Start Writer'}
-              </button>
-            ) : (
-              <>
-                <span className="runtime-indicator" role="status" aria-live="polite" title="Single paper writer is running">
-                  <span className="runtime-indicator-dot" aria-hidden="true"></span>
-                  <span className="runtime-indicator-label">Running</span>
-                </span>
-                <button
-                  onClick={handleStop}
-                  className="btn-stop"
-                >
-                  Stop Writer
-                </button>
-              </>
-            )}
-          </div>
-          <div
-            className="allowed-outputs-row"
-            title="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
-          >
-            <span className="allowed-outputs-label">Allowed Outputs:</span>
-            <label
-              className="allowed-output-option"
-              title="Mathematical Proofs enables Lean 4 proof verification and proof-library output for this run."
-            >
-              <input
-                type="checkbox"
-                checked={proofOutputsAvailable && Boolean(allowedOutputs.mathematicalProofs)}
-                onChange={(event) => updateAllowedOutput('mathematicalProofs', event.target.checked)}
-                disabled={status.is_running || proofOutputUpdating || !proofOutputsAvailable}
-              />
-              <span className="allowed-output-text">Mathematical Proofs</span>
-            </label>
-            <label
-              className="allowed-output-option"
-              title="Research Papers enables the Single Paper Writer compilation output. When disabled, the writer runs proof extraction over the aggregator database instead of compiling a paper."
-            >
-              <input
-                type="checkbox"
-                checked={Boolean(allowedOutputs.researchPapers)}
-                onChange={(event) => updateAllowedOutput('researchPapers', event.target.checked)}
-                disabled={status.is_running}
-              />
-              <span className="allowed-output-text">Research Papers</span>
-            </label>
-          </div>
         </div>
       </div>
 
@@ -579,25 +525,85 @@ function CompilerInterface({
         </div>
       )}
 
-      <div className="research-prompt-section">
-        <label htmlFor="compilerPrompt">Compiler-Directing Prompt:</label>
-        <textarea
-          id="compilerPrompt"
-          value={compilerPrompt}
-          onChange={(e) => setCompilerPrompt(e.target.value)}
-          placeholder='Create a final prompt that exactly relates to a solution your aggregation database helps solve, i.e. "Tell me the most theoretically advanced perspective on the "squaring the circle" problem."'
-          rows={6}
-          disabled={status.is_running}
-        />
-        <TextFileUploader 
-          onFileLoaded={handleTextFileLoaded}
-          disabled={status.is_running}
-          maxSizeMB={5}
-          showCharCount={true}
-          confirmIfNotEmpty={true}
-          existingPromptLength={compilerPrompt.length}
-        />
-        <small>This prompt directs the compiler on what kind of mathematical document to create from the aggregated database. View your in-progress and final answer in the "Live Paper" tab.</small>
+      <div className="research-prompt-section prompt-composer-section">
+        <div className="prompt-composer">
+          <label htmlFor="compilerPrompt">Compiler-Directing Prompt:</label>
+          <textarea
+            id="compilerPrompt"
+            value={compilerPrompt}
+            onChange={(e) => setCompilerPrompt(e.target.value)}
+            placeholder='Create a final prompt that exactly relates to a solution your aggregation database helps solve, i.e. "Tell me the most theoretically advanced perspective on the "squaring the circle" problem."'
+            rows={6}
+            disabled={status.is_running}
+          />
+          <div className="prompt-composer-actions">
+            <TextFileUploader
+              onFileLoaded={handleTextFileLoaded}
+              disabled={status.is_running}
+              maxSizeMB={5}
+              showCharCount={true}
+              confirmIfNotEmpty={true}
+              existingPromptLength={compilerPrompt.length}
+            />
+            {!status.is_running ? (
+              <button
+                type="button"
+                onClick={handleStart}
+                className="btn-start prompt-composer-primary"
+                disabled={isStarting || (anyWorkflowRunning && !status.is_running)}
+              >
+                {isStarting ? 'Starting...' : 'Start Writer'}
+              </button>
+            ) : (
+              <div className="prompt-composer-running-actions">
+                <span className="runtime-indicator" role="status" aria-live="polite" title="Single paper writer is running">
+                  <span className="runtime-indicator-dot" aria-hidden="true"></span>
+                  <span className="runtime-indicator-label">Running</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleStop}
+                  className="btn-stop"
+                >
+                  Stop Writer
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="prompt-composer-options">
+          <div
+            className="allowed-outputs-row"
+            title="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
+          >
+            <span className="allowed-outputs-label">Allowed Outputs:</span>
+            <label
+              className="allowed-output-option"
+              title="Mathematical Proofs enables Lean 4 proof verification and proof-library output for this run."
+            >
+              <input
+                type="checkbox"
+                checked={proofOutputsAvailable && Boolean(allowedOutputs.mathematicalProofs)}
+                onChange={(event) => updateAllowedOutput('mathematicalProofs', event.target.checked)}
+                disabled={status.is_running || proofOutputUpdating || !proofOutputsAvailable}
+              />
+              <span className="allowed-output-text">Mathematical Proofs</span>
+            </label>
+            <label
+              className="allowed-output-option"
+              title="Research Papers enables the Single Paper Writer compilation output. When disabled, the writer runs proof extraction over the aggregator database instead of compiling a paper."
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(allowedOutputs.researchPapers)}
+                onChange={(event) => updateAllowedOutput('researchPapers', event.target.checked)}
+                disabled={status.is_running}
+              />
+              <span className="allowed-output-text">Research Papers</span>
+            </label>
+          </div>
+        </div>
+        <small>This prompt directs the compiler on what kind of rigorous paper or solution report to create from the aggregated database. View your in-progress and final answer in the "Live Paper" tab.</small>
       </div>
 
       <div className="stats-section">

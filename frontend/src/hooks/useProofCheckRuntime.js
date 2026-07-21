@@ -298,7 +298,7 @@ export function useProofCheckRuntime() {
         ...prev,
         [sourceKey]: {
           status: 'running',
-          candidateCount: prev[sourceKey]?.candidateCount ?? null,
+          candidateCount: null,
         },
       }));
       setQueuedChecks((prev) => {
@@ -318,6 +318,17 @@ export function useProofCheckRuntime() {
         [sourceKey]: {
           status: 'running',
           candidateCount: data.count ?? null,
+        },
+      }));
+    });
+
+    const unsubscribeNoCandidates = websocket.on('proof_check_no_candidates', (data) => {
+      const sourceKey = buildSourceKey(data.source_type, data.source_id);
+      setActiveChecks((prev) => ({
+        ...prev,
+        [sourceKey]: {
+          status: 'running',
+          candidateCount: 0,
         },
       }));
     });
@@ -346,6 +357,7 @@ export function useProofCheckRuntime() {
     return () => {
       unsubscribeStarted();
       unsubscribeCandidates();
+      unsubscribeNoCandidates();
       unsubscribeComplete();
     };
   }, [refreshProofStatus]);

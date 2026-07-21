@@ -1,0 +1,698 @@
+{
+  "artifact_type": "target_risk_analysis",
+  "risks": [
+    {
+      "description": "Hosted mode reaches proof settings or another desktop-only route or behavior.",
+      "existing_scenarios": [
+        "real_hosted_proof_settings_returns_desktop_unavailable"
+      ],
+      "gap_score": 15,
+      "missing_isolated_artifacts": [
+        "model:api.hosted_desktop_only_routes_unavailable",
+        "model:proof_runtime.hosted_proof_settings_unavailable",
+        "real_route:api.hosted_desktop_only_routes_unavailable"
+      ],
+      "priority": "critical",
+      "rank": 1,
+      "required_adapters": [
+        "model",
+        "real_route"
+      ],
+      "required_fields": [
+        "proof_runtime_gating",
+        "websocket_api_contracts",
+        "runtime_exclusivity",
+        "allowed_outputs"
+      ],
+      "risk_id": "risk.hosted_desktop_boundary",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "api.hosted_desktop_only_routes_unavailable",
+            "proof_runtime.hosted_proof_settings_unavailable"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        },
+        {
+          "adapter": "real_route",
+          "missing_invariants": [
+            "api.hosted_desktop_only_routes_unavailable"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_hosted_proof_settings_returns_desktop_unavailable"
+          ],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_runtime.hosted_proof_settings_unavailable",
+        "api.hosted_desktop_only_routes_unavailable"
+      ],
+      "title": "Hosted mode invokes desktop-only behavior"
+    },
+    {
+      "description": "Late child output changes state after a parent or user action takes ownership.",
+      "existing_scenarios": [
+        "real_parent_action_fencing_unavailable_without_production_seam"
+      ],
+      "gap_score": 12,
+      "missing_isolated_artifacts": [
+        "model:runtime.parent_action_fences_child_outputs",
+        "real_coordinator:runtime.parent_action_fences_child_outputs"
+      ],
+      "priority": "critical",
+      "rank": 2,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "runtime_exclusivity",
+        "workflow_filesystem_state",
+        "websocket_api_contracts"
+      ],
+      "risk_id": "risk.stale_child_phase_takeover",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "runtime.parent_action_fences_child_outputs"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "runtime.parent_action_fences_child_outputs"
+          ],
+          "result_statuses": [
+            "blocked"
+          ],
+          "scenario_ids": [
+            "real_parent_action_fencing_unavailable_without_production_seam"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "supporting_invariants": [
+        "runtime.parent_action_fences_child_outputs"
+      ],
+      "title": "Stale child output overrides parent phase"
+    },
+    {
+      "description": "Credit pause, stop, or reset loses or corrupts the durable proof cursor.",
+      "existing_scenarios": [
+        "generated_allowed_outputs_provider_pause_resume_seed_29",
+        "generated_allowed_outputs_provider_pause_resume_seed_7",
+        "generated_leanoj_durable_lifecycle_seed_29",
+        "generated_leanoj_durable_lifecycle_seed_7",
+        "model_allowed_outputs_provider_pause_stop_resume",
+        "real_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes",
+        "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam"
+      ],
+      "gap_score": 9,
+      "missing_isolated_artifacts": [
+        "real_coordinator:provider.reset_wakes_without_corrupting_checkpoint",
+        "real_coordinator:provider.stop_resume_preserves_pause"
+      ],
+      "priority": "critical",
+      "rank": 3,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "provider_pause_resume",
+        "workflow_filesystem_state",
+        "proof_runtime_gating"
+      ],
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_allowed_outputs_provider_pause_resume_seed_29",
+            "generated_allowed_outputs_provider_pause_resume_seed_7",
+            "generated_leanoj_durable_lifecycle_seed_29",
+            "generated_leanoj_durable_lifecycle_seed_7",
+            "model_allowed_outputs_provider_pause_stop_resume"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "provider.reset_wakes_without_corrupting_checkpoint",
+            "provider.stop_resume_preserves_pause"
+          ],
+          "result_statuses": [
+            "blocked",
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes",
+            "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam"
+          ],
+          "status": "blocked"
+        }
+      ],
+      "supporting_invariants": [
+        "provider.pause_preserves_checkpoint",
+        "provider.stop_resume_preserves_pause",
+        "provider.reset_wakes_without_corrupting_checkpoint"
+      ],
+      "title": "Provider pause loses resumable work"
+    },
+    {
+      "description": "Assistant proof memory reaches validators or remains live after disable.",
+      "existing_scenarios": [
+        "generated_assistant_prompt_context_seed_29",
+        "generated_assistant_prompt_context_seed_7",
+        "model_assistant_prompt_validator_exclusion",
+        "model_manual_proof_clear_scope_assistant"
+      ],
+      "gap_score": 8,
+      "missing_isolated_artifacts": [
+        "real_coordinator:assistant.disable_clears_live_pack",
+        "real_coordinator:assistant.no_validator_injection",
+        "real_coordinator:prompt.validator_excludes_assistant_memory"
+      ],
+      "priority": "high",
+      "rank": 4,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "assistant_memory",
+        "prompt_context"
+      ],
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_assistant_prompt_context_seed_29",
+            "generated_assistant_prompt_context_seed_7",
+            "model_assistant_prompt_validator_exclusion",
+            "model_manual_proof_clear_scope_assistant"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "assistant.disable_clears_live_pack",
+            "assistant.no_validator_injection",
+            "prompt.validator_excludes_assistant_memory"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "assistant.no_validator_injection",
+        "assistant.disable_clears_live_pack",
+        "prompt.validator_excludes_assistant_memory"
+      ],
+      "title": "Assistant memory crosses role boundary"
+    },
+    {
+      "description": "Generated appendices duplicate into source context or replace mandatory source text.",
+      "existing_scenarios": [
+        "generated_rag_prompt_boundaries_seed_29",
+        "generated_rag_prompt_boundaries_seed_7",
+        "real_generated_proof_appendix_stripping",
+        "real_model_visible_prompts_strip_generated_proof_appendices"
+      ],
+      "gap_score": 8,
+      "missing_isolated_artifacts": [
+        "model:proof_scope.generated_appendices_stripped_from_prompts",
+        "real_coordinator:prompt.proof_source_context_required"
+      ],
+      "priority": "high",
+      "rank": 5,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "prompt_context",
+        "proof_scope_isolation",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "proof_scope.generated_appendices_stripped_from_prompts"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_rag_prompt_boundaries_seed_29",
+            "generated_rag_prompt_boundaries_seed_7"
+          ],
+          "status": "uncovered"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "prompt.proof_source_context_required"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_generated_proof_appendix_stripping",
+            "real_model_visible_prompts_strip_generated_proof_appendices"
+          ],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "prompt.generated_appendices_stripped",
+        "proof_scope.generated_appendices_stripped_from_prompts",
+        "prompt.proof_source_context_required"
+      ],
+      "title": "Generated proofs reenter source prompts"
+    },
+    {
+      "description": "A pruned paper remains available to model or RAG context after removal.",
+      "existing_scenarios": [],
+      "gap_score": 8,
+      "missing_isolated_artifacts": [
+        "model:state.pruned_papers_excluded_from_context",
+        "real_coordinator:state.pruned_papers_excluded_from_context"
+      ],
+      "priority": "high",
+      "rank": 6,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "workflow_filesystem_state",
+        "prompt_context"
+      ],
+      "risk_id": "risk.pruned_paper_context_leak",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [
+            "state.pruned_papers_excluded_from_context"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "state.pruned_papers_excluded_from_context"
+          ],
+          "result_statuses": [],
+          "scenario_ids": [],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "state.pruned_papers_excluded_from_context"
+      ],
+      "title": "Pruned paper remains in model context"
+    },
+    {
+      "description": "Lean or SMT runs despite disabled proof-runtime controls.",
+      "existing_scenarios": [
+        "generated_output_and_proof_runtime_gating_seed_29",
+        "generated_output_and_proof_runtime_gating_seed_7",
+        "model_proof_runtime_gating_allowed_outputs",
+        "real_disabled_proof_runtime_skips_autonomous_checkpoint"
+      ],
+      "gap_score": 6,
+      "missing_isolated_artifacts": [
+        "real_coordinator:proof_runtime.no_smt_when_disabled"
+      ],
+      "priority": "critical",
+      "rank": 7,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_runtime_gating",
+        "allowed_outputs"
+      ],
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_output_and_proof_runtime_gating_seed_29",
+            "generated_output_and_proof_runtime_gating_seed_7",
+            "model_proof_runtime_gating_allowed_outputs"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "proof_runtime.no_smt_when_disabled"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_disabled_proof_runtime_skips_autonomous_checkpoint"
+          ],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_runtime.no_lean_when_disabled",
+        "proof_runtime.no_smt_when_disabled"
+      ],
+      "title": "Disabled proof runtime executes tools"
+    },
+    {
+      "description": "Allowed-output routing silently writes papers or strands a proof-only handoff.",
+      "existing_scenarios": [
+        "generated_allowed_outputs_provider_pause_resume_seed_29",
+        "generated_allowed_outputs_provider_pause_resume_seed_7",
+        "generated_output_and_proof_runtime_gating_seed_29",
+        "generated_output_and_proof_runtime_gating_seed_7",
+        "model_allowed_outputs_provider_pause_stop_resume",
+        "model_proof_runtime_gating_allowed_outputs",
+        "real_autonomous_proofs_only_handoff_returns_to_topic_exploration"
+      ],
+      "gap_score": 6,
+      "missing_isolated_artifacts": [
+        "real_coordinator:outputs.at_least_one_output_enabled"
+      ],
+      "priority": "critical",
+      "rank": 8,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "allowed_outputs",
+        "proof_runtime_gating",
+        "workflow_filesystem_state"
+      ],
+      "risk_id": "risk.proofs_only_enters_paper",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_allowed_outputs_provider_pause_resume_seed_29",
+            "generated_allowed_outputs_provider_pause_resume_seed_7",
+            "generated_output_and_proof_runtime_gating_seed_29",
+            "generated_output_and_proof_runtime_gating_seed_7",
+            "model_allowed_outputs_provider_pause_stop_resume",
+            "model_proof_runtime_gating_allowed_outputs"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [
+            "outputs.at_least_one_output_enabled"
+          ],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_autonomous_proofs_only_handoff_returns_to_topic_exploration"
+          ],
+          "status": "uncovered"
+        }
+      ],
+      "supporting_invariants": [
+        "outputs.at_least_one_output_enabled",
+        "outputs.proofs_only_no_paper_phase"
+      ],
+      "title": "Proofs-only run enters paper phases"
+    },
+    {
+      "description": "Clear/reset fails to remove active state or removes preserved run history.",
+      "existing_scenarios": [
+        "generated_manual_scope_clear_archive_seed_29",
+        "generated_manual_scope_clear_archive_seed_7",
+        "model_manual_proof_clear_scope_assistant",
+        "real_manual_archive_and_leanoj_clear_preserve_scope_contract"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "high",
+      "rank": 9,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "workflow_filesystem_state",
+        "proof_scope_isolation",
+        "assistant_memory"
+      ],
+      "risk_id": "risk.clear_destroys_history",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_manual_scope_clear_archive_seed_29",
+            "generated_manual_scope_clear_archive_seed_7",
+            "model_manual_proof_clear_scope_assistant"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_manual_archive_and_leanoj_clear_preserve_scope_contract"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "state.clear_removes_active_preserves_history",
+        "proof_scope.manual_clear_archives_active"
+      ],
+      "title": "Clear destroys history or leaves active state"
+    },
+    {
+      "description": "Overflow activity loses configured/effective route attribution, disappears on reload, duplicates terminal stop activity, or turns a scoped proof overflow into a workflow stop.",
+      "existing_scenarios": [
+        "generated_context_overflow_contract_seed_29",
+        "generated_context_overflow_contract_seed_7",
+        "real_autonomous_overflow_terminal_stop_once",
+        "real_manual_aggregator_overflow_identity_persists_across_reload",
+        "real_proof_context_overflow_is_scoped_nonfatal"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 10,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "websocket_api_contracts",
+        "workflow_filesystem_state",
+        "provider_pause_resume",
+        "proof_runtime_gating"
+      ],
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_context_overflow_contract_seed_29",
+            "generated_context_overflow_contract_seed_7"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_autonomous_overflow_terminal_stop_once",
+            "real_manual_aggregator_overflow_identity_persists_across_reload",
+            "real_proof_context_overflow_is_scoped_nonfatal"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "events.context_overflow_route_identity",
+        "events.context_overflow_persists_across_reload",
+        "events.context_overflow_terminal_stop_once",
+        "events.proof_context_overflow_nonfatal"
+      ],
+      "title": "Context overflow loses route identity or lifecycle semantics"
+    },
+    {
+      "description": "A directly injected source reappears as supplemental evidence, or optional retrieval silently replaces mandatory source text when the configured context is too small.",
+      "existing_scenarios": [
+        "generated_rag_prompt_boundaries_seed_29",
+        "generated_rag_prompt_boundaries_seed_7",
+        "real_direct_source_rag_exclusion_matrix",
+        "real_rigor_mandatory_source_overflow_fails_before_model_or_rag"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "high",
+      "rank": 11,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "prompt_context",
+        "workflow_filesystem_state",
+        "proof_runtime_gating"
+      ],
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_rag_prompt_boundaries_seed_29",
+            "generated_rag_prompt_boundaries_seed_7"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_direct_source_rag_exclusion_matrix",
+            "real_rigor_mandatory_source_overflow_fails_before_model_or_rag"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "prompt.direct_sources_excluded_from_rag",
+        "prompt.mandatory_source_overflow_fails_visible"
+      ],
+      "title": "Direct source is duplicated or displaced by RAG"
+    },
+    {
+      "description": "Manual, autonomous, archived, or event proof state is exposed in the wrong scope.",
+      "existing_scenarios": [
+        "generated_manual_scope_clear_archive_seed_29",
+        "generated_manual_scope_clear_archive_seed_7",
+        "generated_scoped_registered_proof_events_seed_29",
+        "generated_scoped_registered_proof_events_seed_7",
+        "model_manual_proof_clear_scope_assistant",
+        "model_websocket_proof_scope_events",
+        "real_leanoj_master_proof_stop_resume_preserves_isolated_state",
+        "real_manual_archive_and_leanoj_clear_preserve_scope_contract",
+        "real_manual_compiler_proof_only_uses_rigor_settings_and_manual_scope"
+      ],
+      "gap_score": 0,
+      "missing_isolated_artifacts": [],
+      "priority": "critical",
+      "rank": 12,
+      "required_adapters": [
+        "model",
+        "real_coordinator"
+      ],
+      "required_fields": [
+        "proof_scope_isolation",
+        "workflow_filesystem_state",
+        "websocket_api_contracts"
+      ],
+      "risk_id": "risk.proof_scope_leak",
+      "support": [
+        {
+          "adapter": "model",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "generated_manual_scope_clear_archive_seed_29",
+            "generated_manual_scope_clear_archive_seed_7",
+            "generated_scoped_registered_proof_events_seed_29",
+            "generated_scoped_registered_proof_events_seed_7",
+            "model_manual_proof_clear_scope_assistant",
+            "model_websocket_proof_scope_events"
+          ],
+          "status": "passed"
+        },
+        {
+          "adapter": "real_coordinator",
+          "missing_invariants": [],
+          "result_statuses": [
+            "passed"
+          ],
+          "scenario_ids": [
+            "real_leanoj_master_proof_stop_resume_preserves_isolated_state",
+            "real_manual_archive_and_leanoj_clear_preserve_scope_contract",
+            "real_manual_compiler_proof_only_uses_rigor_settings_and_manual_scope"
+          ],
+          "status": "passed"
+        }
+      ],
+      "supporting_invariants": [
+        "proof_scope.manual_not_in_autonomous_current",
+        "proof_scope.autonomous_events_not_manual",
+        "proof_scope.manual_clear_archives_active"
+      ],
+      "title": "Proof records leak across scopes"
+    }
+  ],
+  "schema_version": 1
+}

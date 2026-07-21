@@ -1,0 +1,2629 @@
+{
+  "artifact_type": "support_graph",
+  "basis": {
+    "declared": "Invariant catalog adapter declarations and target-risk requirements.",
+    "observed": "InteractionCoverage records produced by executable tests or truthful gap records."
+  },
+  "edges": [
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.disable_clears_live_pack",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.disable_clears_live_pack",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "generated_assistant_prompt_context_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.disable_clears_live_pack",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "generated_assistant_prompt_context_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.disable_clears_live_pack",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "model_assistant_prompt_validator_exclusion",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.disable_clears_live_pack",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "model_manual_proof_clear_scope_assistant",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.disable_clears_live_pack",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.disable_clears_live_pack",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.no_validator_injection",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.no_validator_injection",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "generated_assistant_prompt_context_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.no_validator_injection",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "generated_assistant_prompt_context_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.no_validator_injection",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "model_assistant_prompt_validator_exclusion",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.no_validator_injection",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "assistant_memory",
+      "invariant_id": "assistant.no_validator_injection",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.validator_excludes_assistant_memory",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.validator_excludes_assistant_memory",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "generated_assistant_prompt_context_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.validator_excludes_assistant_memory",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "generated_assistant_prompt_context_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.validator_excludes_assistant_memory",
+      "observed": true,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": "model_assistant_prompt_validator_exclusion",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.validator_excludes_assistant_memory",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.validator_excludes_assistant_memory",
+      "observed": false,
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": false,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "generated_manual_scope_clear_archive_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "generated_manual_scope_clear_archive_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "model_manual_proof_clear_scope_assistant",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "real_manual_archive_and_leanoj_clear_preserve_scope_contract",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "real_manual_aggregator_clear_archives_before_clear",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "real_manual_compiler_papers_lifecycle_and_clear_archive",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.clear_removes_active_preserves_history",
+      "observed": false,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.clear_removes_active_preserves_history",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "generated_manual_scope_clear_archive_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.clear_removes_active_preserves_history",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "generated_manual_scope_clear_archive_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.clear_removes_active_preserves_history",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "model_manual_proof_clear_scope_assistant",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.clear_removes_active_preserves_history",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "real_manual_archive_and_leanoj_clear_preserve_scope_contract",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.clear_removes_active_preserves_history",
+      "observed": true,
+      "risk_id": "risk.clear_destroys_history",
+      "scenario_id": "real_manual_compiler_papers_lifecycle_and_clear_archive",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_persists_across_reload",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "browser_overflow_activity_persists_with_attribution_and_terminal_deduplication",
+      "status": "passed",
+      "test_file": "tests/workflow_browser_smoke/overflow-activity.spec.js"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_persists_across_reload",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "generated_context_overflow_contract_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_persists_across_reload",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "generated_context_overflow_contract_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_persists_across_reload",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "real_manual_aggregator_overflow_identity_persists_across_reload",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_persists_across_reload",
+      "observed": false,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_route_identity",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "browser_overflow_activity_persists_with_attribution_and_terminal_deduplication",
+      "status": "passed",
+      "test_file": "tests/workflow_browser_smoke/overflow-activity.spec.js"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_route_identity",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "generated_context_overflow_contract_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_route_identity",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "generated_context_overflow_contract_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_route_identity",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "real_autonomous_overflow_terminal_stop_once",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_route_identity",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "real_manual_aggregator_overflow_identity_persists_across_reload",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_route_identity",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "real_proof_context_overflow_is_scoped_nonfatal",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_route_identity",
+      "observed": false,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_terminal_stop_once",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "browser_overflow_activity_persists_with_attribution_and_terminal_deduplication",
+      "status": "passed",
+      "test_file": "tests/workflow_browser_smoke/overflow-activity.spec.js"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_terminal_stop_once",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "generated_context_overflow_contract_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_terminal_stop_once",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "generated_context_overflow_contract_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_terminal_stop_once",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "real_autonomous_overflow_terminal_stop_once",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.context_overflow_terminal_stop_once",
+      "observed": false,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.proof_context_overflow_nonfatal",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "browser_overflow_activity_persists_with_attribution_and_terminal_deduplication",
+      "status": "passed",
+      "test_file": "tests/workflow_browser_smoke/overflow-activity.spec.js"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.proof_context_overflow_nonfatal",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "generated_context_overflow_contract_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.proof_context_overflow_nonfatal",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "generated_context_overflow_contract_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.proof_context_overflow_nonfatal",
+      "observed": true,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": "real_proof_context_overflow_is_scoped_nonfatal",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "websocket_api_contracts",
+      "invariant_id": "events.proof_context_overflow_nonfatal",
+      "observed": false,
+      "risk_id": "risk.context_overflow_activity_loses_identity",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.direct_sources_excluded_from_rag",
+      "observed": false,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.direct_sources_excluded_from_rag",
+      "observed": true,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": "generated_rag_prompt_boundaries_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.direct_sources_excluded_from_rag",
+      "observed": true,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": "generated_rag_prompt_boundaries_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.direct_sources_excluded_from_rag",
+      "observed": true,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": "real_direct_source_rag_exclusion_matrix",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.direct_sources_excluded_from_rag",
+      "observed": false,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.mandatory_source_overflow_fails_visible",
+      "observed": false,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.mandatory_source_overflow_fails_visible",
+      "observed": true,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": "generated_rag_prompt_boundaries_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.mandatory_source_overflow_fails_visible",
+      "observed": true,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": "generated_rag_prompt_boundaries_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.mandatory_source_overflow_fails_visible",
+      "observed": true,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": "real_rigor_mandatory_source_overflow_fails_before_model_or_rag",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.mandatory_source_overflow_fails_visible",
+      "observed": false,
+      "risk_id": "risk.direct_source_duplicated_by_rag",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_lean_when_disabled",
+      "observed": false,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_lean_when_disabled",
+      "observed": true,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": "generated_output_and_proof_runtime_gating_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_lean_when_disabled",
+      "observed": true,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": "generated_output_and_proof_runtime_gating_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_lean_when_disabled",
+      "observed": true,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": "model_proof_runtime_gating_allowed_outputs",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_lean_when_disabled",
+      "observed": true,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": "real_disabled_proof_runtime_skips_autonomous_checkpoint",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_lean_when_disabled",
+      "observed": false,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_smt_when_disabled",
+      "observed": false,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_smt_when_disabled",
+      "observed": true,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": "generated_output_and_proof_runtime_gating_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_smt_when_disabled",
+      "observed": true,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": "generated_output_and_proof_runtime_gating_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_smt_when_disabled",
+      "observed": true,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": "model_proof_runtime_gating_allowed_outputs",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_smt_when_disabled",
+      "observed": false,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.no_smt_when_disabled",
+      "observed": false,
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.generated_appendices_stripped",
+      "observed": false,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.generated_appendices_stripped",
+      "observed": true,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": "generated_rag_prompt_boundaries_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.generated_appendices_stripped",
+      "observed": true,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": "generated_rag_prompt_boundaries_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.generated_appendices_stripped",
+      "observed": true,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": "real_model_visible_prompts_strip_generated_proof_appendices",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.generated_appendices_stripped",
+      "observed": false,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.proof_source_context_required",
+      "observed": false,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.proof_source_context_required",
+      "observed": true,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": "generated_rag_prompt_boundaries_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "prompt_context",
+      "invariant_id": "prompt.proof_source_context_required",
+      "observed": true,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": "generated_rag_prompt_boundaries_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.proof_source_context_required",
+      "observed": false,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "prompt_context",
+      "invariant_id": "prompt.proof_source_context_required",
+      "observed": false,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.generated_appendices_stripped_from_prompts",
+      "observed": false,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.generated_appendices_stripped_from_prompts",
+      "observed": false,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.generated_appendices_stripped_from_prompts",
+      "observed": true,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": "real_generated_proof_appendix_stripping",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.generated_appendices_stripped_from_prompts",
+      "observed": true,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": "real_model_visible_prompts_strip_generated_proof_appendices",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.generated_appendices_stripped_from_prompts",
+      "observed": false,
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "api.hosted_desktop_only_routes_unavailable",
+      "observed": true,
+      "risk_id": "risk.hosted_desktop_boundary",
+      "scenario_id": "browser_hosted_startup_respects_desktop_capability_boundaries",
+      "status": "passed",
+      "test_file": "tests/workflow_browser_smoke/hosted-capabilities.spec.js"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "invariant_id": "api.hosted_desktop_only_routes_unavailable",
+      "observed": false,
+      "risk_id": "risk.hosted_desktop_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "websocket_api_contracts",
+      "invariant_id": "api.hosted_desktop_only_routes_unavailable",
+      "observed": false,
+      "risk_id": "risk.hosted_desktop_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "websocket_api_contracts",
+      "invariant_id": "api.hosted_desktop_only_routes_unavailable",
+      "observed": false,
+      "risk_id": "risk.hosted_desktop_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.hosted_proof_settings_unavailable",
+      "observed": false,
+      "risk_id": "risk.hosted_desktop_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.hosted_proof_settings_unavailable",
+      "observed": false,
+      "risk_id": "risk.hosted_desktop_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.hosted_proof_settings_unavailable",
+      "observed": false,
+      "risk_id": "risk.hosted_desktop_boundary",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "invariant_id": "proof_runtime.hosted_proof_settings_unavailable",
+      "observed": true,
+      "risk_id": "risk.hosted_desktop_boundary",
+      "scenario_id": "real_hosted_proof_settings_returns_desktop_unavailable",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.autonomous_events_not_manual",
+      "observed": false,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.autonomous_events_not_manual",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "generated_scoped_registered_proof_events_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.autonomous_events_not_manual",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "generated_scoped_registered_proof_events_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.autonomous_events_not_manual",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "model_websocket_proof_scope_events",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.autonomous_events_not_manual",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "real_leanoj_master_proof_stop_resume_preserves_isolated_state",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.autonomous_events_not_manual",
+      "observed": false,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": false,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "generated_manual_scope_clear_archive_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "generated_manual_scope_clear_archive_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "model_manual_proof_clear_scope_assistant",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "real_manual_archive_and_leanoj_clear_preserve_scope_contract",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "real_manual_aggregator_clear_archives_before_clear",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_clear_archives_active",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "real_manual_compiler_papers_lifecycle_and_clear_archive",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_not_in_autonomous_current",
+      "observed": false,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_not_in_autonomous_current",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "generated_manual_scope_clear_archive_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_not_in_autonomous_current",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "generated_manual_scope_clear_archive_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_not_in_autonomous_current",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "model_manual_proof_clear_scope_assistant",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_not_in_autonomous_current",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "real_manual_compiler_proof_only_uses_rigor_settings_and_manual_scope",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "invariant_id": "proof_scope.manual_not_in_autonomous_current",
+      "observed": true,
+      "risk_id": "risk.proof_scope_leak",
+      "scenario_id": "real_proof_scope_matrix_isolated_under_temp_root",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.at_least_one_output_enabled",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "browser_autonomous_start_stop_preserves_single_ui_owner",
+      "status": "passed",
+      "test_file": "tests/workflow_browser_smoke/autonomous-controls.spec.js"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.at_least_one_output_enabled",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "generated_output_and_proof_runtime_gating_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.at_least_one_output_enabled",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "generated_output_and_proof_runtime_gating_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.at_least_one_output_enabled",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "model_proof_runtime_gating_allowed_outputs",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.at_least_one_output_enabled",
+      "observed": false,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.at_least_one_output_enabled",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "real_manual_compiler_rejects_no_allowed_outputs",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.proofs_only_no_paper_phase",
+      "observed": false,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.proofs_only_no_paper_phase",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.proofs_only_no_paper_phase",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.proofs_only_no_paper_phase",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.proofs_only_no_paper_phase",
+      "observed": true,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": "real_autonomous_proofs_only_handoff_returns_to_topic_exploration",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "allowed_outputs",
+      "invariant_id": "outputs.proofs_only_no_paper_phase",
+      "observed": false,
+      "risk_id": "risk.proofs_only_enters_paper",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.pause_preserves_checkpoint",
+      "observed": false,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.pause_preserves_checkpoint",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.pause_preserves_checkpoint",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.pause_preserves_checkpoint",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.pause_preserves_checkpoint",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "real_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.pause_preserves_checkpoint",
+      "observed": false,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.reset_wakes_without_corrupting_checkpoint",
+      "observed": false,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.reset_wakes_without_corrupting_checkpoint",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.reset_wakes_without_corrupting_checkpoint",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.reset_wakes_without_corrupting_checkpoint",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.reset_wakes_without_corrupting_checkpoint",
+      "observed": false,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.reset_wakes_without_corrupting_checkpoint",
+      "observed": false,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.stop_resume_preserves_pause",
+      "observed": false,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.stop_resume_preserves_pause",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.stop_resume_preserves_pause",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.stop_resume_preserves_pause",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "generated_leanoj_durable_lifecycle_seed_29",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.stop_resume_preserves_pause",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "generated_leanoj_durable_lifecycle_seed_7",
+      "status": "passed",
+      "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.stop_resume_preserves_pause",
+      "observed": true,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
+      "status": "passed",
+      "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.stop_resume_preserves_pause",
+      "observed": true,
+      "reason": "Existing coordinator coverage observes pause/reset resume, but no bounded test seam independently interleaves user Stop while the provider wait is active.",
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
+      "status": "blocked",
+      "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "invariant_id": "provider.stop_resume_preserves_pause",
+      "observed": false,
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.pruned_papers_excluded_from_context",
+      "observed": false,
+      "risk_id": "risk.pruned_paper_context_leak",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.pruned_papers_excluded_from_context",
+      "observed": false,
+      "risk_id": "risk.pruned_paper_context_leak",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.pruned_papers_excluded_from_context",
+      "observed": false,
+      "risk_id": "risk.pruned_paper_context_leak",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_route",
+      "declared": true,
+      "field": "workflow_filesystem_state",
+      "invariant_id": "state.pruned_papers_excluded_from_context",
+      "observed": true,
+      "risk_id": "risk.pruned_paper_context_leak",
+      "scenario_id": "real_pruned_paper_preserved_but_removed_from_active_context",
+      "status": "passed",
+      "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+    },
+    {
+      "adapter": "browser_smoke",
+      "declared": false,
+      "field": "runtime_exclusivity",
+      "invariant_id": "runtime.parent_action_fences_child_outputs",
+      "observed": false,
+      "risk_id": "risk.stale_child_phase_takeover",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "runtime_exclusivity",
+      "invariant_id": "runtime.parent_action_fences_child_outputs",
+      "observed": false,
+      "risk_id": "risk.stale_child_phase_takeover",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "runtime_exclusivity",
+      "invariant_id": "runtime.parent_action_fences_child_outputs",
+      "observed": true,
+      "reason": "The invariant catalog declares model-only support and no existing isolated production seam exposes stale child output acceptance after parent takeover.",
+      "risk_id": "risk.stale_child_phase_takeover",
+      "scenario_id": "real_parent_action_fencing_unavailable_without_production_seam",
+      "status": "blocked",
+      "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "runtime_exclusivity",
+      "invariant_id": "runtime.parent_action_fences_child_outputs",
+      "observed": false,
+      "risk_id": "risk.stale_child_phase_takeover",
+      "scenario_id": null,
+      "status": "uncovered",
+      "test_file": null
+    }
+  ],
+  "gaps": [
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "assistant_memory",
+      "gap_id": "risk.assistant_memory_crosses_boundary:assistant.disable_clears_live_pack:real_coordinator",
+      "invariant_id": "assistant.disable_clears_live_pack",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "assistant_memory",
+      "gap_id": "risk.assistant_memory_crosses_boundary:assistant.no_validator_injection:real_coordinator",
+      "invariant_id": "assistant.no_validator_injection",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "prompt_context",
+      "gap_id": "risk.assistant_memory_crosses_boundary:prompt.validator_excludes_assistant_memory:real_coordinator",
+      "invariant_id": "prompt.validator_excludes_assistant_memory",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.assistant_memory_crosses_boundary",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "proof_runtime_gating",
+      "gap_id": "risk.disabled_proof_runtime_executes:proof_runtime.no_smt_when_disabled:real_coordinator",
+      "invariant_id": "proof_runtime.no_smt_when_disabled",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.disabled_proof_runtime_executes",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "prompt_context",
+      "gap_id": "risk.generated_proofs_reenter_prompts:prompt.proof_source_context_required:real_coordinator",
+      "invariant_id": "prompt.proof_source_context_required",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_scope_isolation",
+      "gap_id": "risk.generated_proofs_reenter_prompts:proof_scope.generated_appendices_stripped_from_prompts:model",
+      "invariant_id": "proof_scope.generated_appendices_stripped_from_prompts",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.generated_proofs_reenter_prompts",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "websocket_api_contracts",
+      "gap_id": "risk.hosted_desktop_boundary:api.hosted_desktop_only_routes_unavailable:model",
+      "invariant_id": "api.hosted_desktop_only_routes_unavailable",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.hosted_desktop_boundary",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_route",
+      "declared": false,
+      "field": "websocket_api_contracts",
+      "gap_id": "risk.hosted_desktop_boundary:api.hosted_desktop_only_routes_unavailable:real_route",
+      "invariant_id": "api.hosted_desktop_only_routes_unavailable",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.hosted_desktop_boundary",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "proof_runtime_gating",
+      "gap_id": "risk.hosted_desktop_boundary:proof_runtime.hosted_proof_settings_unavailable:model",
+      "invariant_id": "proof_runtime.hosted_proof_settings_unavailable",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.hosted_desktop_boundary",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "allowed_outputs",
+      "gap_id": "risk.proofs_only_enters_paper:outputs.at_least_one_output_enabled:real_coordinator",
+      "invariant_id": "outputs.at_least_one_output_enabled",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.proofs_only_enters_paper",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "provider_pause_resume",
+      "gap_id": "risk.provider_pause_loses_checkpoint:provider.reset_wakes_without_corrupting_checkpoint:real_coordinator",
+      "invariant_id": "provider.reset_wakes_without_corrupting_checkpoint",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.provider_pause_loses_checkpoint",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "workflow_filesystem_state",
+      "gap_id": "risk.pruned_paper_context_leak:state.pruned_papers_excluded_from_context:model",
+      "invariant_id": "state.pruned_papers_excluded_from_context",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.pruned_paper_context_leak",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "real_coordinator",
+      "declared": false,
+      "field": "workflow_filesystem_state",
+      "gap_id": "risk.pruned_paper_context_leak:state.pruned_papers_excluded_from_context:real_coordinator",
+      "invariant_id": "state.pruned_papers_excluded_from_context",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.pruned_paper_context_leak",
+      "status": "uncovered"
+    },
+    {
+      "adapter": "model",
+      "declared": true,
+      "field": "runtime_exclusivity",
+      "gap_id": "risk.stale_child_phase_takeover:runtime.parent_action_fences_child_outputs:model",
+      "invariant_id": "runtime.parent_action_fences_child_outputs",
+      "reason": "No observed coverage record exists for this required risk/invariant/adapter basis.",
+      "risk_id": "risk.stale_child_phase_takeover",
+      "status": "uncovered"
+    }
+  ],
+  "nodes": {
+    "adapters": [
+      "model",
+      "real_route",
+      "real_coordinator",
+      "browser_smoke"
+    ],
+    "invariants": [
+      {
+        "declared_adapters": [
+          "browser_smoke",
+          "model"
+        ],
+        "field": "websocket_api_contracts",
+        "invariant_id": "api.hosted_desktop_only_routes_unavailable"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "assistant_memory",
+        "invariant_id": "assistant.disable_clears_live_pack"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "assistant_memory",
+        "invariant_id": "assistant.no_validator_injection"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "assistant_memory",
+        "invariant_id": "assistant.non_blocking_retrieval"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "assistant_memory",
+        "invariant_id": "assistant.stagnant_pack_backoff_not_shutdown"
+      },
+      {
+        "declared_adapters": [
+          "browser_smoke",
+          "model",
+          "real_coordinator"
+        ],
+        "field": "websocket_api_contracts",
+        "invariant_id": "events.context_overflow_persists_across_reload"
+      },
+      {
+        "declared_adapters": [
+          "browser_smoke",
+          "model",
+          "real_coordinator"
+        ],
+        "field": "websocket_api_contracts",
+        "invariant_id": "events.context_overflow_route_identity"
+      },
+      {
+        "declared_adapters": [
+          "browser_smoke",
+          "model",
+          "real_coordinator"
+        ],
+        "field": "websocket_api_contracts",
+        "invariant_id": "events.context_overflow_terminal_stop_once"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "websocket_api_contracts",
+        "invariant_id": "events.frontend_events_include_scope_phase"
+      },
+      {
+        "declared_adapters": [
+          "browser_smoke",
+          "model",
+          "real_coordinator"
+        ],
+        "field": "websocket_api_contracts",
+        "invariant_id": "events.proof_context_overflow_nonfatal"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "websocket_api_contracts",
+        "invariant_id": "events.proof_verified_after_registration"
+      },
+      {
+        "declared_adapters": [
+          "browser_smoke",
+          "model",
+          "real_route"
+        ],
+        "field": "allowed_outputs",
+        "invariant_id": "outputs.at_least_one_output_enabled"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "allowed_outputs",
+        "invariant_id": "outputs.papers_only_skips_proof_work"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "allowed_outputs",
+        "invariant_id": "outputs.proofs_only_no_paper_phase"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "prompt_context",
+        "invariant_id": "prompt.direct_sources_excluded_from_rag"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "prompt_context",
+        "invariant_id": "prompt.generated_appendices_stripped"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "prompt_context",
+        "invariant_id": "prompt.mandatory_source_overflow_fails_visible"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "prompt_context",
+        "invariant_id": "prompt.proof_source_context_required"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "prompt_context",
+        "invariant_id": "prompt.user_prompt_direct_injected"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "prompt_context",
+        "invariant_id": "prompt.validator_excludes_assistant_memory"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_route"
+        ],
+        "field": "proof_runtime_gating",
+        "invariant_id": "proof_runtime.hosted_proof_settings_unavailable"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_runtime_gating",
+        "invariant_id": "proof_runtime.no_lean_when_disabled"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "proof_runtime_gating",
+        "invariant_id": "proof_runtime.no_smt_when_disabled"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "proof_runtime_gating",
+        "invariant_id": "proof_runtime.truncation_is_attempt_failure"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_scope_isolation",
+        "invariant_id": "proof_scope.autonomous_events_not_manual"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_scope_isolation",
+        "invariant_id": "proof_scope.generated_appendices_stripped_from_prompts"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator",
+          "real_route"
+        ],
+        "field": "proof_scope_isolation",
+        "invariant_id": "proof_scope.manual_clear_archives_active"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator",
+          "real_route"
+        ],
+        "field": "proof_scope_isolation",
+        "invariant_id": "proof_scope.manual_not_in_autonomous_current"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "provider_pause_resume",
+        "invariant_id": "provider.pause_preserves_checkpoint"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "provider_pause_resume",
+        "invariant_id": "provider.reset_wakes_without_corrupting_checkpoint"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "provider_pause_resume",
+        "invariant_id": "provider.stop_resume_preserves_pause"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_route"
+        ],
+        "field": "runtime_exclusivity",
+        "invariant_id": "runtime.child_tasks_count_as_active"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "runtime_exclusivity",
+        "invariant_id": "runtime.parent_action_fences_child_outputs"
+      },
+      {
+        "declared_adapters": [
+          "browser_smoke",
+          "model",
+          "real_route"
+        ],
+        "field": "runtime_exclusivity",
+        "invariant_id": "runtime.single_active_workflow"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator",
+          "real_route"
+        ],
+        "field": "workflow_filesystem_state",
+        "invariant_id": "state.clear_removes_active_preserves_history"
+      },
+      {
+        "declared_adapters": [
+          "model"
+        ],
+        "field": "workflow_filesystem_state",
+        "invariant_id": "state.completed_brainstorm_no_replay_handoff"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_route"
+        ],
+        "field": "workflow_filesystem_state",
+        "invariant_id": "state.pruned_papers_excluded_from_context"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "workflow_filesystem_state",
+        "invariant_id": "state.runtime_roots_are_active_roots"
+      }
+    ],
+    "risks": [
+      {
+        "priority": "high",
+        "risk_id": "risk.assistant_memory_crosses_boundary",
+        "title": "Assistant memory crosses role boundary"
+      },
+      {
+        "priority": "high",
+        "risk_id": "risk.clear_destroys_history",
+        "title": "Clear destroys history or leaves active state"
+      },
+      {
+        "priority": "critical",
+        "risk_id": "risk.context_overflow_activity_loses_identity",
+        "title": "Context overflow loses route identity or lifecycle semantics"
+      },
+      {
+        "priority": "high",
+        "risk_id": "risk.direct_source_duplicated_by_rag",
+        "title": "Direct source is duplicated or displaced by RAG"
+      },
+      {
+        "priority": "critical",
+        "risk_id": "risk.disabled_proof_runtime_executes",
+        "title": "Disabled proof runtime executes tools"
+      },
+      {
+        "priority": "high",
+        "risk_id": "risk.generated_proofs_reenter_prompts",
+        "title": "Generated proofs reenter source prompts"
+      },
+      {
+        "priority": "critical",
+        "risk_id": "risk.hosted_desktop_boundary",
+        "title": "Hosted mode invokes desktop-only behavior"
+      },
+      {
+        "priority": "critical",
+        "risk_id": "risk.proof_scope_leak",
+        "title": "Proof records leak across scopes"
+      },
+      {
+        "priority": "critical",
+        "risk_id": "risk.proofs_only_enters_paper",
+        "title": "Proofs-only run enters paper phases"
+      },
+      {
+        "priority": "critical",
+        "risk_id": "risk.provider_pause_loses_checkpoint",
+        "title": "Provider pause loses resumable work"
+      },
+      {
+        "priority": "high",
+        "risk_id": "risk.pruned_paper_context_leak",
+        "title": "Pruned paper remains in model context"
+      },
+      {
+        "priority": "critical",
+        "risk_id": "risk.stale_child_phase_takeover",
+        "title": "Stale child output overrides parent phase"
+      }
+    ],
+    "scenarios": [
+      {
+        "adapter": "browser_smoke",
+        "result": "passed",
+        "scenario_id": "browser_autonomous_start_stop_preserves_single_ui_owner",
+        "test_file": "tests/workflow_browser_smoke/autonomous-controls.spec.js"
+      },
+      {
+        "adapter": "browser_smoke",
+        "result": "passed",
+        "scenario_id": "browser_hosted_startup_respects_desktop_capability_boundaries",
+        "test_file": "tests/workflow_browser_smoke/hosted-capabilities.spec.js"
+      },
+      {
+        "adapter": "browser_smoke",
+        "result": "passed",
+        "scenario_id": "browser_mode_switching_preserves_in_memory_default_and_developer_gate",
+        "test_file": "tests/workflow_browser_smoke/mode-switching.spec.js"
+      },
+      {
+        "adapter": "browser_smoke",
+        "result": "passed",
+        "scenario_id": "browser_overflow_activity_persists_with_attribution_and_terminal_deduplication",
+        "test_file": "tests/workflow_browser_smoke/overflow-activity.spec.js"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_allowed_outputs_provider_pause_resume_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_assistant_prompt_context_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_assistant_prompt_context_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_autonomous_paper_checkpoint_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_autonomous_paper_checkpoint_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_context_overflow_contract_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_context_overflow_contract_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_leanoj_durable_lifecycle_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_leanoj_durable_lifecycle_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_manual_aggregator_lifecycle_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_manual_aggregator_lifecycle_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_manual_scope_clear_archive_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_manual_scope_clear_archive_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_output_and_proof_runtime_gating_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_output_and_proof_runtime_gating_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_rag_prompt_boundaries_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_rag_prompt_boundaries_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_runtime_start_exclusivity_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_runtime_start_exclusivity_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_scoped_registered_proof_events_seed_29",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "generated_scoped_registered_proof_events_seed_7",
+        "test_file": "tests/workflow_recombinatory/test_mode_aware_generator.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
+        "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "model_assistant_prompt_validator_exclusion",
+        "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "model_manual_proof_clear_scope_assistant",
+        "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "model_proof_runtime_gating_allowed_outputs",
+        "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
+        "scenario_id": "model_websocket_proof_scope_events",
+        "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_actual_route_start_conflict_matrix_no_side_effects",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_autonomous_overflow_terminal_stop_once",
+        "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_autonomous_proofs_only_handoff_returns_to_topic_exploration",
+        "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes",
+        "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_direct_source_rag_exclusion_matrix",
+        "test_file": "tests/workflow_real_adapters/test_build_e_rag_prompt_context.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_disabled_proof_runtime_skips_autonomous_checkpoint",
+        "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_generated_proof_appendix_stripping",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_hosted_proof_settings_returns_desktop_unavailable",
+        "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_leanoj_coordinator_skip_force_clear_and_intermediate_edit",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "blocked",
+        "scenario_id": "real_leanoj_full_final_loop_not_safely_bounded",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_leanoj_master_proof_stop_resume_preserves_isolated_state",
+        "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_manual_aggregator_clear_archives_before_clear",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_manual_aggregator_durable_hydration_and_clear_blocker",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_manual_aggregator_overflow_identity_persists_across_reload",
+        "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_manual_aggregator_route_lifecycle_output_and_temp_root",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_manual_archive_and_leanoj_clear_preserve_scope_contract",
+        "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_manual_compiler_papers_lifecycle_and_clear_archive",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_manual_compiler_proof_only_background_ownership",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_manual_compiler_proof_only_uses_rigor_settings_and_manual_scope",
+        "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_manual_compiler_rejects_no_allowed_outputs",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_model_visible_prompts_strip_generated_proof_appendices",
+        "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "blocked",
+        "scenario_id": "real_parent_action_fencing_unavailable_without_production_seam",
+        "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_proof_context_overflow_is_scoped_nonfatal",
+        "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_proof_scope_matrix_isolated_under_temp_root",
+        "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "blocked",
+        "scenario_id": "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
+        "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_pruned_paper_preserved_but_removed_from_active_context",
+        "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_rigor_mandatory_source_overflow_fails_before_model_or_rag",
+        "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_route_pending_child_activity_counts_as_active",
+        "test_file": "tests/workflow_real_adapters/test_route_conflicts.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_route_start_conflicts_preserve_single_workflow",
+        "test_file": "tests/workflow_real_adapters/test_route_conflicts.py"
+      },
+      {
+        "adapter": "real_route",
+        "result": "passed",
+        "scenario_id": "real_shared_start_guard_representative_race",
+        "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+      }
+    ]
+  },
+  "schema_version": 1
+}

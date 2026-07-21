@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
 import TextFileUploader from '../TextFileUploader';
+import '../autonomous/AutonomousResearch.css';
 import '../settings-common.css';
 
 export default function AggregatorInterface({
@@ -14,8 +15,8 @@ export default function AggregatorInterface({
 }) {
   const [isRunning, setIsRunning] = useState(false);
   const [status, setStatus] = useState(null);
-  const [uploadedFiles, setUploadedFiles] = useState([]);
   const lmStudioEnabled = capabilities?.lmStudioEnabled !== false;
+  const attachedFiles = config.uploadedFiles || [];
 
   useEffect(() => {
     fetchStatus();
@@ -38,27 +39,45 @@ export default function AggregatorInterface({
 
   const handleFileUpload = async (event) => {
     const files = Array.from(event.target.files);
+    event.target.value = '';
     
     for (const file of files) {
       try {
         const result = await api.uploadFile(file);
-        setUploadedFiles(prev => [...prev, result.path]);
         setConfig(prev => ({
           ...prev,
-          uploadedFiles: [...prev.uploadedFiles, result.path]
+          uploadedFiles: Array.from(new Set([...(prev.uploadedFiles || []), result.path]))
         }));
       } catch (error) {
         console.error('Failed to upload file:', error);
-        alert(`Failed to upload ${file.name}`);
+        alert(`Failed to upload ${file.name}: ${error.details || error.message}`);
       }
     }
   };
 
-  const handleTextFileLoaded = (content) => {
-    // Append to existing prompt with separator
-    const separator = config.userPrompt.trim() ? '\n\n' : '';
-    const newPrompt = config.userPrompt + separator + content;
-    setConfig({ ...config, userPrompt: newPrompt });
+  const handleTextFileLoaded = (content, filename = 'uploaded-file') => {
+    const isLeanFile = filename.toLowerCase().endsWith('.lean');
+    const labeledContext = `[UPLOADED ${isLeanFile ? 'LEAN FILE' : 'TEXT FILE'}: ${filename}]\n${content}`;
+    setConfig(prev => {
+      const separator = prev.userPrompt.trim() ? '\n\n' : '';
+      return {
+        ...prev,
+        userPrompt: prev.userPrompt + separator + labeledContext
+      };
+    });
+  };
+
+  const handleRemoveUploadedFile = async (filePath) => {
+    setConfig(prev => ({
+      ...prev,
+      uploadedFiles: (prev.uploadedFiles || []).filter(path => path !== filePath)
+    }));
+    try {
+      await api.deleteUploadedFile(filePath);
+    } catch (error) {
+      console.error('Failed to remove uploaded file:', error);
+      alert(`Removed ${filePath} from this run, but failed to delete it from upload storage: ${error.details || error.message}`);
+    }
   };
 
   const handleStart = async () => {
@@ -166,57 +185,87 @@ export default function AggregatorInterface({
         </div>
       </div>
 
-      <div className="form-group">
-        <label>User Prompt *</label>
-        <textarea
-          value={config.userPrompt}
-          onChange={(e) => setConfig({ ...config, userPrompt: e.target.value })}
-          placeholder='Be descriptive, this prompt should direct an open-ended brainstorming question, i.e. "Tell me all of the reasons we both should or should not be able to mathematically \"square the circle\"."'
-          disabled={isRunning}
-        />
-        <TextFileUploader 
-          onFileLoaded={handleTextFileLoaded}
-          disabled={isRunning}
-          maxSizeMB={5}
-          showCharCount={true}
-          confirmIfNotEmpty={true}
-          existingPromptLength={config.userPrompt.length}
-        />
-      </div>
-
-      <div className="form-group">
-        <label>Upload Files (optional)</label>
-        <input
-          type="file"
-          onChange={handleFileUpload}
-          multiple
-          disabled={isRunning}
-        />
-        {uploadedFiles.length > 0 && (
-          <div style={{ marginTop: '0.5rem', color: '#4CAF50' }}>
-            Uploaded {uploadedFiles.length} file(s)
+      <div className="form-group prompt-composer-section">
+        <div className="prompt-composer">
+          <label htmlFor="aggregator-user-prompt">User Prompt *</label>
+          <textarea
+            id="aggregator-user-prompt"
+            value={config.userPrompt}
+            onChange={(e) => setConfig({ ...config, userPrompt: e.target.value })}
+            placeholder='Be descriptive, this prompt should direct an open-ended brainstorming question, i.e. "Tell me all of the reasons we both should or should not be able to mathematically \"square the circle\"."'
+            disabled={isRunning}
+            rows={5}
+          />
+          <div className="prompt-composer-actions">
+            <TextFileUploader
+              onFileLoaded={handleTextFileLoaded}
+              disabled={isRunning}
+              maxSizeMB={5}
+              showCharCount={true}
+              confirmIfNotEmpty={true}
+              existingPromptLength={config.userPrompt.length}
+            />
+            {!isRunning ? (
+              <button
+                type="button"
+                onClick={handleStart}
+                className="btn-start prompt-composer-primary"
+                disabled={anyWorkflowRunning && !isRunning}
+              >
+                Start Aggregator
+              </button>
+            ) : (
+              <button type="button" onClick={handleStop} className="btn-stop">
+                Stop Aggregator
+              </button>
+            )}
+          </div>
+        </div>
+        {developerModeEnabled && (
+          <div className="prompt-composer-options">
+            <label className="settings-checkbox-label prompt-composer-option">
+              <input
+                type="checkbox"
+                checked={Boolean(config.creativityEmphasisBoostEnabled)}
+                onChange={(e) => setConfig({ ...config, creativityEmphasisBoostEnabled: e.target.checked })}
+                disabled={isRunning}
+              />
+              Creativity Emphasis Boost
+            </label>
           </div>
         )}
       </div>
 
-      <div className="button-group">
-        {!isRunning ? (
-          <button onClick={handleStart} disabled={anyWorkflowRunning && !isRunning}>
-            Start Aggregator
-          </button>
-        ) : (
-          <button onClick={handleStop} className="danger">Stop Aggregator</button>
-        )}
-        {developerModeEnabled && (
-          <label className="settings-checkbox-label">
-            <input
-              type="checkbox"
-              checked={Boolean(config.creativityEmphasisBoostEnabled)}
-              onChange={(e) => setConfig({ ...config, creativityEmphasisBoostEnabled: e.target.checked })}
-              disabled={isRunning}
-            />
-            Creativity Emphasis Boost
-          </label>
+      <div className="form-group">
+        <label htmlFor="aggregator-context-file-upload">Attach Context Files (optional)</label>
+        <input
+          id="aggregator-context-file-upload"
+          type="file"
+          onChange={handleFileUpload}
+          multiple
+          accept=".txt,.lean,text/plain,text/x-lean"
+          disabled={isRunning}
+        />
+        <small className="settings-hint">
+          Attached .txt and .lean files are kept as separate context sources and use direct-first/RAG allocation.
+        </small>
+        {attachedFiles.length > 0 && (
+          <div className="attached-file-list" aria-label="Attached context files">
+            {attachedFiles.map((filePath) => (
+              <span className="attached-file-chip" key={filePath}>
+                <span className="attached-file-name">{filePath}</span>
+                <button
+                  type="button"
+                  className="attached-file-remove"
+                  onClick={() => handleRemoveUploadedFile(filePath)}
+                  disabled={isRunning}
+                  aria-label={`Remove ${filePath}`}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
         )}
       </div>
 

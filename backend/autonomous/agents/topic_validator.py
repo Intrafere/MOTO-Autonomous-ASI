@@ -93,7 +93,6 @@ class TopicValidatorAgent:
                 proposed_action = {
                     "action": submission.action,
                     "topic_id": submission.topic_id,
-                    "topic_ids": submission.topic_ids,
                     "topic_prompt": submission.topic_prompt,
                     "reasoning": submission.reasoning
                 }
@@ -104,6 +103,15 @@ class TopicValidatorAgent:
                     brainstorms_summary=brainstorms_summary,
                     papers_summary=papers_summary,
                     proposed_action=proposed_action
+                )
+                from backend.shared.solution_path.integration import with_validator_hook
+                prompt = with_validator_hook(
+                    prompt, getattr(self, "solution_path_manager", None)
+                )
+            if override_prompt:
+                from backend.shared.solution_path.integration import with_validator_hook
+                prompt = with_validator_hook(
+                    prompt, getattr(self, "solution_path_manager", None)
                 )
             
             # Validate prompt size
@@ -130,6 +138,10 @@ class TopicValidatorAgent:
                     brainstorms_summary=brainstorms_summary,
                     papers_summary=truncated_papers,
                     proposed_action=proposed_action
+                )
+                from backend.shared.solution_path.integration import with_validator_hook
+                prompt = with_validator_hook(
+                    prompt, getattr(self, "solution_path_manager", None)
                 )
                 
                 prompt_tokens = count_tokens(prompt)
@@ -172,7 +184,7 @@ class TopicValidatorAgent:
             # Parse JSON using central utility (handles sanitization + parsing + array handling)
             try:
                 data = parse_json(content)
-                
+                from backend.shared.solution_path.integration import enqueue_optional_update
                 # parse_json already handles array response, but keep check for safety
                 if isinstance(data, list) and len(data) > 0:
                     logger.warning("TopicValidator: Model returned array, using first element")
@@ -180,15 +192,25 @@ class TopicValidatorAgent:
                 
                 # Validate required fields
                 decision = data.get("decision", "").lower()
-                reasoning = data.get("reasoning", "No reasoning provided")
-                
+                reasoning = data.get("reasoning")
+                if not isinstance(reasoning, str) or not reasoning.strip():
+                    logger.error("TopicValidator: Missing non-empty reasoning")
+                    return self._create_rejection("Missing non-empty reasoning")
                 if decision not in ["accept", "reject"]:
                     logger.error(f"TopicValidator: Invalid decision: {decision}")
                     return self._create_rejection(f"Invalid decision format: {decision}")
+                await enqueue_optional_update(
+                    data,
+                    getattr(self, "solution_path_manager", None),
+                    proposer_role="topic_validator",
+                    source_task_id=task_id,
+                    source_phase="topic_validation",
+                    source_decision=decision,
+                )
                 
                 result = TopicValidationResult(
                     decision=decision,
-                    reasoning=reasoning
+                    reasoning=reasoning.strip(),
                 )
                 
                 # Notify task completed successfully

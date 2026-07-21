@@ -2,13 +2,14 @@
 
 Usage:
     python tests/run_all_tests.py
-    python tests/run_all_tests.py tests/test_build_info.py tests/test_proof_routes.py
+    python tests/run_all_tests.py tests/unit/test_build_info.py tests/workflow_scenarios/test_workflow_scenarios.py
     python tests/run_all_tests.py --stop-on-fail
 """
 
 from __future__ import annotations
 
 import argparse
+import shlex
 import subprocess
 import sys
 import time
@@ -27,14 +28,27 @@ class TestFileResult:
     elapsed_seconds: float
     stdout: str
     stderr: str
+    allow_no_tests: bool = False
 
     @property
     def passed(self) -> bool:
         return self.returncode == 0
 
+    @property
+    def skipped(self) -> bool:
+        return self.returncode == 5 and self.allow_no_tests
+
+    @property
+    def successful(self) -> bool:
+        return self.passed or self.skipped
+
 
 def discover_test_files() -> list[Path]:
-    return sorted(TESTS_DIR.glob("test_*.py"))
+    return sorted(
+        path
+        for path in TESTS_DIR.rglob("test_*.py")
+        if path.is_file() and "__pycache__" not in path.parts
+    )
 
 
 def resolve_requested_files(requested_files: list[str]) -> list[Path]:
@@ -55,7 +69,14 @@ def resolve_requested_files(requested_files: list[str]) -> list[Path]:
 
         if not path.exists():
             raise SystemExit(f"Test file does not exist: {raw_path}")
-        if not path.is_file() or path.name == Path(__file__).name:
+        if (
+            not path.is_file()
+            or path.parent == TESTS_DIR and path.name == Path(__file__).name
+            or TESTS_DIR not in path.parents
+            or not path.name.startswith("test_")
+            or path.suffix != ".py"
+            or "__pycache__" in path.parts
+        ):
             raise SystemExit(f"Not a runnable pytest file: {raw_path}")
 
         resolved.append(path)
@@ -89,15 +110,20 @@ def run_test_file(test_file: Path, extra_pytest_args: list[str]) -> TestFileResu
         elapsed_seconds=elapsed_seconds,
         stdout=completed.stdout,
         stderr=completed.stderr,
+        allow_no_tests=any(
+            arg in {"-k", "-m", "--keyword", "--markers"}
+            or arg.startswith(("--keyword=", "--markers="))
+            for arg in extra_pytest_args
+        ),
     )
 
 
 def print_result(result: TestFileResult) -> None:
-    status = "PASS" if result.passed else "FAIL"
+    status = "PASS" if result.passed else "SKIP" if result.skipped else "FAIL"
     relative_path = result.path.relative_to(ROOT_DIR)
     print(f"[{status}] {relative_path} ({result.elapsed_seconds:.1f}s)")
 
-    if result.passed:
+    if result.successful:
         return
 
     output = "\n".join(part for part in (result.stdout, result.stderr) if part.strip())
@@ -111,12 +137,14 @@ def print_result(result: TestFileResult) -> None:
 
 def print_summary(results: list[TestFileResult]) -> None:
     passed = [result for result in results if result.passed]
-    failed = [result for result in results if not result.passed]
+    skipped = [result for result in results if result.skipped]
+    failed = [result for result in results if not result.successful]
 
     print("\n" + "=" * 80)
     print("TEST FILE SUMMARY")
     print("=" * 80)
     print(f"Passed: {len(passed)}")
+    print(f"Skipped: {len(skipped)}")
     print(f"Failed: {len(failed)}")
     print(f"Total:  {len(results)}")
 
@@ -141,7 +169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "test_files",
         nargs="*",
-        help="Optional test files to run. Defaults to every tests/test_*.py file.",
+        help="Optional test files to run. Defaults to every tests/**/test_*.py file.",
     )
     parser.add_argument(
         "--stop-on-fail",
@@ -156,9 +184,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pytest-args",
         default="",
-        help="Additional arguments passed to pytest, split on spaces.",
+        help="Additional shell-style arguments passed to each pytest invocation.",
     )
     return parser.parse_args()
+
+
+def parse_pytest_args(raw_args: str) -> list[str]:
+    """Parse the quoted argument string supplied to ``--pytest-args``."""
+    if not raw_args:
+        return []
+    lexer = shlex.shlex(raw_args, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    return list(lexer)
 
 
 def main() -> int:
@@ -171,10 +210,10 @@ def main() -> int:
         return 0
 
     if not test_files:
-        print("No tests/test_*.py files found.")
+        print("No tests/**/test_*.py files found.")
         return 1
 
-    extra_pytest_args = args.pytest_args.split() if args.pytest_args else []
+    extra_pytest_args = parse_pytest_args(args.pytest_args)
     results: list[TestFileResult] = []
 
     print(f"Running {len(test_files)} pytest file(s) separately...\n")
@@ -183,11 +222,11 @@ def main() -> int:
         results.append(result)
         print_result(result)
 
-        if args.stop_on_fail and not result.passed:
+        if args.stop_on_fail and not result.successful:
             break
 
     print_summary(results)
-    return 0 if all(result.passed for result in results) else 1
+    return 0 if all(result.successful for result in results) else 1
 
 
 if __name__ == "__main__":

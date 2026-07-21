@@ -3,6 +3,7 @@ Global RAG operation lock to prevent collisions between Aggregator and Compiler.
 """
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,16 @@ class RAGOperationLock:
         Release lock.
         Only fully releases when acquisition count reaches 0 (handles reentrant acquisitions).
         """
+        current_task = asyncio.current_task()
         if self._acquisition_count <= 0:
             logger.warning("Attempted to release RAG lock when not held")
-            return
+            return False
+        if self._current_task is not current_task:
+            logger.error(
+                "Refusing RAG lock release by non-owner task (holder=%s)",
+                self._current_holder,
+            )
+            return False
         
         self._acquisition_count -= 1
         
@@ -59,6 +67,22 @@ class RAGOperationLock:
             self._lock.release()
         else:
             logger.debug(f"RAG lock reentrant release (count={self._acquisition_count})")
+        return True
+
+    def owned_by_current_task(self) -> bool:
+        return (
+            self._acquisition_count > 0
+            and self._current_task is asyncio.current_task()
+        )
+
+    @asynccontextmanager
+    async def operation(self, operation_name: str):
+        """Acquire and owner-safely release one reentrant RAG operation."""
+        await self.acquire(operation_name)
+        try:
+            yield self
+        finally:
+            self.release()
     
     async def __aenter__(self):
         await self.acquire("context_manager")

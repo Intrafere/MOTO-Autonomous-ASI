@@ -1,0 +1,26 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "real_skip_consume",
+    "real_force_consume",
+    "state_preserved_then_cleared",
+    "master_proof_temp_root"
+  ],
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "proof_scope_isolation"
+  ],
+  "invariants": [
+    "state.runtime_roots_are_active_roots"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_leanoj_coordinator_skip_force_clear_and_intermediate_edit",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+}

@@ -8,6 +8,8 @@ from typing import Optional
 
 
 CRITIQUE_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL / ARTIFACT CLAIM POLICY:
+- Apply claim-type and domain-appropriate rigor. Mathematical claims require sound derivation, proof, or explicit assumptions; engineering/software claims require mechanisms, constraints, interfaces, failure modes, feasibility reasoning, and verification plans; strategic or causal claims require valid inference, explicit assumptions, and realistic limitations.
+- Literature claims require identifiable external sources rather than invented citations.
 - Artifact claims include statements about code, kernels, experiments, logs, reproductions, or accompanying implementations.
 - Empirical or artifact claims may be accepted as factual ONLY when backed by an explicit external citation or a provided artifact in context.
 - If such support is absent, they should be criticized, removed, or reframed as hypotheses, validation plans, expected benefits, limitations, or future work.
@@ -16,7 +18,7 @@ CRITIQUE_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL / ARTIFACT CLAIM POLICY:
 
 def get_critique_submitter_system_prompt() -> str:
     """System prompt for generating self-review critiques of the body section."""
-    return """You are a peer reviewer generating constructive self-review notes for a mathematical document's body section.
+    return """You are a peer reviewer generating constructive self-review notes for a rigorous, solution-oriented research paper or report's body section.
 
 IMPORTANT - INTERNAL CONTENT WARNING:
 
@@ -39,11 +41,12 @@ If the body section is academically acceptable with only minor stylistic issues 
 SOURCE MATERIAL POLICY:
 - The aggregator/brainstorm database and reference papers are optional support for critique, not mandatory checklists.
 - Do NOT critique solely because the body does not explicitly cover some source material.
-- Do critique omitted material when the omission creates a genuine gap relative to the current outline, stated paper scope, or mathematical goals.
+- Do critique omitted material when the omission creates a genuine gap relative to the current outline, stated paper scope, or direct solution goal.
 - Focus on whether the paper itself is strong, rigorous, and aligned, not on exhaustively mirroring source inputs.
 
 CRITIQUE QUALITY REQUIREMENTS:
-- Identify only substantive mathematical, logical, structural, or provenance issues.
+- Identify only substantive mathematical, logical, technical, algorithmic, engineering, design, empirical, implementation, structural, provenance, or directness issues, as appropriate to the objective.
+- Mathematical errors and proof gaps remain first-class critique targets whenever applicable; non-mathematical work must not be criticized merely for lacking theorem/proof form.
 - Be specific enough that a reader understands the limitation or concern.
 - Do not propose direct edits or rewrites. The critique will be appended transparently as self-review.
 - Do not list every possible issue. You will be called up to 3 total attempts, so focus on one important point per turn.
@@ -78,8 +81,8 @@ CRITICAL JSON ESCAPE RULES:
 Example critique:
 {
   "critique_needed": true,
-  "submission": "Section III asserts a convergence claim without establishing the needed uniform bound. This is a substantive limitation because later arguments depend on that convergence statement. The paper should be read with this proof gap in mind unless an independent bound is supplied.",
-  "reasoning": "This is a mathematical gap that affects the reliability of a downstream claim and is suitable for the self-review section."
+  "submission": "The architecture assumes idempotent retries but does not specify an idempotency-key lifecycle or a recovery test for partial downstream commits. This leaves a substantive correctness and implementation gap in the proposed failure-handling mechanism.",
+  "reasoning": "This concrete engineering limitation affects whether the central design works under the failure mode it claims to handle and is suitable for the self-review section."
 }
 
 Example decline:
@@ -93,7 +96,7 @@ Example decline:
 
 def get_critique_validator_system_prompt() -> str:
     """System prompt for validating critique submissions."""
-    return """You are a validation agent reviewing peer-review critiques for a mathematical document's self-review section.
+    return """You are a validation agent reviewing peer-review critiques for a rigorous, solution-oriented research paper or report's self-review section.
 
 IMPORTANT - INTERNAL CONTENT WARNING:
 
@@ -116,7 +119,7 @@ For CRITIQUES (critique_needed=true): evaluate whether appending this critique w
 For DECLINE ASSESSMENTS (critique_needed=false): evaluate whether the submitter's assessment that no substantive critique is needed is correct.
 
 ACCEPT a critique if it:
-1. Identifies a real mathematical error, proof gap, unsupported claim, structural problem, or material limitation.
+1. Identifies a real mathematical error, proof gap, logical or technical flaw, design/implementation/empirical/provenance/directness problem, unsupported claim, structural problem, or material limitation, as applicable.
 2. Is specific and useful to readers.
 3. Is substantive rather than stylistic.
 4. Is non-redundant with existing accepted critiques.
@@ -130,7 +133,7 @@ REJECT a critique if it:
 5. Criticizes selective non-use of optional source material without a real gap in the paper's stated scope.
 6. Is trivial or pedantic without meaningful impact.
 
-For declines, ACCEPT only if the body is academically acceptable and any remaining issues are minor. REJECT if a substantive issue was missed.
+For declines, ACCEPT only if the body is rigorous and acceptable for its stated scope and objective and any remaining issues are minor. REJECT if a substantive domain-appropriate issue was missed.
 
 Output your decision ONLY as JSON in this exact format:
 {
@@ -178,8 +181,6 @@ def build_critique_prompt(
         get_critique_json_schema(),
         "\n---\n",
         f"USER COMPILER-DIRECTING PROMPT:\n{user_prompt}",
-        "\n---\n",
-        f"PAPER TITLE:\n{user_prompt}",
         "\n---\n",
         f"CURRENT OUTLINE:\n{current_outline}",
         "\n---\n",

@@ -1,0 +1,23 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {
+    "reason": "Existing coordinator coverage observes pause/reset resume, but no bounded test seam independently interleaves user Stop while the provider wait is active."
+  },
+  "evidence": [],
+  "fields": [
+    "provider_pause_resume",
+    "workflow_filesystem_state",
+    "runtime_exclusivity"
+  ],
+  "invariants": [
+    "provider.stop_resume_preserves_pause"
+  ],
+  "replay": [],
+  "result": "blocked",
+  "scenario_id": "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+}

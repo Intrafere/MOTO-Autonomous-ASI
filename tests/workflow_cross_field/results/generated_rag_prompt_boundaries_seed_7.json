@@ -1,0 +1,60 @@
+{
+  "action_ids": [
+    "start_autonomous_papers_and_proofs",
+    "reject_mandatory_source_overflow",
+    "verify_rag_source_exclusion",
+    "prepare_prompt_context"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "autonomous",
+    "final_phase": "topic_exploration"
+  },
+  "evidence": [
+    "mandatory_source_overflow",
+    "prompt_context",
+    "rag_source_exclusion"
+  ],
+  "exercised_invariants": [
+    "prompt.direct_sources_excluded_from_rag",
+    "prompt.generated_appendices_stripped",
+    "prompt.mandatory_source_overflow_fails_visible",
+    "prompt.proof_source_context_required",
+    "prompt.user_prompt_direct_injected"
+  ],
+  "fields": [
+    "prompt_context",
+    "workflow_filesystem_state",
+    "proof_runtime_gating",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "prompt.user_prompt_direct_injected",
+    "prompt.proof_source_context_required",
+    "prompt.direct_sources_excluded_from_rag",
+    "prompt.mandatory_source_overflow_fails_visible",
+    "prompt.generated_appendices_stripped"
+  ],
+  "observed_fields": [
+    "allowed_outputs",
+    "assistant_memory",
+    "prompt_context",
+    "proof_runtime_gating",
+    "proof_scope_isolation",
+    "websocket_api_contracts",
+    "workflow_filesystem_state"
+  ],
+  "replay": [
+    "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
+    "reject_mandatory_source_overflow()",
+    "verify_rag_source_exclusion()",
+    "prepare_prompt_context()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_rag_prompt_boundaries_seed_7",
+  "schema_version": 1,
+  "seed": 7,
+  "target_artifact": "targets/generated_rag_prompt_boundaries.json",
+  "target_id": "generated_rag_prompt_boundaries"
+}

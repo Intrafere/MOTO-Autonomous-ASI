@@ -1,13 +1,20 @@
 """Canonical MOTO proof database normalization for unified proof search."""
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 
 from backend.autonomous.memory.proof_database import manual_proof_database, proof_database
 from backend.shared.models import ProofDependency, ProofRecord
+from backend.shared.proof_identity import canonical_proof_identity
 from backend.shared.proof_search.models import UnifiedProofSearchRecord
+
+ASSISTANT_EXCLUDE_STANDALONE_EXACT_DUPLICATE_EMPHASIS = (
+    "assistant_exclude_standalone_exact_duplicate_emphasis"
+)
+STANDALONE_EXACT_DUPLICATE_EMPHASIS_PURPOSE = (
+    "standalone_exact_duplicate_emphasis"
+)
 
 
 async def load_moto_proof_records() -> list[UnifiedProofSearchRecord]:
@@ -53,17 +60,36 @@ async def _records_from_autonomous_history() -> list[UnifiedProofSearchRecord]:
 
 
 async def _records_from_manual_history() -> list[UnifiedProofSearchRecord]:
+    history_root: Path
     try:
         from backend.shared.config import system_config
 
+        history_root = Path(system_config.data_dir) / "manual_proof_runs"
         entries = await manual_proof_database.list_proof_library_from_history(
-            Path(system_config.data_dir) / "manual_proof_runs",
+            history_root,
             novel_only=False,
         )
     except Exception:
         return []
 
-    return [_record_from_library_entry(entry, default_corpus="manual") for entry in entries]
+    records: list[UnifiedProofSearchRecord] = []
+    for entry in entries:
+        full_entry = entry
+        session_id = str(entry.get("session_id", "") or "")
+        proof_id = str(entry.get("proof_id", "") or "")
+        if session_id and proof_id:
+            try:
+                hydrated = await manual_proof_database.get_library_proof_from_history(
+                    history_root,
+                    session_id,
+                    proof_id,
+                )
+            except Exception:
+                hydrated = None
+            if hydrated:
+                full_entry = {**entry, **hydrated}
+        records.append(_record_from_library_entry(full_entry, default_corpus="manual"))
+    return records
 
 
 def _record_from_library_entry(
@@ -74,9 +100,11 @@ def _record_from_library_entry(
     theorem_statement = str(entry.get("theorem_statement", "") or "")
     proof_id = str(entry.get("proof_id", "") or "")
     session_id = str(entry.get("session_id", "") or "")
+    run_id = str(entry.get("run_id", "") or session_id)
     source_type = str(entry.get("source_type", "") or "")
     corpus = "leanoj" if source_type.startswith("leanoj_") else default_corpus
     lean_code = str(entry.get("lean_code", "") or "")
+    identity = canonical_proof_identity(theorem_statement, lean_code)
     return UnifiedProofSearchRecord(
         search_id=f"{corpus}:{session_id}:{proof_id}",
         corpus=corpus,
@@ -84,6 +112,7 @@ def _record_from_library_entry(
         source_kind="verified_proof",
         proof_id=proof_id,
         session_id=session_id,
+        run_id=run_id,
         source_type=source_type,
         source_id=str(entry.get("source_id", "") or ""),
         source_title=str(entry.get("source_title", "") or ""),
@@ -92,8 +121,11 @@ def _record_from_library_entry(
         theorem_statement=theorem_statement,
         formal_sketch=str(entry.get("formal_sketch", "") or ""),
         lean_code=lean_code,
-        lean_code_hash=_sha256_text(lean_code) if lean_code else "",
-        theorem_statement_hash=_sha256_text(theorem_statement),
+        lean_code_hash=identity.lean_code_hash if lean_code else "",
+        theorem_statement_hash=identity.theorem_statement_hash,
+        canonical_identity_version=identity.version,
+        canonical_lean_code_hash=identity.lean_code_hash if lean_code else "",
+        canonical_theorem_statement_hash=identity.theorem_statement_hash,
         dependency_names=_dependency_names(entry.get("dependencies", [])),
         novelty_tier=str(entry.get("novelty_tier", "") or ""),
         novelty_reasoning=str(entry.get("novelty_reasoning", "") or ""),
@@ -106,6 +138,14 @@ def _record_from_library_entry(
             "attempt_count": entry.get("attempt_count", 0),
             "verification_notes": str(entry.get("verification_notes", "") or ""),
             "user_prompt": str(entry.get("user_prompt", "") or ""),
+            "run_id": run_id,
+            "canonical_identity_version": identity.version,
+            "canonical_theorem_statement_hash": identity.theorem_statement_hash,
+            "canonical_lean_code_hash": identity.lean_code_hash if lean_code else "",
+            ASSISTANT_EXCLUDE_STANDALONE_EXACT_DUPLICATE_EMPHASIS: (
+                entry.get("artifact_purpose")
+                == STANDALONE_EXACT_DUPLICATE_EMPHASIS_PURPOSE
+            ),
         },
     )
 
@@ -118,9 +158,9 @@ def normalize_proof_record(
 ) -> UnifiedProofSearchRecord:
     """Convert a stored ProofRecord into the shared search model."""
     corpus = "leanoj" if proof.source_type.startswith("leanoj_") else default_corpus
-    lean_code_hash = _sha256_text(proof.lean_code) if proof.lean_code else ""
-    statement_hash = _sha256_text(proof.theorem_statement)
+    identity = canonical_proof_identity(proof.theorem_statement, proof.lean_code)
     scope = "active" if default_corpus == "manual" else "current"
+    run_id = str(getattr(proof, "run_id", "") or session_id)
 
     return UnifiedProofSearchRecord(
         search_id=f"{corpus}:{session_id}:{proof.proof_id}",
@@ -129,6 +169,7 @@ def normalize_proof_record(
         source_kind="verified_proof",
         proof_id=proof.proof_id,
         session_id=session_id,
+        run_id=run_id,
         source_type=proof.source_type,
         source_id=proof.source_id,
         source_title=proof.source_title,
@@ -137,8 +178,11 @@ def normalize_proof_record(
         theorem_statement=proof.theorem_statement,
         formal_sketch=proof.formal_sketch,
         lean_code=proof.lean_code,
-        lean_code_hash=lean_code_hash,
-        theorem_statement_hash=statement_hash,
+        lean_code_hash=identity.lean_code_hash if proof.lean_code else "",
+        theorem_statement_hash=identity.theorem_statement_hash,
+        canonical_identity_version=identity.version,
+        canonical_lean_code_hash=identity.lean_code_hash if proof.lean_code else "",
+        canonical_theorem_statement_hash=identity.theorem_statement_hash,
         imports=_import_names(proof.dependencies),
         dependency_names=_dependency_names(proof.dependencies),
         novelty_tier=proof.novelty_tier,
@@ -152,6 +196,13 @@ def normalize_proof_record(
             "novel": proof.novel,
             "verification_notes": proof.verification_notes,
             "attempt_count": proof.attempt_count,
+            ASSISTANT_EXCLUDE_STANDALONE_EXACT_DUPLICATE_EMPHASIS: (
+                proof.artifact_purpose
+                == STANDALONE_EXACT_DUPLICATE_EMPHASIS_PURPOSE
+            ),
+            "canonical_identity_version": identity.version,
+            "canonical_theorem_statement_hash": identity.theorem_statement_hash,
+            "canonical_lean_code_hash": identity.lean_code_hash if proof.lean_code else "",
         },
     )
 
@@ -178,8 +229,4 @@ def _import_names(dependencies: list[Any]) -> list[str]:
         if kind == "mathlib" and name:
             imports.append(str(name).split(".")[0])
     return sorted(set(imports))
-
-
-def _sha256_text(value: str) -> str:
-    return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
 

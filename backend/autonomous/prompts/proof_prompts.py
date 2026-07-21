@@ -776,7 +776,6 @@ def build_proof_novelty_prompt(
 ) -> str:
     """Ask the validator to classify a Lean-verified theorem into one of five novelty tiers."""
     user_prompt, _verified_proof_context_block = _prepare_user_prompt_context(user_prompt)
-    existing_proofs_block = existing_novel_proofs or "[No previously stored novel proofs.]"
     return f"""This proof has been FORMALLY VERIFIED by Lean 4. It is mathematically valid.
 
 Your ONLY task: assign a novelty tier to the verified result based on the criteria below.
@@ -788,7 +787,6 @@ NOVELTY TIERS (choose exactly one):
 - It is a trivial identity, tautology, or definitional equality.
 - It is closable by a single standard tactic (simp, omega, norm_num, decide, rfl).
 - It is a routine helper lemma, proof-engineering fact, or general known-knowledge-base entry rather than new prompt-directed knowledge.
-- It duplicates a result already present in the stored proofs below.
 - Assign this tier when there is no meaningful original contribution.
 
 "novel_formulation"
@@ -831,9 +829,6 @@ VERIFIED THEOREM:
 
 LEAN 4 CODE:
 {lean_code}
-
-EXISTING STORED NOVEL PROOFS:
-{existing_proofs_block}
 
 {_json_only_footer('{"novelty_tier": "mathematical_discovery", "reasoning": "brief explanation"}')}
 """

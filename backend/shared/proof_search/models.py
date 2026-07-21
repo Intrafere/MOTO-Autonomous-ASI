@@ -33,6 +33,7 @@ class UnifiedProofSearchRecord(BaseModel):
     external_fingerprint: str = ""
     release_id: str = ""
     session_id: str = ""
+    run_id: str = ""
     source_type: str = ""
     source_id: str = ""
     source_title: str = ""
@@ -45,6 +46,9 @@ class UnifiedProofSearchRecord(BaseModel):
     lean_code: str = ""
     lean_code_hash: str = ""
     theorem_statement_hash: str = ""
+    canonical_identity_version: str = ""
+    canonical_lean_code_hash: str = ""
+    canonical_theorem_statement_hash: str = ""
     imports: list[str] = Field(default_factory=list)
     dependency_names: list[str] = Field(default_factory=list)
     topic_tags: list[str] = Field(default_factory=list)
@@ -65,8 +69,11 @@ class UnifiedProofSearchRecord(BaseModel):
             keys.append(f"fingerprint:{self.external_fingerprint}")
         if self.corpus != "syntheticlib4" and self.proof_id:
             keys.append(f"local:{self.corpus}:{self.proof_id}")
-        if self.theorem_statement_hash and self.lean_code_hash:
-            keys.append(f"hash:{self.theorem_statement_hash}:{self.lean_code_hash}")
+        statement_hash = self.canonical_theorem_statement_hash or self.theorem_statement_hash
+        lean_hash = self.canonical_lean_code_hash or self.lean_code_hash
+        identity_version = self.canonical_identity_version or "external-integrity"
+        if statement_hash and lean_hash:
+            keys.append(f"hash:{identity_version}:{statement_hash}:{lean_hash}")
         return keys
 
 

@@ -53,8 +53,8 @@ beforeEach(() => {
   localStorage.clear();
   openRouterAPI.getApiKeyStatus.mockResolvedValue({ has_key: true });
   openRouterAPI.getFreeModelSettings.mockResolvedValue({
-    looping_enabled: true,
-    auto_selector_enabled: true,
+    looping_enabled: false,
+    auto_selector_enabled: false,
   });
   openRouterAPI.getModels.mockResolvedValue({
     models: [

@@ -24,7 +24,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Apply the rigor and evidence standard appropriate to each domain and claim type. Mathematical claims require sound derivation or proof; empirical, artifact, engineering, software, and causal claims require corresponding evidence, provenance, feasibility reasoning, and validation. Use internal context as exploration history, not authority.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -45,16 +45,17 @@ REASONS FOR REMOVAL - A paper should be removed if it:
 2. OVERLAPS significantly with more comprehensive papers
 3. Contains information SUPERSEDED by better, more complete papers
 4. Was MARGINALLY useful initially but provides no unique value given current library
-5. Covers the same mathematical territory as a newer, superior paper
+5. Covers the same solution territory as a newer, superior paper
 6. Is more indirect or auxiliary while another paper provides a stronger rigorous direct answer on the same territory
 
 REASONS TO KEEP - A paper should be kept if it:
 1. Provides a stronger direct answer to the user's prompt than overlapping papers
-2. Provides unique mathematical content that materially strengthens a direct route to the user's prompt
+2. Provides a distinct solution mechanism or causal route
 3. Offers a different perspective or approach that materially improves the strongest direct answer path
-4. Contains specific proofs, theorems, or techniques necessary for direct prompt progress
-5. Contributes to research diversity only when that diversity improves credible direct-answer progress
-6. Covers distinct mathematical subtopics only when those subtopics are necessary to the user's prompt
+4. Contributes distinct evidence, derivation, argument, implementation, or design necessary for direct prompt progress
+5. Contains a distinct theorem, proof, algorithm, or impossibility result
+6. Provides a distinct experimental proposal, validation method, risk, failure-mode, or limitation analysis
+7. Contributes diversity only when that diversity improves credible direct-answer progress
 
 CONSERVATIVE APPROACH:
 - When in doubt, DO NOT recommend removal
@@ -100,14 +101,14 @@ Remove Paper:
 {
   "should_remove": true,
   "paper_id": "paper_005",
-  "reasoning": "Paper 005 on 'Basic Principles of Class Field Theory' is now redundant. Papers 003, 009, and 014 provide more comprehensive coverage of class field theory with deeper mathematical rigor and broader applications. Paper 005's unique contributions (elementary introduction) are minimal and the library would be stronger without this redundant entry. The other papers fully subsume its content."
+  "reasoning": "Paper 005 is now redundant. Papers 003, 009, and 014 provide the same mechanism and evidence with more complete feasibility analysis and validation. Paper 005 adds no distinct implementation, proof, experiment, risk analysis, or other direct-answer value, so the other papers fully subsume it."
 }
 
 No Removal:
 {
   "should_remove": false,
   "paper_id": null,
-  "reasoning": "After reviewing all paper titles and abstracts, no papers are redundant. Each paper provides unique perspectives, covers distinct mathematical areas, or approaches common topics from different angles. The library maintains good diversity without unnecessary overlap."
+  "reasoning": "After reviewing all paper titles and abstracts, no papers are redundant. Each paper contributes a distinct solution mechanism, evidence base, implementation, validation method, risk analysis, theorem, proof, or other necessary direct-answer component. The library maintains useful diversity without unnecessary overlap."
 }"""
 
 

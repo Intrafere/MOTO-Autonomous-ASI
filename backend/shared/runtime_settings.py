@@ -38,6 +38,7 @@ _PROOF_INT_FIELDS = {
 }
 
 _LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT = 600
+_LEGACY_DEFAULT_SMT_TIMEOUT = 30
 
 _CONNECTIVITY_BOOL_FIELDS = {
     "syntheticlib4_enabled",
@@ -128,8 +129,8 @@ def _proof_settings_from_config() -> Dict[str, Any]:
 def _free_model_settings_from_manager() -> Dict[str, Any]:
     status = free_model_manager.get_status()
     return {
-        "looping_enabled": bool(status.get("looping_enabled", True)),
-        "auto_selector_enabled": bool(status.get("auto_selector_enabled", True)),
+        "looping_enabled": bool(status.get("looping_enabled", False)),
+        "auto_selector_enabled": bool(status.get("auto_selector_enabled", False)),
     }
 
 
@@ -197,6 +198,12 @@ def apply_persisted_runtime_settings() -> None:
                         field == "lean4_proof_timeout"
                         and default != _LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT
                         and str(proof_settings[field]).strip() == str(_LEGACY_DEFAULT_LEAN4_PROOF_TIMEOUT)
+                    ):
+                        proof_settings[field] = default
+                    if (
+                        field == "smt_timeout"
+                        and default != _LEGACY_DEFAULT_SMT_TIMEOUT
+                        and str(proof_settings[field]).strip() == str(_LEGACY_DEFAULT_SMT_TIMEOUT)
                     ):
                         proof_settings[field] = default
                     setattr(

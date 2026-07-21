@@ -22,14 +22,14 @@ test('shows SyntheticLib4 coming-soon explainer copy', () => {
     'href',
     'https://x.com/IntrafereLLC'
   );
-  expect(screen.getByText(/super-MOTO brainstorm database/i)).toBeInTheDocument();
-  expect(screen.getByText(/value for their data with their consent/i)).toBeInTheDocument();
+  expect(screen.getByText(/contribution-based Lean 4 proof ecosystem/i)).toBeInTheDocument();
+  expect(screen.getByText(/unused proofs can now provide value back to you/i)).toBeInTheDocument();
 });
 
 test('explains contribution access and redistribution limits', () => {
   renderModal();
 
-  expect(screen.getByText(/30 novel proofs/i)).toBeInTheDocument();
+  expect(screen.getByText(/20 novel proofs/i)).toBeInTheDocument();
   expect(screen.getByText(/one month of access/i)).toBeInTheDocument();
   expect(screen.getByText(/pay a small monthly fee/i)).toBeInTheDocument();
   expect(screen.getByText(/cite, use, and reference individual proofs/i)).toBeInTheDocument();

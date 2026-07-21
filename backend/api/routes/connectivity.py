@@ -309,6 +309,7 @@ async def update_connectivity_toggles(request: ConnectivityToggleRequest) -> dic
                 broadcast=True,
                 reason="agent_conversation_memory_disabled",
             )
+            await assistant_proof_search_coordinator.clear_cooldown_state()
     if request.wolfram_alpha_enabled is not None:
         system_config.wolfram_alpha_enabled = bool(request.wolfram_alpha_enabled)
 

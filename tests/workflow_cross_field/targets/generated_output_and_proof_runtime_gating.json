@@ -1,0 +1,24 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "proof_runtime_gating",
+    "allowed_outputs"
+  ],
+  "invariants": [
+    "outputs.at_least_one_output_enabled",
+    "outputs.papers_only_skips_proof_work",
+    "proof_runtime.no_lean_when_disabled",
+    "proof_runtime.no_smt_when_disabled"
+  ],
+  "max_steps": 10,
+  "must_exercise": [
+    "no_outputs_rejected",
+    "papers_only"
+  ],
+  "result_ids": [
+    "generated_output_and_proof_runtime_gating_seed_7",
+    "generated_output_and_proof_runtime_gating_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_output_and_proof_runtime_gating"
+}

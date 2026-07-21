@@ -1,0 +1,34 @@
+{
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "manual_proof",
+    "manual_archive",
+    "assistant_pack"
+  ],
+  "fields": [
+    "proof_scope_isolation",
+    "workflow_filesystem_state",
+    "assistant_memory"
+  ],
+  "invariants": [
+    "proof_scope.manual_not_in_autonomous_current",
+    "proof_scope.manual_clear_archives_active",
+    "state.clear_removes_active_preserves_history",
+    "assistant.disable_clears_live_pack"
+  ],
+  "replay": [
+    "start_manual_compiler",
+    "enable_manual_lean",
+    "run_manual_proof_check",
+    "refresh_assistant_pack",
+    "clear"
+  ],
+  "result": "passed",
+  "scenario_id": "model_manual_proof_clear_scope_assistant",
+  "schema_version": 1,
+  "seed": null,
+  "source": "curated",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+}

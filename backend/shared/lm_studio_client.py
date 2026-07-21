@@ -20,6 +20,11 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 from backend.shared.config import rag_config, system_config
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.provider_errors import (
+    ProviderContextLengthError,
+    ProviderRouteError,
+    ProviderRouteIdentity,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -541,10 +546,12 @@ class LMStudioClient:
                             f"Input prompt too large! Prompt: ~{approx_tokens} tokens, "
                             f"Model context limit: {context_limit} tokens."
                         )
-                        raise ValueError(
+                        raise ProviderContextLengthError(
                             f"Prompt ({approx_tokens} tokens) exceeds model's context window ({context_limit} tokens). "
-                            f"In LM Studio: Increase 'Context Length (n_ctx)' to at least {approx_tokens + 5000} tokens."
-                        )
+                            f"In LM Studio: Increase 'Context Length (n_ctx)' to at least {approx_tokens + 5000} tokens.",
+                            route=ProviderRouteIdentity(provider="lm_studio", model=model),
+                            cause=e,
+                        ) from e
                     
                     # Retry on transient 400 errors
                     if attempt < max_retries:
@@ -568,7 +575,12 @@ class LMStudioClient:
                     )
                     raise
                     
-            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+            except (
+                httpx.ConnectError,
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.TimeoutException,
+            ) as e:
                 logger.error(
                     "Connection error for model '%s': %s",
                     redact_log_text(model, 160),
@@ -577,7 +589,11 @@ class LMStudioClient:
                 if attempt < max_retries:
                     await asyncio.sleep(1.0 * (attempt + 1))
                     continue
-                raise
+                raise ProviderRouteError(
+                    "LM Studio connection failed after internal retries.",
+                    route=ProviderRouteIdentity(provider="lm_studio", model=model),
+                    cause=e,
+                ) from e
                     
             except Exception as e:
                 logger.error("Failed to generate completion: %s", redact_log_text(e, 240))

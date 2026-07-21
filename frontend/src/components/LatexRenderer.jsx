@@ -1029,14 +1029,6 @@ const LatexRenderer = ({
   );
   const [largeDocWarningDismissed, setLargeDocWarningDismissed] = useState(false);
 
-  // Auto-switch to raw when content grows past threshold (for live/growing documents).
-  // Only fires if the user has not explicitly opted into rendered mode.
-  useEffect(() => {
-    if (isLargeDoc && !largeDocWarningDismissed) {
-      setInternalViewMode('raw');
-    }
-  }, [isLargeDoc, largeDocWarningDismissed]);
-
   const debouncedContent = useDebouncedValue(content, 1500);
 
   const viewMode = showLatex !== undefined 

@@ -8,7 +8,7 @@ from backend.autonomous.prompts.paper_reference_prompts import get_reference_tit
 
 def get_paper_title_system_prompt() -> str:
     """Get system prompt for paper title selection."""
-    return """You are selecting a title for a mathematical research paper. Your role is to:
+    return """You are selecting a title for a solution-oriented research paper or report. Your role is to:
 
 1. Review your brainstorm topic and database content
 2. Review any selected reference papers informing this paper (if any)
@@ -26,14 +26,14 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been established as correct. Use domain- and claim-appropriate rigor and honest provenance. Mathematical reasoning, theorem discovery, proof, and formalization remain first-class whenever relevant.
 
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
 YOUR TASK:
-Choose a title that accurately captures the mathematical content and scope of the planned paper.
+Choose a title that accurately captures the strongest credible solution contribution and scope of the planned paper.
 
 DIRECT-SOLUTION PREFERENCE:
 - When the paper reaches direct answer-bearing content, let the title foreground that content rather than sounding like generic exploration
@@ -46,18 +46,19 @@ IMPORTANT CLARIFICATION:
 - If "EXISTING PAPERS FROM THIS BRAINSTORM: None" - there's nothing to differentiate from
 
 TITLE CRITERIA:
-- Accurately represents the mathematical content to be covered (from your brainstorm)
+- Accurately represents the solution content to be covered (from your brainstorm)
 - Is specific enough to convey the paper's focus
-- Is professional and suitable for a mathematical research paper
+- Is professional and suitable for a solution-oriented research paper or report
 - Differentiates from EXISTING COMPLETED PAPERS from the same brainstorm (if any exist - check the list below)
 - Avoids being overly broad or generic
 - Makes the paper's strongest direct contribution clear when the content justifies it
 
 TITLE STYLE:
-- Use standard mathematical paper title conventions
+- Use conventions appropriate to the domain and contribution; retain standard mathematical title forms when the paper is mathematical
 - Can include colons for subtitles if appropriate
-- Should convey the main mathematical themes
-- Consider including key mathematical objects/concepts
+- Should convey the main mechanism, result, design, method, evidence package, limitation, algorithm, proof, or other answer-bearing contribution
+- Consider including key mathematical objects/concepts when relevant
+- Do not imply that proposed experiments, artifacts, measurements, or validation already exist
 - Appropriate length: typically 5-15 words
 
 CRITICAL JSON ESCAPE RULES:
@@ -73,7 +74,7 @@ def get_paper_title_json_schema() -> str:
     """Get JSON schema for paper title selection."""
     return """REQUIRED JSON FORMAT:
 {
-  "paper_title": "string - The complete title for the mathematical research paper",
+  "paper_title": "string - The complete title for the solution-oriented research paper or report",
   "reasoning": "string - Why this title appropriately captures the brainstorm content and differentiates from existing papers (if any)"
 }
 
@@ -83,8 +84,8 @@ FIELD REQUIREMENTS:
 
 EXAMPLE:
 {
-  "paper_title": "Modular Forms and Galois Representations in the Langlands Program: A Computational Perspective",
-  "reasoning": "This title accurately captures the core content of our brainstorm database, which extensively covers both modular forms and Galois representations with emphasis on computational approaches. The subtitle 'A Computational Perspective' differentiates it from the existing theoretical paper on Langlands correspondence in our library and reflects the practical examples and algorithms present in the brainstorm submissions."
+  "paper_title": "Partition-Tolerant Coordination with Explicit Safety, Liveness, and Recovery Constraints",
+  "reasoning": "This title identifies the report's actual protocol contribution and its verification obligations. It reflects the source brainstorm while differing from the existing completed paper on failure detection, and it does not imply that the proposed implementation or tests have already been completed."
 }"""
 
 
@@ -109,7 +110,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been established as correct. Apply domain- and claim-appropriate rigor and honest provenance. Mathematical reasoning and formal proof remain first-class whenever relevant.
 
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -141,18 +142,20 @@ ACCEPT the title if:
 - It remains consistent with the paper's intended scope when selected reference papers are present
 - It is appropriately specific (not too broad or narrow)
 - It differentiates from EXISTING COMPLETED PAPERS from the same brainstorm (if any exist)
-- It follows mathematical paper title conventions
+- It follows professional conventions appropriate to the paper's domain; mathematical papers may and should use mathematical conventions
 - The reasoning is sound
 - If "EXISTING PAPERS FROM THIS BRAINSTORM: None" - there's nothing to differentiate from, so accept if other criteria are met
 - It makes any justified direct conclusion or core result clear rather than sounding needlessly exploratory
+- It does not overclaim completed empirical demonstration, artifacts, measurements, citations, or validation beyond the source material
 
 REJECT the title if:
 - It is too similar to an EXISTING COMPLETED PAPER from the same brainstorm (NOT brainstorm submissions - those are the source material!)
 - It doesn't accurately represent the brainstorm content
 - It is too vague or generic
-- It doesn't follow professional conventions
+- It doesn't follow professional conventions appropriate to the domain
 - The reasoning is flawed
 - It obscures a clear direct result behind generic exploratory wording
+- It overstates a proposal or hypothesis as an implemented, tested, measured, or demonstrated result
 
 DO NOT REJECT simply because the title reflects brainstorm submission content - that is the INTENDED behavior.
 

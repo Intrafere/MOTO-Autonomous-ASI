@@ -1,5 +1,5 @@
 """
-Construction prompts for mathematical document building.
+Construction prompts for rigorous solution-document building.
 Implements phase-based construction with explicit section_complete feedback.
 
 PHASE ORDER (enforced):
@@ -15,14 +15,17 @@ from backend.shared.config import system_config
 
 
 CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES:
-- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
-- Theoretical claims must be supported by sound derivation, proof, or explicit assumptions inside the paper.
+- Apply claim-type and domain-appropriate rigor to every substantive claim.
+- Mathematical claims require sound derivation, proof, or explicit assumptions inside the paper.
+- Engineering and software proposals require concrete mechanisms, constraints, interfaces, failure modes, feasibility reasoning, and verification plans appropriate to the claim.
+- Strategic or causal claims require valid inference, explicit assumptions, and realistic limitations.
 - Literature claims must include explicit in-text citations identifying the external source.
 - Empirical claims include benchmark results, latency, throughput, speedups, accuracy, perplexity, ablation outcomes, hardware utilization, and measured implementation metrics.
 - Artifact claims include statements about code, kernels, experiments, logs, reproductions, or accompanying implementations.
 - Empirical or artifact claims may be stated as facts ONLY when backed by an explicit external citation or a provided artifact in context.
 - If that support is missing, rewrite the material as a hypothesis, expected benefit, design target, proposed experiment, validation plan, limitation, or future work.
-- NEVER invent citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts."""
+- NEVER invent citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts.
+- Novelty never overrides correctness, provenance, safety, or honesty."""
 
 
 def get_wolfram_tool_guidance() -> str:
@@ -65,24 +68,13 @@ Tool budget: up to 20 Wolfram Alpha calls for this submission. If you do not nee
 When you use the tool, incorporate only relevant verified results into your final JSON `new_string` and explain in `reasoning` how the Wolfram result informed the content. The system records the full audit trail separately."""
 
 
-CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES:
-- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
-- Theoretical claims must be supported by sound derivation, proof, or explicit assumptions inside the paper.
-- Literature claims must include explicit in-text citations identifying the external source.
-- Empirical claims include benchmark results, latency, throughput, speedups, accuracy, perplexity, ablation outcomes, hardware utilization, and measured implementation metrics.
-- Artifact claims include statements about code, kernels, experiments, logs, reproductions, or accompanying implementations.
-- Empirical or artifact claims may be stated as facts ONLY when backed by an explicit external citation or a provided artifact in context.
-- If that support is missing, rewrite the material as a hypothesis, expected benefit, design target, proposed experiment, validation plan, limitation, or future work.
-- NEVER invent citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts."""
-
-
 # =============================================================================
 # PHASE-SPECIFIC CONSTRUCTION PROMPTS
 # =============================================================================
 
 def get_body_construction_system_prompt() -> str:
     """Get system prompt for BODY section construction phase."""
-    return """You are constructing the BODY SECTIONS of a mathematical document. Your ONLY task in this phase is to write main content sections.
+    return """You are constructing the BODY SECTIONS of a rigorous, solution-oriented research paper or report. Your ONLY task in this phase is to write main solution content.
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -97,7 +89,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Aggressively pursue the strongest credible and genuinely novel solution to the user's exact objective. Choose the solution form and verification standard that fit the problem. Mathematical reasoning, theorems, derivations, proofs, and LaTeX remain first-class and preferred whenever relevant, but non-mathematical work must not be forced into mathematical form.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -105,17 +97,17 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 IMPORTANT - WHY WE WRITE PAPERS OUT OF ORDER:
 This paper is constructed OUT OF ORDER intentionally. The writing sequence is:
-1. BODY SECTIONS FIRST - establishes the actual mathematical content with full flexibility
-2. CONCLUSION second - summarizes what was actually proven in the body
+1. BODY SECTIONS FIRST - establishes the actual solution content with full flexibility
+2. CONCLUSION second - summarizes what was actually established in the body
 3. INTRODUCTION third - describes what the paper actually contains (written after we know the content)
 4. ABSTRACT last - summarizes the complete paper
 
-WHY BODY FIRST? If we wrote the introduction or abstract first, it would lock in what the body must contain before we've written it. By writing body sections first, the mathematical content can develop naturally and organically without being constrained by promises made in a pre-written introduction.
+WHY BODY FIRST? If we wrote the introduction or abstract first, it would lock in what the body must contain before we've written it. By writing body sections first, the solution can develop naturally without being constrained by promises made in a pre-written introduction.
 
 SOURCE USAGE PRINCIPLE:
 - Treat the brainstorm/aggregator database as optional high-value source material and exploration history, not a mandatory checklist
 - Use it when it helps you achieve the strongest rigorous paper toward the user's prompt
-- You may synthesize beyond brainstorm/database material using sound mathematical reasoning
+- You may synthesize beyond brainstorm/database material using sound domain-appropriate reasoning
 - Do NOT force coverage of every source entry
 - Do NOT ignore clearly crucial source material for the scope you are writing
 
@@ -156,7 +148,7 @@ HOW PLACEHOLDERS WORK:
 WHY THEY EXIST: They prevent AI confusion about whether sections like Introduction are "already written" when they aren't.
 
 PHASE: BODY SECTIONS
-You are writing the main content of the paper - definitions, theorems, proofs, results, discussions.
+You are writing the paper's main solution content. Use the modality best suited to the objective: for example mathematical definitions/theorems/proofs; algorithmic constraints/architecture/correctness/interfaces/complexity/evaluation; engineering requirements/mechanisms/tradeoffs/failure modes/verification; empirical hypotheses/protocols/falsifiable predictions/analysis plans/limitations; or strategic objectives/causal models/interventions/risks/evaluation.
 
 YOUR TASK:
 1. Review the outline to identify which body sections need to be written
@@ -167,11 +159,10 @@ YOUR TASK:
 PROGRESSIVE SYSTEM: You will be called repeatedly — once per body section. Focus on writing ONE complete, rigorous section per turn rather than rushing through multiple sections. Write what you can do thoroughly and correctly this turn; you will be called again for the next section.
 
 WHAT COUNTS AS BODY SECTIONS:
-- Definitions and Preliminaries
-- Main Results / Theorems
-- Proofs
-- Corollaries
-- Discussion of results
+- Every central solution component promised by the outline
+- Definitions, theorems, proofs, derivations, and corollaries when the objective is mathematical
+- Algorithms, architectures, mechanisms, interfaces, correctness or feasibility arguments, evaluation plans, evidence analysis, failure modes, risks, and limitations when appropriate
+- Discussion that directly supports the answer-bearing route
 - Any numbered sections from the outline EXCEPT Introduction, Conclusion, and Abstract
 
 DO NOT WRITE IN THIS PHASE:
@@ -181,13 +172,13 @@ DO NOT WRITE IN THIS PHASE:
 
 COMPLETION CRITERIA - Set section_complete=true when:
 ✓ ALL body sections listed in the outline have been written
-✓ All theorems, proofs, and results from the outline are present
-✓ The main mathematical content is complete
+✓ Every central solution component promised by the outline is present
+✓ Any relevant theorems, proofs, derivations, mechanisms, evidence, interfaces, evaluation plans, and failure analyses are complete enough for the claimed result
 
 Set section_complete=false if:
 ✗ There are still body sections in the outline that haven't been written
-✗ Important theorems or proofs are missing
-✗ The main content is incomplete
+✗ Any important promised solution component is missing, including a theorem/proof when the mathematical route requires it
+✗ The main answer-bearing content is incomplete
 
 CRITICAL REQUIREMENTS:
 - Follow the outline structure for body sections
@@ -196,8 +187,8 @@ CRITICAL REQUIREMENTS:
 - Prioritize the strongest direct rigorous route to answering the user's prompt
 - Do not repeat content already in the document
 - Check for existing section headers before creating new ones
-- Write clear, rigorous mathematical exposition
-- ALL content must be rooted in sound mathematical reasoning
+- Write clear, rigorous, independently checkable, domain-appropriate exposition
+- Mathematical claims require sound derivation, proof, or explicit assumptions; other claims require the verification standard appropriate to their type
 - Unsupported empirical or artifact claims must be rewritten as hypotheses, validation plans, limitations, or future work instead of being asserted as completed results
 
 EXACT STRING MATCHING FOR EDITS:
@@ -244,11 +235,11 @@ For SUBSEQUENT sections (paper has content), use operation="insert_after" with t
 
 🚨 CRITICAL CONTENT REQUIREMENT 🚨
 
-If you set needs_construction=true, you MUST provide actual content in new_string.
-- needs_construction=true + new_string="" is INVALID and will be rejected
-- needs_construction=true means you ARE writing content - so PROVIDE it
+If you set needs_construction=true, you MUST provide actual content in new_string unless operation="delete".
+- needs_construction=true + new_string="" is INVALID except for delete, where old_string identifies the content to remove
+- needs_construction=true means you ARE editing content - provide new_string for full_content, replace, and insert_after
 - Only set needs_construction=false if NO body sections remain to write
-- The "new_string" field must NEVER be empty when needs_construction=true
+- The "new_string" field must be non-empty when needs_construction=true except for delete
 
 WRONG (will be rejected):
 {
@@ -270,7 +261,7 @@ Output your response ONLY as JSON in this exact format:
   "section_complete": true or false,
   "operation": "full_content | replace | insert_after | delete",
   "old_string": "exact text from document to find (empty for full_content)",
-  "new_string": "Your complete section text (MUST NOT be empty if needs_construction=true)",
+  "new_string": "Your complete section text (non-empty if needs_construction=true, except empty for delete)",
   "reasoning": "Why construction is/isn't needed AND whether body phase is complete"
 }
 """
@@ -278,7 +269,7 @@ Output your response ONLY as JSON in this exact format:
 
 def get_conclusion_construction_system_prompt() -> str:
     """Get system prompt for CONCLUSION section construction phase."""
-    return """You are constructing the CONCLUSION section of a mathematical document. Your ONLY task in this phase is to write the conclusion.
+    return """You are constructing the CONCLUSION section of a rigorous, solution-oriented research paper or report. Your ONLY task in this phase is to write the conclusion.
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -293,7 +284,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Use claim-type and domain-appropriate rigor to summarize only what the body actually establishes. Mathematical results and proofs remain fully supported when relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -301,12 +292,12 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 IMPORTANT - WHY WE WRITE PAPERS OUT OF ORDER:
 This paper is constructed OUT OF ORDER intentionally. The writing sequence is:
-1. BODY SECTIONS first - establishes the actual mathematical content (DONE)
-2. CONCLUSION second - YOU ARE HERE - summarize what was actually proven
+1. BODY SECTIONS first - establishes the actual solution content (DONE)
+2. CONCLUSION second - YOU ARE HERE - summarize what was actually established
 3. INTRODUCTION third - will describe what the paper contains (written after we know full content)
 4. ABSTRACT last - will summarize the complete paper
 
-WHY CONCLUSION BEFORE INTRODUCTION? Writing the conclusion now, before the introduction, ensures we summarize actual proven results rather than hypothetical content. The introduction will be written next, and it will accurately describe both the body content AND this conclusion.
+WHY CONCLUSION BEFORE INTRODUCTION? Writing the conclusion now ensures we summarize actual established results rather than hypothetical content. The introduction will be written next and will accurately describe both the body and this conclusion.
 
 CRITICAL - SYSTEM-MANAGED MARKERS (NOT YOUR OUTPUT):
 
@@ -347,7 +338,7 @@ The body sections are COMPLETE. Now write the conclusion that summarizes the pap
 DO NOT RESPOND WITH needs_construction=false. You are in the CONCLUSION PHASE which means:
 1. YOU MUST WRITE THE CONCLUSION SECTION NOW
 2. SET needs_construction=true
-3. PROVIDE THE ACTUAL CONCLUSION TEXT in the "content" field
+3. PROVIDE THE ACTUAL CONCLUSION TEXT in the "new_string" field
 4. SET section_complete=true (because writing the conclusion completes this phase)
 
 WRONG RESPONSE (DO NOT DO THIS):
@@ -375,19 +366,19 @@ YOUR TASK:
 2. WRITE the conclusion content that summarizes the main results and contributions
 3. SET needs_construction=true (because you ARE constructing content)
 4. SET section_complete=true (because writing the conclusion completes this phase)
-5. PROVIDE the actual Conclusion text in the "content" field
+5. PROVIDE the actual Conclusion text in the "new_string" field
 
 DIRECT-ANSWER-FIRST REQUIREMENT:
 - Make the paper's strongest justified answer, partial answer, impossibility result, or sharp constraint explicit
 - Do not hide the core answer behind generic summary language
 
 WHAT TO INCLUDE IN CONCLUSION:
-- Summary of main results and theorems proven
+- Summary of the main results, mechanisms, evidence, designs, theorems, or proofs actually established, as applicable
 - Clear statement of the strongest direct answer the paper has established
-- Significance of the mathematical contributions
+- Significance of the paper's contributions
 - Connections between results
 - Brief mention of limitations or open questions (optional)
-- Final remarks on the mathematical significance
+- Final remarks on significance and applicability
 - If empirical validation was not actually supported, state the limitation plainly instead of summarizing unsupported benchmark claims as established fact
 
 CRITICAL - SECTION HEADER FORMAT:
@@ -412,12 +403,12 @@ You CANNOT complete the conclusion phase without WRITING the conclusion.
 
 CRITICAL REQUIREMENTS:
 - You MUST set needs_construction=true
-- You MUST provide the actual Conclusion text in "content"
+- You MUST provide the actual Conclusion text in "new_string"
 - You MUST set section_complete=true (writing conclusion = completing phase)
-- Do NOT add new theorems or proofs - those belong in body sections
-- Summarize, don't introduce new material
+- Do NOT add any new central result, mechanism, evidence, theorem, or proof - those belong in body sections
+- Summarize; do not introduce new material
 - Maintain coherent narrative flow from body to conclusion
-- Write clear, rigorous mathematical exposition
+- Write clear, rigorous, domain-appropriate exposition
 - Do not convert unsupported empirical ideas into factual claims while summarizing
 
 EXACT STRING MATCHING FOR EDITS:
@@ -440,7 +431,7 @@ Output your response ONLY as JSON in this exact format:
 
 def get_introduction_construction_system_prompt() -> str:
     """Get system prompt for INTRODUCTION section construction phase."""
-    return """You are constructing the INTRODUCTION section of a mathematical document. Your ONLY task in this phase is to write the introduction.
+    return """You are constructing the INTRODUCTION section of a rigorous, solution-oriented research paper or report. Your ONLY task in this phase is to write the introduction.
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -455,7 +446,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Use claim-type and domain-appropriate rigor, and describe only solution content the completed body and conclusion actually support. Mathematical reasoning, theorems, proofs, and LaTeX remain fully supported when relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -463,8 +454,8 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 IMPORTANT - WHY WE WRITE PAPERS OUT OF ORDER:
 This paper is constructed OUT OF ORDER intentionally. The writing sequence is:
-1. BODY SECTIONS first - established the actual mathematical content (DONE)
-2. CONCLUSION second - summarized what was proven (DONE)
+1. BODY SECTIONS first - established the actual solution content (DONE)
+2. CONCLUSION second - summarized what was established (DONE)
 3. INTRODUCTION third - YOU ARE HERE - describe what the paper contains
 4. ABSTRACT last - will summarize the complete paper
 
@@ -509,7 +500,7 @@ The body and conclusion are COMPLETE. Now write an introduction that describes t
 DO NOT RESPOND WITH needs_construction=false. You are in the INTRODUCTION PHASE which means:
 1. YOU MUST WRITE THE INTRODUCTION SECTION NOW
 2. SET needs_construction=true
-3. PROVIDE THE ACTUAL INTRODUCTION TEXT in the "content" field
+3. PROVIDE THE ACTUAL INTRODUCTION TEXT in the "new_string" field
 4. SET section_complete=true (because writing the introduction completes this phase)
 
 WRONG RESPONSE (DO NOT DO THIS):
@@ -545,16 +536,16 @@ YOUR TASK:
 3. WRITE the introduction that properly introduces and describes the paper's content
 4. SET needs_construction=true (because you ARE constructing content)
 5. SET section_complete=true (because writing the introduction completes this phase)
-6. PROVIDE the actual Introduction text in the "content" field
+6. PROVIDE the actual Introduction text in the "new_string" field
 
 DIRECT-ANSWER-FIRST REQUIREMENT:
 - Frame the paper around the main question and the direct answer the body/conclusion establish
 - Keep preliminaries and motivation in service of that answer rather than drifting into generic survey exposition
 
 WHAT TO INCLUDE IN INTRODUCTION:
-- Context and motivation for the mathematical problem
+- Context and motivation for the exact problem
 - Brief overview of what the paper covers
-- Statement of main results (high-level, not full proofs)
+- Statement of main results or solution contributions (high-level; do not duplicate full proofs or implementation detail)
 - Clear framing of the paper's answer-bearing contribution
 - Roadmap of the paper structure
 - Historical context or prior work (if relevant)
@@ -562,7 +553,7 @@ WHAT TO INCLUDE IN INTRODUCTION:
 CRITICAL - SECTION HEADER FORMAT:
 - Use EXACTLY "I. Introduction" as the section header
 - The Introduction is ALWAYS Section I (Roman numeral one)
-- This follows standard mathematical paper conventions
+- This follows the compiler's required paper convention
 
 DO NOT WRITE IN THIS PHASE:
 - Additional body content (that phase is complete)
@@ -580,11 +571,11 @@ You CANNOT complete the introduction phase without WRITING the introduction.
 
 CRITICAL REQUIREMENTS:
 - You MUST set needs_construction=true
-- You MUST provide the actual Introduction text in "content"
+- You MUST provide the actual Introduction text in "new_string"
 - You MUST set section_complete=true (writing introduction = completing phase)
 - The introduction is the ONLY place where forward-looking language is allowed
-- Describe results without full proofs
-- Set up the mathematical context
+- Describe results without duplicating full proofs or detailed body argument
+- Set up the domain-appropriate problem context
 - Make the reader want to continue reading
 - Do not promise empirical validation, benchmark numbers, or artifacts unless they are explicitly supported
 
@@ -608,7 +599,7 @@ Output your response ONLY as JSON in this exact format:
 
 def get_abstract_construction_system_prompt() -> str:
     """Get system prompt for ABSTRACT section construction phase."""
-    return """You are constructing the ABSTRACT of a mathematical document. Your ONLY task in this phase is to write the abstract.
+    return """You are constructing the ABSTRACT of a rigorous, solution-oriented research paper or report. Your ONLY task in this phase is to write the abstract.
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -623,7 +614,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Use claim-type and domain-appropriate rigor and summarize only what the completed paper actually supports. Mathematical reasoning, theorems, proofs, and LaTeX remain fully supported when relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -631,8 +622,8 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 IMPORTANT - WHY WE WRITE PAPERS OUT OF ORDER:
 This paper is constructed OUT OF ORDER intentionally. The writing sequence is:
-1. BODY SECTIONS first - established the actual mathematical content (DONE)
-2. CONCLUSION second - summarized what was proven (DONE)
+1. BODY SECTIONS first - established the actual solution content (DONE)
+2. CONCLUSION second - summarized what was established (DONE)
 3. INTRODUCTION third - described what the paper contains (DONE)
 4. ABSTRACT last - YOU ARE HERE - summarize the complete paper
 
@@ -676,7 +667,7 @@ The entire paper (introduction, body, conclusion) is COMPLETE. Now write the abs
 DO NOT RESPOND WITH needs_construction=false. You are in the ABSTRACT PHASE (THE FINAL PHASE) which means:
 1. YOU MUST WRITE THE ABSTRACT SECTION NOW
 2. SET needs_construction=true
-3. PROVIDE THE ACTUAL ABSTRACT TEXT in the "content" field
+3. PROVIDE THE ACTUAL ABSTRACT TEXT in the "new_string" field
 4. ALWAYS SET section_complete=true (this is the FINAL phase - writing abstract = completing paper)
 
 WRONG RESPONSE (DO NOT DO THIS):
@@ -712,7 +703,7 @@ YOUR TASK:
 3. WRITE a concise abstract that summarizes the entire paper
 4. SET needs_construction=true (because you ARE constructing content)
 5. ALWAYS SET section_complete=true (THIS IS THE FINAL PHASE - no exceptions)
-6. PROVIDE the actual Abstract text in the "content" field
+6. PROVIDE the actual Abstract text in the "new_string" field
 
 DIRECT-ANSWER-FIRST REQUIREMENT:
 - State the strongest direct answer, partial answer, impossibility result, or sharp constraint up front when the paper justifies it
@@ -749,7 +740,7 @@ You CANNOT complete the abstract phase without WRITING the abstract.
 
 CRITICAL REQUIREMENTS:
 - You MUST set needs_construction=true
-- You MUST provide the actual Abstract text in "content"
+- You MUST provide the actual Abstract text in "new_string"
 - You MUST ALWAYS set section_complete=true (this is the final phase - no exceptions)
 - The abstract should stand alone - reader should understand contributions without reading the paper
 - Be concise but comprehensive
@@ -786,7 +777,7 @@ def get_construction_system_prompt() -> str:
     
     NOTE: For autonomous mode and proper section ordering, use phase-specific prompts instead.
     """
-    return """You are constructing a mathematical document section by section. Your role is to:
+    return """You are constructing a rigorous, solution-oriented research paper or report section by section. Your role is to:
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -801,7 +792,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + CONSTRUCTION_EMPIRICAL_PROVENANCE_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Aggressively pursue the strongest credible and genuinely novel solution to the user's exact objective. Choose the solution form and verification standard that fit the problem. Mathematical reasoning, theorems, derivations, proofs, and LaTeX remain first-class whenever relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -842,10 +833,10 @@ CRITICAL REQUIREMENTS:
 - Use brainstorm/aggregator content when it helps, but you are not required to cover every source entry
 - Prioritize the strongest direct rigorous route to answering the user's prompt
 - Maintain coherent narrative flow
-- Write clear, rigorous mathematical exposition
+- Write clear, rigorous, independently checkable, domain-appropriate exposition
 - Do not repeat content already in the document
 - Check for existing section headers before creating new ones
-- ALL content must be rooted in sound mathematical reasoning
+- Apply claim-type rigor: mathematical claims require derivation/proof/assumptions; engineering, software, empirical, and strategic claims require their appropriate mechanisms, evidence, constraints, failure modes, and verification
 - Unsupported empirical or artifact claims must be rewritten conservatively rather than asserted as established fact
 
 EXACT STRING MATCHING FOR EDITS:
@@ -885,7 +876,7 @@ REQUIRED JSON FORMAT:
 }
 
 FIELD DEFINITIONS:
-- needs_construction: Set to false if no more content is needed in the CURRENT PHASE
+- needs_construction: Set to false only if no more content is needed in the CURRENT PHASE. If true, new_string contains the actual edit content except for delete, where it is empty.
 - section_complete: Set to true when the CURRENT PHASE (body/conclusion/intro/abstract) is complete
 - operation: Type of edit operation:
   * "full_content": Replace entire document with new_string (for first content)
@@ -895,7 +886,7 @@ FIELD DEFINITIONS:
 - old_string: EXACT text from the current document that you want to find. Must be unique.
   Include enough context (3-5 lines) to ensure uniqueness. Empty for full_content operation.
 - new_string: The actual text to insert (for insert_after/full_content) or replace with (for replace).
-  Empty for delete operation.
+  It MUST be non-empty when needs_construction=true, except for a delete operation; empty when needs_construction=false.
 - reasoning: Explain your decision and phase status
 
 EXACT STRING MATCHING RULES:
@@ -931,9 +922,9 @@ Example (Body phase - insert_after to add new section):
   "needs_construction": true,
   "section_complete": false,
   "operation": "insert_after",
-  "old_string": "This completes the proof of Theorem 2.1.\\n\\n[HARD CODED PLACEHOLDER FOR THE CONCLUSION",
-  "new_string": "III. Main Results\\n\\nWe now present the central theorem...",
-  "reasoning": "Section III Main Results is needed per the outline. Inserting after Section II ends."
+  "old_string": "The interface contract above fixes the request and response invariants.",
+  "new_string": "\\n\\nIII. Failure Modes and Verification\\n\\nWe now analyze degraded dependencies, recovery behavior, and the tests needed to verify each invariant.",
+  "reasoning": "The outline requires failure-mode and verification analysis after the architecture section. The editable prose anchor is exact and contains no protected marker."
 }
 
 Example (Replacing a paragraph):
@@ -1098,7 +1089,7 @@ If it is NOT present, you MUST write it now.
     parts.append("""OPTIONAL SOURCE MATERIAL POLICY:
 - The brainstorm database and source evidence below are optional supports, not mandatory checklists.
 - Use them if they help you achieve the strongest rigorous paper toward the user's prompt.
-- You may synthesize beyond them using sound mathematical reasoning.
+- You may synthesize beyond them using sound domain-appropriate reasoning; mathematical reasoning and proof remain first-class when relevant.
 - Do NOT force coverage of every source entry.
 - Prefer material that strengthens the paper's direct answer over broader auxiliary coverage.
 """)

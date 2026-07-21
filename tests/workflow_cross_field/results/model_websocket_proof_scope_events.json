@@ -1,0 +1,29 @@
+{
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "scoped_event",
+    "registered_proof_event"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "proof_scope_isolation"
+  ],
+  "invariants": [
+    "events.frontend_events_include_scope_phase",
+    "events.proof_verified_after_registration",
+    "proof_scope.autonomous_events_not_manual"
+  ],
+  "replay": [
+    "start_autonomous_papers_and_proofs",
+    "emit_frontend_scoped_event",
+    "emit_registered_proof_verified"
+  ],
+  "result": "passed",
+  "scenario_id": "model_websocket_proof_scope_events",
+  "schema_version": 1,
+  "seed": null,
+  "source": "curated",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+}

@@ -1,0 +1,24 @@
+{
+  "adapter": "browser_smoke",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "hosted_openrouter_startup",
+    "desktop_provider_paths_not_requested"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "proof_runtime_gating",
+    "runtime_exclusivity"
+  ],
+  "invariants": [
+    "api.hosted_desktop_only_routes_unavailable"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "browser_hosted_startup_respects_desktop_capability_boundaries",
+  "schema_version": 1,
+  "seed": null,
+  "source": "browser_smoke",
+  "test_file": "tests/workflow_browser_smoke/hosted-capabilities.spec.js"
+}

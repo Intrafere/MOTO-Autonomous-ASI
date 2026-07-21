@@ -1,12 +1,15 @@
 """Helpers for distinguishing model availability failures from ordinary output errors."""
 from __future__ import annotations
 
+import httpx
+
 from backend.shared.openrouter_client import (
     CreditExhaustionError,
     FreeModelExhaustedError,
     OpenRouterInvalidResponseError,
     OpenRouterPrivacyPolicyError,
 )
+from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteError
 
 
 _NON_RETRYABLE_MODEL_ERROR_MARKERS = (
@@ -80,6 +83,18 @@ _TRANSIENT_INVALID_RESPONSE_BODY_MARKERS = (
     "upstream connect error",
 )
 
+_PROVIDER_CONTEXT_LENGTH_MARKERS = (
+    "context_length_exceeded",
+    "context length exceeded",
+    "exceeds the context window",
+    "exceeded the context window",
+    "too large for the context window",
+    "maximum context size",
+    "input exceeds",
+    "request too large",
+    "prompt is too long",
+)
+
 
 def format_transient_provider_error(exc: Exception) -> str:
     """Return a checkpoint-preserving transient provider error message."""
@@ -99,8 +114,30 @@ def is_retryable_model_output_error(exc: Exception) -> bool:
     return any(all(marker in message for marker in markers) for markers in _RETRYABLE_OUTPUT_FAILURE_MARKERS)
 
 
+def is_provider_context_length_error(exc: Exception) -> bool:
+    """Return true when a provider rejects a request before generation because input is too large."""
+    if isinstance(exc, ProviderContextLengthError):
+        return True
+    if isinstance(exc, ProviderRouteError) and exc.cause is not None:
+        return is_provider_context_length_error(exc.cause)
+    message = str(exc or "").lower()
+    return any(marker in message for marker in _PROVIDER_CONTEXT_LENGTH_MARKERS)
+
+
 def is_transient_model_call_error(exc: Exception) -> bool:
     """Return true for provider/network failures that should not be treated as config errors."""
+    if isinstance(exc, ProviderRouteError) and exc.cause is not None:
+        if isinstance(
+            exc.cause,
+            (
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.RemoteProtocolError,
+                httpx.TimeoutException,
+            ),
+        ):
+            return True
+        return is_transient_model_call_error(exc.cause)
     if isinstance(exc, OpenRouterInvalidResponseError):
         content_type = str(getattr(exc, "content_type", "") or "").lower()
         body_preview = str(getattr(exc, "body_preview", "") or "").lower()
@@ -116,6 +153,10 @@ def is_transient_model_call_error(exc: Exception) -> bool:
 
 def is_non_retryable_model_error(exc: Exception) -> bool:
     """Return true when a model/API failure should halt workflow progress."""
+    if isinstance(exc, ProviderContextLengthError):
+        return True
+    if isinstance(exc, ProviderRouteError) and exc.cause is not None:
+        return is_non_retryable_model_error(exc.cause)
     if isinstance(
         exc,
         (

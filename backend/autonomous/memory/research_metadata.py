@@ -490,9 +490,9 @@ class ResearchMetadata:
     # ========================================================================
     
     async def get_user_prompt(self) -> str:
-        """Get the user's research prompt."""
+        """Get the canonical user-authored research prompt."""
         await self._ensure_initialized()
-        return self._data.get("user_research_prompt", "")
+        return self._data.get("base_user_research_prompt") or self._data.get("user_research_prompt", "")
 
     async def get_base_user_prompt(self) -> str:
         """Get the original user research prompt before proof framing."""
@@ -500,9 +500,10 @@ class ResearchMetadata:
         return self._data.get("base_user_research_prompt") or self._data.get("user_research_prompt", "")
     
     async def set_user_prompt(self, prompt: str) -> None:
-        """Set the user's research prompt."""
+        """Persist only the canonical user-authored research prompt."""
         async with self._lock:
             self._data["user_research_prompt"] = prompt
+            self._data["base_user_research_prompt"] = prompt
             await self._save_metadata()
 
     async def set_proof_framing_state(
@@ -514,10 +515,10 @@ class ResearchMetadata:
         context: str,
         reasoning: str,
     ) -> None:
-        """Persist the proof-framing decision in metadata."""
+        """Persist proof framing separately from the canonical user prompt."""
         async with self._lock:
             self._data["base_user_research_prompt"] = base_user_prompt
-            self._data["user_research_prompt"] = effective_user_prompt
+            self._data["user_research_prompt"] = base_user_prompt
             self._data["proof_framing_active"] = active
             self._data["proof_framing_context"] = context
             self._data["proof_framing_reasoning"] = reasoning

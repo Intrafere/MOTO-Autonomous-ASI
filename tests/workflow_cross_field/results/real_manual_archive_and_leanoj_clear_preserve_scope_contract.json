@@ -1,0 +1,26 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "physical_manual_archive",
+    "active_store_empty",
+    "leanoj_root_removed"
+  ],
+  "fields": [
+    "proof_scope_isolation",
+    "workflow_filesystem_state",
+    "assistant_memory"
+  ],
+  "invariants": [
+    "proof_scope.manual_clear_archives_active",
+    "state.clear_removes_active_preserves_history"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_manual_archive_and_leanoj_clear_preserve_scope_contract",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+}

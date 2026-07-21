@@ -1,0 +1,57 @@
+{
+  "action_ids": [
+    "start_autonomous_papers_and_proofs",
+    "attempt_conflicting_start",
+    "complete_topic_exploration",
+    "force_paper_writing",
+    "enter_autonomous_paper_checkpoint",
+    "complete_autonomous_paper_checkpoint"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "autonomous",
+    "final_phase": "topic_exploration"
+  },
+  "evidence": [
+    "paper_checkpoint",
+    "scoped_event",
+    "start_blocked"
+  ],
+  "exercised_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "observed_fields": [
+    "allowed_outputs",
+    "assistant_memory",
+    "prompt_context",
+    "proof_runtime_gating",
+    "provider_pause_resume",
+    "runtime_exclusivity",
+    "websocket_api_contracts",
+    "workflow_filesystem_state"
+  ],
+  "replay": [
+    "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
+    "start_manual_compiler()",
+    "complete_topic_exploration()",
+    "force_paper_writing()",
+    "complete_brainstorm()",
+    "enter_autonomous_paper_checkpoint()",
+    "complete_autonomous_paper_checkpoint()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_autonomous_paper_checkpoint_seed_7",
+  "schema_version": 1,
+  "seed": 7,
+  "target_artifact": "targets/generated_autonomous_paper_checkpoint.json",
+  "target_id": "generated_autonomous_paper_checkpoint"
+}

@@ -36,6 +36,7 @@ import {
 } from '../../utils/leanojProfiles';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
+import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
 import RawSettingsEditor from '../RawSettingsEditor';
 import '../settings-common.css';
 
@@ -270,7 +271,7 @@ function RoleEditor(props) {
       <h4>{title}</h4>
       {title === 'Assistant' && (
         <p className="settings-info">
-          Runs in parallel during topic, brainstorm, path, master-proof edit, and final proof work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators never receive Assistant context.
+          Runs in parallel during topic, brainstorm, path, master-proof edit, and final proof work to retrieve up to 7 relevant verified proof-memory supports from Session History Memory and SyntheticLib4 when enabled. Validators never receive Assistant context.
         </p>
       )}
       {disabled && (
@@ -1005,18 +1006,16 @@ export default function LeanOJSettings({
             >
               🔗 OpenRouter Model List
             </button>
-            <label className="settings-checkbox-label model-refresh-controls__toggle" style={{ cursor: isRunning ? 'not-allowed' : 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={settings.freeOnly}
-                onChange={(event) => updateSettings({ freeOnly: event.target.checked })}
-                disabled={isRunning}
-              />
-              Free models only
-            </label>
+            <OpenRouterFreeModelsControl
+              checked={settings.freeOnly}
+              disabled={isRunning}
+              onChange={(freeOnly) => updateSettings({ freeOnly })}
+            />
           </>
         )}
-        {developerModeEnabled ? (
+        {developerModeEnabled && (
+          <>
+          {hasOpenRouterKey && <span className="model-refresh-controls__divider" aria-hidden="true" />}
           <label className="settings-checkbox-label model-refresh-controls__toggle" style={{ cursor: isRunning ? 'not-allowed' : 'pointer' }}>
             <input
               type="checkbox"
@@ -1026,10 +1025,7 @@ export default function LeanOJSettings({
             />
             Edit Raw
           </label>
-        ) : (
-          <span className="settings-developer-mode-hint">
-            Developer mode: press Shift + Z + X to toggle raw JSON settings.
-          </span>
+          </>
         )}
       </div>
 

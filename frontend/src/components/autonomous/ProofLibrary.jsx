@@ -1,7 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { autonomousAPI, proofSearchAPI } from '../../services/api';
 import { buildResearchRunGroups, formatRunPromptPreview } from '../../utils/researchRunHistory';
 import { downloadTextFile } from '../../utils/downloadHelpers';
+import { classifyProofNovelty, getCanonicalProofIdentity, sanitizeDomId } from '../../utils/proofPresentation';
+import { readBooleanStorage } from '../../utils/safeStorage';
 import './FinalAnswerLibrary.css';
 import './ProofLibrary.css';
 
@@ -20,33 +22,72 @@ function truncate(text, maxLength = 220) {
 }
 
 function getTierBadge(proof) {
-  const tier = proof.novelty_tier;
-  if (tier === 'major_mathematical_discovery') {
-    return { cssClass: 'proof-badge--platinum', label: 'Major Mathematical Discovery' };
-  }
-  if (tier === 'mathematical_discovery') {
-    return { cssClass: 'proof-badge--gold', label: 'Minor Mathematical Discovery' };
-  }
-  if (tier === 'novel_variant') {
-    return { cssClass: 'proof-badge--silver', label: 'Novel Reformulation' };
-  }
-  if (tier === 'novel_formulation') {
-    return { cssClass: 'proof-badge--bronze', label: 'Novel Formalization' };
-  }
-  if (proof.novel) {
-    return { cssClass: 'proof-badge--gold', label: 'Novel' };
-  }
-  return { cssClass: 'proof-badge--known', label: 'Known' };
+  const presentation = classifyProofNovelty(proof);
+  return { cssClass: presentation.badgeClass, label: presentation.label };
 }
 
 function getCardClass(proof) {
-  const tier = proof.novelty_tier;
-  if (tier === 'major_mathematical_discovery') return 'proof-card--platinum';
-  if (tier === 'mathematical_discovery') return 'proof-card--gold';
-  if (tier === 'novel_variant') return 'proof-card--silver';
-  if (tier === 'novel_formulation') return 'proof-card--bronze';
-  if (proof.novel) return 'proof-card--novel';
-  return 'proof-card--known';
+  return classifyProofNovelty(proof).cardClass;
+}
+
+function getProofCardId(proof) {
+  return getCanonicalProofIdentity(proof);
+}
+
+function getProofRunKey(proof) {
+  return proof.run_id || proof.session_id || `orphan:${proof.proof_id}`;
+}
+
+function matchesSelectedProof(proof, selectedProofId, selectedSessionId = '', selectedRunId = '') {
+  if (!selectedProofId) return false;
+  const proofIds = [
+    proof.proof_id,
+    proof.library_id,
+    proof.search_id,
+    proof.lean_code_hash,
+    proof.theorem_statement_hash,
+  ].filter(Boolean).map(String);
+  if (!proofIds.includes(String(selectedProofId))) {
+    return false;
+  }
+  if (selectedRunId) {
+    return (proof.run_id || proof.session_id || '') === selectedRunId;
+  }
+  return !selectedSessionId || !proof.session_id || proof.session_id === selectedSessionId;
+}
+
+const FEDERATED_QUERY_STORAGE_KEY = 'proof_library_federated_query';
+const FEDERATED_CORPORA_STORAGE_KEY = 'proof_library_federated_corpora';
+const FEDERATED_VERIFIED_STORAGE_KEY = 'proof_library_federated_verified_only';
+const LOCAL_QUERY_STORAGE_KEY = 'proof_library_local_query';
+const LOCAL_CATEGORY_STORAGE_KEY = 'proof_library_local_category';
+const DEFAULT_CORPORA = ['moto', 'manual', 'leanoj', 'syntheticlib4'];
+
+function readStringStorage(key, fallback) {
+  try {
+    const value = localStorage.getItem(key);
+    return value === null ? fallback : value;
+  } catch {
+    return fallback;
+  }
+}
+
+function readCorporaStorage() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FEDERATED_CORPORA_STORAGE_KEY));
+    const valid = Array.isArray(parsed) ? parsed.filter((id) => DEFAULT_CORPORA.includes(id)) : [];
+    return valid.length ? valid : DEFAULT_CORPORA;
+  } catch {
+    return DEFAULT_CORPORA;
+  }
+}
+
+function writeStorage(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Storage is optional; keep the current in-memory controls usable.
+  }
 }
 
 const PROOF_SEARCH_CORPORA = [
@@ -58,29 +99,45 @@ const PROOF_SEARCH_CORPORA = [
 
 const PROOF_SEARCH_OPTIONS = [
   { id: 'verified_only', label: 'Verified only' },
-  { id: 'include_partial', label: 'Include partial artifacts' },
-  { id: 'include_failed', label: 'Include failed attempts' },
+];
+
+const PROOF_LIBRARY_FILTERS = [
+  { id: 'novel', label: 'Novel Proofs' },
+  { id: 'duplicate_novel', label: 'Duplicate Novel Proofs' },
+  { id: 'not_novel', label: 'Not Novel Proofs' },
+  { id: 'all', label: 'All Proofs' },
 ];
 
 export default function ProofLibrary({
   proofScope = 'autonomous',
   title = 'Proof Library',
   description = 'All verified mathematical proofs generated across research sessions.',
+  selectedProofId = null,
+  selectedSessionId = '',
+  selectedRunId = '',
 }) {
   const [proofs, setProofs] = useState([]);
+  const [proofCounts, setProofCounts] = useState({});
   const [sessionsResponse, setSessionsResponse] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const [expandedProof, setExpandedProof] = useState(null);
+  const activeDetailRequestRef = useRef(null);
+  const libraryRequestGenerationRef = useRef(0);
+  const searchRequestGenerationRef = useRef(0);
+  const searchDetailRequestGenerationRef = useRef(0);
+  const [expandedRunGroups, setExpandedRunGroups] = useState(() => new Set());
   const [loadingContentId, setLoadingContentId] = useState(null);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterNovelty, setFilterNovelty] = useState('novel');
+  const [searchTerm, setSearchTerm] = useState(() => readStringStorage(LOCAL_QUERY_STORAGE_KEY, ''));
+  const [filterNovelty, setFilterNovelty] = useState(() => {
+    const value = readStringStorage(LOCAL_CATEGORY_STORAGE_KEY, 'novel');
+    return PROOF_LIBRARY_FILTERS.some(({ id }) => id === value) ? value : 'novel';
+  });
   const [proofSearchOverview, setProofSearchOverview] = useState(null);
-  const [proofSearchCorpora, setProofSearchCorpora] = useState(['moto', 'manual', 'leanoj', 'syntheticlib4']);
-  const [proofSearchVerifiedOnly, setProofSearchVerifiedOnly] = useState(true);
-  const [proofSearchIncludePartial, setProofSearchIncludePartial] = useState(false);
-  const [proofSearchIncludeFailed, setProofSearchIncludeFailed] = useState(false);
+  const [proofSearchCorpora, setProofSearchCorpora] = useState(readCorporaStorage);
+  const [proofSearchVerifiedOnly, setProofSearchVerifiedOnly] = useState(() => readBooleanStorage(FEDERATED_VERIFIED_STORAGE_KEY, true));
+  const [proofSearchQuery, setProofSearchQuery] = useState(() => readStringStorage(FEDERATED_QUERY_STORAGE_KEY, ''));
   const [proofSearchResults, setProofSearchResults] = useState([]);
   const [proofSearchMessage, setProofSearchMessage] = useState('');
   const [proofSearchLoading, setProofSearchLoading] = useState(false);
@@ -88,13 +145,16 @@ export default function ProofLibrary({
   const [proofSearchExpandedRecord, setProofSearchExpandedRecord] = useState(null);
 
   const loadProofLibrary = async () => {
+    const generation = ++libraryRequestGenerationRef.current;
+    activeDetailRequestRef.current = null;
+    setExpandedId(null);
+    setExpandedProof(null);
     try {
       setLoading(true);
       setError(null);
 
-      const novelOnly = filterNovelty === 'novel';
       const [proofsResult, sessionsResult] = await Promise.allSettled([
-        autonomousAPI.getProofLibrary(novelOnly, proofScope),
+        autonomousAPI.getProofLibrary(filterNovelty, proofScope),
         proofScope === 'manual' ? Promise.resolve(null) : autonomousAPI.getSessions(),
       ]);
 
@@ -102,7 +162,9 @@ export default function ProofLibrary({
         throw proofsResult.reason;
       }
 
-      setProofs(proofsResult.value.proofs || []);
+      if (generation !== libraryRequestGenerationRef.current) return;
+      setProofs((proofsResult.value.proofs || []).map((proof) => ({ ...proof, scope: proofScope })));
+      setProofCounts(proofsResult.value.counts || {});
 
       if (sessionsResult.status === 'fulfilled') {
         setSessionsResponse(sessionsResult.value);
@@ -110,15 +172,38 @@ export default function ProofLibrary({
         setSessionsResponse(null);
       }
     } catch (err) {
+      if (generation !== libraryRequestGenerationRef.current) return;
       setError(err.message || 'Failed to load proof library');
     } finally {
-      setLoading(false);
+      if (generation === libraryRequestGenerationRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadProofLibrary();
   }, [filterNovelty, proofScope]);
+
+  useEffect(() => {
+    writeStorage(LOCAL_QUERY_STORAGE_KEY, searchTerm);
+  }, [searchTerm]);
+  useEffect(() => {
+    writeStorage(LOCAL_CATEGORY_STORAGE_KEY, filterNovelty);
+  }, [filterNovelty]);
+  useEffect(() => {
+    writeStorage(FEDERATED_QUERY_STORAGE_KEY, proofSearchQuery);
+  }, [proofSearchQuery]);
+  useEffect(() => {
+    writeStorage(FEDERATED_CORPORA_STORAGE_KEY, JSON.stringify(proofSearchCorpora));
+  }, [proofSearchCorpora]);
+  useEffect(() => {
+    writeStorage(FEDERATED_VERIFIED_STORAGE_KEY, JSON.stringify(proofSearchVerifiedOnly));
+  }, [proofSearchVerifiedOnly]);
+  useEffect(() => () => {
+    libraryRequestGenerationRef.current += 1;
+    searchRequestGenerationRef.current += 1;
+    searchDetailRequestGenerationRef.current += 1;
+    activeDetailRequestRef.current = null;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -153,7 +238,7 @@ export default function ProofLibrary({
 
   const runGroups = useMemo(() => {
     const pseudoPapers = filteredProofs.map((p) => ({
-      session_id: p.session_id,
+      session_id: p.run_id || p.session_id || `orphan:${p.proof_id}`,
       paper_id: p.proof_id,
       created_at: p.created_at,
       user_prompt: p.user_prompt,
@@ -169,7 +254,7 @@ export default function ProofLibrary({
   const proofsBySession = useMemo(() => {
     const map = new Map();
     for (const proof of filteredProofs) {
-      const sid = proof.session_id || 'unknown';
+      const sid = getProofRunKey(proof);
       if (!map.has(sid)) map.set(sid, []);
       map.get(sid).push(proof);
     }
@@ -177,24 +262,97 @@ export default function ProofLibrary({
   }, [filteredProofs]);
 
   const handleExpand = async (proof) => {
-    const id = proof.library_id || proof.proof_id;
+    const id = getProofCardId(proof);
     if (expandedId === id) {
+      activeDetailRequestRef.current = null;
       setExpandedId(null);
       setExpandedProof(null);
       return;
     }
 
     setExpandedId(id);
+    activeDetailRequestRef.current = id;
     setLoadingContentId(id);
 
     try {
-      const fullProof = await autonomousAPI.getLibraryProof(proof.session_id, proof.proof_id, proofScope);
-      setExpandedProof(fullProof);
+      let fullProof;
+      try {
+        fullProof = await proofSearchAPI.getProof(proof.corpus || proofScope, proof.proof_id, {
+          searchId: proof.search_id || null,
+          runId: proof.run_id || null,
+          sessionId: proof.session_id || null,
+        });
+        if (!fullProof) throw new Error('Canonical proof hydration unavailable');
+      } catch {
+        fullProof = await autonomousAPI.getLibraryProof(proof.session_id, proof.proof_id, proofScope);
+      }
+      if (activeDetailRequestRef.current === id) setExpandedProof(fullProof);
     } catch {
-      setExpandedProof(proof);
+      if (activeDetailRequestRef.current === id) setExpandedProof(proof);
     } finally {
-      setLoadingContentId(null);
+      setLoadingContentId((current) => (current === id ? null : current));
     }
+  };
+
+  useEffect(() => {
+    if (!selectedProofId || loading) return;
+    const visibleMatch = filteredProofs.find((proof) => matchesSelectedProof(proof, selectedProofId, selectedSessionId, selectedRunId));
+    if (visibleMatch) return;
+    const hiddenNoveltyMatch = proofs.find((proof) => matchesSelectedProof(proof, selectedProofId, selectedSessionId, selectedRunId));
+    if (hiddenNoveltyMatch && filterNovelty !== 'all') {
+      setFilterNovelty('all');
+    }
+  }, [filterNovelty, filteredProofs, loading, proofs, selectedProofId, selectedRunId, selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedProofId || loading) return;
+    const match = filteredProofs.find((proof) => matchesSelectedProof(proof, selectedProofId, selectedSessionId, selectedRunId));
+    if (!match) return;
+    const id = getProofCardId(match);
+    const runKey = getProofRunKey(match);
+    setExpandedRunGroups((previous) => new Set(previous).add(runKey));
+    setExpandedId(id);
+    setLoadingContentId(id);
+    let cancelled = false;
+    proofSearchAPI.getProof(match.corpus || proofScope, match.proof_id, {
+      searchId: match.search_id || null,
+      runId: match.run_id || null,
+      sessionId: match.session_id || null,
+    })
+      .then((fullProof) => {
+        if (!fullProof) throw new Error('Canonical proof hydration unavailable');
+        return fullProof;
+      })
+      .catch(() => autonomousAPI.getLibraryProof(match.session_id, match.proof_id, proofScope))
+      .then((fullProof) => {
+        if (!cancelled) setExpandedProof(fullProof);
+      })
+      .catch(() => {
+        if (!cancelled) setExpandedProof(match);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingContentId(null);
+          setTimeout(() => {
+            document.getElementById(sanitizeDomId(id, 'proof-card'))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }, 0);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [filteredProofs, loading, proofScope, selectedProofId, selectedRunId, selectedSessionId]);
+
+  const toggleRunGroup = (runKey) => {
+    setExpandedRunGroups((previous) => {
+      const next = new Set(previous);
+      if (next.has(runKey)) next.delete(runKey);
+      else next.add(runKey);
+      return next;
+    });
+    activeDetailRequestRef.current = null;
+    setExpandedId(null);
+    setExpandedProof(null);
   };
 
   const handleDownloadLean = async (proof, event) => {
@@ -227,21 +385,20 @@ export default function ProofLibrary({
   };
 
   const handleUnifiedProofSearch = async (event) => {
+    const generation = ++searchRequestGenerationRef.current;
+    searchDetailRequestGenerationRef.current += 1;
     event?.preventDefault();
     setProofSearchLoading(true);
     setProofSearchMessage('');
     setProofSearchExpandedId(null);
     setProofSearchExpandedRecord(null);
     try {
-      const effectiveVerifiedOnly = proofSearchVerifiedOnly
-        && !proofSearchIncludePartial
-        && !proofSearchIncludeFailed;
       const response = await proofSearchAPI.search({
-        query: '',
+        query: proofSearchQuery,
         corpora: proofSearchCorpora,
-        verified_only: effectiveVerifiedOnly,
-        include_partial: proofSearchIncludePartial,
-        include_failed: proofSearchIncludeFailed,
+        verified_only: proofSearchVerifiedOnly,
+        include_partial: false,
+        include_failed: false,
         dependency_names: [],
         novelty_filters: [],
         module_filters: [],
@@ -249,17 +406,24 @@ export default function ProofLibrary({
         limit: 7,
         hydrate_lean_code: false,
       });
+      if (generation !== searchRequestGenerationRef.current) return;
+      searchDetailRequestGenerationRef.current += 1;
       setProofSearchResults(response.results || []);
       setProofSearchMessage(response.weak_result_warning || response.ranking_notes || '');
     } catch (err) {
+      if (generation !== searchRequestGenerationRef.current) return;
+      searchDetailRequestGenerationRef.current += 1;
       setProofSearchResults([]);
       setProofSearchMessage(err.message || 'Proof search failed');
     } finally {
-      setProofSearchLoading(false);
+      if (generation === searchRequestGenerationRef.current) setProofSearchLoading(false);
     }
   };
 
   const handleProofSearchReindex = async () => {
+    searchDetailRequestGenerationRef.current += 1;
+    setProofSearchExpandedId(null);
+    setProofSearchExpandedRecord(null);
     setProofSearchLoading(true);
     setProofSearchMessage('');
     try {
@@ -274,28 +438,36 @@ export default function ProofLibrary({
   };
 
   const handleExpandProofSearchResult = async (record) => {
-    const id = record.search_id || `${record.corpus}:${record.proof_id}`;
+    const id = record.search_id || `${record.corpus}:${record.session_id || ''}:${record.proof_id}`;
     if (proofSearchExpandedId === id) {
+      searchDetailRequestGenerationRef.current += 1;
       setProofSearchExpandedId(null);
       setProofSearchExpandedRecord(null);
       return;
     }
     setProofSearchExpandedId(id);
     setProofSearchExpandedRecord(record);
+    const generation = ++searchDetailRequestGenerationRef.current;
     if (record.lean_code) {
       return;
     }
     try {
       const hydrated = await proofSearchAPI.getProof(record.corpus, record.proof_id, {
+        searchId: record.search_id || null,
+        runId: record.run_id || null,
         sessionId: record.session_id || null,
       });
-      setProofSearchExpandedRecord(hydrated);
+      if (generation === searchDetailRequestGenerationRef.current) {
+        setProofSearchExpandedRecord(hydrated);
+      }
     } catch {
-      setProofSearchExpandedRecord(record);
+      if (generation === searchDetailRequestGenerationRef.current) setProofSearchExpandedRecord(record);
     }
   };
 
-  const novelCount = proofs.filter((p) => p.novel).length;
+  const novelCount = proofCounts.novel ?? proofs.filter((p) => classifyProofNovelty(p).group === 'novel').length;
+  const duplicateNovelCount = proofCounts.duplicate_novel ?? proofs.filter((p) => classifyProofNovelty(p).group === 'duplicate_novel').length;
+  const notNovelCount = proofCounts.not_novel ?? proofs.filter((p) => classifyProofNovelty(p).group === 'not_novel').length;
   const totalCount = proofs.length;
 
   if (loading) {
@@ -329,15 +501,10 @@ export default function ProofLibrary({
         <h2>{title}</h2>
         <p>{description}</p>
         <div className="library-stats">
-          {filterNovelty === 'novel' ? (
-            <span className="stat-badge">{novelCount} Novel Proof{novelCount !== 1 ? 's' : ''}</span>
-          ) : (
-            <>
-              <span className="stat-badge">{totalCount} Total Proof{totalCount !== 1 ? 's' : ''}</span>
-              <span className="stat-badge">{novelCount} Novel</span>
-              <span className="stat-badge">{totalCount - novelCount} Known</span>
-            </>
-          )}
+          <span className="stat-badge">{totalCount} Listed Proof{totalCount !== 1 ? 's' : ''}</span>
+          <span className="stat-badge">{novelCount} Novel</span>
+          <span className="stat-badge">{duplicateNovelCount} Duplicate Novel</span>
+          <span className="stat-badge">{notNovelCount} Not Novel</span>
         </div>
       </div>
 
@@ -356,6 +523,15 @@ export default function ProofLibrary({
         </div>
 
         <form className="proof-search-form" onSubmit={handleUnifiedProofSearch}>
+          <label htmlFor="federated-proof-search-query">Federated proof query</label>
+          <input
+            id="federated-proof-search-query"
+            className="search-input"
+            type="search"
+            value={proofSearchQuery}
+            onChange={(event) => setProofSearchQuery(event.target.value)}
+            placeholder="Search all enabled proof corpora..."
+          />
           <fieldset className="proof-search-checklist">
             <legend>Search Checklist</legend>
             <div className="proof-search-checklist__grid">
@@ -382,41 +558,9 @@ export default function ProofLibrary({
                     </label>
                   );
                 }
-                if (option.id === 'include_partial') {
-                  return (
-                    <label key={option.id} className="proof-search-checkbox">
-                      <input
-                        type="checkbox"
-                        checked={proofSearchIncludePartial}
-                        onChange={(event) => {
-                          setProofSearchIncludePartial(event.target.checked);
-                          if (event.target.checked) setProofSearchVerifiedOnly(false);
-                        }}
-                      />
-                      <span>{option.label}</span>
-                    </label>
-                  );
-                }
-                return (
-                  <label key={option.id} className="proof-search-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={proofSearchIncludeFailed}
-                      onChange={(event) => {
-                        setProofSearchIncludeFailed(event.target.checked);
-                        if (event.target.checked) setProofSearchVerifiedOnly(false);
-                      }}
-                    />
-                    <span>{option.label}</span>
-                  </label>
-                );
+                return null;
               })}
             </div>
-            {(proofSearchIncludePartial || proofSearchIncludeFailed) && proofSearchVerifiedOnly && (
-              <p className="proof-search-checklist__note">
-                Partial or failed artifact searches automatically disable verified-only filtering for the request.
-              </p>
-            )}
           </fieldset>
           <div className="proof-search-actions">
             <button type="submit" className="refresh-button" disabled={proofSearchLoading}>
@@ -443,6 +587,7 @@ export default function ProofLibrary({
           <div className="proof-search-results">
             {proofSearchResults.map((record) => {
               const id = record.search_id || `${record.corpus}:${record.proof_id}`;
+              const detailsId = sanitizeDomId(id, 'proof-search-details');
               const isExpanded = proofSearchExpandedId === id;
               const expandedRecord = isExpanded ? (proofSearchExpandedRecord || record) : record;
               return (
@@ -451,6 +596,8 @@ export default function ProofLibrary({
                     type="button"
                     className="proof-search-result-card__summary"
                     onClick={() => handleExpandProofSearchResult(record)}
+                    aria-expanded={isExpanded}
+                    aria-controls={detailsId}
                   >
                     <div>
                       <h4>{record.theorem_name || record.display_title || record.proof_id}</h4>
@@ -464,8 +611,15 @@ export default function ProofLibrary({
                     <span>{record.source_kind}</span>
                     {record.lean_code_hash && <span>Code hash: {record.lean_code_hash}</span>}
                   </div>
-                  {isExpanded && (
-                    <div className="proof-expanded-content proof-search-expanded">
+                  <div
+                      id={detailsId}
+                      className="proof-expanded-content proof-search-expanded"
+                      role="region"
+                      aria-label={`Details for ${record.theorem_name || record.proof_id}`}
+                      hidden={!isExpanded}
+                    >
+                    {isExpanded && (
+                      <>
                       <div className="proof-detail-section">
                         <h4>Description</h4>
                         <p>{expandedRecord.proof_description || expandedRecord.formal_sketch || 'No description available.'}</p>
@@ -498,8 +652,9 @@ export default function ProofLibrary({
                           This result is metadata-only. Hydration did not return full Lean code for this record.
                         </div>
                       )}
+                      </>
+                    )}
                     </div>
-                  )}
                 </div>
               );
             })}
@@ -509,6 +664,7 @@ export default function ProofLibrary({
 
       <div className="library-controls">
         <input
+          aria-label="Filter this proof library"
           className="search-input"
           type="text"
           placeholder="Search by theorem name, statement, source, or research question..."
@@ -516,18 +672,16 @@ export default function ProofLibrary({
           onChange={(e) => setSearchTerm(e.target.value)}
         />
         <div className="filter-buttons">
-          <button
-            className={filterNovelty === 'novel' ? 'active' : ''}
-            onClick={() => setFilterNovelty('novel')}
-          >
-            Novel Only
-          </button>
-          <button
-            className={filterNovelty === 'all' ? 'active' : ''}
-            onClick={() => setFilterNovelty('all')}
-          >
-            All Proofs
-          </button>
+          {PROOF_LIBRARY_FILTERS.map((filter) => (
+            <button
+              key={filter.id}
+              className={filterNovelty === filter.id ? 'active' : ''}
+              onClick={() => setFilterNovelty(filter.id)}
+              aria-pressed={filterNovelty === filter.id}
+            >
+              {filter.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -548,10 +702,19 @@ export default function ProofLibrary({
           {runGroups.map((group) => {
             const sessionProofs = proofsBySession.get(group.sessionId) || [];
             if (sessionProofs.length === 0) return null;
+            const isRunExpanded = expandedRunGroups.has(group.sessionId);
+            const runRegionId = sanitizeDomId(group.sessionId, 'proof-run');
 
             return (
-              <div key={group.sessionId} className="run-history-group">
-                <div className="run-history-group-header">
+              <div key={group.sessionId} className={`run-history-group proof-prompt-group ${isRunExpanded ? 'expanded' : ''}`}>
+                <button
+                  type="button"
+                  className="run-history-group-header proof-prompt-group-header"
+                  onClick={() => toggleRunGroup(group.sessionId)}
+                  aria-expanded={isRunExpanded}
+                  aria-controls={runRegionId}
+                  aria-label={`${isRunExpanded ? 'Collapse' : 'Expand'} proof run ${formatRunPromptPreview(group.userPrompt)}`}
+                >
                   <div className="run-history-group-heading">
                     <h3 className="run-history-group-title">
                       {formatRunPromptPreview(group.userPrompt)}
@@ -570,23 +733,35 @@ export default function ProofLibrary({
                     {group.isLegacy && (
                       <span className="run-history-group-badge">Legacy</span>
                     )}
+                    <span className="proof-prompt-group-chevron" aria-hidden="true">
+                      {isRunExpanded ? '▲' : '▼'}
+                    </span>
                   </div>
-                </div>
+                </button>
 
-                <div className="run-history-group-body">
+                <div
+                  id={runRegionId}
+                  className="run-history-group-body"
+                  role="region"
+                  aria-label={`Proofs for ${formatRunPromptPreview(group.userPrompt)}`}
+                  hidden={!isRunExpanded}
+                >
+                  {isRunExpanded && (
                   <div className="answer-list">
                     {sessionProofs.map((proof) => {
-                      const id = proof.library_id || proof.proof_id;
+                      const id = getProofCardId(proof);
+                      const cardDomId = sanitizeDomId(id, 'proof-card');
+                      const detailsDomId = sanitizeDomId(id, 'proof-library-details');
                       const isExpanded = expandedId === id;
 
                       return (
                         <div
+                          id={cardDomId}
                           key={id}
                           className={`answer-card proof-card ${isExpanded ? 'expanded' : ''} ${getCardClass(proof)}`}
                         >
                           <div
                             className="answer-header"
-                            onClick={() => handleExpand(proof)}
                           >
                             <div className="answer-title-row">
                               <h4 className="answer-title proof-title">
@@ -600,7 +775,14 @@ export default function ProofLibrary({
                                 >
                                   Download .lean
                                 </button>
-                                <button className="expand-button">
+                                <button
+                                  type="button"
+                                  className="expand-button"
+                                  onClick={() => handleExpand(proof)}
+                                  aria-expanded={isExpanded}
+                                  aria-controls={detailsDomId}
+                                  aria-label={`${isExpanded ? 'Collapse' : 'Expand'} proof ${proof.theorem_name || proof.proof_id}`}
+                                >
                                   {isExpanded ? '\u25B2' : '\u25BC'}
                                 </button>
                               </div>
@@ -640,9 +822,15 @@ export default function ProofLibrary({
                             </div>
                           </div>
 
-                          {isExpanded && (
-                            <div className="answer-content">
-                              {loadingContentId === id ? (
+                            <div
+                              id={detailsDomId}
+                              className="answer-content"
+                              role="region"
+                              aria-label={`Details for ${proof.theorem_name || proof.proof_id}`}
+                              hidden={!isExpanded}
+                            >
+                            {isExpanded && (
+                              loadingContentId === id ? (
                                 <div className="library-loading" style={{ padding: '20px' }}>
                                   <span className="library-loading__icon">&#x21BB;</span>
                                   <span className="library-loading__text">Loading proof details...</span>
@@ -717,13 +905,14 @@ export default function ProofLibrary({
                                     )}
                                   </div>
                                 </div>
-                              ) : null}
+                              ) : null
+                            )}
                             </div>
-                          )}
                         </div>
                       );
                     })}
                   </div>
+                  )}
                 </div>
               </div>
             );
@@ -732,21 +921,90 @@ export default function ProofLibrary({
       ) : (
         <div className="answer-list">
           {filteredProofs.map((proof) => {
-            const id = proof.library_id || proof.proof_id;
+            const id = getProofCardId(proof);
+            const cardDomId = sanitizeDomId(id, 'proof-card');
+            const detailsDomId = sanitizeDomId(id, 'proof-library-details');
+            const isExpanded = expandedId === id;
             return (
-              <div key={id} className="answer-card proof-card">
-                <div className="answer-header" onClick={() => handleExpand(proof)}>
+              <div
+                id={cardDomId}
+                key={id}
+                className={`answer-card proof-card ${isExpanded ? 'expanded' : ''} ${getCardClass(proof)}`}
+              >
+                <div className="answer-header">
                   <div className="answer-title-row">
-                    <h4 className="answer-title">{proof.theorem_name || proof.proof_id}</h4>
-                    <button
-                      type="button"
-                      className="proof-header-download"
-                      onClick={(event) => handleDownloadLean(proof, event)}
-                    >
-                      Download .lean
-                    </button>
+                    <h4 className="answer-title proof-title">{proof.theorem_name || proof.proof_id}</h4>
+                    <div className="proof-card-actions">
+                      <button
+                        type="button"
+                        className="proof-header-download"
+                        onClick={(event) => handleDownloadLean(proof, event)}
+                      >
+                        Download .lean
+                      </button>
+                      <button
+                        type="button"
+                        className="expand-button"
+                        onClick={() => handleExpand(proof)}
+                        aria-expanded={isExpanded}
+                        aria-controls={detailsDomId}
+                        aria-label={`${isExpanded ? 'Collapse' : 'Expand'} proof ${proof.theorem_name || proof.proof_id}`}
+                      >
+                        {isExpanded ? '\u25B2' : '\u25BC'}
+                      </button>
+                    </div>
                   </div>
+                  <div className="answer-metadata">
+                    <span className={`format-badge ${getTierBadge(proof).cssClass}`}>
+                      {getTierBadge(proof).label}
+                    </span>
+                    <span className="word-count">
+                      {proof.solver || 'Lean 4'}
+                    </span>
+                  </div>
+                  <p className="proof-statement">
+                    {truncate(proof.theorem_statement, 300)}
+                  </p>
                 </div>
+                  <div
+                    id={detailsDomId}
+                    className="answer-content"
+                    role="region"
+                    aria-label={`Details for ${proof.theorem_name || proof.proof_id}`}
+                    hidden={!isExpanded}
+                  >
+                  {isExpanded && (
+                    loadingContentId === id ? (
+                      <div className="library-loading" style={{ padding: '20px' }}>
+                        <span className="library-loading__icon">&#x21BB;</span>
+                        <span className="library-loading__text">Loading proof details...</span>
+                      </div>
+                    ) : expandedProof ? (
+                      <div className="proof-expanded-content">
+                        <div className="proof-detail-section">
+                          <h4>Theorem Statement</h4>
+                          <pre className="proof-code-block">
+                            {expandedProof.theorem_statement}
+                          </pre>
+                        </div>
+                        {expandedProof.novelty_reasoning && (
+                          <div className="proof-detail-section">
+                            <h4>Novelty Assessment</h4>
+                            <p>{expandedProof.novelty_reasoning}</p>
+                          </div>
+                        )}
+                        {expandedProof.lean_code && (
+                          <div className="proof-detail-section">
+                            <h4>Lean 4 Source Code</h4>
+                            <pre className="proof-code-block proof-lean-code">
+                              {expandedProof.lean_code}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    ) : null
+                  )}
+                  </div>
               </div>
             );
           })}

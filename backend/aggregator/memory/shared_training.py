@@ -6,6 +6,7 @@ import aiofiles
 from pathlib import Path
 from typing import List, Callable, Optional, Dict
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 PROOF_APPENDIX_HEADER = "=== PROOFS GENERATED FROM THIS BRAINSTORM (Lean 4 Verified) ==="
 MANUAL_AGGREGATOR_PROMPT_FILE = "manual_aggregator_prompt.txt"
+MANUAL_MAIN_SUBMITTER_CONFIG_FILE = "manual_main_submitter_config.json"
 
 
 def get_manual_aggregator_prompt_path() -> Path:
@@ -61,6 +63,42 @@ async def clear_manual_aggregator_prompt() -> None:
             logger.debug("Unable to clear manual Aggregator prompt: %s", exc)
 
 
+def get_manual_main_submitter_config_path() -> Path:
+    return Path(system_config.data_dir) / MANUAL_MAIN_SUBMITTER_CONFIG_FILE
+
+
+async def save_manual_main_submitter_config(config: Dict[str, object]) -> None:
+    """Persist non-secret Main Submitter 1 settings for backend-restart handoff."""
+    path = get_manual_main_submitter_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f"{path.name}.tmp")
+    async with aiofiles.open(temp_path, "w", encoding="utf-8") as handle:
+        await handle.write(json.dumps(config, ensure_ascii=False, indent=2))
+    await asyncio.to_thread(temp_path.replace, path)
+
+
+async def load_manual_main_submitter_config() -> Dict[str, object]:
+    path = get_manual_main_submitter_config_path()
+    if not path.exists():
+        return {}
+    try:
+        async with aiofiles.open(path, "r", encoding="utf-8") as handle:
+            payload = json.loads(await handle.read())
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError, TypeError) as exc:
+        logger.debug("Unable to load manual Main Submitter config: %s", exc)
+        return {}
+
+
+async def clear_manual_main_submitter_config() -> None:
+    path = get_manual_main_submitter_config_path()
+    if path.exists():
+        try:
+            await asyncio.to_thread(path.unlink)
+        except FileNotFoundError:
+            pass
+
+
 class SharedTrainingMemory:
     """
     Validator-distributed training database.
@@ -68,7 +106,9 @@ class SharedTrainingMemory:
     """
     
     def __init__(self):
-        self.file_path = Path(system_config.shared_training_file)
+        self._file_path = Path(system_config.shared_training_file)
+        self._uses_default_path = True
+        self._root_generation = system_config.runtime_root_generation
         self.insights: List[Dict[str, str]] = []  # Now stores dicts with metadata
         self.max_insights = rag_config.max_shared_training_insights
         self.rechunk_callback: Optional[Callable] = None
@@ -76,6 +116,32 @@ class SharedTrainingMemory:
         self.submission_count = 0
         self.last_ragged_submission_count = 0  # Track which submissions have been RAG'd
         self.proof_appendix = ""
+
+    @property
+    def file_path(self) -> Path:
+        if self._root_generation != system_config.runtime_root_generation:
+            if self._uses_default_path:
+                self._file_path = Path(system_config.shared_training_file)
+                self.insights = []
+                self.submission_count = 0
+                self.last_ragged_submission_count = 0
+                self.proof_appendix = ""
+            else:
+                system_config.assert_path_in_data_root(
+                    self._file_path,
+                    "shared-training override",
+                )
+            self._root_generation = system_config.runtime_root_generation
+        return self._file_path
+
+    @file_path.setter
+    def file_path(self, value: str | Path) -> None:
+        path = Path(value)
+        self._file_path = path
+        self._uses_default_path = path.resolve(strict=False) == Path(
+            system_config.shared_training_file
+        ).resolve(strict=False)
+        self._root_generation = system_config.runtime_root_generation
     
     async def initialize(self) -> None:
         """Initialize shared training memory, creating file if needed."""

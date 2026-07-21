@@ -1,0 +1,25 @@
+{
+  "adapter": "real_route",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "actual_proof_only_start_route",
+    "live_background_task",
+    "second_start_conflict"
+  ],
+  "fields": [
+    "allowed_outputs",
+    "runtime_exclusivity",
+    "proof_runtime_gating"
+  ],
+  "invariants": [
+    "runtime.child_tasks_count_as_active"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_manual_compiler_proof_only_background_ownership",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+}

@@ -1,5 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { downloadTextFile } from '../../utils/downloadHelpers';
+import {
+  getCanonicalProofIdentity,
+  getLeanOJProofPresentation,
+  sanitizeDomId,
+} from '../../utils/proofPresentation';
+import { formatRunPromptPreview } from '../../utils/researchRunHistory';
 import '../autonomous/FinalAnswerLibrary.css';
 import '../autonomous/ProofLibrary.css';
 
@@ -17,36 +23,68 @@ function truncate(text, maxLength = 260) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
-function getProofBadge(proof) {
-  if (proof.proof_kind === 'final') {
-    return { cssClass: 'proof-badge--gold', cardClass: 'proof-card--gold', label: 'Final Verified Submission' };
-  }
-  return { cssClass: 'proof-badge--silver', cardClass: 'proof-card--silver', label: 'Verified Proof Fragment' };
-}
-
 function formatSolverName(solver) {
   return String(solver || 'Proof Solver').replace(/^LeanOJ\b/, 'Proof Solver');
 }
 
-export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
+function getLeanOJProofCardId(proof) {
+  return getCanonicalProofIdentity({ ...proof, corpus: proof.corpus || 'leanoj' });
+}
+
+function getLeanOJRunKey(proof) {
+  return proof.run_id || proof.session_id || `orphan:${proof.proof_id}`;
+}
+
+function matchesSelectedLeanOJProof(proof, selectedProofId, selectedSessionId = '', selectedRunId = '') {
+  if (!selectedProofId) return false;
+  const proofIds = [
+    proof.proof_id,
+    proof.library_id,
+    proof.search_id,
+    proof.lean_code_hash,
+    proof.theorem_statement_hash,
+  ].filter(Boolean).map(String);
+  if (!proofIds.includes(String(selectedProofId))) {
+    return false;
+  }
+  if (selectedRunId) return getLeanOJRunKey(proof) === selectedRunId;
+  return !selectedSessionId || !proof.session_id || proof.session_id === selectedSessionId;
+}
+
+export default function LeanOJProofLibrary({
+  api,
+  refreshToken = 0,
+  selectedProofId = null,
+  selectedSessionId = '',
+  selectedRunId = '',
+}) {
   const [proofs, setProofs] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState(null);
   const [expandedProof, setExpandedProof] = useState(null);
+  const [expandedSessions, setExpandedSessions] = useState(() => new Set());
   const [loadingContentId, setLoadingContentId] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterKind, setFilterKind] = useState('all');
+  const detailGenerationRef = useRef(0);
+  const libraryGenerationRef = useRef(0);
 
   const loadProofLibrary = async () => {
+    const generation = ++libraryGenerationRef.current;
+    detailGenerationRef.current += 1;
+    setExpandedId(null);
+    setExpandedProof(null);
     try {
       setLoading(true);
       setError('');
       const response = await api.getProofLibrary(true);
+      if (generation !== libraryGenerationRef.current) return;
       setProofs(response.proofs || []);
       setSessions(response.sessions || []);
     } catch (err) {
+      if (generation !== libraryGenerationRef.current) return;
       if (err.status === 404) {
         setProofs([]);
         setSessions([]);
@@ -55,13 +93,18 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
       }
       setError(err.message || 'Failed to load Proof Solver proof works library');
     } finally {
-      setLoading(false);
+      if (generation === libraryGenerationRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadProofLibrary();
   }, [refreshToken]);
+
+  useEffect(() => () => {
+    libraryGenerationRef.current += 1;
+    detailGenerationRef.current += 1;
+  }, []);
 
   const filteredProofs = useMemo(() => {
     const lowerSearch = searchTerm.trim().toLowerCase();
@@ -74,6 +117,7 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
         (proof.theorem_statement || '').toLowerCase().includes(lowerSearch) ||
         (proof.source_title || '').toLowerCase().includes(lowerSearch) ||
         (proof.user_prompt || '').toLowerCase().includes(lowerSearch) ||
+        (proof.run_id || '').toLowerCase().includes(lowerSearch) ||
         (proof.session_id || '').toLowerCase().includes(lowerSearch)
       );
     });
@@ -82,7 +126,7 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
   const proofsBySession = useMemo(() => {
     const map = new Map();
     for (const proof of filteredProofs) {
-      const sessionId = proof.session_id || 'unknown';
+      const sessionId = getLeanOJRunKey(proof);
       if (!map.has(sessionId)) map.set(sessionId, []);
       map.get(sessionId).push(proof);
     }
@@ -90,7 +134,22 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
   }, [filteredProofs]);
 
   const visibleSessions = useMemo(() => {
-    return sessions.filter((session) => proofsBySession.has(session.session_id));
+    const metadata = new Map();
+    sessions.forEach((session) => {
+      if (session.run_id) metadata.set(session.run_id, session);
+      if (session.session_id && !metadata.has(session.session_id)) metadata.set(session.session_id, session);
+    });
+    return Array.from(proofsBySession.keys()).map((runKey) => {
+      const matched = metadata.get(runKey);
+      return matched ? { ...matched, group_key: runKey } : {
+        session_id: proofsBySession.get(runKey)?.[0]?.session_id || '',
+        run_id: proofsBySession.get(runKey)?.[0]?.run_id || '',
+        group_key: runKey,
+        user_prompt: proofsBySession.get(runKey)?.[0]?.user_prompt || 'Legacy Proof Solver run',
+        updated_at: proofsBySession.get(runKey)?.[0]?.created_at,
+        phase: 'legacy',
+      };
+    });
   }, [proofsBySession, sessions]);
 
   const counts = useMemo(() => ({
@@ -100,8 +159,9 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
   }), [proofs]);
 
   const handleExpand = async (proof) => {
-    const id = proof.library_id || `${proof.session_id}:${proof.proof_id}`;
+    const id = getLeanOJProofCardId(proof);
     if (expandedId === id) {
+      detailGenerationRef.current += 1;
       setExpandedId(null);
       setExpandedProof(null);
       return;
@@ -109,14 +169,73 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
 
     setExpandedId(id);
     setLoadingContentId(id);
+    const generation = ++detailGenerationRef.current;
     try {
       const fullProof = await api.getLibraryProof(proof.session_id, proof.proof_id);
-      setExpandedProof(fullProof);
+      if (generation === detailGenerationRef.current) setExpandedProof(fullProof);
     } catch {
-      setExpandedProof(proof);
+      if (generation === detailGenerationRef.current) setExpandedProof(proof);
     } finally {
-      setLoadingContentId(null);
+      if (generation === detailGenerationRef.current) setLoadingContentId(null);
     }
+  };
+
+  useEffect(() => {
+    if (!selectedProofId || loading) return;
+    const visibleMatch = filteredProofs.find((proof) => matchesSelectedLeanOJProof(proof, selectedProofId, selectedSessionId, selectedRunId));
+    if (visibleMatch) return;
+    const searchHiddenMatch = proofs.find((proof) => matchesSelectedLeanOJProof(proof, selectedProofId, selectedSessionId, selectedRunId));
+    if (searchHiddenMatch && searchTerm) {
+      setSearchTerm('');
+      return;
+    }
+    const hiddenKindMatch = proofs.find((proof) => matchesSelectedLeanOJProof(proof, selectedProofId, selectedSessionId, selectedRunId));
+    if (hiddenKindMatch && filterKind !== 'all') {
+      setFilterKind('all');
+    }
+  }, [filterKind, filteredProofs, loading, proofs, searchTerm, selectedProofId, selectedRunId, selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedProofId || loading) return;
+    const match = filteredProofs.find((proof) => matchesSelectedLeanOJProof(proof, selectedProofId, selectedSessionId, selectedRunId));
+    if (!match) return;
+    const id = getLeanOJProofCardId(match);
+    const sessionKey = getLeanOJRunKey(match);
+    setExpandedSessions((previous) => new Set(previous).add(sessionKey));
+    setExpandedId(id);
+    setLoadingContentId(id);
+    const generation = ++detailGenerationRef.current;
+    let cancelled = false;
+    api.getLibraryProof(match.session_id, match.proof_id)
+      .then((fullProof) => {
+        if (!cancelled && generation === detailGenerationRef.current) setExpandedProof(fullProof);
+      })
+      .catch(() => {
+        if (!cancelled && generation === detailGenerationRef.current) setExpandedProof(match);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingContentId(null);
+          setTimeout(() => {
+            document.getElementById(sanitizeDomId(id, 'leanoj-proof-card'))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }, 0);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, filteredProofs, loading, selectedProofId, selectedRunId, selectedSessionId]);
+
+  const toggleSession = (sessionId) => {
+    setExpandedSessions((previous) => {
+      const next = new Set(previous);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+    detailGenerationRef.current += 1;
+    setExpandedId(null);
+    setExpandedProof(null);
   };
 
   const handleDownloadLean = async (proof, event) => {
@@ -178,6 +297,7 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
 
       <div className="library-controls">
         <input
+          aria-label="Filter Proof Solver proof works"
           className="search-input"
           type="text"
           placeholder="Search by theorem, problem, session, or Proof Solver source..."
@@ -185,13 +305,13 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
           onChange={(event) => setSearchTerm(event.target.value)}
         />
         <div className="filter-buttons">
-          <button className={filterKind === 'all' ? 'active' : ''} onClick={() => setFilterKind('all')}>
+          <button className={filterKind === 'all' ? 'active' : ''} aria-pressed={filterKind === 'all'} onClick={() => setFilterKind('all')}>
             All
           </button>
-          <button className={filterKind === 'final' ? 'active' : ''} onClick={() => setFilterKind('final')}>
+          <button className={filterKind === 'final' ? 'active' : ''} aria-pressed={filterKind === 'final'} onClick={() => setFilterKind('final')}>
             Final
           </button>
-          <button className={filterKind === 'subproof' ? 'active' : ''} onClick={() => setFilterKind('subproof')}>
+          <button className={filterKind === 'subproof' ? 'active' : ''} aria-pressed={filterKind === 'subproof'} onClick={() => setFilterKind('subproof')}>
             Proof Fragments
           </button>
         </div>
@@ -210,12 +330,23 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
       ) : (
         <div className="run-history-groups">
           {visibleSessions.map((session) => {
-            const sessionProofs = proofsBySession.get(session.session_id) || [];
+            const groupKey = session.group_key || session.run_id || session.session_id;
+            const sessionProofs = proofsBySession.get(groupKey) || [];
+            const isSessionExpanded = expandedSessions.has(groupKey);
+            const sessionRegionId = sanitizeDomId(groupKey, 'leanoj-proof-session');
             return (
-              <div key={session.session_id} className="run-history-group">
-                <div className="run-history-group-header">
+              <div key={groupKey} className={`run-history-group proof-prompt-group ${isSessionExpanded ? 'expanded' : ''}`}>
+                <button
+                  type="button"
+                  className="run-history-group-header proof-prompt-group-header"
+                  onClick={() => toggleSession(groupKey)}
+                  aria-expanded={isSessionExpanded}
+                  aria-controls={sessionRegionId}
+                >
                   <div className="run-history-group-heading">
-                    <h3 className="run-history-group-title">{session.user_prompt}</h3>
+                    <h3 className="run-history-group-title">
+                      {formatRunPromptPreview(session.user_prompt || sessionProofs[0]?.user_prompt || 'Legacy Proof Solver run')}
+                    </h3>
                     <p className="run-history-group-subtitle">
                       {sessionProofs.length} proof work{sessionProofs.length !== 1 ? 's' : ''} - {formatDate(session.updated_at)}
                     </p>
@@ -229,19 +360,25 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
                     {session.phase && (
                       <span className="run-history-group-badge">{session.phase}</span>
                     )}
+                    <span className="proof-prompt-group-chevron" aria-hidden="true">
+                      {isSessionExpanded ? '▲' : '▼'}
+                    </span>
                   </div>
-                </div>
+                </button>
 
-                <div className="run-history-group-body">
+                <div id={sessionRegionId} className="run-history-group-body" role="region" aria-label={`Proof works for ${formatRunPromptPreview(session.user_prompt || sessionProofs[0]?.user_prompt || groupKey)}`} hidden={!isSessionExpanded}>
+                  {isSessionExpanded && (
                   <div className="answer-list">
                     {sessionProofs.map((proof) => {
-                      const id = proof.library_id || `${proof.session_id}:${proof.proof_id}`;
+                      const id = getLeanOJProofCardId(proof);
+                      const cardDomId = sanitizeDomId(id, 'leanoj-proof-card');
+                      const detailsDomId = sanitizeDomId(id, 'leanoj-proof-details');
                       const isExpanded = expandedId === id;
-                      const badge = getProofBadge(proof);
+                      const badge = getLeanOJProofPresentation(proof);
 
                       return (
-                        <div key={id} className={`answer-card proof-card ${isExpanded ? 'expanded' : ''} ${badge.cardClass}`}>
-                          <div className="answer-header" onClick={() => handleExpand(proof)}>
+                        <div id={cardDomId} key={id} className={`answer-card proof-card ${isExpanded ? 'expanded' : ''} ${badge.cardClass}`}>
+                          <div className="answer-header">
                             <div className="answer-title-row">
                               <h4 className="answer-title proof-title">
                                 {proof.theorem_name || proof.proof_id}
@@ -254,7 +391,14 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
                                 >
                                   Download .lean
                                 </button>
-                                <button className="expand-button">
+                                <button
+                                  type="button"
+                                  className="expand-button"
+                                  onClick={() => handleExpand(proof)}
+                                  aria-expanded={isExpanded}
+                                  aria-controls={detailsDomId}
+                                  aria-label={`${isExpanded ? 'Collapse' : 'Expand'} proof ${proof.theorem_name || proof.proof_id}`}
+                                >
                                   {isExpanded ? 'Hide' : 'View'}
                                 </button>
                               </div>
@@ -289,9 +433,9 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
                             </div>
                           </div>
 
-                          {isExpanded && (
-                            <div className="answer-content">
-                              {loadingContentId === id ? (
+                            <div id={detailsDomId} className="answer-content" role="region" aria-label={`Details for ${proof.theorem_name || proof.proof_id}`} hidden={!isExpanded}>
+                            {isExpanded && (
+                              loadingContentId === id ? (
                                 <div className="library-loading" style={{ padding: '20px' }}>
                                   <span className="library-loading__icon">&#x21BB;</span>
                                   <span className="library-loading__text">Loading proof work details...</span>
@@ -328,13 +472,14 @@ export default function LeanOJProofLibrary({ api, refreshToken = 0 }) {
                                     )}
                                   </div>
                                 </div>
-                              ) : null}
+                              ) : null
+                            )}
                             </div>
-                          )}
                         </div>
                       );
                     })}
                   </div>
+                  )}
                 </div>
               </div>
             );

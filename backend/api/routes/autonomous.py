@@ -29,13 +29,26 @@ from backend.shared.boost_logger import boost_logger
 from backend.shared.config import system_config
 from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.log_redaction import redact_log_text
-from backend.shared.workflow_start_guard import workflow_start_guard
+from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auto-research", tags=["autonomous"])
+AUTONOMOUS_WORKFLOW_OWNER = "autonomous"
+_autonomous_workflow_lease: WorkflowLease | None = None
+
+
+def _release_autonomous_workflow_lease() -> None:
+    global _autonomous_workflow_lease
+    workflow_start_guard.release(_autonomous_workflow_lease)
+    _autonomous_workflow_lease = None
+
+
+autonomous_coordinator.top_level_terminal_callback = (
+    _release_autonomous_workflow_lease
+)
 
 
 def _get_active_autonomous_session_id() -> str:
@@ -309,6 +322,10 @@ async def _get_combined_api_logs(
 
 def _get_start_conflict() -> Optional[str]:
     """Return a user-facing conflict message if another workflow is active."""
+    if workflow_start_guard.active_owner:
+        if workflow_start_guard.active_owner == AUTONOMOUS_WORKFLOW_OWNER:
+            return "Autonomous research is already running"
+        return "Cannot start Autonomous Research while another workflow is running. Stop it first."
     autonomous_state = autonomous_coordinator.get_state()
     if autonomous_state.is_running or autonomous_coordinator.is_active:
         return "Autonomous research is already running"
@@ -714,6 +731,7 @@ async def _delete_autonomous_paper_from_scope(
 @router.post("/start")
 async def start_autonomous_research(request: AutonomousResearchStartRequest):
     """Start autonomous research mode."""
+    global _autonomous_workflow_lease
     try:
         from backend.shared.config import system_config
 
@@ -847,8 +865,19 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
             )
 
             # Start in background with a retained task handle so Stop can cancel it.
-            if not autonomous_coordinator.start_in_background():
-                raise HTTPException(status_code=400, detail="Autonomous research is already running")
+            try:
+                _autonomous_workflow_lease = workflow_start_guard.commit(
+                    AUTONOMOUS_WORKFLOW_OWNER
+                )
+                if not autonomous_coordinator.start_in_background():
+                    raise HTTPException(status_code=400, detail="Autonomous research is already running")
+            except BaseException:
+                if autonomous_coordinator.is_active:
+                    await autonomous_coordinator.stop()
+                _release_autonomous_workflow_lease()
+                raise
+            if not autonomous_coordinator.is_active:
+                _release_autonomous_workflow_lease()
 
             return {
                 "success": True,
@@ -871,36 +900,55 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
 @router.post("/stop")
 async def stop_autonomous_research():
     """Stop autonomous research mode gracefully."""
-    try:
-        state = autonomous_coordinator.get_state()
-        if not state.is_running and not autonomous_coordinator.is_active:
+    # Start performs substantial coordinator and RAG initialization while holding
+    # this process-wide lifecycle reservation. A Stop that overlaps that work can
+    # otherwise tear down coordinator state while Chroma is still being reset.
+    async with workflow_start_guard.reserve():
+        stopped_cleanly = False
+        try:
+            state = autonomous_coordinator.get_state()
+            if not state.is_running and not autonomous_coordinator.is_active:
+                return {
+                    "success": True,
+                    "message": "Autonomous research was not running"
+                }
+
+            await autonomous_coordinator.stop()
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="autonomous_stopped",
+            )
+
+            # Get final stats
+            stats = await research_metadata.get_stats()
+            stopped_cleanly = not autonomous_coordinator.is_active
+
             return {
                 "success": True,
-                "message": "Autonomous research was not running"
+                "message": "Autonomous research stopped",
+                "final_stats": stats
             }
-        
-        await autonomous_coordinator.stop()
-        await assistant_proof_search_coordinator.stop_all(
-            broadcast=True,
-            reason="autonomous_stopped",
-        )
-        
-        # Get final stats
-        stats = await research_metadata.get_stats()
-        
-        return {
-            "success": True,
-            "message": "Autonomous research stopped",
-            "final_stats": stats
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to stop autonomous research: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+
+        except Exception as e:
+            logger.error(f"Failed to stop autonomous research: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
+        finally:
+            if stopped_cleanly or not autonomous_coordinator.is_active:
+                _release_autonomous_workflow_lease()
+            else:
+                logger.error(
+                    "Autonomous stop did not reach a terminal state; retaining workflow ownership"
+                )
 
 
 @router.post("/clear")
 async def clear_autonomous_research(confirm: bool = False):
+    """Serialize clear against pending top-level lifecycle transitions."""
+    async with workflow_start_guard.reserve():
+        return await _clear_autonomous_research_impl(confirm)
+
+
+async def _clear_autonomous_research_impl(confirm: bool = False):
     """Clear all autonomous research data.
     
     Returns success even with non-critical warnings.
@@ -913,11 +961,10 @@ async def clear_autonomous_research(confirm: bool = False):
                 detail="Must confirm with confirm=true"
             )
         
-        state = autonomous_coordinator.get_state()
-        if state.is_running:
+        if autonomous_coordinator.is_active:
             raise HTTPException(
                 status_code=400,
-                detail="Cannot clear data while autonomous research is running. Please stop research first."
+                detail="Cannot clear data while autonomous research is active or still stopping. Please wait for Stop to finish."
             )
         
         logger.info("Starting autonomous research data clear...")

@@ -1,0 +1,32 @@
+{
+  "actions": [
+    "start_autonomous_proofs_only",
+    "complete_topic_exploration",
+    "simulate_credit_exhaustion",
+    "complete_brainstorm",
+    "stop",
+    "resume",
+    "reset_credit"
+  ],
+  "adapter": "model",
+  "artifact_type": "scenario",
+  "expected_result": "passed",
+  "fields": [
+    "allowed_outputs",
+    "provider_pause_resume",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "outputs.proofs_only_no_paper_phase",
+    "provider.pause_preserves_checkpoint",
+    "provider.stop_resume_preserves_pause",
+    "provider.reset_wakes_without_corrupting_checkpoint"
+  ],
+  "must_exercise": [
+    "provider_pause",
+    "stop_resume",
+    "reset_credit"
+  ],
+  "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
+  "schema_version": 1
+}

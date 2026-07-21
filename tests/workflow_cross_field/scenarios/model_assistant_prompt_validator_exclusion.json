@@ -1,0 +1,27 @@
+{
+  "actions": [
+    "start_autonomous_papers_and_proofs",
+    "refresh_assistant_pack",
+    "prepare_prompt_context",
+    "disable_session_history"
+  ],
+  "adapter": "model",
+  "artifact_type": "scenario",
+  "expected_result": "passed",
+  "fields": [
+    "assistant_memory",
+    "prompt_context"
+  ],
+  "invariants": [
+    "assistant.no_validator_injection",
+    "assistant.disable_clears_live_pack",
+    "prompt.validator_excludes_assistant_memory"
+  ],
+  "must_exercise": [
+    "assistant_pack",
+    "assistant_disable",
+    "prompt_context"
+  ],
+  "scenario_id": "model_assistant_prompt_validator_exclusion",
+  "schema_version": 1
+}

@@ -1,0 +1,24 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "disabled_runtime",
+    "zero_proof_stage_calls"
+  ],
+  "fields": [
+    "proof_runtime_gating",
+    "allowed_outputs",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "proof_runtime.no_lean_when_disabled"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_disabled_proof_runtime_skips_autonomous_checkpoint",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+}

@@ -1,0 +1,61 @@
+{
+  "action_ids": [
+    "start_leanoj",
+    "skip_leanoj_brainstorm",
+    "stop",
+    "resume",
+    "force_leanoj_brainstorm",
+    "attempt_conflicting_start",
+    "edit_leanoj_master_proof",
+    "clear_leanoj_state"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "none",
+    "final_phase": "idle"
+  },
+  "evidence": [
+    "leanoj_clear",
+    "leanoj_draft",
+    "leanoj_force",
+    "leanoj_skip",
+    "start_blocked",
+    "stop_resume"
+  ],
+  "exercised_invariants": [
+    "provider.stop_resume_preserves_pause",
+    "runtime.single_active_workflow"
+  ],
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow",
+    "provider.stop_resume_preserves_pause"
+  ],
+  "observed_fields": [
+    "prompt_context",
+    "provider_pause_resume",
+    "runtime_exclusivity",
+    "websocket_api_contracts",
+    "workflow_filesystem_state"
+  ],
+  "replay": [
+    "start_leanoj()",
+    "skip_leanoj_brainstorm()",
+    "stop()",
+    "resume()",
+    "force_leanoj_brainstorm()",
+    "start_manual_compiler()",
+    "edit_leanoj_master_proof()",
+    "clear()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_leanoj_durable_lifecycle_seed_7",
+  "schema_version": 1,
+  "seed": 7,
+  "target_artifact": "targets/generated_leanoj_durable_lifecycle.json",
+  "target_id": "generated_leanoj_durable_lifecycle"
+}

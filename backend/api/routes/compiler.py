@@ -17,7 +17,7 @@ from backend.shared.token_tracker import token_tracker
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.manual_proof_context import get_manual_proof_context_lock
-from backend.shared.workflow_start_guard import workflow_start_guard
+from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.compiler.core.compiler_coordinator import CRITIQUE_ATTEMPT_TARGET, compiler_coordinator
 from backend.compiler.memory.manual_prompt import (
@@ -31,6 +31,8 @@ from backend.aggregator.core.coordinator import coordinator
 from backend.aggregator.memory.shared_training import (
     append_proof_to_manual_shared_training,
     clear_manual_shared_training_proof_appendix,
+    load_manual_aggregator_prompt,
+    load_manual_main_submitter_config,
 )
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
@@ -46,10 +48,28 @@ router = APIRouter(prefix="/api/compiler", tags=["compiler"])
 _compiler_proof_only_task: asyncio.Task | None = None
 _saved_compiler_proof_tasks: set[asyncio.Task] = set()
 MANUAL_AGGREGATOR_SOURCE_ID = "manual_aggregator"
+COMPILER_WORKFLOW_OWNER = "manual_compiler"
+COMPILER_PROOF_ONLY_OWNER = "manual_compiler_proof_only"
+_compiler_workflow_lease: WorkflowLease | None = None
+_compiler_proof_only_lease: WorkflowLease | None = None
 MANUAL_PROOF_ACTIVE_KEYS = {
     "brainstorm:manual_aggregator",
     "paper:manual_compiler_current",
 }
+
+def _release_compiler_workflow_lease() -> None:
+    global _compiler_workflow_lease
+    workflow_start_guard.release(_compiler_workflow_lease)
+    _compiler_workflow_lease = None
+
+
+def _release_compiler_proof_only_lease() -> None:
+    global _compiler_proof_only_lease
+    workflow_start_guard.release(_compiler_proof_only_lease)
+    _compiler_proof_only_lease = None
+
+
+compiler_coordinator.top_level_terminal_callback = _release_compiler_workflow_lease
 
 
 async def _release_pre_reserved_source(source_type: str, source_id: str, reserved: bool) -> None:
@@ -218,6 +238,12 @@ async def _run_saved_compiler_paper_proof_check(
 
 def _get_start_conflict() -> str | None:
     """Return a user-facing conflict message if another workflow is active."""
+    if workflow_start_guard.active_owner:
+        if workflow_start_guard.active_owner == COMPILER_PROOF_ONLY_OWNER:
+            return "Compiler proof verification is already running"
+        if workflow_start_guard.active_owner == COMPILER_WORKFLOW_OWNER:
+            return "Compiler is already running"
+        return "Cannot start Compiler while another workflow is running. Stop it first."
     if compiler_coordinator.is_running:
         return "Compiler is already running"
 
@@ -356,6 +382,21 @@ async def _run_compiler_aggregator_proof_check(
         token_tracker.stop_timer()
 
 
+async def _run_owned_compiler_aggregator_proof_check(
+    request: CompilerStartRequest,
+    *,
+    source_reserved: bool = False,
+) -> None:
+    """Keep proof-only workflow ownership tied to the exact background task."""
+    try:
+        await _run_compiler_aggregator_proof_check(
+            request,
+            source_reserved=source_reserved,
+        )
+    finally:
+        _release_compiler_proof_only_lease()
+
+
 def _log_background_task_failure(task: asyncio.Task) -> None:
     _saved_compiler_proof_tasks.discard(task)
     try:
@@ -386,7 +427,10 @@ async def _manual_proof_clear_blocker() -> str | None:
 @router.post("/start")
 async def start_compiler(request: CompilerStartRequest):
     """Start the compiler system."""
-    global _compiler_proof_only_task
+    global _compiler_proof_only_task, _compiler_workflow_lease, _compiler_proof_only_lease
+    manual_solution_path = None
+    parent_start_committed = False
+    coordinator_started = False
     try:
         async with workflow_start_guard.reserve():
             conflict = _get_start_conflict()
@@ -449,10 +493,29 @@ async def start_compiler(request: CompilerStartRequest):
                         await ProofVerificationStage.reserve_source("brainstorm", MANUAL_AGGREGATOR_SOURCE_ID)
                     except RuntimeError:
                         raise HTTPException(status_code=409, detail="A proof verification is already running for the manual Aggregator database.")
-                    _compiler_proof_only_task = asyncio.create_task(
-                        _run_compiler_aggregator_proof_check(request, source_reserved=True)
-                    )
-                    _compiler_proof_only_task.add_done_callback(_log_background_task_failure)
+                    try:
+                        _compiler_proof_only_lease = workflow_start_guard.commit(
+                            COMPILER_PROOF_ONLY_OWNER
+                        )
+                        _compiler_proof_only_task = asyncio.create_task(
+                            _run_owned_compiler_aggregator_proof_check(
+                                request,
+                                source_reserved=True,
+                            )
+                        )
+                        _compiler_proof_only_task.add_done_callback(_log_background_task_failure)
+                    except BaseException:
+                        task_was_started = _compiler_proof_only_task is not None
+                        if _compiler_proof_only_task is not None:
+                            _compiler_proof_only_task.cancel()
+                            await asyncio.gather(_compiler_proof_only_task, return_exceptions=True)
+                        _compiler_proof_only_task = None
+                        _release_compiler_proof_only_lease()
+                        if not task_was_started:
+                            await ProofVerificationStage.release_source(
+                                "brainstorm", MANUAL_AGGREGATOR_SOURCE_ID
+                            )
+                        raise
                 return {
                     "status": "proof_check_started",
                     "message": "Compiler proof verification started over the Aggregator database",
@@ -520,6 +583,70 @@ async def start_compiler(request: CompilerStartRequest):
                 redact_log_text(request.high_param_max_output_tokens, 40),
             )
 
+            # Continue the durable manual Aggregator plan, including after a
+            # backend restart where the process-local registry is empty.
+            from backend.shared.solution_path import (
+                build_review_prompt,
+                            compact_review_prompt,
+                review_with_json_retry,
+                solution_path_registry,
+            )
+            manual_prompt = (await load_manual_aggregator_prompt()).strip()
+            manual_solution_path = solution_path_registry.get("manual")
+            if manual_solution_path is None and manual_prompt:
+                saved_primary = await load_manual_main_submitter_config()
+                live_primary = api_client_manager.get_role_config("aggregator_submitter_1")
+                primary = live_primary or (
+                    ModelConfig(**saved_primary) if saved_primary else None
+                )
+                if primary is not None:
+                    api_client_manager.configure_role("aggregator_submitter_1", primary)
+                    reviewer_role_id = "manual_solution_path_reviewer"
+                    api_client_manager.configure_role(reviewer_role_id, primary)
+
+                    async def review_solution_path(proposal, current_plan):
+                        prompt = build_review_prompt(
+                            user_prompt=manual_prompt,
+                            proposal=proposal,
+                            current_plan=current_plan,
+                        )
+
+                        async def call(messages):
+                            return await api_client_manager.generate_completion(
+                                task_id=f"agg_sub1_solution_path_{proposal.review_count:03d}",
+                                role_id=reviewer_role_id,
+                                model=primary.model_id,
+                                messages=messages,
+                                temperature=0.0,
+                                max_tokens=primary.max_output_tokens,
+                            )
+
+                        return await review_with_json_retry(
+                            prompt=prompt,
+                            call_completion=call,
+                            extract_text=lambda response: extract_message_text(
+                                response["choices"][0]["message"]
+                            ),
+                            context_window=primary.context_window,
+                            max_output_tokens=primary.max_output_tokens,
+                            compact_prompt=compact_review_prompt(
+                                user_prompt=manual_prompt,
+                                proposal=proposal,
+                                current_plan=current_plan,
+                            ),
+                        )
+
+                    manual_solution_path = await solution_path_registry.acquire(
+                        Path(system_config.data_dir) / "solution_paths",
+                        workflow_mode="manual",
+                        user_prompt=manual_prompt,
+                        stable_run_id="manual",
+                        reviewer=review_solution_path,
+                    )
+            elif manual_solution_path is not None:
+                await manual_solution_path.start()
+            compiler_coordinator.solution_path_manager = manual_solution_path
+
             # Initialize coordinator with OpenRouter provider configurations
             await compiler_coordinator.initialize(
                 compiler_prompt=request.compiler_prompt,
@@ -555,6 +682,13 @@ async def start_compiler(request: CompilerStartRequest):
             token_tracker.reset()
             token_tracker.start_timer()
             await compiler_coordinator.start()
+            coordinator_started = compiler_coordinator.is_running
+            if not coordinator_started:
+                raise RuntimeError("Compiler did not enter running state")
+            _compiler_workflow_lease = workflow_start_guard.commit(
+                COMPILER_WORKFLOW_OWNER
+            )
+            parent_start_committed = True
 
             return {"status": "started", "message": "Compiler started successfully"}
     
@@ -607,27 +741,42 @@ async def start_compiler(request: CompilerStartRequest):
         # Other errors
         logger.error(f"Failed to start compiler: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        if coordinator_started and not parent_start_committed:
+            await compiler_coordinator.stop()
+            token_tracker.stop_timer()
+        if manual_solution_path is not None and not parent_start_committed:
+            await manual_solution_path.stop()
 
 
 @router.post("/stop")
 async def stop_compiler():
     """Stop the compiler system."""
     global _compiler_proof_only_task
-    try:
-        if _compiler_proof_only_task and not _compiler_proof_only_task.done():
-            _compiler_proof_only_task.cancel()
-            await asyncio.gather(_compiler_proof_only_task, return_exceptions=True)
-            _compiler_proof_only_task = None
-        await compiler_coordinator.stop()
-        await assistant_proof_search_coordinator.stop_all(
-            broadcast=True,
-            reason="compiler_stopped",
-        )
-        token_tracker.stop_timer()
-        return {"status": "stopped", "message": "Compiler stopped"}
-    except Exception as e:
-        logger.error(f"Failed to stop compiler: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    async with workflow_start_guard.reserve():
+        try:
+            if _compiler_proof_only_task and not _compiler_proof_only_task.done():
+                _compiler_proof_only_task.cancel()
+                await asyncio.gather(_compiler_proof_only_task, return_exceptions=True)
+                _compiler_proof_only_task = None
+            await compiler_coordinator.stop()
+            if getattr(compiler_coordinator, "solution_path_manager", None) is not None:
+                await compiler_coordinator.solution_path_manager.stop()
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="compiler_stopped",
+            )
+            if compiler_coordinator.is_running or (
+                _compiler_proof_only_task and not _compiler_proof_only_task.done()
+            ):
+                raise RuntimeError("Compiler remained active after stop")
+            token_tracker.stop_timer()
+            _release_compiler_proof_only_lease()
+            _release_compiler_workflow_lease()
+            return {"status": "stopped", "message": "Compiler stopped"}
+        except Exception as e:
+            logger.error(f"Failed to stop compiler: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/test-models")
@@ -964,12 +1113,13 @@ async def clear_paper(confirm: bool = False):
         )
     
     try:
-        async with get_manual_proof_context_lock():
+        async with workflow_start_guard.reserve(), get_manual_proof_context_lock():
             blocker = await _manual_proof_clear_blocker()
             if blocker:
                 raise HTTPException(status_code=409, detail=blocker)
             if compiler_coordinator.is_running:
                 await compiler_coordinator.stop()
+            _release_compiler_workflow_lease()
             persisted_prompt = compiler_coordinator.user_prompt or await load_manual_compiler_prompt()
             archived_proofs = await manual_proof_database.archive_current_run(
                 Path(system_config.data_dir) / "manual_proof_runs",
@@ -978,6 +1128,11 @@ async def clear_paper(confirm: bool = False):
             )
             await clear_manual_shared_training_proof_appendix()
             await compiler_coordinator.clear_paper()
+            from backend.shared.solution_path import solution_path_registry
+            await solution_path_registry.clear_run(
+                Path(system_config.data_dir) / "solution_paths", "manual"
+            )
+            compiler_coordinator.solution_path_manager = None
             await assistant_proof_search_coordinator.stop_all(
                 broadcast=True,
                 reason="compiler_cleared",

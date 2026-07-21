@@ -96,8 +96,10 @@ backend/data/auto_api_log.txt
 backend/data/aggregator_results.txt
 backend/data/manual_aggregator_prompt.txt
 backend/data/manual_compiler_prompt.txt
+backend/data/manual_main_submitter_config.json
 backend/data/runtime_settings.json
 backend/data/provider_notifications.json
+backend/data/.moto_backend.lock
 
 backend/data/chroma_db/*
 !backend/data/chroma_db/.gitkeep
@@ -106,6 +108,7 @@ backend/data/boost_api_log.txt
 backend/data/boost_state.json
 backend/data/model_cache.json
 backend/data/proof_search/
+backend/data/solution_paths/
 backend/data/syntheticlib4/
 backend/data/paper_version_*.txt
 backend/data/critique_feedback_*.txt
@@ -125,6 +128,8 @@ backend/logs/*
 .pytest_cache/
 .coverage
 htmlcov/
+playwright-report/
+test-results/playwright/
 
 # Temporary files
 *.tmp

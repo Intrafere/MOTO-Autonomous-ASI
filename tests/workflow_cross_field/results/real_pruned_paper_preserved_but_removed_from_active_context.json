@@ -1,0 +1,26 @@
+{
+  "adapter": "real_route",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "pruned_history_downloadable",
+    "active_enumeration_empty",
+    "brainstorm_reference_removed",
+    "rag_source_removed",
+    "temp_root"
+  ],
+  "fields": [
+    "workflow_filesystem_state",
+    "prompt_context"
+  ],
+  "invariants": [
+    "state.pruned_papers_excluded_from_context"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_pruned_paper_preserved_but_removed_from_active_context",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+}

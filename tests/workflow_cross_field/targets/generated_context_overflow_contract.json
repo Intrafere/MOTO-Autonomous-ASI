@@ -1,0 +1,26 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "websocket_api_contracts",
+    "workflow_filesystem_state",
+    "provider_pause_resume",
+    "runtime_exclusivity",
+    "proof_runtime_gating"
+  ],
+  "invariants": [
+    "events.context_overflow_route_identity",
+    "events.context_overflow_persists_across_reload",
+    "events.context_overflow_terminal_stop_once",
+    "events.proof_context_overflow_nonfatal"
+  ],
+  "max_steps": 6,
+  "must_exercise": [
+    "context_overflow"
+  ],
+  "result_ids": [
+    "generated_context_overflow_contract_seed_7",
+    "generated_context_overflow_contract_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_context_overflow_contract"
+}

@@ -1,19 +1,22 @@
 """
-Review prompts for mathematical document cleanup and error correction.
+Review prompts for rigorous solution-document cleanup and error correction.
 """
 
 from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 
 
 EMPIRICAL_PROVENANCE_REVIEW_RULES = """EMPIRICAL PROVENANCE AND CITATION RULES:
-- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
-- Theoretical claims must be supported by sound derivation, proof, or explicit assumptions inside the paper.
+- Apply claim-type and domain-appropriate rigor to every substantive claim.
+- Mathematical claims require sound derivation, proof, or explicit assumptions inside the paper.
+- Engineering and software claims require mechanisms, constraints, interfaces, failure modes, feasibility reasoning, and verification plans appropriate to the claim.
+- Strategic or causal claims require valid inference, explicit assumptions, and realistic limitations.
 - Literature claims must include explicit in-text citations identifying the external source. Do NOT rely on vague phrases like "studies show" or "the literature suggests".
 - Empirical claims include benchmarks, latency, throughput, speedups, accuracy, perplexity, ablations, wall-clock measurements, hardware utilization numbers, and dataset/task results.
 - Artifact claims include statements about code, kernels, measurements, experiments, benchmark logs, reproductions, or "accompanying" implementations.
 - Empirical or artifact claims are acceptable ONLY if they are backed by an explicit external citation or by a provided artifact in context. If not backed, they must be removed or rewritten as hypotheses, design goals, expected benefits, proposed experiments, or future work.
 - NEVER invent citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts.
-- If external information is retained, it must remain explicitly cited in-text. Do NOT imply that unsupported facts were externally verified."""
+- If external information is retained, it must remain explicitly cited in-text. Do NOT imply that unsupported facts were externally verified.
+- Novelty never overrides correctness, provenance, safety, or honesty."""
 
 
 EMPIRICAL_RED_TEAM_REVIEW_FOCUS = """PRE-ABSTRACT EMPIRICAL RED-TEAM TASK:
@@ -23,6 +26,7 @@ Your highest-priority job is to catch and neutralize:
 - unsupported benchmark numbers
 - uncited external results
 - benchmark-shaped claims presented as established facts
+- unsupported claims that a proposed implementation, mechanism, or evaluation has already been built or completed
 
 Inspect especially for:
 - speedup, latency, throughput, bandwidth, utilization, clock-cycle, memory, or hardware claims
@@ -40,7 +44,7 @@ Do NOT preserve unsupported benchmark numbers merely because they fit the narrat
 
 def get_review_system_prompt() -> str:
     """Get system prompt for document review/cleanup mode."""
-    return """You are reviewing the current mathematical document draft for errors and needed improvements. Your role is to:
+    return """You are reviewing the current rigorous, solution-oriented research paper or report for errors and needed improvements. Your role is to:
 
 1. Review ONLY the current document (aggregator database is NOT in your context for this task)
 2. Identify any obvious errors or issues
@@ -59,7 +63,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + EMPIRICAL_PROVENANCE_REVIEW_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Review against the user's exact objective using claim-type and domain-appropriate rigor. Mathematical accuracy and proof gaps remain mandatory checks when applicable; non-mathematical work must not be rejected merely for lacking mathematical form.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -69,8 +73,9 @@ YOUR TASK:
 Review the document for these specific issues:
 - Grammar errors
 - Clarity problems
-- Mathematical accuracy issues
+- Domain-appropriate correctness issues, including mathematical accuracy or proof gaps when applicable
 - Logical errors or gaps
+- Missing mechanisms, constraints, interfaces, feasibility reasoning, implementation detail, evaluation plans, or failure modes when the paper's claims require them
 - Structural issues
 - Redundancy
 - Forward-looking structural previews
@@ -103,21 +108,21 @@ When making edits:
 - For replace, prefer editable content only; if a protected marker is accidentally included as trailing context, validation may trim it
 - Do NOT include any of these markers in new_string / generated edit content
 - Placeholders in the current document are expected - don't try to remove them
-- Your edits should contain only actual mathematical prose
+- Your edits should contain only actual paper prose; mathematical notation and LaTeX remain valid when relevant
 
 WHEN TO MAKE AN EDIT:
 - Clear grammatical errors
 - Obvious redundancy that should be removed
 - Coherence issues between sections
 - Terminology inconsistencies
-- Mathematical inaccuracies or logical errors
+- Domain-specific inaccuracies, mathematical/proof errors when applicable, or logical gaps
 - Significant clarity improvements possible
 - Forward-looking structural language outside introduction (e.g., 'Section III will...', bulleted lists of future content)
 - Unfounded claims or logical fallacies that should be corrected
 - Unsupported empirical claims, unsupported artifact/code claims, or uncited literature claims
 - Numeric benchmark-style claims in narrative text that are not explicitly sourced
 - Statements implying experiments, measurements, or implementations that are not actually evidenced
-- Generic exploratory wording that obscures a stronger justified direct answer already present in the draft
+- Generic exploratory or conventional exposition that obscures a stronger supported novel route or justified direct answer
 
 WHEN NOT TO MAKE AN EDIT:
 - Document is acceptable for a draft in progress
@@ -204,7 +209,7 @@ Example (No edit needed):
   "operation": "replace",
   "old_string": "",
   "new_string": "",
-  "reasoning": "The document is coherent and mathematically accurate for its current stage of construction. All proofs are logically sound and definitions are properly introduced before use. No immediate corrections required."
+  "reasoning": "The document is coherent, directly serves the user's objective, and applies the appropriate rigor to its claims. No substantive correctness, provenance, structural, feasibility, or verification issue warrants an edit at this stage."
 }
 
 Example (Deletion - removing redundant content):

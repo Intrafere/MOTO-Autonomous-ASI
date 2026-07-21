@@ -45,6 +45,7 @@ AssistantSelectionMode = Literal[
     "cached_oauth_cooldown",
     "deterministic_oauth_cooldown",
 ]
+ASSISTANT_PROOF_PACK_SCHEMA_VERSION = "moto.assistant_proof_pack.v2"
 
 
 def _now_iso() -> str:
@@ -77,8 +78,9 @@ class AssistantTargetSnapshot(BaseModel):
     source_title: str = ""
     source_type: str = ""
     source_id: str = ""
+    run_id: str = ""
     dependency_names: list[str] = Field(default_factory=list)
-    imports: list[str] = Field(default_factory=lambda: ["Mathlib"])
+    imports: list[str] = Field(default_factory=list)
     target_hash: str = ""
     created_at: str = Field(default_factory=_now_iso)
 
@@ -107,6 +109,7 @@ class AssistantTargetSnapshot(BaseModel):
             self.source_title,
             self.source_type,
             self.source_id,
+            self.run_id,
             " ".join(self.source_titles),
             " ".join(self.dependency_names),
             " ".join(self.imports),
@@ -148,6 +151,7 @@ class AssistantProofSupport(BaseModel):
     source_kind: str = "verified_proof"
     proof_id: str
     session_id: str = ""
+    run_id: str = ""
     fingerprint: str = ""
     theorem_name: str = ""
     theorem_statement: str
@@ -157,10 +161,20 @@ class AssistantProofSupport(BaseModel):
     theorem_statement_hash: str = ""
     lean_code_hash: str = ""
     canonical_uri: str = ""
+    source_type: str = ""
+    source_id: str = ""
+    source_title: str = ""
+    novelty_tier: str = ""
+    novelty_reasoning: str = ""
+    created_at: str = ""
     relevance_reason: str = ""
     transfer_hint: str = ""
     has_hydrated_code: bool = False
     lean_code: str = ""
+    retrieval_lanes: list[str] = Field(default_factory=list)
+    occurrence_provenance: list[dict[str, str]] = Field(default_factory=list)
+    occurrence_total: int = 0
+    occurrence_omitted: int = 0
 
     @classmethod
     def from_record(
@@ -170,6 +184,24 @@ class AssistantProofSupport(BaseModel):
         relevance_reason: str = "",
         transfer_hint: str = "",
     ) -> "AssistantProofSupport":
+        occurrences = record.metadata.get("assistant_occurrences")
+        if not isinstance(occurrences, list):
+            occurrence = {
+                "search_id": record.search_id,
+                "corpus": record.corpus,
+                "corpus_scope": record.corpus_scope or record.release_id,
+                "session_id": record.session_id,
+                "run_id": record.run_id,
+                "source_type": record.source_type,
+                "source_id": record.source_id,
+                "source_title": record.source_title,
+            }
+            if record.metadata.get("assistant_exclude_standalone_exact_duplicate_emphasis") is True:
+                occurrence["assistant_exclude_standalone_exact_duplicate_emphasis"] = "true"
+            occurrences = [occurrence]
+        lanes = record.metadata.get("assistant_retrieval_lanes")
+        if not isinstance(lanes, list):
+            lanes = []
         return cls(
             search_id=record.search_id,
             corpus=record.corpus,
@@ -177,6 +209,7 @@ class AssistantProofSupport(BaseModel):
             source_kind=record.source_kind,
             proof_id=record.proof_id,
             session_id=record.session_id,
+            run_id=record.run_id,
             fingerprint=record.external_fingerprint,
             theorem_name=record.theorem_name or record.display_title,
             theorem_statement=record.theorem_statement,
@@ -186,10 +219,24 @@ class AssistantProofSupport(BaseModel):
             theorem_statement_hash=record.theorem_statement_hash,
             lean_code_hash=record.lean_code_hash,
             canonical_uri=record.canonical_uri,
+            source_type=record.source_type,
+            source_id=record.source_id,
+            source_title=record.source_title,
+            novelty_tier=record.novelty_tier,
+            novelty_reasoning=record.novelty_reasoning,
+            created_at=record.created_at,
             relevance_reason=relevance_reason,
             transfer_hint=transfer_hint,
             has_hydrated_code=bool((record.lean_code or "").strip()),
             lean_code=record.lean_code or "",
+            retrieval_lanes=[str(value) for value in lanes if str(value)],
+            occurrence_provenance=[
+                {str(key): str(value) for key, value in occurrence.items()}
+                for occurrence in occurrences
+                if isinstance(occurrence, dict)
+            ],
+            occurrence_total=int(record.metadata.get("assistant_occurrence_total") or len(occurrences)),
+            occurrence_omitted=int(record.metadata.get("assistant_occurrence_omitted") or 0),
         )
 
     def metadata_only_dump(self) -> dict:
@@ -198,11 +245,44 @@ class AssistantProofSupport(BaseModel):
         payload["has_hydrated_code"] = bool(self.has_hydrated_code)
         return payload
 
+    def event_preview_dump(self, *, occurrence_limit: int = 8) -> dict:
+        payload = self.metadata_only_dump()
+        occurrences = payload.get("occurrence_provenance", [])
+        payload["occurrence_provenance"] = occurrences[:occurrence_limit]
+        payload["occurrence_total"] = max(self.occurrence_total, len(occurrences))
+        payload["occurrence_omitted"] = max(0, self.occurrence_total - len(payload["occurrence_provenance"]))
+        payload["occurrence_detail_available"] = self.occurrence_total > len(payload["occurrence_provenance"])
+        return payload
+
+
+class AssistantSupportLineageOccurrence(BaseModel):
+    """Metadata-only provenance for one occurrence of an Assistant support."""
+
+    search_id: str = ""
+    corpus: str = ""
+    corpus_scope: str = ""
+    session_id: str = ""
+    run_id: str = ""
+    source_type: str = ""
+    source_id: str = ""
+    source_title: str = ""
+
+
+class AssistantSupportLineageResponse(BaseModel):
+    """Bounded page of provenance for one support in one Assistant target pack."""
+
+    target_hash: str
+    support_search_id: str
+    occurrence_total: int
+    offset: int
+    limit: int
+    next_offset: int | None = None
+    occurrences: list[AssistantSupportLineageOccurrence] = Field(default_factory=list)
 
 class AssistantProofPack(BaseModel):
     """Latest non-blocking proof-support pack for one target snapshot."""
 
-    schema_version: str = "moto.assistant_proof_pack.v1"
+    schema_version: str = ASSISTANT_PROOF_PACK_SCHEMA_VERSION
     created_at: str = Field(default_factory=_now_iso)
     workflow_mode: AssistantWorkflowMode
     target_kind: AssistantTargetKind
@@ -217,6 +297,7 @@ class AssistantProofPack(BaseModel):
     candidate_count: int = 0
     shortlist_count: int = 0
     selection_reasoning: str = ""
+    retrieval_observability: dict = Field(default_factory=dict)
 
     def to_prompt_context(self, *, max_code_chars_per_result: int = 4000) -> str:
         return self._to_prompt_context(
@@ -248,8 +329,12 @@ class AssistantProofPack(BaseModel):
             f"Selection mode: {self.selection_mode}",
             f"Query summary: {self.query_summary or '[not provided]'}",
             (
-                "Use these verified memory records only as relevant mathematical context, "
-                "proof-pattern, dependency, or tactic guidance for the user's prompt/current target."
+                "These are Lean-verified theorem records. Use them only when their exact statement "
+                "or proof structure materially helps the user's objective/current task. They may "
+                "provide mathematical context, bounds, invariants, impossibility arguments, "
+                "decomposition patterns, dependencies, or tactics. They do not override or "
+                "mathematically reinterpret the user objective, prove informal applicability, or "
+                "require the current work to become mathematical. Ignore unrelated records."
             ),
         ]
         for index, support in enumerate(self.results[:7], start=1):
@@ -288,4 +373,28 @@ class AssistantProofPack(BaseModel):
         payload = self.model_dump(mode="json")
         payload["results"] = [result.metadata_only_dump() for result in self.results]
         return payload
+
+
+class LatestAssistantProofPackResponse(BaseModel):
+    """Metadata-only latest Assistant pack exposed to UI clients."""
+
+    enabled: bool
+    has_pack: bool
+    results: list[dict] = Field(default_factory=list)
+    disabled_reason: str = ""
+    schema_version: str = ""
+    created_at: str = ""
+    workflow_mode: str = ""
+    target_kind: str = ""
+    target_hash: str = ""
+    query_summary: str = ""
+    freshness: str = ""
+    warnings: list[str] = Field(default_factory=list)
+    selection_mode: str = ""
+    assistant_role_id: str = ""
+    assistant_model_id: str = ""
+    candidate_count: int = 0
+    shortlist_count: int = 0
+    selection_reasoning: str = ""
+    retrieval_observability: dict = Field(default_factory=dict)
 

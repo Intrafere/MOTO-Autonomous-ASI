@@ -202,6 +202,11 @@ class AnswerFormatSelector:
             # Validate prompt size
             prompt_tokens = count_tokens(prompt)
             max_input = self._calculate_max_input_tokens()
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt, getattr(self, "solution_path_manager", None), max_input
+            )
+            prompt_tokens = count_tokens(prompt)
             
             if prompt_tokens > max_input:
                 logger.error(f"AnswerFormatSelector: Prompt too large ({prompt_tokens} > {max_input})")
@@ -238,15 +243,19 @@ class AnswerFormatSelector:
             # Parse JSON using central utility
             data = parse_json(content)
             
-            # Validate answer_format value
-            answer_format = data.get("answer_format", "short_form")
-            if answer_format not in ["short_form", "long_form"]:
-                logger.warning(f"AnswerFormatSelector: Invalid format '{answer_format}', defaulting to short_form")
-                answer_format = "short_form"
+            answer_format = data.get("answer_format")
+            reasoning = data.get("reasoning")
+            if answer_format not in {"short_form", "long_form"}:
+                raise ValueError(
+                    "Format selection requires answer_format to be exactly "
+                    "'short_form' or 'long_form'"
+                )
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                raise ValueError("Format selection requires non-empty reasoning")
             
             return AnswerFormatSelection(
                 answer_format=answer_format,
-                reasoning=data.get("reasoning", "")
+                reasoning=reasoning.strip(),
             )
             
         except FreeModelExhaustedError:
@@ -277,6 +286,10 @@ class AnswerFormatSelector:
                 papers_summary=all_papers,
                 certainty_assessment=certainty_assessment.model_dump(),
                 format_selection=selection.model_dump()
+            )
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(
+                prompt, getattr(self, "solution_path_manager", None)
             )
             
             # Validate prompt size
@@ -319,11 +332,23 @@ class AnswerFormatSelector:
             
             # Parse JSON using central utility
             data = parse_json(content)
+            from backend.shared.solution_path.integration import enqueue_optional_update
+            decision = data.get("decision")
+            reasoning = data.get("reasoning")
+            if decision not in {"accept", "reject"}:
+                return False, "Validator response requires decision to be exactly accept or reject"
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                return False, "Validator response requires non-empty reasoning"
+            await enqueue_optional_update(
+                data,
+                getattr(self, "solution_path_manager", None),
+                proposer_role=f"{self.role_id}_validator",
+                source_task_id=task_id,
+                source_phase="answer_format_validation",
+                source_decision=decision,
+            )
             
-            decision = data.get("decision", "reject")
-            reasoning = data.get("reasoning", "No reasoning provided")
-            
-            return decision == "accept", reasoning
+            return decision == "accept", reasoning.strip()
             
         except FreeModelExhaustedError:
             raise

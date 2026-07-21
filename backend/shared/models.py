@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 DEFAULT_CONTEXT_WINDOW = 0
 DEFAULT_MAX_OUTPUT_TOKENS = 0
@@ -138,8 +138,8 @@ class BoostConfig(BaseModel):
 
 class FreeModelSettings(BaseModel):
     """Settings for free model cooldown handling and rotation."""
-    looping_enabled: bool = True
-    auto_selector_enabled: bool = True
+    looping_enabled: bool = False
+    auto_selector_enabled: bool = False
 
 
 class WorkflowTask(BaseModel):
@@ -390,11 +390,23 @@ class BrainstormMetadata(BaseModel):
     topic_id: str
     topic_prompt: str
     status: Literal["in_progress", "complete"] = "in_progress"
+    # Current post-cleanup database size.
     submission_count: int = 0
+    # Monotonic accepted-event count used for resume offsets and hard caps.
+    total_acceptances: int = 0
     created_at: datetime = Field(default_factory=datetime.now)
     completed_at: Optional[datetime] = None
     last_activity: datetime = Field(default_factory=datetime.now)
     papers_generated: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _restore_legacy_total_acceptances(cls, data: Any) -> Any:
+        """Legacy metadata only stored the retained submission count."""
+        if isinstance(data, dict) and "total_acceptances" not in data:
+            data = dict(data)
+            data["total_acceptances"] = max(0, int(data.get("submission_count") or 0))
+        return data
 
 
 class PaperMetadata(BaseModel):
@@ -421,10 +433,9 @@ class PaperMetadata(BaseModel):
 
 class TopicSelectionSubmission(BaseModel):
     """Submission from topic selection agent."""
-    action: Literal["new_topic", "continue_existing", "combine_topics"]
+    action: Literal["new_topic", "continue_existing"]
     topic_id: Optional[str] = None  # Required if action is continue_existing
-    topic_ids: List[str] = Field(default_factory=list)  # Required if action is combine_topics
-    topic_prompt: str = ""  # Required if action is new_topic or combine_topics
+    topic_prompt: str = ""  # Required if action is new_topic
     reasoning: str
 
 
@@ -705,6 +716,19 @@ class ProofAttemptFeedback(BaseModel):
     strategy: Literal["full_script", "tactic_script"] = "full_script"
     tactic_trace: List[str] = Field(default_factory=list)
     success: bool = False
+    configured_model: Optional[str] = None
+    configured_provider: Optional[str] = None
+    effective_model: Optional[str] = None
+    effective_provider: Optional[str] = None
+    overflow_origin: Optional[Literal["local_preflight", "provider"]] = None
+    prompt_tokens: Optional[int] = None
+    max_input_tokens: Optional[int] = None
+
+
+ProofArtifactPurpose = Literal[
+    "verified_occurrence",
+    "standalone_exact_duplicate_emphasis",
+]
 
 
 class ProofRecord(BaseModel):
@@ -717,17 +741,104 @@ class ProofRecord(BaseModel):
     source_type: Literal["brainstorm", "paper", "leanoj_subproof", "leanoj_final"]
     source_id: str
     source_title: str = ""
+    run_id: str = ""
+    user_prompt: str = ""
     solver: str = "Lean 4"
     lean_code: str
     novel: bool = False
     novelty_tier: str = "not_novel"
     novelty_reasoning: str = ""
+    independent_novelty_tier: str = ""
+    independent_novelty_reasoning: str = ""
+    exact_duplicate_proof_id: str = ""
+    exact_duplicate_run_id: str = ""
+    artifact_purpose: ProofArtifactPurpose = "verified_occurrence"
+    canonical_identity_version: str = ""
+    canonical_theorem_statement_hash: str = ""
+    canonical_lean_code_hash: str = ""
     verification_notes: str = ""
     attempt_count: int = 0
     attempts: List[ProofAttemptFeedback] = Field(default_factory=list)
     dependencies: List[ProofDependency] = Field(default_factory=list)
     solver_hints: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ProofLibraryEntry(BaseModel):
+    """Stable metadata returned by archived proof-library endpoints."""
+    library_id: str = ""
+    session_id: str = ""
+    proof_id: str
+    theorem_name: str = ""
+    theorem_statement: str = ""
+    formal_sketch: str = ""
+    source_type: str = ""
+    source_id: str = ""
+    source_title: str = ""
+    run_id: str = ""
+    user_prompt: str = ""
+    solver: str = "Lean 4"
+    novel: bool = False
+    novelty_tier: str = "not_novel"
+    novelty_reasoning: str = ""
+    independent_novelty_tier: str = ""
+    independent_novelty_reasoning: str = ""
+    exact_duplicate_proof_id: str = ""
+    exact_duplicate_run_id: str = ""
+    artifact_purpose: ProofArtifactPurpose = "verified_occurrence"
+    canonical_identity_version: str = ""
+    canonical_theorem_statement_hash: str = ""
+    canonical_lean_code_hash: str = ""
+    verification_notes: str = ""
+    attempt_count: int = 0
+    created_at: str = ""
+    dependencies: List[ProofDependency] = Field(default_factory=list)
+    lean_code: str = ""
+
+
+class ProofLibraryCounts(BaseModel):
+    total: int = 0
+    listed: int = 0
+    novel: int = 0
+    duplicate_novel: int = 0
+    not_novel: int = 0
+
+
+class ProofLibraryResponse(BaseModel):
+    proofs: List[ProofLibraryEntry] = Field(default_factory=list)
+    counts: ProofLibraryCounts = Field(default_factory=ProofLibraryCounts)
+    scope: Literal["autonomous", "manual"]
+    category: Literal["novel", "duplicate_novel", "not_novel", "all"]
+
+
+class ProofCertificateResponse(BaseModel):
+    proof_id: str
+    theorem_statement: str
+    theorem_name: str = ""
+    lean_code: str = ""
+    solver: str = "Lean 4"
+    lean_version: str = ""
+    mathlib_commit: str = ""
+    verified_at: Optional[str] = None
+    source_type: str = ""
+    source_id: str = ""
+    source_title: str = ""
+    run_id: str = ""
+    user_prompt: str = ""
+    novel: bool = False
+    novelty_tier: str = "not_novel"
+    novelty_reasoning: str = ""
+    independent_novelty_tier: str = ""
+    independent_novelty_reasoning: str = ""
+    exact_duplicate_proof_id: str = ""
+    exact_duplicate_run_id: str = ""
+    artifact_purpose: ProofArtifactPurpose = "verified_occurrence"
+    canonical_identity_version: str = ""
+    canonical_theorem_statement_hash: str = ""
+    canonical_lean_code_hash: str = ""
+    attempt_count: int = 0
+    solver_hints: List[str] = Field(default_factory=list)
+    dependencies: List[ProofDependency] = Field(default_factory=list)
 
 
 class ProofAttemptResult(BaseModel):
@@ -752,6 +863,7 @@ class ProofStageResult(BaseModel):
     results: List[ProofAttemptResult] = Field(default_factory=list)
     had_error: bool = False
     error_message: str = ""
+    deferred_candidate_ids: List[str] = Field(default_factory=list)
 
 
 class ProofCheckRequest(BaseModel):

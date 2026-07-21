@@ -59,7 +59,7 @@ Both paths call `DOMPurify.sanitize(rawHtml, DOMPURIFY_CONFIG)` after `renderLat
 
 Dual rendering: **Rendered LaTeX View** (KaTeX math, dark theme on screen, white for PDFs) and **Raw Text View** (plain text, dark theme). All rendering flows through `LatexRenderer.jsx` (`frontend/src/components/LatexRenderer.jsx`). CSS in `LatexRenderer.css`. PDF generation via `downloadHelpers.js`.
 
-**Performance Architecture**: For large documents (>~10K words), content is split into chunks at section boundaries. Each chunk renders independently via `IntersectionObserver`-gated `RenderedChunk` components — only chunks visible in the viewport (plus 600px margin) are LaTeX-rendered. Documents >50K chars auto-default to raw mode with a banner to switch. Content updates in rendered mode are debounced (1.5s) to prevent rapid re-rendering.
+**Performance Architecture**: For large documents (>~10K words), content is split into chunks at section boundaries. Each chunk renders independently via `IntersectionObserver`-gated `RenderedChunk` components — only chunks visible in the viewport (plus 600px margin) are LaTeX-rendered. Paper views default to rendered mode, including documents >50K chars. Content updates in rendered mode are debounced (1.5s) to prevent rapid re-rendering.
 
 ### Props API
 
@@ -97,7 +97,7 @@ DOMPurify sanitization is intentionally outside `renderLatexToHtml()` and must r
 
 **Debouncing**: `useDebouncedValue` hook delays rendered-mode processing by 1.5s during rapid content updates (WebSocket + polling). Raw mode is unaffected (instant updates).
 
-**Auto-threshold**: Documents >50K chars (`LARGE_DOC_THRESHOLD`) auto-default to raw mode with a banner offering to switch to rendered view.
+**Large-document threshold**: Documents >50K chars (`LARGE_DOC_THRESHOLD`) use the same progressive chunk rendering while preserving the caller's selected/default view.
 
 **Invariant**: Each chunk independently runs `renderLatexToHtml()` and then `DOMPurify.sanitize()`. Chunked and single-document paths must share the same conversion helpers and ordering anchors.
 
@@ -123,9 +123,9 @@ DOMPurify sanitization is intentionally outside `renderLatexToHtml()` and must r
 
 | Component | Location | PDF | Toggle | Disclaimer | Notes |
 |-----------|----------|-----|--------|------------|-------|
-| LivePaper.jsx | compiler/ | ✅ | ✅ | paper | Real-time paper viewing; auto-switches to raw >50K chars |
+| LivePaper.jsx | compiler/ | ✅ | ✅ | paper | Real-time paper viewing; defaults to rendered |
 | PaperLibrary.jsx | autonomous/ | ✅ | ✅ | baked-in | Paper library cards (backend embeds disclaimer at save) |
-| FinalAnswerView.jsx | autonomous/ | ✅ | ✅ | baked-in | Tier 3 final answer (defaults to raw for performance) |
+| FinalAnswerView.jsx | autonomous/ | ✅ | ✅ | baked-in | Tier 3 final answer; defaults to rendered |
 | FinalAnswerLibrary.jsx | autonomous/ | ✅ | ✅ | paper | Final answer library (all sessions) |
 | LivePaperProgress.jsx | autonomous/ | ✅ | ✅ | paper | Live Tier 2 paper in progress |
 | LiveTier3Progress.jsx | autonomous/ | ✅ | ✅ | paper | Live Tier 3 paper in progress |

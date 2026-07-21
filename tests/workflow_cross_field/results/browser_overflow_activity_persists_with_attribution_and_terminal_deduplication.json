@@ -1,0 +1,29 @@
+{
+  "adapter": "browser_smoke",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "configured_and_effective_route_visible",
+    "proof_overflow_keeps_parent_active",
+    "fatal_stop_not_duplicated",
+    "activity_restored_after_reload"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "workflow_filesystem_state",
+    "provider_pause_resume"
+  ],
+  "invariants": [
+    "events.context_overflow_route_identity",
+    "events.context_overflow_persists_across_reload",
+    "events.context_overflow_terminal_stop_once",
+    "events.proof_context_overflow_nonfatal"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "browser_overflow_activity_persists_with_attribution_and_terminal_deduplication",
+  "schema_version": 1,
+  "seed": null,
+  "source": "browser_smoke",
+  "test_file": "tests/workflow_browser_smoke/overflow-activity.spec.js"
+}

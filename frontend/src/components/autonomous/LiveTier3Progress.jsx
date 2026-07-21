@@ -346,7 +346,7 @@ const LiveTier3Progress = ({ api, status, capabilities }) => {
                       : prependDisclaimer(paperData.content, 'paper')
                   }
                   className="live-tier3-latex-renderer"
-                  defaultRaw={true}
+                  defaultRaw={false}
                   showToggle={true}
                 />
               </div>

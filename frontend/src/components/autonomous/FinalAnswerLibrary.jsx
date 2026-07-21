@@ -38,7 +38,7 @@ function FinalAnswerLibrary({ capabilities }) {
   const [expandedContent, setExpandedContent] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterFormat, setFilterFormat] = useState('all'); // 'all', 'short_form', 'long_form'
-  const [showLatex, setShowLatex] = useState(false); // Raw text by default for performance with large docs
+  const [showLatex, setShowLatex] = useState(true);
   const [downloadingPDF, setDownloadingPDF] = useState(null); // Track which answer is generating PDF
   const [expandedPrunedRuns, setExpandedPrunedRuns] = useState({});
   const [expandedPrunedPaperId, setExpandedPrunedPaperId] = useState(null);
@@ -673,7 +673,7 @@ function FinalAnswerLibrary({ capabilities }) {
                                       : expandedPrunedContent.content || ''
                                   }
                                   showToggle={true}
-                                  defaultRaw={true}
+                                  defaultRaw={false}
                                 />
                               </div>
                             )}

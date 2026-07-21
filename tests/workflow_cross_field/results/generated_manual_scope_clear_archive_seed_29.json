@@ -1,0 +1,56 @@
+{
+  "action_ids": [
+    "start_manual_compiler",
+    "refresh_assistant_pack",
+    "enable_manual_lean",
+    "run_manual_proof_check",
+    "clear_manual_state"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "none",
+    "final_phase": "idle"
+  },
+  "evidence": [
+    "assistant_pack",
+    "manual_archive",
+    "manual_proof",
+    "scoped_event"
+  ],
+  "exercised_invariants": [
+    "proof_scope.manual_clear_archives_active",
+    "proof_scope.manual_not_in_autonomous_current",
+    "state.clear_removes_active_preserves_history"
+  ],
+  "fields": [
+    "proof_scope_isolation",
+    "workflow_filesystem_state",
+    "assistant_memory"
+  ],
+  "invariants": [
+    "proof_scope.manual_not_in_autonomous_current",
+    "proof_scope.manual_clear_archives_active",
+    "state.clear_removes_active_preserves_history"
+  ],
+  "observed_fields": [
+    "assistant_memory",
+    "prompt_context",
+    "proof_runtime_gating",
+    "proof_scope_isolation",
+    "workflow_filesystem_state"
+  ],
+  "replay": [
+    "start_manual_compiler()",
+    "refresh_assistant_pack(proof_ids=('prior-proof-1', 'prior-proof-2'))",
+    "enable_manual_lean()",
+    "run_manual_proof_check()",
+    "clear()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_manual_scope_clear_archive_seed_29",
+  "schema_version": 1,
+  "seed": 29,
+  "target_artifact": "targets/generated_manual_scope_clear_archive.json",
+  "target_id": "generated_manual_scope_clear_archive"
+}

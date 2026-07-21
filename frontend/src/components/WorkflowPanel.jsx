@@ -1,12 +1,24 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { websocket } from '../services/websocket';
-import { boostAPI, workflowAPI } from '../services/api';
+import { boostAPI, proofSearchAPI, workflowAPI } from '../services/api';
+import {
+  classifyProofNovelty,
+  formatProofProvenance,
+  getCanonicalProofIdentity,
+  sanitizeDomId,
+} from '../utils/proofPresentation';
+import {
+  getSolutionPathEmptyLabel,
+  isSolutionPathSnapshotAtLeast,
+  solutionPathEventMatches,
+} from '../utils/solutionPathPresentation';
 import './WorkflowPanel.css';
 
 const AUTO_OPEN_DELAY_SECONDS = 600;
 const BOOST_CATEGORY_GROUPS = ['Aggregator', 'Compiler', 'Autonomous', 'Proof Solver'];
 const MAX_SUBMITTERS = 10;
 const WORKFLOW_PANEL_COLLAPSED_KEY = 'workflow_panel_collapsed';
+const ASSISTANT_MAX_RESULTS = 7;
 
 const readStoredCollapsedState = () => {
   if (typeof window === 'undefined') return true;
@@ -150,9 +162,35 @@ const formatTime = (totalSeconds) => {
   return `${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
 };
 
+const truncateText = (text, maxLength = 140) => {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength).trim()}...`;
+};
+
+const formatAssistantTierLabel = (support = {}) => classifyProofNovelty(support).shortLabel;
+
+const getAssistantTileClass = (support = {}) => classifyProofNovelty(support).tileClass;
+
+const formatAssistantSource = (support = {}) => (
+  [
+    support.corpus,
+    support.corpus_scope,
+    support.session_id ? `session ${support.session_id}` : '',
+  ].filter(Boolean).join(' · ') || 'proof history'
+);
+
+const normalizeAssistantPack = (pack = {}) => ({
+  ...pack,
+  results: Array.isArray(pack.results) ? pack.results.slice(0, ASSISTANT_MAX_RESULTS) : [],
+});
+
 export default function WorkflowPanel({
   isRunning,
   onOpenBoostSettings,
+  onOpenAssistantProof,
+  onOpenSolutionPath,
+  onSolutionPathSnapshotChange,
   collapsed: controlledCollapsed,
   onCollapseChange,
 }) {
@@ -177,6 +215,17 @@ export default function WorkflowPanel({
   const [localElapsed, setLocalElapsed] = useState(0);
   const lastSyncRef = useRef(Date.now());
   const hasElapsedSyncRef = useRef(false);
+  const [assistantMemoryPack, setAssistantMemoryPack] = useState(null);
+  const [solutionPath, setSolutionPath] = useState(null);
+  const solutionPathRef = useRef(null);
+  const solutionPathRequestRef = useRef(0);
+  const [assistantMemoryError, setAssistantMemoryError] = useState('');
+  const [selectedAssistantProof, setSelectedAssistantProof] = useState(null);
+  const [assistantProofDetail, setAssistantProofDetail] = useState(null);
+  const [assistantProofLoading, setAssistantProofLoading] = useState(false);
+  const assistantPackGenerationRef = useRef(0);
+  const assistantDetailGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
 
   // Auto-open: pop open exactly once, 10 minutes after user presses Start.
   // No persistence. Resets every time isRunning goes true.
@@ -201,6 +250,55 @@ export default function WorkflowPanel({
       hasPoppedThisSession.current = false;
     }
   }, [isRunning]);
+
+  const fetchSolutionPath = useCallback(async () => {
+    const requestSequence = ++solutionPathRequestRef.current;
+    try {
+      const snapshot = await workflowAPI.getSolutionPath();
+      if (!mountedRef.current || requestSequence !== solutionPathRequestRef.current) return null;
+      const current = solutionPathRef.current;
+      if (isSolutionPathSnapshotAtLeast(snapshot, current)) {
+        solutionPathRef.current = snapshot;
+        setSolutionPath(snapshot);
+        onSolutionPathSnapshotChange?.(snapshot);
+      }
+      return snapshot;
+    } catch (error) {
+      if (!mountedRef.current || requestSequence !== solutionPathRequestRef.current) return null;
+      console.debug('Failed to fetch solution path:', error);
+      return null;
+    }
+  }, [onSolutionPathSnapshotChange]);
+
+  useEffect(() => {
+    fetchSolutionPath();
+  }, [fetchSolutionPath, isRunning]);
+
+  useEffect(() => {
+    const handleChanged = (data = {}) => {
+      const current = solutionPathRef.current;
+      if (!solutionPathEventMatches(data, current, current?.mode || '')) return;
+      if (
+        current?.run_id === data.run_id
+        && Number(data.lifecycle_generation || 0)
+          === Number(current?.lifecycle_generation || 0)
+        && Number(data.revision || 0) < Number(current?.revision || 0)
+      ) return;
+      fetchSolutionPath();
+    };
+    const events = [
+      'solution_path_activated',
+      'solution_path_proposal_queued',
+      'solution_path_proposal_reviewing',
+      'solution_path_updated',
+      'solution_path_proposal_rejected',
+      'solution_path_proposal_retry_queued',
+      'solution_path_proposal_user_repair_required',
+      'solution_path_proposal_resumed',
+    ];
+    events.forEach((eventName) => websocket.on(eventName, handleChanged));
+    return () => events.forEach((eventName) => websocket.off(eventName, handleChanged));
+  }, [fetchSolutionPath]);
 
   useEffect(() => {
     if (!isRunning || hasPoppedThisSession.current) return;
@@ -234,6 +332,46 @@ export default function WorkflowPanel({
     const interval = setInterval(fetchBoostStatus, 5000);
     return () => clearInterval(interval);
   }, [fetchBoostStatus]);
+
+  const fetchAssistantMemoryPack = useCallback(async () => {
+    const generation = ++assistantPackGenerationRef.current;
+    try {
+      const pack = await proofSearchAPI.getAssistantLatestPack();
+      if (!mountedRef.current || generation !== assistantPackGenerationRef.current) return;
+      if (pack?.enabled === false) {
+        setAssistantMemoryPack(normalizeAssistantPack({ ...pack, results: [] }));
+        setSelectedAssistantProof(null);
+        setAssistantProofDetail(null);
+        setAssistantMemoryError(pack.disabled_reason || 'Session History Memory is disabled.');
+        return;
+      }
+      setAssistantMemoryPack(normalizeAssistantPack(pack));
+      setAssistantMemoryError(pack.disabled_reason || '');
+    } catch (error) {
+      if (!mountedRef.current || generation !== assistantPackGenerationRef.current) return;
+      setAssistantMemoryError(error.message || 'Assistant memory unavailable');
+    }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      assistantPackGenerationRef.current += 1;
+      assistantDetailGenerationRef.current += 1;
+      solutionPathRequestRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    fetchAssistantMemoryPack();
+  }, [fetchAssistantMemoryPack]);
+
+  useEffect(() => {
+    if (!collapsed) {
+      fetchAssistantMemoryPack();
+    }
+  }, [collapsed, fetchAssistantMemoryPack]);
 
   useEffect(() => {
     if (!isEditingBoostNext) {
@@ -309,6 +447,41 @@ export default function WorkflowPanel({
     websocket.on('token_usage_updated', handleTokenUpdate);
     return () => websocket.off('token_usage_updated', handleTokenUpdate);
   }, []);
+
+  useEffect(() => {
+    const handleAssistantPackUpdated = (data) => {
+      if (data?.enabled === false) {
+        setAssistantMemoryPack(normalizeAssistantPack({ ...data, results: [] }));
+        setSelectedAssistantProof(null);
+        setAssistantProofDetail(null);
+        setAssistantMemoryError(data.disabled_reason || 'Session History Memory is disabled.');
+      } else if (Array.isArray(data?.results)) {
+        setAssistantMemoryPack(normalizeAssistantPack({ ...data, has_pack: true, enabled: true }));
+        setAssistantMemoryError('');
+      } else {
+        fetchAssistantMemoryPack();
+      }
+    };
+    const handleAssistantPackFailed = (data = {}) => {
+      setAssistantMemoryError(data.error_message || data.reason || 'Assistant memory selection failed');
+    };
+    const handleAssistantMemoryUnavailable = (data = {}) => {
+      setAssistantMemoryPack((previous) => previous ? { ...previous, results: [] } : previous);
+      setSelectedAssistantProof(null);
+      setAssistantProofDetail(null);
+      setAssistantMemoryError(data.reason || 'Assistant memory found no external proof history yet.');
+    };
+    websocket.on('assistant_proof_pack_updated', handleAssistantPackUpdated);
+    websocket.on('assistant_proof_pack_failed', handleAssistantPackFailed);
+    websocket.on('assistant_proof_memory_unavailable', handleAssistantMemoryUnavailable);
+    websocket.on('assistant_proof_memory_shutdown', handleAssistantMemoryUnavailable);
+    return () => {
+      websocket.off('assistant_proof_pack_updated', handleAssistantPackUpdated);
+      websocket.off('assistant_proof_pack_failed', handleAssistantPackFailed);
+      websocket.off('assistant_proof_memory_unavailable', handleAssistantMemoryUnavailable);
+      websocket.off('assistant_proof_memory_shutdown', handleAssistantMemoryUnavailable);
+    };
+  }, [fetchAssistantMemoryPack]);
 
   // Local 1-second timer tick for smooth elapsed display
   useEffect(() => {
@@ -413,6 +586,40 @@ export default function WorkflowPanel({
   const toggleCollapse = () => {
     setPanelCollapsed(!collapsed);
   };
+
+  const handleAssistantProofClick = async (support) => {
+    const identity = getCanonicalProofIdentity(support);
+    const generation = ++assistantDetailGenerationRef.current;
+    setSelectedAssistantProof(support);
+    setAssistantProofDetail(null);
+    setAssistantProofLoading(true);
+    onOpenAssistantProof?.(support);
+    try {
+      const hydrated = await proofSearchAPI.getProof(support.corpus, support.proof_id, {
+        searchId: support.search_id || null,
+        runId: support.run_id || null,
+        sessionId: support.session_id || null,
+      });
+      if (
+        mountedRef.current
+        && generation === assistantDetailGenerationRef.current
+        && getCanonicalProofIdentity(support) === identity
+      ) setAssistantProofDetail(hydrated);
+    } catch (error) {
+      if (!mountedRef.current || generation !== assistantDetailGenerationRef.current) return;
+      setAssistantProofDetail({
+        ...support,
+        hydration_error: error.message || 'Proof history details could not be opened.',
+      });
+    } finally {
+      if (mountedRef.current && generation === assistantDetailGenerationRef.current) {
+        setAssistantProofLoading(false);
+      }
+    }
+  };
+
+  const assistantResults = assistantMemoryPack?.results || [];
+  const selectedProofView = assistantProofDetail || selectedAssistantProof;
 
   // REMOVED: Conditional rendering that hid panel when no workflow running
   // WorkflowPanel is now ETERNAL - always visible for boost controls
@@ -582,6 +789,175 @@ export default function WorkflowPanel({
                 )}
               </div>
             )}
+
+            {(solutionPath?.enabled || solutionPath?.acceptance_count >= 5) && (
+              <button
+                type="button"
+                className={`solution-path-card ${solutionPath?.enabled ? 'available' : ''}`}
+                onClick={async () => {
+                  const snapshot = await fetchSolutionPath();
+                  onOpenSolutionPath?.(snapshot || solutionPath);
+                }}
+                aria-label="Open current solution path"
+              >
+                <span>
+                  <strong>Solution Path</strong>
+                  <small>
+                    {solutionPath?.repair_required_proposals > 0
+                      ? `${solutionPath.repair_required_proposals} solution-path update(s) need attention`
+                      : solutionPath?.reviewing_proposals > 0
+                      ? 'Solution-path update under review'
+                      : solutionPath?.queued_proposals > 0
+                      ? `${solutionPath.queued_proposals} solution-path update(s) queued`
+                      : solutionPath?.enabled && (solutionPath.steps?.length || 0) > 0
+                      ? `${solutionPath.steps?.length || 0} steps · revision ${solutionPath.revision || 1}`
+                      : getSolutionPathEmptyLabel(solutionPath)}
+                  </small>
+                </span>
+                <span aria-hidden="true">›</span>
+              </button>
+            )}
+
+            <div className="assistant-memory-bank">
+              <div className="assistant-memory-bank__header">
+                <div>
+                  <div className="assistant-memory-bank__title">Assistant Memory Bank</div>
+                  <div className="assistant-memory-bank__subtitle">
+                    Latest proof supports retrieved by Assistant memory.
+                  </div>
+                </div>
+                {assistantMemoryPack?.has_pack && (
+                  <span className="assistant-memory-bank__count">
+                    {assistantResults.length}/{assistantMemoryPack.max_result_count || ASSISTANT_MAX_RESULTS}
+                  </span>
+                )}
+              </div>
+
+              {assistantMemoryError && assistantResults.length === 0 && (
+                <div className="assistant-memory-bank__empty">{assistantMemoryError}</div>
+              )}
+
+              {!assistantMemoryError && assistantResults.length === 0 && (
+                <div className="assistant-memory-bank__empty">
+                  No Assistant proof pack has been retrieved yet.
+                </div>
+              )}
+
+              {assistantResults.length > 0 && (
+                <div className="assistant-proof-list">
+                  {assistantResults.map((support, index) => {
+                    const supportKey = getCanonicalProofIdentity(support, { includeIndex: true, index });
+                    const supportIdentity = getCanonicalProofIdentity(support);
+                    const selectedKey = selectedAssistantProof ? getCanonicalProofIdentity(selectedAssistantProof) : '';
+                    const isSelected = selectedKey === supportIdentity;
+                    const detailId = sanitizeDomId(supportIdentity, 'assistant-proof-details');
+                    const provenance = formatProofProvenance(support);
+                    return (
+                      <button
+                        type="button"
+                        key={supportKey}
+                        className={`assistant-proof-tile ${getAssistantTileClass(support)} ${isSelected ? 'selected' : ''}`}
+                        onClick={() => handleAssistantProofClick(support)}
+                        title="Open proof history preview"
+                        aria-expanded={isSelected}
+                        aria-controls={detailId}
+                      >
+                        <div className="assistant-proof-tile__topline">
+                          <span className="assistant-proof-tile__tier">{formatAssistantTierLabel(support)}</span>
+                          <span className="assistant-proof-tile__source">{support.corpus}</span>
+                        </div>
+                        <div className="assistant-proof-tile__name">
+                          {support.theorem_name || support.proof_id || 'Untitled proof'}
+                        </div>
+                        <div className="assistant-proof-tile__statement">
+                          {truncateText(support.theorem_statement, 128)}
+                        </div>
+                        <div className="assistant-proof-tile__hint">
+                          {[
+                            ...provenance.lanes.map((lane) => `Lane: ${lane}`),
+                            provenance.runId && `Run: ${provenance.runId}`,
+                            provenance.sessionId && `Session: ${provenance.sessionId}`,
+                            provenance.source && `Source: ${provenance.source}`,
+                            provenance.omitted > 0 && `+${provenance.omitted} omitted lineage records`,
+                          ].filter(Boolean).join(' · ')}
+                        </div>
+                        {(support.relevance_reason || support.transfer_hint) && (
+                          <div className="assistant-proof-tile__hint">
+                            {truncateText(support.relevance_reason || support.transfer_hint, 110)}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div
+                id={sanitizeDomId(
+                  selectedAssistantProof ? getCanonicalProofIdentity(selectedAssistantProof) : '',
+                  'assistant-proof-details'
+                )}
+                className="assistant-proof-preview"
+                hidden={!selectedAssistantProof}
+              >
+                {selectedAssistantProof && (
+                  <>
+                  <div className="assistant-proof-preview__header">
+                    <div>
+                      <div className="assistant-proof-preview__label">Proof History Preview</div>
+                      <div className="assistant-proof-preview__title">
+                        {selectedProofView?.theorem_name || selectedProofView?.display_title || selectedProofView?.proof_id}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="assistant-proof-preview__close"
+                      onClick={() => {
+                        assistantDetailGenerationRef.current += 1;
+                        setSelectedAssistantProof(null);
+                        setAssistantProofDetail(null);
+                        setAssistantProofLoading(false);
+                      }}
+                    >
+                      Close
+                    </button>
+                  </div>
+                  {assistantProofLoading ? (
+                    <div className="assistant-proof-preview__loading">Opening proof history...</div>
+                  ) : (
+                    <>
+                      <div className="assistant-proof-preview__meta">
+                        <span>{formatAssistantSource(selectedProofView)}</span>
+                        {selectedProofView?.proof_id && <span>{selectedProofView.proof_id}</span>}
+                        <span>{formatAssistantTierLabel(selectedProofView)}</span>
+                        {selectedProofView?.run_id && <span>Run: {selectedProofView.run_id}</span>}
+                        {selectedProofView?.session_id && <span>Session: {selectedProofView.session_id}</span>}
+                        {selectedProofView?.source_type && <span>Source: {selectedProofView.source_type}{selectedProofView.source_id ? `/${selectedProofView.source_id}` : ''}</span>}
+                        {(selectedProofView?.retrieval_lanes || []).map((lane) => <span key={lane}>Lane: {lane}</span>)}
+                        {formatProofProvenance(selectedProofView).omitted > 0 && <span>+{formatProofProvenance(selectedProofView).omitted} omitted lineage records</span>}
+                      </div>
+                      <p className="assistant-proof-preview__statement">
+                        {selectedProofView?.theorem_statement || 'No theorem statement available.'}
+                      </p>
+                      {(selectedProofView?.proof_description || selectedProofView?.formal_sketch) && (
+                        <p className="assistant-proof-preview__description">
+                          {selectedProofView.proof_description || selectedProofView.formal_sketch}
+                        </p>
+                      )}
+                      {selectedProofView?.hydration_error && (
+                        <div className="assistant-proof-preview__error">{selectedProofView.hydration_error}</div>
+                      )}
+                      {selectedProofView?.lean_code && (
+                        <pre className="assistant-proof-preview__code">
+                          {truncateText(selectedProofView.lean_code, 900)}
+                        </pre>
+                      )}
+                    </>
+                  )}
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </>
       )}

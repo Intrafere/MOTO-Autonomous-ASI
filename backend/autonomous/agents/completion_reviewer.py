@@ -211,6 +211,13 @@ class CompletionReviewerAgent:
             # Validate prompt size before sending
             prompt_tokens = count_tokens(prompt)
             max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt,
+                getattr(self, "solution_path_manager", None),
+                max_input_tokens,
+            )
+            prompt_tokens = count_tokens(prompt)
             
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -262,6 +269,10 @@ class CompletionReviewerAgent:
                 if decision not in ["continue_brainstorm", "write_paper"]:
                     logger.error(f"CompletionReviewer: Invalid decision: {decision}")
                     return None
+                reasoning = data.get("reasoning")
+                if not isinstance(reasoning, str) or not reasoning.strip():
+                    logger.error("CompletionReviewer: Missing non-empty reasoning")
+                    return None
                 
                 # Notify task completed successfully
                 if self.task_tracking_callback:
@@ -269,7 +280,7 @@ class CompletionReviewerAgent:
                 
                 return CompletionReviewResult(
                     decision=decision,
-                    reasoning=data.get("reasoning", "No reasoning provided"),
+                    reasoning=reasoning.strip(),
                     suggested_additions=data.get("suggested_additions", "")
                 )
                 
@@ -319,6 +330,10 @@ class CompletionReviewerAgent:
                 brainstorm_database=brainstorm_context,  # Use prepared context (may be RAG)
                 original_assessment=original_assessment
             )
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(
+                prompt, getattr(self, "solution_path_manager", None)
+            )
             
             # Validate prompt size before sending
             prompt_tokens = count_tokens(prompt)
@@ -366,16 +381,23 @@ class CompletionReviewerAgent:
             # Parse JSON using central utility (handles sanitization + parsing + array handling + enhanced logging)
             try:
                 data = parse_json(content)
-                
-                # Get validation result - check for string "true"/"false" as well
-                validated_raw = data.get("validated", False)
-                if isinstance(validated_raw, str):
-                    validated = validated_raw.lower() == "true"
-                    logger.warning(f"CompletionReviewer: 'validated' was a string '{validated_raw}', converted to bool: {validated}")
-                else:
-                    validated = bool(validated_raw)
-                
-                reasoning = data.get("reasoning", "No reasoning")
+                from backend.shared.solution_path.integration import enqueue_optional_update
+                validated = data.get("validated")
+                reasoning = data.get("reasoning")
+                if type(validated) is not bool:
+                    logger.error("CompletionReviewer: 'validated' must be an exact boolean")
+                    return False
+                if not isinstance(reasoning, str) or not reasoning.strip():
+                    logger.error("CompletionReviewer: Self-validation requires non-empty reasoning")
+                    return False
+                await enqueue_optional_update(
+                    data,
+                    getattr(self, "solution_path_manager", None),
+                    proposer_role=self.role_id,
+                    source_task_id=task_id,
+                    source_phase="completion_self_validation",
+                    source_decision="accept" if validated else "reject",
+                )
                 
                 # Notify task completed successfully
                 if self.task_tracking_callback:

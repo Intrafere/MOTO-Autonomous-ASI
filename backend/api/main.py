@@ -35,6 +35,7 @@ from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.config import rag_config, system_config
 from backend.shared.lean4_client import clear_lean4_client, close_lean4_client, initialize_lean4_client
 from backend.shared.runtime_settings import apply_persisted_runtime_settings
+from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.aggregator.core.coordinator import coordinator
 from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
@@ -168,10 +169,8 @@ def _restore_desktop_provider_credentials(api_client_manager) -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _application_lifespan(app: FastAPI):
     """Lifespan events for the FastAPI app."""
-    _apply_generic_mode_from_env()
-    _validate_generic_mode_startup_env()
     _ensure_desktop_api_token()
 
     # Startup
@@ -187,6 +186,9 @@ async def lifespan(app: FastAPI):
     Path(system_config.logs_dir).mkdir(parents=True, exist_ok=True)
     Path(system_config.user_uploads_dir).mkdir(parents=True, exist_ok=True)
     apply_persisted_runtime_settings()
+
+    from backend.aggregator.core.rag_manager import rag_manager
+    await rag_manager.prepare_process_generation_cache()
 
     from backend.shared.api_client_manager import api_client_manager
 
@@ -265,9 +267,21 @@ async def lifespan(app: FastAPI):
         # Restore saved LeanOJ state for the UI, but only launch model work when
         # explicitly requested. Lean 4 being enabled is not enough to imply that
         # LM Studio/OpenRouter models are loaded and ready at backend startup.
-        await leanoj_coordinator.restore_latest_session(
-            auto_resume=system_config.lean4_enabled and system_config.leanoj_auto_resume_enabled
+        auto_resume_leanoj = (
+            system_config.lean4_enabled and system_config.leanoj_auto_resume_enabled
         )
+        await leanoj_coordinator.restore_latest_session(auto_resume=False)
+        if auto_resume_leanoj and leanoj_coordinator._request is not None:
+            async with workflow_start_guard.reserve():
+                if workflow_start_guard.active_owner is None:
+                    from backend.api.routes.leanoj import (
+                        commit_leanoj_workflow_lease,
+                        release_leanoj_workflow_lease,
+                    )
+                    if leanoj_coordinator.start_in_background():
+                        commit_leanoj_workflow_lease()
+                        if not leanoj_coordinator.is_active:
+                            release_leanoj_workflow_lease()
     except Exception as exc:
         logger.warning("Failed to restore LeanOJ session state on startup: %s", exc)
 
@@ -308,10 +322,23 @@ async def lifespan(app: FastAPI):
             logger.debug("Lean 4 warm start task cancelled during shutdown")
         except Exception as exc:
             logger.debug("Lean 4 warm start task failed during shutdown: %s", exc)
-    await coordinator.stop()
-    await compiler_coordinator.stop()
-    await autonomous_coordinator.stop()
-    await leanoj_coordinator.stop()
+    try:
+        for label, stop in (
+            ("Aggregator", coordinator.stop),
+            ("Compiler", compiler_coordinator.stop),
+            ("Autonomous Research", autonomous_coordinator.stop),
+            ("Proof Solver", leanoj_coordinator.stop),
+        ):
+            try:
+                await stop()
+            except Exception:
+                logger.exception("%s shutdown cleanup failed", label)
+    finally:
+        workflow_start_guard.release_all()
+    try:
+        await rag_manager.close()
+    except Exception:
+        logger.exception("Chroma shutdown cleanup failed")
     await close_lean4_client()
     clear_lean4_client()
     await lm_studio_client.close()
@@ -320,6 +347,21 @@ async def lifespan(app: FastAPI):
     await openai_codex_client.close()
     await sakana_fugu_client.close()
     logger.info("Shutdown complete")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Hold authoritative data-root ownership for the complete app lifespan."""
+    _apply_generic_mode_from_env()
+    _validate_generic_mode_startup_env()
+    from backend.shared.runtime_root_lock import RuntimeRootLease
+
+    runtime_root_lease = RuntimeRootLease(system_config.data_dir).acquire()
+    try:
+        async with _application_lifespan(app):
+            yield
+    finally:
+        runtime_root_lease.release()
 
 
 # Create FastAPI app

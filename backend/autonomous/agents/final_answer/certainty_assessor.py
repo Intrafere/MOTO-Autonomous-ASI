@@ -162,7 +162,8 @@ class CertaintyAssessor:
             is_valid, feedback = await self._validate_assessment(
                 user_research_prompt,
                 all_papers,
-                assessment
+                assessment,
+                expanded_papers,
             )
             
             if is_valid:
@@ -272,7 +273,10 @@ class CertaintyAssessor:
 
 YOUR TASK:
 Review the paper abstracts and outlines below. Decide which papers you need to see in FULL CONTENT 
-to accurately assess what can be answered with certainty (no speculation, no hand-waving).
+to accurately assess the strongest defensible answer and the evidence status of its components.
+Expand papers when full details are needed to evaluate a mechanism, evidence or derivation,
+implementation, risk or limitation, validation method, theorem, or proof.
+Do not treat a proposed invention or experiment as demonstrated without the required evidence.
 
 You may expand as many papers as needed for a thorough assessment.
 If the abstracts/outlines provide sufficient information, you may proceed without expansion.
@@ -419,6 +423,11 @@ USER'S RESEARCH QUESTION:
                 if prompt_tokens > max_input:
                     logger.error("CertaintyAssessor: Cannot fit even summary-only prompt")
                     return None
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt, getattr(self, "solution_path_manager", None), max_input
+            )
+            prompt_tokens = count_tokens(prompt)
             
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -457,11 +466,28 @@ USER'S RESEARCH QUESTION:
             
             # Parse JSON using central utility
             data = parse_json(content)
-            
+            if not isinstance(data, dict):
+                raise ValueError("Certainty assessment must be a JSON object")
+            certainty_level = data.get("certainty_level")
+            summary = data.get("known_certainties_summary")
+            reasoning = data.get("reasoning")
+            if certainty_level not in {
+                "total_answer",
+                "partial_answer",
+                "no_answer_known",
+                "appears_impossible",
+                "other",
+            }:
+                raise ValueError("Certainty assessment has an invalid or missing certainty_level")
+            if not isinstance(summary, str) or not summary.strip():
+                raise ValueError("Certainty assessment requires a non-empty known_certainties_summary")
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                raise ValueError("Certainty assessment requires non-empty reasoning")
+
             return CertaintyAssessment(
-                certainty_level=data.get("certainty_level", "other"),
-                known_certainties_summary=data.get("known_certainties_summary", ""),
-                reasoning=data.get("reasoning", "")
+                certainty_level=certainty_level,
+                known_certainties_summary=summary.strip(),
+                reasoning=reasoning.strip(),
             )
             
         except FreeModelExhaustedError:
@@ -476,7 +502,8 @@ USER'S RESEARCH QUESTION:
         self,
         user_research_prompt: str,
         all_papers: List[Dict[str, Any]],
-        assessment: CertaintyAssessment
+        assessment: CertaintyAssessment,
+        expanded_papers: List[Dict[str, Any]] = None,
     ) -> tuple[bool, str]:
         """
         Validate the certainty assessment.
@@ -489,7 +516,12 @@ USER'S RESEARCH QUESTION:
             prompt = build_certainty_validation_prompt(
                 user_research_prompt=user_research_prompt,
                 papers_summary=all_papers,
-                assessment=assessment.model_dump()
+                assessment=assessment.model_dump(),
+                expanded_papers=expanded_papers,
+            )
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(
+                prompt, getattr(self, "solution_path_manager", None)
             )
             
             # Validate prompt size
@@ -532,8 +564,16 @@ USER'S RESEARCH QUESTION:
             
             # Parse JSON using central utility
             data = parse_json(content)
-            
+            from backend.shared.solution_path.integration import enqueue_optional_update
             decision = data.get("decision", "reject")
+            await enqueue_optional_update(
+                data,
+                getattr(self, "solution_path_manager", None),
+                proposer_role=f"{self.role_id}_validator",
+                source_task_id=task_id,
+                source_phase="certainty_validation",
+                source_decision=decision if decision in {"accept", "reject"} else None,
+            )
             reasoning = data.get("reasoning", "No reasoning provided")
             
             return decision == "accept", reasoning

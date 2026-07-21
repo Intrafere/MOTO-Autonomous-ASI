@@ -1,0 +1,25 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "configured_effective_route",
+    "single_terminal_stop"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "workflow_filesystem_state",
+    "runtime_exclusivity"
+  ],
+  "invariants": [
+    "events.context_overflow_route_identity",
+    "events.context_overflow_terminal_stop_once"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_autonomous_overflow_terminal_stop_once",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
+}

@@ -30,6 +30,7 @@ import {
 } from '../../utils/oauthProviders';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
+import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
 import ProofStrengthBadge from '../ProofStrengthBadge';
 import RawSettingsEditor from '../RawSettingsEditor';
 import '../autonomous/AutonomousResearch.css';
@@ -78,8 +79,8 @@ function CompilerSettings({
   const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [loadingModels, setLoadingModels] = useState(true);
   const [freeOnly, setFreeOnly] = useState(false);
-  const [freeModelLooping, setFreeModelLooping] = useState(true);
-  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(true);
+  const [freeModelLooping, setFreeModelLooping] = useState(false);
+  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(false);
 
   // Validator settings
   const [validatorProvider, setValidatorProvider] = useState('lm_studio');
@@ -323,8 +324,8 @@ function CompilerSettings({
 
       try {
         const freeModelSettings = await openRouterAPI.getFreeModelSettings();
-        setFreeModelLooping(freeModelSettings.looping_enabled ?? true);
-        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? true);
+        setFreeModelLooping(freeModelSettings.looping_enabled ?? false);
+        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? false);
       } catch (error) {
         console.error('Failed to load free model settings:', error);
       }
@@ -928,11 +929,11 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setCritiqueSubmitterMaxOutput(rawSettings.critiqueSubmitterMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
     setCritiqueSubmitterSuperchargeEnabled(Boolean(rawSettings.critiqueSubmitterSuperchargeEnabled));
     setFreeOnly(rawSettings.freeOnly ?? false);
-    setFreeModelLooping(rawSettings.freeModelLooping ?? true);
-    setFreeModelAutoSelector(rawSettings.freeModelAutoSelector ?? true);
+    setFreeModelLooping(rawSettings.freeModelLooping ?? false);
+    setFreeModelAutoSelector(rawSettings.freeModelAutoSelector ?? false);
     setModelProviders(rawSettings.modelProviders || {});
     openRouterAPI
-      .setFreeModelSettings(rawSettings.freeModelLooping ?? true, rawSettings.freeModelAutoSelector ?? true)
+      .setFreeModelSettings(rawSettings.freeModelLooping ?? false, rawSettings.freeModelAutoSelector ?? false)
       .catch(() => {});
 
     if (updateRawText) {
@@ -959,8 +960,8 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         critiqueSubmitterModel: rawSettings.critiqueSubmitterModel || '',
         critiqueSubmitterOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.critiqueSubmitterOpenrouterReasoningEffort),
         freeOnly: rawSettings.freeOnly ?? false,
-        freeModelLooping: rawSettings.freeModelLooping ?? true,
-        freeModelAutoSelector: rawSettings.freeModelAutoSelector ?? true,
+        freeModelLooping: rawSettings.freeModelLooping ?? false,
+        freeModelAutoSelector: rawSettings.freeModelAutoSelector ?? false,
         modelProviders: rawSettings.modelProviders || {},
       }));
     }
@@ -1376,17 +1377,15 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             >
               🔗 OpenRouter Model List
             </button>
-            <label className="settings-checkbox-label model-refresh-controls__toggle">
-              <input
-                type="checkbox"
-                checked={freeOnly}
-                onChange={(e) => setFreeOnly(e.target.checked)}
-              />
-              Free models only
-            </label>
+            <OpenRouterFreeModelsControl
+              checked={freeOnly}
+              onChange={setFreeOnly}
+            />
           </>
         )}
-        {developerModeEnabled ? (
+        {developerModeEnabled && (
+          <>
+          {hasOpenRouterKey && <span className="model-refresh-controls__divider" aria-hidden="true" />}
           <label className="settings-checkbox-label model-refresh-controls__toggle">
             <input
               type="checkbox"
@@ -1395,10 +1394,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             />
             Edit Raw
           </label>
-        ) : (
-          <span className="settings-developer-mode-hint">
-            Developer mode: press Shift + Z + X to toggle raw JSON settings.
-          </span>
+          </>
         )}
       </div>
 
@@ -1440,7 +1436,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
         {renderRoleConfig({
           title: 'Assistant',
-          description: 'Runs in parallel during outline, writing, review, and proof work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases do not receive Assistant context.',
+          description: 'Runs in parallel during outline, writing, review, and proof work to retrieve up to 7 relevant verified proof-memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases do not receive Assistant context.',
           provider: assistantProvider,
           setProvider: setAssistantProvider,
           model: assistantModel || validatorModel,

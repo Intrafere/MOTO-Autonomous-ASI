@@ -82,8 +82,8 @@ beforeEach(() => {
   localStorage.clear();
   openRouterAPI.getApiKeyStatus.mockResolvedValue({ has_key: true });
   openRouterAPI.getFreeModelSettings.mockResolvedValue({
-    looping_enabled: true,
-    auto_selector_enabled: true,
+    looping_enabled: false,
+    auto_selector_enabled: false,
   });
   openRouterAPI.getModels.mockResolvedValue({
     models: [
@@ -103,7 +103,7 @@ beforeEach(() => {
     lean4_lsp_enabled: false,
     proof_max_parallel_candidates: 6,
     smt_enabled: false,
-    smt_timeout: 30,
+    smt_timeout: 300,
   });
   autonomousAPI.getDefaultCritiquePrompt.mockResolvedValue({
     data: {

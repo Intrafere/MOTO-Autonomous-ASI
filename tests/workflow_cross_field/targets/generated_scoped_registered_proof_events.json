@@ -1,0 +1,23 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "websocket_api_contracts",
+    "proof_scope_isolation"
+  ],
+  "invariants": [
+    "events.frontend_events_include_scope_phase",
+    "events.proof_verified_after_registration",
+    "proof_scope.autonomous_events_not_manual"
+  ],
+  "max_steps": 10,
+  "must_exercise": [
+    "scoped_event",
+    "registered_proof_event"
+  ],
+  "result_ids": [
+    "generated_scoped_registered_proof_events_seed_7",
+    "generated_scoped_registered_proof_events_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_scoped_registered_proof_events"
+}

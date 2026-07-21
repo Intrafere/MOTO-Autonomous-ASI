@@ -15,14 +15,15 @@ from backend.shared.lean4_client import get_lean4_client
 from backend.shared.model_error_utils import (
     format_transient_provider_error,
     is_non_retryable_model_error,
+    is_provider_context_length_error,
     is_retryable_model_output_error,
     is_transient_model_call_error,
 )
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.shared.proof_search.tool_adapter import execute_search_lean_proofs
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
-from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config, system_config
 from backend.autonomous.prompts.proof_prompts import (
@@ -32,16 +33,6 @@ from backend.autonomous.prompts.proof_prompts import (
 
 logger = logging.getLogger(__name__)
 
-
-def _assistant_workflow_mode_for_role(role_id: str) -> str:
-    normalized = (role_id or "").lower()
-    if "manual" in normalized or "compiler_aggregator" in normalized:
-        return "manual_proof_check"
-    if normalized.startswith("compiler") or normalized.startswith("comp_"):
-        return "compiler"
-    if normalized.startswith("leanoj"):
-        return "leanoj"
-    return "autonomous"
 
 AttemptCallback = Callable[[ProofAttemptFeedback], Awaitable[None]]
 AttemptStartCallback = Callable[[int, str], Awaitable[None]]
@@ -68,15 +59,92 @@ _JSON_PARSE_ERROR_MARKERS = (
     "upstream provider timeout",
 )
 _MALFORMED_MODEL_OUTPUT_REASON = "Model returned malformed output (not valid JSON); retrying with clean context."
-_INCOMPLETE_MODEL_OUTPUT_ERROR = (
-    "MODEL OUTPUT INCOMPLETE: provider stopped before returning usable proof output "
-    "(max_output_tokens). Preserve the proof checkpoint and retry with adjusted output budget or prompt size."
+_INCOMPLETE_MODEL_OUTPUT_REASON = (
+    "Model/provider output reached its maximum output length and was truncated before returning usable Lean proof code."
 )
 _LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
 _MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX = "MANDATORY FULL SOURCE CONTEXT OVERFLOW"
 _PROOF_SEARCH_CONTEXT_OMITTED = (
     "[Proof-search context omitted because it was unavailable or did not fit the configured context budget.]"
 )
+_TRUNCATED_FINISH_REASONS = {
+    "incomplete",
+    "length",
+    "max_tokens",
+    "max_output_tokens",
+    "token_limit",
+    "output_limit",
+}
+_TRUNCATED_RESPONSE_STATUSES = {
+    "incomplete",
+    "length",
+    "max_tokens",
+    "max_output_tokens",
+}
+
+
+class ProofFormalizationContextOverflowError(ValueError):
+    """Compiler-facing overflow that retains the failed proof route."""
+
+    def __init__(self, feedback: ProofAttemptFeedback) -> None:
+        super().__init__(feedback.error_output)
+        self.feedback = feedback
+
+
+def _truncated_model_output_feedback(
+    theorem_candidate: ProofCandidate,
+    *,
+    attempt_number: int,
+    strategy: str,
+) -> ProofAttemptFeedback:
+    return ProofAttemptFeedback(
+        attempt=attempt_number,
+        theorem_id=theorem_candidate.theorem_id,
+        reasoning=_INCOMPLETE_MODEL_OUTPUT_REASON,
+        lean_code="",
+        error_output=(
+            "MODEL OUTPUT TRUNCATED: the selected model/provider reached its maximum output length "
+            "before returning usable Lean proof code. This attempt is counted as failed; "
+            "research will continue with the next proof attempt or candidate."
+        ),
+        goal_states="",
+        strategy=strategy,
+        success=False,
+    )
+
+
+def _latest_assistant_pack_for_lean_attempts() -> tuple[str, str, list[dict[str, Any]]]:
+    """Reuse the latest Assistant proof context without refreshing during Lean attempts."""
+    assistant_pack = assistant_proof_search_coordinator.get_latest_reusable_pack()
+    if not assistant_pack or not assistant_pack.results:
+        return "", "", []
+    return (
+        assistant_pack.target_hash,
+        assistant_pack.to_prompt_context(),
+        [support.model_dump(mode="json") for support in assistant_pack.results],
+    )
+
+
+def _response_indicates_output_truncation(response: dict[str, Any]) -> bool:
+    if not isinstance(response, dict):
+        return False
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        finish_reason = str(first_choice.get("finish_reason") or "").strip().lower()
+        if finish_reason in _TRUNCATED_FINISH_REASONS:
+            return True
+    status = str(response.get("status") or "").strip().lower()
+    if status in _TRUNCATED_RESPONSE_STATUSES:
+        return True
+    incomplete_details = response.get("incomplete_details")
+    if isinstance(incomplete_details, dict):
+        reason = str(incomplete_details.get("reason") or "").strip().lower()
+        if reason in _TRUNCATED_FINISH_REASONS:
+            return True
+    return False
+
+
 def _is_stop_requested(should_stop: ShouldStopFn) -> bool:
     if should_stop is None:
         return False
@@ -135,6 +203,45 @@ def _is_context_overflow_feedback(feedback: ProofAttemptFeedback) -> bool:
     return (
         not feedback.success
         and error_output.startswith(_MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX)
+    )
+
+
+def _is_provider_context_overflow(exc: Exception) -> bool:
+    return isinstance(exc, ProviderContextLengthError) or is_provider_context_length_error(exc)
+
+
+def _provider_context_overflow_feedback(
+    theorem_candidate: ProofCandidate,
+    *,
+    attempt_number: int,
+    strategy: str,
+    context_window: int,
+    max_output_tokens: int,
+    exc: Exception,
+) -> ProofAttemptFeedback:
+    typed_error = isinstance(exc, ProviderContextLengthError)
+    route = getattr(exc, "route", None) if typed_error else None
+    safe_detail = str(getattr(exc, "safe_message", "") or "").strip() if typed_error else str(exc)
+    return ProofAttemptFeedback(
+        attempt=attempt_number,
+        theorem_id=theorem_candidate.theorem_id,
+        reasoning="Provider rejected the proof prompt because it exceeded the model context window.",
+        lean_code="",
+        error_output=(
+            f"{_MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX}: Provider rejected the proof "
+            "formalization prompt before generation because the input exceeded the selected "
+            f"model context window. Configured total context={context_window}, "
+            f"max output reserve={max_output_tokens}. Lean 4 was not run."
+            + (f" Provider detail: {safe_detail}" if safe_detail else "")
+        ),
+        goal_states="",
+        strategy=strategy,
+        success=False,
+        configured_model=getattr(route, "configured_model", None),
+        configured_provider=getattr(route, "configured_provider", None),
+        effective_model=getattr(route, "model", None),
+        effective_provider=getattr(route, "provider", None),
+        overflow_origin="provider",
     )
 
 
@@ -357,6 +464,9 @@ class ProofFormalizationAgent:
                 ),
                 strategy="full_script",
                 success=False,
+                overflow_origin="local_preflight",
+                prompt_tokens=prompt_tokens,
+                max_input_tokens=max_input_tokens,
             )
             return "", source_excerpt, feedback
 
@@ -377,6 +487,21 @@ class ProofFormalizationAgent:
                     assistant_memory_target_hash,
                     role_id=self.role_id,
                     task_id=task_id,
+                )
+            if _response_indicates_output_truncation(response):
+                logger.warning(
+                    "ProofFormalizationAgent full-script attempt %s for %s returned a length-truncated provider response.",
+                    attempt_number,
+                    theorem_candidate.theorem_id,
+                )
+                return (
+                    "",
+                    source_excerpt,
+                    _truncated_model_output_feedback(
+                        theorem_candidate,
+                        attempt_number=attempt_number,
+                        strategy="full_script",
+                    ),
                 )
             if not response or not response.get("choices"):
                 raise ValueError("Empty response from formalization model.")
@@ -418,10 +543,40 @@ class ProofFormalizationAgent:
         except RetryableProviderError:
             raise
         except Exception as exc:
+            if _is_provider_context_overflow(exc):
+                feedback = _provider_context_overflow_feedback(
+                    theorem_candidate,
+                    attempt_number=attempt_number,
+                    strategy="full_script",
+                    context_window=self.context_window,
+                    max_output_tokens=self.max_output_tokens,
+                    exc=exc,
+                )
+                logger.warning(
+                    "ProofFormalizationAgent full-script attempt %s context overflow for %s: %s",
+                    attempt_number,
+                    theorem_candidate.theorem_id,
+                    exc,
+                )
+                return "", source_excerpt, feedback
             if is_non_retryable_model_error(exc):
                 raise
             if is_retryable_model_output_error(exc):
-                raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
+                logger.warning(
+                    "ProofFormalizationAgent full-script attempt %s for %s hit provider output truncation: %s",
+                    attempt_number,
+                    theorem_candidate.theorem_id,
+                    exc,
+                )
+                return (
+                    "",
+                    source_excerpt,
+                    _truncated_model_output_feedback(
+                        theorem_candidate,
+                        attempt_number=attempt_number,
+                        strategy="full_script",
+                    ),
+                )
             if is_transient_model_call_error(exc):
                 raise RetryableProviderError(
                     provider="unknown",
@@ -476,29 +631,8 @@ class ProofFormalizationAgent:
             theorem_candidate.statement,
             source_content,
         )
-        assistant_snapshot = AssistantTargetSnapshot(
-            workflow_mode=_assistant_workflow_mode_for_role(self.role_id),
-            target_kind="proof_candidate",
-            user_prompt=user_research_prompt,
-            target_statement=theorem_candidate.statement,
-            formal_sketch=theorem_candidate.formal_sketch,
-            proof_attempt_feedback=_format_attempt_feedback_for_assistant(attempts),
-            source_title=source_title,
-            source_type=source_type,
-            source_id=theorem_candidate.origin_source_id,
-            dependency_names=[
-                str(getattr(lemma, "full_name", "") or getattr(lemma, "requested_name", "") or "").strip()
-                for lemma in (theorem_candidate.relevant_lemmas or [])
-                if str(getattr(lemma, "full_name", "") or getattr(lemma, "requested_name", "") or "").strip()
-            ],
-        )
-        assistant_target_hash = assistant_proof_search_coordinator.submit_target(assistant_snapshot)
-        assistant_pack = assistant_proof_search_coordinator.get_latest_pack(assistant_target_hash)
-        retrieved_proofs_context = assistant_pack.to_prompt_context() if assistant_pack else ""
-        retrieved_proof_records: list[dict[str, Any]] = (
-            [support.model_dump(mode="json") for support in assistant_pack.results]
-            if assistant_pack
-            else []
+        assistant_target_hash, retrieved_proofs_context, retrieved_proof_records = (
+            _latest_assistant_pack_for_lean_attempts()
         )
         theorem_name = ""
 
@@ -520,17 +654,6 @@ class ProofFormalizationAgent:
                     theorem_candidate.theorem_id,
                 )
                 break
-            if attempts:
-                assistant_snapshot = assistant_snapshot.model_copy(
-                    update={"proof_attempt_feedback": _format_attempt_feedback_for_assistant(attempts)}
-                )
-                assistant_target_hash = assistant_proof_search_coordinator.submit_target(assistant_snapshot)
-                assistant_pack = assistant_proof_search_coordinator.get_latest_pack(assistant_target_hash)
-                if assistant_pack:
-                    retrieved_proofs_context = assistant_pack.to_prompt_context()
-                    retrieved_proof_records = [
-                        support.model_dump(mode="json") for support in assistant_pack.results
-                    ]
             attempt_number = next_attempt_number + attempt_offset
             if attempt_start_callback and malformed_output_retries == 0:
                 await attempt_start_callback(attempt_number, "full_script")
@@ -546,7 +669,7 @@ class ProofFormalizationAgent:
                 smt_hint=smt_hint,
                 source_title=source_title,
                 retrieved_proofs_context=retrieved_proofs_context,
-                assistant_memory_target_hash=assistant_target_hash if assistant_pack and assistant_pack.results else "",
+                assistant_memory_target_hash=assistant_target_hash,
             )
 
             terminal_malformed_output = False
@@ -611,29 +734,8 @@ class ProofFormalizationAgent:
             theorem_candidate.statement,
             source_content,
         )
-        assistant_snapshot = AssistantTargetSnapshot(
-            workflow_mode=_assistant_workflow_mode_for_role(self.role_id),
-            target_kind="proof_candidate",
-            user_prompt=user_research_prompt,
-            target_statement=theorem_candidate.statement,
-            formal_sketch=theorem_candidate.formal_sketch,
-            proof_attempt_feedback=_format_attempt_feedback_for_assistant(attempts),
-            source_title=source_title,
-            source_type=source_type,
-            source_id=theorem_candidate.origin_source_id,
-            dependency_names=[
-                str(getattr(lemma, "full_name", "") or getattr(lemma, "requested_name", "") or "").strip()
-                for lemma in (theorem_candidate.relevant_lemmas or [])
-                if str(getattr(lemma, "full_name", "") or getattr(lemma, "requested_name", "") or "").strip()
-            ],
-        )
-        assistant_target_hash = assistant_proof_search_coordinator.submit_target(assistant_snapshot)
-        assistant_pack = assistant_proof_search_coordinator.get_latest_pack(assistant_target_hash)
-        retrieved_proofs_context = assistant_pack.to_prompt_context() if assistant_pack else ""
-        retrieved_proof_records: list[dict[str, Any]] = (
-            [support.model_dump(mode="json") for support in assistant_pack.results]
-            if assistant_pack
-            else []
+        assistant_target_hash, retrieved_proofs_context, retrieved_proof_records = (
+            _latest_assistant_pack_for_lean_attempts()
         )
         theorem_name = ""
 
@@ -658,18 +760,6 @@ class ProofFormalizationAgent:
             attempt_number = next_attempt_number + attempt_offset
             if attempt_start_callback and malformed_output_retries == 0:
                 await attempt_start_callback(attempt_number, "tactic_script")
-            if attempts:
-                assistant_snapshot = assistant_snapshot.model_copy(
-                    update={"proof_attempt_feedback": _format_attempt_feedback_for_assistant(attempts)}
-                )
-                assistant_target_hash = assistant_proof_search_coordinator.submit_target(assistant_snapshot)
-                assistant_pack = assistant_proof_search_coordinator.get_latest_pack(assistant_target_hash)
-                if assistant_pack:
-                    retrieved_proofs_context = assistant_pack.to_prompt_context()
-                    retrieved_proof_records = [
-                        support.model_dump(mode="json") for support in assistant_pack.results
-                    ]
-
             prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
                 build_proof_tactic_script_prompt,
                 min_excerpt_length=1500,
@@ -704,6 +794,9 @@ class ProofFormalizationAgent:
                     ),
                     strategy="tactic_script",
                     success=False,
+                    overflow_origin="local_preflight",
+                    prompt_tokens=prompt_tokens,
+                    max_input_tokens=max_input_tokens,
                 )
                 attempts.append(feedback)
                 if attempt_callback:
@@ -722,12 +815,28 @@ class ProofFormalizationAgent:
                     max_tokens=self.max_output_tokens,
                     temperature=0.0,
                 )
-                if assistant_target_hash and assistant_pack and assistant_pack.results:
+                if assistant_target_hash:
                     assistant_proof_search_coordinator.mark_pack_consumed_by_solver(
                         assistant_target_hash,
                         role_id=self.role_id,
                         task_id=task_id,
                     )
+                if _response_indicates_output_truncation(response):
+                    logger.warning(
+                        "ProofFormalizationAgent tactic-script attempt %s for %s returned a length-truncated provider response.",
+                        attempt_number,
+                        theorem_candidate.theorem_id,
+                    )
+                    feedback = _truncated_model_output_feedback(
+                        theorem_candidate,
+                        attempt_number=attempt_number,
+                        strategy="tactic_script",
+                    )
+                    attempts.append(feedback)
+                    if attempt_callback:
+                        await attempt_callback(feedback)
+                    attempt_offset += 1
+                    continue
                 if not response or not response.get("choices"):
                     raise ValueError("Empty response from tactic formalization model.")
 
@@ -766,7 +875,7 @@ class ProofFormalizationAgent:
                         smt_hint=smt_hint,
                         source_title=source_title,
                         retrieved_proofs_context=retrieved_proofs_context,
-                        assistant_memory_target_hash=assistant_target_hash if assistant_pack and assistant_pack.results else "",
+                        assistant_memory_target_hash=assistant_target_hash,
                     )
                     if current_theorem_name:
                         theorem_name = current_theorem_name
@@ -843,10 +952,44 @@ class ProofFormalizationAgent:
             except RetryableProviderError:
                 raise
             except Exception as exc:
+                if _is_provider_context_overflow(exc):
+                    feedback = _provider_context_overflow_feedback(
+                        theorem_candidate,
+                        attempt_number=attempt_number,
+                        strategy="tactic_script",
+                        context_window=self.context_window,
+                        max_output_tokens=self.max_output_tokens,
+                        exc=exc,
+                    )
+                    logger.warning(
+                        "ProofFormalizationAgent tactic-script attempt %s context overflow for %s: %s",
+                        attempt_number,
+                        theorem_candidate.theorem_id,
+                        exc,
+                    )
+                    attempts.append(feedback)
+                    if attempt_callback:
+                        await attempt_callback(feedback)
+                    break
                 if is_non_retryable_model_error(exc):
                     raise
                 if is_retryable_model_output_error(exc):
-                    raise RuntimeError(_INCOMPLETE_MODEL_OUTPUT_ERROR) from exc
+                    logger.warning(
+                        "ProofFormalizationAgent tactic-script attempt %s for %s hit provider output truncation: %s",
+                        attempt_number,
+                        theorem_candidate.theorem_id,
+                        exc,
+                    )
+                    feedback = _truncated_model_output_feedback(
+                        theorem_candidate,
+                        attempt_number=attempt_number,
+                        strategy="tactic_script",
+                    )
+                    attempts.append(feedback)
+                    if attempt_callback:
+                        await attempt_callback(feedback)
+                    attempt_offset += 1
+                    continue
                 if is_transient_model_call_error(exc):
                     raise RetryableProviderError(
                         provider="unknown",

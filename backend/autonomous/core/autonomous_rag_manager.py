@@ -273,7 +273,7 @@ class AutonomousRAGManager:
         
         # Retrieve relevant chunks via RAG
         if not query:
-            query = "reference paper content mathematical research"
+            query = "reference paper content relevant to the exact objective, solution mechanism, evidence, constraints, and validation"
         
         # Get outline for context enhancement (use first paper's outline)
         outline = None
@@ -424,7 +424,7 @@ class AutonomousRAGManager:
         }
         
         # RAG query for retrievals
-        rag_query = query or f"mathematical research paper compilation"
+        rag_query = query or "research paper or solution report compilation relevant to the exact objective"
         rag_exclude_sources: List[str] = []
         
         # Priority 1: Brainstorm database (highest priority after outline)
