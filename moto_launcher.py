@@ -1978,7 +1978,6 @@ def start_services(
         frontend_port=runtime.frontend_port,
         data_root=runtime.data_root,
         log_root=runtime.log_root,
-        keyring_namespace=runtime.secret_namespace,
         storage_prefix=runtime.storage_prefix,
     )
 
@@ -2001,7 +2000,6 @@ def start_services(
                 instance_id=runtime.instance_id,
                 data_root=runtime.data_root,
                 log_root=runtime.log_root,
-                keyring_namespace=runtime.secret_namespace,
                 storage_prefix=runtime.storage_prefix,
             )
         except OSError as exc:

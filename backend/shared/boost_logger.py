@@ -8,12 +8,13 @@ import hashlib
 import json
 import logging
 import os
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 from backend.shared.config import system_config
+from backend.shared.api_log_persistence import atomic_write_log_lines, ensure_private_log_file
 from backend.shared.log_redaction import redact_log_text
 
 logger = logging.getLogger(__name__)
@@ -52,17 +53,24 @@ class BoostLogger:
             return
         
         self._initialized = True
+        self._prepared_root_identity = None
+        self._volatile_payloads: OrderedDict[str, Dict[str, str]] = OrderedDict()
+        self._prepare_active_root()
+        logger.info("BoostLogger initialized")
+
+    def _prepare_active_root(self) -> None:
+        identity = system_config.runtime_root_identity()
+        if self._prepared_root_identity == identity:
+            return
+        self._volatile_payloads.clear()
         self._ensure_log_file()
         self._scrub_persisted_full_payloads()
-        logger.info("BoostLogger initialized")
+        self._prepared_root_identity = identity
     
     def _ensure_log_file(self) -> None:
         """Ensure the log file and directory exist."""
         log_path = self._get_log_path()
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        if not log_path.exists():
-            log_path.write_text("")
+        ensure_private_log_file(log_path)
 
     def _get_log_path(self) -> Path:
         """Return the instance-scoped boost log path."""
@@ -117,8 +125,7 @@ class BoostLogger:
                 scrubbed_lines.append(json.dumps(entry) + "\n")
 
             if changed:
-                with open(log_path, "w", encoding="utf-8") as f:
-                    f.writelines(scrubbed_lines)
+                atomic_write_log_lines(log_path, scrubbed_lines)
                 logger.info("Scrubbed legacy full payloads from boost API log")
         except Exception as e:
             logger.warning(f"Failed to scrub legacy boost API log payloads: {e}")
@@ -153,10 +160,19 @@ class BoostLogger:
         """
         async with self._lock:
             try:
+                self._prepare_active_root()
                 response_meta = _payload_metadata(response_content, 2000)
-                store_full_payloads = bool(system_config.api_log_store_full_payloads)
+                store_full_payloads = bool(
+                    system_config.api_log_store_full_payloads
+                    and not system_config.generic_mode
+                )
+                timestamp = datetime.now().isoformat()
+                entry_id = hashlib.sha256(
+                    f"{timestamp}\0{task_id}\0{role_id}".encode("utf-8", errors="replace")
+                ).hexdigest()
                 log_entry = {
-                    "timestamp": datetime.now().isoformat(),
+                    "entry_id": entry_id,
+                    "timestamp": timestamp,
                     "task_id": task_id,
                     "role_id": role_id,
                     "model": model,
@@ -165,17 +181,23 @@ class BoostLogger:
                     "response_preview": response_meta["preview"],
                     "response_size": response_meta["size"],
                     "response_sha256": response_meta["sha256"],
-                    "response_redacted": not store_full_payloads,
-                    "has_full_response": store_full_payloads and bool(response_content),
+                    "response_redacted": True,
+                    "has_full_response": False,
                     "tokens_used": tokens_used,
                     "duration_ms": duration_ms,
                     "success": success,
                     "error": redact_log_text(error, 1000)
                 }
                 if store_full_payloads:
-                    log_entry["response_full"] = response_content
+                    self._volatile_payloads[entry_id] = {
+                        "response_full": response_content,
+                        "workflow": self._entry_workflow(log_entry),
+                    }
+                    while len(self._volatile_payloads) > self.MAX_LOG_ENTRIES:
+                        self._volatile_payloads.popitem(last=False)
                 
                 # Append to log file
+                ensure_private_log_file(self._get_log_path())
                 with open(self._get_log_path(), "a", encoding="utf-8") as f:
                     f.write(json.dumps(log_entry) + "\n")
                 
@@ -196,8 +218,7 @@ class BoostLogger:
             if len(lines) > self.MAX_LOG_ENTRIES:
                 # Keep only the most recent entries
                 lines = lines[-self.MAX_LOG_ENTRIES:]
-                with open(self._get_log_path(), "w", encoding="utf-8") as f:
-                    f.writelines(lines)
+                atomic_write_log_lines(self._get_log_path(), lines)
                 logger.debug(f"Trimmed boost log to {self.MAX_LOG_ENTRIES} entries")
                 
         except Exception as e:
@@ -215,6 +236,7 @@ class BoostLogger:
         """
         async with self._lock:
             try:
+                self._prepare_active_root()
                 log_path = self._get_log_path()
                 if not os.path.exists(log_path):
                     return []
@@ -228,15 +250,22 @@ class BoostLogger:
                     if line:
                         try:
                             log_entry = json.loads(line)
-                            if not include_full or not system_config.api_log_store_full_payloads:
-                                prompt_full = str(log_entry.pop("prompt_full", "") or "")
-                                response_full = str(log_entry.pop("response_full", "") or "")
-                                log_entry["prompt_size"] = len(prompt_full)
-                                log_entry["response_size"] = int(log_entry.get("response_size") or len(response_full))
-                                log_entry["has_full_prompt"] = False
+                            prompt_full = str(log_entry.pop("prompt_full", "") or "")
+                            response_full = str(log_entry.pop("response_full", "") or "")
+                            log_entry["prompt_size"] = int(log_entry.get("prompt_size") or len(prompt_full))
+                            log_entry["response_size"] = int(log_entry.get("response_size") or len(response_full))
+                            cached = self._volatile_payloads.get(str(log_entry.get("entry_id") or ""))
+                            if (
+                                include_full
+                                and cached
+                                and system_config.api_log_store_full_payloads
+                                and not system_config.generic_mode
+                            ):
+                                log_entry["response_full"] = cached["response_full"]
+                                log_entry["has_full_response"] = bool(cached["response_full"])
+                            else:
                                 log_entry["has_full_response"] = False
-                                if response_full and not log_entry.get("response_sha256"):
-                                    log_entry["response_sha256"] = hashlib.sha256(response_full.encode("utf-8", errors="replace")).hexdigest()
+                            log_entry["has_full_prompt"] = False
                             logs.append(log_entry)
                         except json.JSONDecodeError:
                             continue
@@ -280,6 +309,7 @@ class BoostLogger:
         """Clear boost API logs, optionally scoped to one workflow."""
         async with self._lock:
             try:
+                self._prepare_active_root()
                 if workflow:
                     log_path = self._get_log_path()
                     if not os.path.exists(log_path):
@@ -301,13 +331,17 @@ class BoostLogger:
                         if self._entry_workflow(entry) != workflow:
                             retained_lines.append(line)
 
-                    with open(log_path, "w", encoding="utf-8") as f:
-                        f.writelines(retained_lines)
+                    self._volatile_payloads = OrderedDict(
+                        (entry_id, payload)
+                        for entry_id, payload in self._volatile_payloads.items()
+                        if payload.get("workflow") != workflow
+                    )
+                    atomic_write_log_lines(log_path, retained_lines)
                     logger.info("Boost logs cleared for workflow %s", workflow)
                     return
 
-                with open(self._get_log_path(), "w", encoding="utf-8") as f:
-                    f.write("")
+                self._volatile_payloads.clear()
+                atomic_write_log_lines(self._get_log_path(), [])
                 logger.info("Boost logs cleared")
             except Exception as e:
                 logger.error(f"Failed to clear boost logs: {e}")

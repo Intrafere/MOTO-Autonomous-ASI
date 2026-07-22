@@ -154,6 +154,7 @@ Sandbox is API-only. The MOTO React frontend is NOT served from the hosted sandb
 - Desktop default: `secret_store.py` uses OS keyring, restored on startup
 - Hosted generic mode: provider keys are env-injected at sandbox launch and/or set via proxied MOTO API routes. `secret_store` persistence is bypassed; keys live in sandbox memory only. Re-injection required after sandbox recreation.
 - Generic-mode OpenRouter and Wolfram routes update runtime memory only; they do not write to or clear the desktop keyring.
+- Generic mode always persists API-call observability as bounded secret-redacted previews/metadata only; the desktop volatile full-payload debug cache remains disabled even if its environment flag is set.
 - Control plane NEVER stores, logs, or persists user provider keys in its own database
 
 ## Data Persistence

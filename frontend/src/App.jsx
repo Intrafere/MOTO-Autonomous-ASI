@@ -86,6 +86,7 @@ import {
   hasRecentAssistantProofPackDuplicate,
   shouldAddRejectionFeedbackNotice,
 } from './utils/activityStyles';
+import { sanitizePersistedActivityValue } from './utils/activityPersistence';
 import {
   canStorePromptDraftInLocalStorage,
   readPromptDraftSync,
@@ -108,9 +109,10 @@ const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'
 const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'assistant', 'writer', 'high_param'];
 const HIGH_SCORE_CRITIQUE_THRESHOLD = 6.25;
 const SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY = 'seenHighScoreCritiqueNotifications';
-const DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS_STORAGE_KEY = 'dismissedOAuthProviderNotifications';
+// This legacy storage key contains SHA-256 notification fingerprints only.
+const DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY = 'dismissedOAuthProviderNotifications';
 const MAX_SEEN_HIGH_SCORE_CRITIQUES = 500;
-const MAX_DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS = 500;
+const MAX_DISMISSED_PROVIDER_NOTIFICATION_IDS = 500;
 const MAX_LIVE_ACTIVITY_EVENTS = 5000;
 const AUTONOMOUS_LIVE_ACTIVITY_STORAGE_KEY = 'autonomous_live_activity_events';
 const LEANOJ_LIVE_ACTIVITY_STORAGE_KEY = 'leanoj_live_activity_events';
@@ -200,31 +202,42 @@ function persistSeenHighScoreCritiques(seenSet) {
   }
 }
 
-function readDismissedOAuthProviderNotifications() {
+async function fingerprintProviderNotificationId(value) {
+  const input = new TextEncoder().encode(String(value || ''));
+  const digest = await window.crypto.subtle.digest('SHA-256', input);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function readDismissedProviderNotificationIds() {
   if (typeof window === 'undefined') {
     return new Set();
   }
 
   try {
-    const raw = window.localStorage.getItem(DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY);
     const values = raw ? JSON.parse(raw) : [];
-    return new Set(Array.isArray(values) ? values.filter(value => typeof value === 'string') : []);
+    return new Set(Array.isArray(values) ? values.filter(value => /^[0-9a-f]{64}$/i.test(value)) : []);
   } catch (error) {
-    console.warn('Could not read dismissed OAuth provider notifications:', error);
+    console.warn('Could not read dismissed provider notification IDs:', error);
     return new Set();
   }
 }
 
-function persistDismissedOAuthProviderNotifications(seenSet) {
+async function persistDismissedProviderNotificationId(notificationId) {
   if (typeof window === 'undefined') {
     return;
   }
 
   try {
-    const values = Array.from(seenSet).slice(-MAX_DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS);
-    window.localStorage.setItem(DISMISSED_OAUTH_PROVIDER_NOTIFICATIONS_STORAGE_KEY, JSON.stringify(values));
+    const fingerprint = await fingerprintProviderNotificationId(notificationId);
+    const dismissedFingerprints = await readDismissedProviderNotificationIds();
+    dismissedFingerprints.add(fingerprint);
+    window.localStorage.setItem(
+      DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY,
+      JSON.stringify(Array.from(dismissedFingerprints).slice(-MAX_DISMISSED_PROVIDER_NOTIFICATION_IDS)),
+    );
   } catch (error) {
-    console.warn('Could not save dismissed OAuth provider notifications:', error);
+    console.warn('Could not save dismissed provider notification IDs:', error);
   }
 }
 
@@ -260,16 +273,16 @@ function buildOAuthProviderNotification(data = {}, fallbackProvider = 'oauth') {
   };
 }
 
-function addOAuthProviderNotification(setNotifications, data = {}, fallbackProvider = 'oauth') {
+async function addOAuthProviderNotification(setNotifications, data = {}, fallbackProvider = 'oauth') {
   const notification = buildOAuthProviderNotification(data, fallbackProvider);
-  const dismissedNotifications = readDismissedOAuthProviderNotifications();
+  const dismissedNotifications = await readDismissedProviderNotificationIds();
+  const notificationFingerprint = await fingerprintProviderNotificationId(notification.notification_key);
   if (
-    dismissedNotifications.has(notification.notification_key)
-    || (data.id && dismissedNotifications.has(String(data.id)))
+    dismissedNotifications.has(notificationFingerprint)
   ) {
     return;
   }
-  setNotifications(prev => {
+      setNotifications(prev => {
     if (prev.some(item => item.notification_key === notification.notification_key)) {
       return prev;
     }
@@ -534,7 +547,7 @@ export function readPersistedLiveActivity(storageKey) {
     if (!savedEvents) {
       return [];
     }
-    const parsed = JSON.parse(savedEvents);
+    const parsed = sanitizePersistedActivityValue(JSON.parse(savedEvents));
     return Array.isArray(parsed)
       ? parsed
         .filter((event) => event && typeof event === 'object')
@@ -595,15 +608,19 @@ function compactLiveActivityEvent(event) {
   if (!event || typeof event !== 'object') {
     return null;
   }
+  const sanitizedEvent = sanitizePersistedActivityValue(event);
+  const persistedMessage = typeof sanitizedEvent.event === 'string'
+    ? sanitizedEvent.event
+    : '';
   return {
-    event: event.event || event.type || '',
-    type: event.type,
-    timestamp: event.timestamp || event.fullTimestamp || '',
-    fullTimestamp: event.fullTimestamp,
-    message: typeof event.message === 'string'
-      ? compactPersistedActivityValue(event.message)
-      : '',
-    data: compactPersistedActivityValue(event.data || {}),
+    event: sanitizedEvent.event || sanitizedEvent.type || '',
+    type: sanitizedEvent.type,
+    timestamp: sanitizedEvent.timestamp || sanitizedEvent.fullTimestamp || '',
+    fullTimestamp: sanitizedEvent.fullTimestamp,
+    // Persist only the event discriminator here. Raw/generated provider
+    // messages are rendered live and are intentionally not durable browser data.
+    message: persistedMessage,
+    data: compactPersistedActivityValue(sanitizedEvent.data || {}),
   };
 }
 
@@ -3567,9 +3584,7 @@ function App() {
     setCodexOAuthNotifications(prev => {
       const notification = prev.find(n => n.id === notificationId);
       if (notification?.notification_key) {
-        const dismissed = readDismissedOAuthProviderNotifications();
-        dismissed.add(notification.notification_key);
-        persistDismissedOAuthProviderNotifications(dismissed);
+        void persistDismissedProviderNotificationId(notification.notification_key);
       }
       return prev.filter(n => n.id !== notificationId);
     });

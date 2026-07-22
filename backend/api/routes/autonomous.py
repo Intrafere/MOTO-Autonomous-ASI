@@ -3104,8 +3104,14 @@ async def get_autonomous_api_log_detail(log_key: str, workflow: Optional[str] = 
                     "log": {
                         **log,
                         "log_key": log_key,
-                        "prompt_size": len(str(log.get("prompt_full") or "")),
-                        "response_size": len(str(log.get("response_full") or "")),
+                        "prompt_size": int(
+                            log.get("prompt_size")
+                            or len(str(log.get("prompt_full") or ""))
+                        ),
+                        "response_size": int(
+                            log.get("response_size")
+                            or len(str(log.get("response_full") or ""))
+                        ),
                     },
                 }
 

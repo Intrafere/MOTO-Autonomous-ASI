@@ -326,6 +326,33 @@ class UpdateAvailabilityTests(TestCase):
 
 
 class LauncherStateTests(TestCase):
+    def test_nonsecret_json_metadata_rejects_credential_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "metadata.json"
+
+            for payload in (
+                {"api_key": "example"},
+                {"nested": {"refresh_token": "example"}},
+                {"instances": [{"authorization": "Bearer example"}]},
+            ):
+                with self.subTest(payload=payload):
+                    with self.assertRaises(ValueError):
+                        moto_updater._write_nonsecret_json_metadata(output_path, payload)
+
+            self.assertFalse(output_path.exists())
+
+    def test_nonsecret_json_metadata_allows_keyring_namespace_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "metadata.json"
+            payload = {
+                "instance_id": "instance_one",
+                "keyring_namespace": "instance_one",
+            }
+
+            moto_updater._write_nonsecret_json_metadata(output_path, payload)
+
+            self.assertEqual(json.loads(output_path.read_text(encoding="utf-8")), payload)
+
     def test_cleanup_launcher_state_removes_dead_instances(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / ".moto_launcher_state.json"
@@ -380,6 +407,44 @@ class LauncherStateTests(TestCase):
                 ["current", "other"],
             )
 
+    def test_launcher_state_writer_persists_only_public_runtime_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / ".moto_launcher_state.json"
+            payload = {
+                "instances": [{
+                    "instance_id": "instance_one",
+                    "backend_window_pid": 100,
+                    "frontend_window_pid": 101,
+                    "backend_port": 8000,
+                    "frontend_port": 5173,
+                    "data_root": "data",
+                    "log_root": "logs",
+                    "storage_prefix": "instance_one",
+                    "unknown_field": "discard-me",
+                    "keyring_namespace": "discard-selector",
+                }],
+                "unknown_top_level": "discard-me",
+            }
+
+            with mock.patch.object(moto_updater, "LAUNCHER_STATE_PATH", state_path):
+                moto_updater._save_launcher_state(payload)
+                saved = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(set(saved), {"instances"})
+        self.assertEqual(
+            set(saved["instances"][0]),
+            {
+                "instance_id",
+                "backend_window_pid",
+                "frontend_window_pid",
+                "backend_port",
+                "frontend_port",
+                "data_root",
+                "log_root",
+                "storage_prefix",
+            },
+        )
+
     def test_last_instance_record_does_not_persist_keyring_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             record_path = Path(temp_dir) / ".moto_last_instance.json"
@@ -389,7 +454,6 @@ class LauncherStateTests(TestCase):
                     instance_id="instance_one",
                     data_root="data",
                     log_root="logs",
-                    keyring_namespace="instance_one",
                     storage_prefix="instance_one",
                 )
                 payload = json.loads(record_path.read_text(encoding="utf-8"))

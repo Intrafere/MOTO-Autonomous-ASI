@@ -107,6 +107,25 @@ describe('context overflow activity behavior', () => {
     expect(restored[1].message).toContain('Route: fallback-model via lm_studio');
   });
 
+  test('App sanitizes credentials in legacy persisted activity records', () => {
+    localStorage.setItem('activity', JSON.stringify([{
+      event: 'oauth_provider_failure',
+      message: 'Authorization: Bearer legacy-token',
+      data: {
+        provider: 'openai_codex_oauth',
+        access_token: 'legacy-access-token',
+        error_summary: 'callback https://example.test/?code=legacy-code&state=keep',
+      },
+    }]));
+
+    const [restored] = readPersistedLiveActivity('activity');
+    expect(restored.message).not.toContain('legacy-token');
+    expect(restored.data.access_token).toBe('[redacted]');
+    expect(restored.data.error_summary).not.toContain('legacy-code');
+    expect(restored.data.error_summary).toContain('state=keep');
+    expect(restored.data.provider).toBe('openai_codex_oauth');
+  });
+
   test('Aggregator persisted overflow display includes stored model and provider', () => {
     expect(formatAggregatorPersistedOverflowMessage({
       type: 'context_overflow_error',

@@ -13,8 +13,10 @@ from backend.api.routes import autonomous as autonomous_route
 from backend.autonomous.memory.autonomous_rejection_logs import AutonomousRejectionLogs
 from backend.autonomous.memory.brainstorm_memory import BrainstormMemory
 from backend.autonomous.memory.paper_library import PaperLibrary
+from backend.autonomous.memory.proof_database import ProofDatabase
 from backend.shared.config import system_config
-from backend.shared.models import PaperMetadata
+from backend.shared.models import PaperMetadata, ProofRecord
+from backend.shared.path_safety import resolve_filename_within_root
 
 
 class IngestionPathHardeningTests(TestCase):
@@ -174,6 +176,102 @@ class PaperLibraryPathHardeningTests(TestCase):
                 self.assertTrue((base_dir / "pruned" / "pruned_paper_paper_1.txt").exists())
                 self.assertTrue((base_dir / "pruned" / "pruned_paper_paper_1_metadata.json").exists())
                 self.assertFalse((base_dir / "paper_paper_1.txt").exists())
+
+        asyncio.run(run_case())
+
+
+class ProofDatabasePathHardeningTests(TestCase):
+    def _database_for(self, base_dir: Path) -> ProofDatabase:
+        database = ProofDatabase()
+        database.set_base_dir(base_dir)
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return database
+
+    def test_proof_paths_reject_traversal_and_both_separator_styles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = self._database_for(Path(temp_dir) / "proofs")
+
+            for proof_id in ("../evil", r"..\evil", "a/b", r"a\b", ".", ".."):
+                with self.subTest(proof_id=proof_id):
+                    with self.assertRaises(ValueError):
+                        database._get_record_path(proof_id)
+                    with self.assertRaises(ValueError):
+                        database._get_lean_path(proof_id)
+
+    def test_filename_resolver_rejects_absolute_and_drive_like_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "proofs"
+            root.mkdir()
+            for filename in ("/tmp/evil", r"C:\temp\evil", "../evil", r"..\evil"):
+                with self.subTest(filename=filename):
+                    with self.assertRaises(ValueError):
+                        resolve_filename_within_root(root, filename)
+            self.assertEqual(
+                resolve_filename_within_root(root, "proof_001.json"),
+                (root / "proof_001.json").resolve(),
+            )
+
+    def test_proof_paths_remain_inside_active_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_dir = Path(temp_dir) / "proofs"
+            database = self._database_for(base_dir)
+
+            self.assertEqual(
+                database._get_record_path("proof_001"),
+                (base_dir / "proof_proof_001.json").resolve(),
+            )
+            self.assertEqual(
+                database._get_lean_path("proof_001"),
+                (base_dir / "proof_proof_001_lean.lean").resolve(),
+            )
+            self.assertEqual(
+                database._get_failed_candidates_path("topic_001"),
+                (base_dir / "failed" / "topic_001.json").resolve(),
+            )
+
+    def test_failed_candidate_path_rejects_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = self._database_for(Path(temp_dir) / "proofs")
+
+            for brainstorm_id in ("../evil", r"..\evil", "a/b", r"a\b", ".", ".."):
+                with self.subTest(brainstorm_id=brainstorm_id):
+                    with self.assertRaises(ValueError):
+                        database._get_failed_candidates_path(brainstorm_id)
+
+    def test_occurrence_write_rejects_malicious_id_without_creating_artifacts(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                base_dir = Path(temp_dir) / "proofs"
+                database = self._database_for(base_dir)
+                record = ProofRecord(
+                    proof_id="../outside",
+                    theorem_statement="True",
+                    source_type="paper",
+                    source_id="paper_1",
+                    lean_code="theorem safe : True := by trivial",
+                )
+                with self.assertRaises(ValueError):
+                    await database.add_proof_occurrence(record)
+                self.assertFalse((Path(temp_dir) / "proof_outside.json").exists())
+                self.assertEqual(list(base_dir.glob("proof_*")), [])
+
+        asyncio.run(run_case())
+
+    def test_occurrence_write_creates_both_valid_artifacts(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                base_dir = Path(temp_dir) / "proofs"
+                database = self._database_for(base_dir)
+                record = ProofRecord(
+                    proof_id="proof_custom",
+                    theorem_statement="True",
+                    source_type="paper",
+                    source_id="paper_1",
+                    lean_code="theorem safe : True := by trivial",
+                )
+                await database.add_proof_occurrence(record)
+                self.assertTrue((base_dir / "proof_proof_custom.json").exists())
+                self.assertTrue((base_dir / "proof_proof_custom_lean.lean").exists())
 
         asyncio.run(run_case())
 

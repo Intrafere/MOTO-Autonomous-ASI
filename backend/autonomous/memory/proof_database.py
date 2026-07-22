@@ -19,7 +19,7 @@ import aiofiles
 from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import FailedProofCandidate, ProofCandidate, ProofRecord
-from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
+from backend.shared.path_safety import resolve_filename_within_root, validate_single_path_component
 from backend.shared.proof_identity import canonical_proof_identity
 from backend.autonomous.prompts.proof_prompts import format_failure_hints_for_injection
 
@@ -130,6 +130,15 @@ class ProofDatabase:
     def _safe_proof_id(self, proof_id: str) -> str:
         return validate_single_path_component(proof_id, "proof ID")
 
+    def _resolve_storage_path(self, filename: str) -> Path:
+        """Resolve one generated filename beneath the active proof-store root."""
+        self._refresh_runtime_root()
+        return resolve_filename_within_root(
+            self._base_dir,
+            filename,
+            "proof storage filename",
+        )
+
     def _refresh_runtime_root(self) -> None:
         if (
             self._session_manager is None
@@ -145,12 +154,12 @@ class ProofDatabase:
         return self._base_dir / "proofs_index.json"
 
     def _get_record_path(self, proof_id: str) -> Path:
-        self._refresh_runtime_root()
-        return self._base_dir / f"proof_{self._safe_proof_id(proof_id)}.json"
+        safe_id = self._safe_proof_id(proof_id)
+        return self._resolve_storage_path(f"proof_{safe_id}.json")
 
     def _get_lean_path(self, proof_id: str) -> Path:
-        self._refresh_runtime_root()
-        return self._base_dir / f"proof_{self._safe_proof_id(proof_id)}_lean.lean"
+        safe_id = self._safe_proof_id(proof_id)
+        return self._resolve_storage_path(f"proof_{safe_id}_lean.lean")
 
     def _get_failed_dir(self) -> Path:
         self._refresh_runtime_root()
@@ -158,7 +167,12 @@ class ProofDatabase:
 
     def _get_failed_candidates_path(self, source_brainstorm_id: str) -> Path:
         safe_id = validate_single_path_component(source_brainstorm_id, "brainstorm ID")
-        return self._get_failed_dir() / f"{safe_id}.json"
+        failed_dir = self._get_failed_dir()
+        return resolve_filename_within_root(
+            failed_dir,
+            f"{safe_id}.json",
+            "failed candidate filename",
+        )
 
     def _default_index(self) -> Dict[str, Any]:
         return {
@@ -351,6 +365,19 @@ class ProofDatabase:
         stored_record, _duplicate = await self.add_proof_if_absent(record)
         return stored_record
 
+    async def _persist_record_files(
+        self,
+        stored_record: ProofRecord,
+        serialized: Dict[str, Any],
+    ) -> None:
+        """Persist one proof's metadata and Lean source through validated paths."""
+        record_path = self._get_record_path(stored_record.proof_id)
+        lean_path = self._get_lean_path(stored_record.proof_id)
+        async with aiofiles.open(record_path, "w", encoding="utf-8") as handle:
+            await handle.write(json.dumps(serialized, indent=2))
+        async with aiofiles.open(lean_path, "w", encoding="utf-8") as handle:
+            await handle.write(stored_record.lean_code)
+
     async def add_proof_occurrence(self, record: ProofRecord) -> ProofRecord:
         """Persist a full record for each newly verified current-run occurrence."""
         async with self._lock:
@@ -360,10 +387,7 @@ class ProofDatabase:
             proof_id = record.proof_id or f"proof_{self._index_data['next_proof_id']:03d}"
             stored_record = record.model_copy(update={"proof_id": proof_id})
             serialized = self._serialize_record(stored_record)
-            async with aiofiles.open(self._get_record_path(proof_id), "w", encoding="utf-8") as handle:
-                await handle.write(json.dumps(serialized, indent=2))
-            async with aiofiles.open(self._get_lean_path(proof_id), "w", encoding="utf-8") as handle:
-                await handle.write(stored_record.lean_code)
+            await self._persist_record_files(stored_record, serialized)
 
             proofs = [
                 proof
@@ -400,11 +424,7 @@ class ProofDatabase:
             proof_id = record.proof_id or f"proof_{self._index_data['next_proof_id']:03d}"
             stored_record = record.model_copy(update={"proof_id": proof_id})
             serialized = self._serialize_record(stored_record)
-
-            async with aiofiles.open(self._get_record_path(proof_id), "w", encoding="utf-8") as handle:
-                await handle.write(json.dumps(serialized, indent=2))
-            async with aiofiles.open(self._get_lean_path(proof_id), "w", encoding="utf-8") as handle:
-                await handle.write(stored_record.lean_code)
+            await self._persist_record_files(stored_record, serialized)
 
             proofs = [
                 proof
