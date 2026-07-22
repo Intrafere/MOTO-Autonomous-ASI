@@ -29,6 +29,7 @@ const AutonomousResearchInterface = ({
   status,
   activity,
   onStart,
+  onStartingChange,
   onStop,
   onClear,
   config,
@@ -149,11 +150,13 @@ const AutonomousResearchInterface = ({
     }
   }, [isRunning, isStopping]);
 
-  const handleTextFileLoaded = (content) => {
-    // Append to existing prompt with separator
-    const separator = researchPrompt.trim() ? '\n\n' : '';
-    const newPrompt = researchPrompt + separator + content;
-    setResearchPrompt(newPrompt);
+  const handleTextFileLoaded = (content, filename = 'uploaded-file') => {
+    const isLeanFile = filename.toLowerCase().endsWith('.lean');
+    const labeledContext = `[UPLOADED ${isLeanFile ? 'LEAN FILE' : 'TEXT FILE'}: ${filename}]\n${content}`;
+    setResearchPrompt(prevPrompt => {
+      const separator = prevPrompt.trim() ? '\n\n' : '';
+      return prevPrompt + separator + labeledContext;
+    });
   };
 
   const handleStart = async () => {
@@ -173,12 +176,14 @@ const AutonomousResearchInterface = ({
       return;
     }
     setStartRequested(true);
+    onStartingChange?.(true);
     const proofOnlyRequested = mathematicalProofsAllowed && !researchPapersAllowed;
     const shouldSyncProofRuntime = mathematicalProofsAllowed && !capabilities?.genericMode;
     if (proofOnlyRequested || shouldSyncProofRuntime) {
       const enabled = await updateProofRuntimeSetting(true);
       if (!enabled) {
         setStartRequested(false);
+        onStartingChange?.(false);
         return;
       }
     }
@@ -190,6 +195,8 @@ const AutonomousResearchInterface = ({
     } catch (error) {
       setStartRequested(false);
       throw error;
+    } finally {
+      onStartingChange?.(false);
     }
   };
 
@@ -212,7 +219,7 @@ const AutonomousResearchInterface = ({
         lean4_lsp_idle_timeout: status.lean4_lsp_idle_timeout ?? 600,
         max_parallel_candidates: status.proof_max_parallel_candidates ?? 6,
         smt_enabled: Boolean(status.smt_enabled),
-        smt_timeout: status.smt_timeout ?? 30,
+        smt_timeout: status.smt_timeout ?? 300,
       });
       if (enabled) {
         const leanVersion = String(updatedStatus.lean4_version || updatedStatus.lean_version || '').trim();
@@ -349,11 +356,33 @@ const AutonomousResearchInterface = ({
       {/* Header */}
       <div className="autonomous-header">
         <h2>Autonomous Research</h2>
-        <div className="autonomous-controls-stack">
-          <div className="autonomous-controls">
+      </div>
+
+      {/* Research Prompt Input */}
+      <div className="research-prompt-section prompt-composer-section">
+        <div className="prompt-composer">
+          <label htmlFor="research-prompt">Research Goal</label>
+          <textarea
+            id="research-prompt"
+            value={researchPrompt}
+            onChange={(e) => setResearchPrompt(e.target.value)}
+            placeholder="Enter a high-level S.T.E.M. research or solution objective (e.g., 'Advance desalination technology,' 'Design a resilient distributed protocol,' or 'Solve a mathematical conjecture')"
+            disabled={controlsLocked}
+            rows={3}
+          />
+          <div className="prompt-composer-actions">
+            <TextFileUploader
+              onFileLoaded={handleTextFileLoaded}
+              disabled={controlsLocked}
+              maxSizeMB={5}
+              showCharCount={true}
+              confirmIfNotEmpty={true}
+              existingPromptLength={researchPrompt.length}
+            />
             {!showStopControl ? (
               <button
-                className="btn-start"
+                type="button"
+                className="btn-start prompt-composer-primary"
                 onClick={handleStart}
                 disabled={
                   !config?.submitter_configs?.some(s => s.modelId) ||
@@ -363,7 +392,7 @@ const AutonomousResearchInterface = ({
                 Start Research
               </button>
             ) : (
-              <>
+              <div className="prompt-composer-running-actions">
                 {showRuntimeIndicator && (
                   <span
                     className="runtime-indicator"
@@ -375,41 +404,19 @@ const AutonomousResearchInterface = ({
                     <span className="runtime-indicator-label">{isStopping ? 'Stopping' : 'Running'}</span>
                   </span>
                 )}
-                <button className="btn-stop" onClick={onStop} disabled={isStopping}>
-                  {isStopping ? 'Stopping...' : 'Stop Research'}
+                <button
+                  type="button"
+                  className="btn-stop"
+                  onClick={onStop}
+                  disabled={isStopping || (startRequested && !isRunning)}
+                >
+                  {isStopping ? 'Stopping...' : (startRequested && !isRunning ? 'Starting...' : 'Stop Research')}
                 </button>
-              </>
-            )}
-            {developerModeEnabled && (
-              <label className="settings-checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={Boolean(config?.creativity_emphasis_boost_enabled)}
-                  onChange={(event) => onConfigChange?.({
-                    ...config,
-                    creativity_emphasis_boost_enabled: event.target.checked
-                  })}
-                  disabled={controlsLocked}
-                />
-                Creativity Emphasis Boost
-              </label>
-            )}
-              <button
-              className={`btn-clear ${showClearConfirm ? 'btn-confirm' : ''}`}
-              onClick={handleClear}
-              disabled={controlsLocked || isClearing}
-            >
-              {isClearing ? 'Clearing...' : (showClearConfirm ? 'Confirm Clear' : 'Clear All')}
-            </button>
-            {showClearConfirm && !isClearing && (
-              <button
-                className="btn-cancel"
-                onClick={() => setShowClearConfirm(false)}
-              >
-                Cancel
-              </button>
+              </div>
             )}
           </div>
+        </div>
+        <div className="prompt-composer-options">
           <div
             className="allowed-outputs-row"
             title="Allowed Outputs controls which products this workflow may generate. At least one output must remain enabled."
@@ -440,28 +447,38 @@ const AutonomousResearchInterface = ({
               <span className="allowed-output-text">Research Papers</span>
             </label>
           </div>
+          {developerModeEnabled && (
+            <label className="settings-checkbox-label prompt-composer-option">
+              <input
+                type="checkbox"
+                checked={Boolean(config?.creativity_emphasis_boost_enabled)}
+                onChange={(event) => onConfigChange?.({
+                  ...config,
+                  creativity_emphasis_boost_enabled: event.target.checked
+                })}
+                disabled={controlsLocked}
+              />
+              Creativity Emphasis Boost
+            </label>
+          )}
+          <button
+            type="button"
+            className={`btn-clear ${showClearConfirm ? 'btn-confirm' : ''}`}
+            onClick={handleClear}
+            disabled={controlsLocked || isClearing}
+          >
+            {isClearing ? 'Clearing...' : (showClearConfirm ? 'Confirm Reset' : 'Clear Research Run')}
+          </button>
+          {showClearConfirm && !isClearing && (
+            <button
+              type="button"
+              className="btn-cancel"
+              onClick={() => setShowClearConfirm(false)}
+            >
+              Cancel
+            </button>
+          )}
         </div>
-      </div>
-
-      {/* Research Prompt Input */}
-      <div className="research-prompt-section">
-        <label htmlFor="research-prompt">Research Goal</label>
-        <textarea
-          id="research-prompt"
-          value={researchPrompt}
-          onChange={(e) => setResearchPrompt(e.target.value)}
-          placeholder="Enter your high level research goal on any topic that relates to S.T.E.M. mathematics, anything remotely related to mathematics (e.g., 'Advance desalination technology' or 'Solve physics unification')"
-          disabled={controlsLocked}
-          rows={3}
-        />
-        <TextFileUploader 
-          onFileLoaded={handleTextFileLoaded}
-          disabled={controlsLocked}
-          maxSizeMB={5}
-          showCharCount={true}
-          confirmIfNotEmpty={true}
-          existingPromptLength={researchPrompt.length}
-        />
       </div>
 
       {/* Status Display */}

@@ -1,0 +1,25 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "persisted_result_hydration",
+    "temp_root",
+    "blocked_clear_no_archive"
+  ],
+  "fields": [
+    "workflow_filesystem_state",
+    "proof_scope_isolation",
+    "prompt_context"
+  ],
+  "invariants": [
+    "state.runtime_roots_are_active_roots"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_manual_aggregator_durable_hydration_and_clear_blocker",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+}

@@ -10,6 +10,24 @@ let proofStatusCache = null;
 let proofStatusCacheTime = 0;
 let proofStatusInFlight = null;
 
+export const API_ERROR_KINDS = Object.freeze({
+  BACKEND_UNAVAILABLE: 'backend_unavailable',
+  STALE_TOKEN: 'stale_token',
+  BACKEND_VALIDATION: 'backend_validation',
+  AMBIGUOUS_TRANSPORT: 'ambiguous_transport',
+  BACKEND_RESPONSE: 'backend_response',
+});
+
+export class MotoApiError extends Error {
+  constructor(message, { kind, status = null, details = null, cause = null } = {}) {
+    super(message, cause ? { cause } : undefined);
+    this.name = 'MotoApiError';
+    this.kind = kind || API_ERROR_KINDS.BACKEND_RESPONSE;
+    this.status = status;
+    this.details = details;
+  }
+}
+
 function isProofStatusStartingUp(status) {
   const version = (status?.lean4_version || status?.lean_version || '').trim();
   return Boolean(status?.lean4_enabled && (!version || !status?.workspace_ready));
@@ -115,10 +133,44 @@ async function extractErrorMessage(response, fallbackMessage) {
  */
 async function throwFromResponse(response, fallbackMessage) {
   const message = await extractErrorMessage(response, fallbackMessage);
-  const err = new Error(message);
-  err.status = response.status;
-  err.statusText = response.statusText;
-  throw err;
+  let kind = API_ERROR_KINDS.BACKEND_RESPONSE;
+  if (response.status === 401) {
+    kind = API_ERROR_KINDS.STALE_TOKEN;
+  } else if (response.status === 400 || response.status === 409 || response.status === 422) {
+    kind = API_ERROR_KINDS.BACKEND_VALIDATION;
+  }
+  throw new MotoApiError(message, {
+    kind,
+    status: response.status,
+    details: message,
+  });
+}
+
+export async function requestJson(url, options = {}, fallbackMessage = 'Backend request failed') {
+  const method = String(options.method || 'GET').toUpperCase();
+  try {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      await throwFromResponse(response, fallbackMessage);
+    }
+    return await response.json();
+  } catch (error) {
+    if (error instanceof MotoApiError) {
+      throw error;
+    }
+    const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+    throw new MotoApiError(
+      isMutation
+        ? `${fallbackMessage}: the request outcome is unknown because the backend response was not received`
+        : `${fallbackMessage}: backend unavailable`,
+      {
+        kind: isMutation
+          ? API_ERROR_KINDS.AMBIGUOUS_TRANSPORT
+          : API_ERROR_KINDS.BACKEND_UNAVAILABLE,
+        cause: error,
+      },
+    );
+  }
 }
 
 // Aggregator API
@@ -174,34 +226,23 @@ export const api = {
 
   // Start aggregator
   async startAggregator(config) {
-    const response = await fetch(`${API_BASE}/aggregator/start`, {
+    return requestJson(`${API_BASE}/aggregator/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
-    });
-    if (!response.ok) {
-      const errorData = await response.json();
-      const error = new Error('Failed to start aggregator');
-      error.details = errorData.detail;
-      throw error;
-    }
-    return response.json();
+    }, 'Failed to start aggregator');
   },
 
   // Stop aggregator
   async stopAggregator() {
-    const response = await fetch(`${API_BASE}/aggregator/stop`, {
+    return requestJson(`${API_BASE}/aggregator/stop`, {
       method: 'POST',
-    });
-    if (!response.ok) throw new Error('Failed to stop aggregator');
-    return response.json();
+    }, 'Failed to stop aggregator');
   },
 
   // Get status
   async getStatus() {
-    const response = await fetch(`${API_BASE}/aggregator/status`);
-    if (!response.ok) throw new Error('Failed to get status');
-    return response.json();
+    return requestJson(`${API_BASE}/aggregator/status`, {}, 'Failed to get aggregator status');
   },
 
   async getAggregatorPrompt() {
@@ -246,7 +287,19 @@ export const api = {
       method: 'POST',
       body: formData,
     });
-    if (!response.ok) throw new Error('Failed to upload file');
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to upload file');
+    }
+    return response.json();
+  },
+
+  async deleteUploadedFile(filename) {
+    const response = await fetch(`${API_BASE}/aggregator/upload-file/${encodeURIComponent(filename)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to remove uploaded file');
+    }
     return response.json();
   },
 
@@ -307,18 +360,12 @@ export const compilerAPI = {
 
   // Start compiler
   async start(config) {
-    const response = await fetch(`${API_BASE}/compiler/start`, {
+    const data = await requestJson(`${API_BASE}/compiler/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
-    });
-    if (!response.ok) {
-      const errorData = await response.json();
-      const error = new Error('Failed to start compiler');
-      error.details = errorData.detail;
-      throw error;
-    }
-    return { data: await response.json() };
+    }, 'Failed to start compiler');
+    return { data };
   },
 
   // Test models compatibility
@@ -334,18 +381,16 @@ export const compilerAPI = {
 
   // Stop compiler
   async stop() {
-    const response = await fetch(`${API_BASE}/compiler/stop`, {
+    const data = await requestJson(`${API_BASE}/compiler/stop`, {
       method: 'POST',
-    });
-    if (!response.ok) throw new Error('Failed to stop compiler');
-    return { data: await response.json() };
+    }, 'Failed to stop compiler');
+    return { data };
   },
 
   // Get status
   async getStatus() {
-    const response = await fetch(`${API_BASE}/compiler/status`);
-    if (!response.ok) throw new Error('Failed to get status');
-    return { data: await response.json() };
+    const data = await requestJson(`${API_BASE}/compiler/status`, {}, 'Failed to get compiler status');
+    return { data };
   },
 
   async getPrompt() {
@@ -453,24 +498,18 @@ export const compilerAPI = {
 export const autonomousAPI = {
   // Start autonomous research
   async start(config) {
-    const response = await fetch(`${API_BASE}/auto-research/start`, {
+    return requestJson(`${API_BASE}/auto-research/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
-    });
-    if (!response.ok) {
-      await throwFromResponse(response, 'Failed to start autonomous research');
-    }
-    return response.json();
+    }, 'Failed to start autonomous research');
   },
 
   // Stop autonomous research
   async stop() {
-    const response = await fetch(`${API_BASE}/auto-research/stop`, {
+    return requestJson(`${API_BASE}/auto-research/stop`, {
       method: 'POST',
-    });
-    if (!response.ok) throw new Error('Failed to stop autonomous research');
-    return response.json();
+    }, 'Failed to stop autonomous research');
   },
 
   // Clear all autonomous research data
@@ -490,9 +529,7 @@ export const autonomousAPI = {
 
   // Get status
   async getStatus() {
-    const response = await fetch(`${API_BASE}/auto-research/status`);
-    if (!response.ok) throw new Error('Failed to get autonomous status');
-    return response.json();
+    return requestJson(`${API_BASE}/auto-research/status`, {}, 'Failed to get autonomous status');
   },
 
   // Get all brainstorms
@@ -684,8 +721,11 @@ export const autonomousAPI = {
     return response.text();
   },
 
-  async getProofLibrary(novelOnly = true, scope = 'autonomous') {
-    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/library?novel_only=${novelOnly}`, scope)}`);
+  async getProofLibrary(category = 'novel', scope = 'autonomous') {
+    const normalizedCategory = typeof category === 'boolean'
+      ? (category ? 'novel' : 'all')
+      : (category || 'novel');
+    const response = await fetch(`${API_BASE}${withProofScope(`/proofs/library?category=${encodeURIComponent(normalizedCategory)}`, scope)}`);
     if (!response.ok) throw new Error('Failed to get proof library');
     return response.json();
   },
@@ -1201,24 +1241,15 @@ export const boostAPI = {
 // LeanOJ Proof Solver API
 export const leanojAPI = {
   async start(config) {
-    const response = await fetch(`${API_BASE}/leanoj/start`, {
+    return requestJson(`${API_BASE}/leanoj/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
-    });
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const error = new Error('Failed to start Proof Solver');
-      error.details = errorData.detail;
-      throw error;
-    }
-    return response.json();
+    }, 'Failed to start Proof Solver');
   },
 
   async stop() {
-    const response = await fetch(`${API_BASE}/leanoj/stop`, { method: 'POST' });
-    if (!response.ok) throw new Error('Failed to stop Proof Solver');
-    return response.json();
+    return requestJson(`${API_BASE}/leanoj/stop`, { method: 'POST' }, 'Failed to stop Proof Solver');
   },
 
   async clear() {
@@ -1231,9 +1262,7 @@ export const leanojAPI = {
   },
 
   async getStatus() {
-    const response = await fetch(`${API_BASE}/leanoj/status`);
-    if (!response.ok) throw new Error('Failed to get Proof Solver status');
-    return response.json();
+    return requestJson(`${API_BASE}/leanoj/status`, {}, 'Failed to get Proof Solver status');
   },
 
   async getMasterProof() {
@@ -1297,6 +1326,28 @@ export const workflowAPI = {
   async getPredictions() {
     const response = await fetch(`${API_BASE}/workflow/predictions`);
     if (!response.ok) throw new Error('Failed to get workflow predictions');
+    return response.json();
+  },
+
+  async getSolutionPath() {
+    const response = await fetch(`${API_BASE}/workflow/solution-path`);
+    if (!response.ok) throw new Error('Failed to get solution path');
+    return response.json();
+  },
+
+  async resumeSolutionPathProposal({ runId, proposalId, lifecycleGeneration }) {
+    const response = await fetch(`${API_BASE}/workflow/solution-path/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        run_id: runId,
+        proposal_id: proposalId,
+        lifecycle_generation: lifecycleGeneration,
+      }),
+    });
+    if (!response.ok) {
+      await throwFromResponse(response, 'Failed to retry solution-path proposal');
+    }
     return response.json();
   },
 
@@ -1683,6 +1734,12 @@ export const proofSearchAPI = {
     return response.json();
   },
 
+  async getAssistantLatestPack() {
+    const response = await fetch(`${API_BASE}/proof-search/assistant/latest-pack`);
+    if (!response.ok) await throwFromResponse(response, 'Failed to load Assistant proof pack');
+    return response.json();
+  },
+
   async search(request) {
     const response = await fetch(`${API_BASE}/proof-search/search`, {
       method: 'POST',
@@ -1693,13 +1750,27 @@ export const proofSearchAPI = {
     return response.json();
   },
 
-  async getProof(source, proofId, { sessionId = null } = {}) {
+  async getProof(source, proofId, { searchId = null, runId = null, sessionId = null } = {}) {
     const params = new URLSearchParams();
+    if (searchId) params.append('search_id', searchId);
+    if (runId) params.append('run_id', runId);
     if (sessionId) params.append('session_id', sessionId);
     const response = await fetch(
       `${API_BASE}/proof-search/proofs/${encodeURIComponent(source)}/${encodeURIComponent(proofId)}${params.toString() ? '?' + params.toString() : ''}`
     );
     if (!response.ok) await throwFromResponse(response, 'Failed to hydrate proof-search record');
+    return response.json();
+  },
+
+  async getAssistantSupportLineage(targetHash, supportSearchId, { offset = 0, limit = 50 } = {}) {
+    const params = new URLSearchParams({
+      offset: String(offset),
+      limit: String(limit),
+    });
+    const response = await fetch(
+      `${API_BASE}/proof-search/assistant/targets/${encodeURIComponent(targetHash)}/supports/${encodeURIComponent(supportSearchId)}/lineage?${params.toString()}`
+    );
+    if (!response.ok) await throwFromResponse(response, 'Failed to load Assistant support lineage');
     return response.json();
   },
 

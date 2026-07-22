@@ -2,8 +2,8 @@ import React, { useState, useRef } from 'react';
 import './TextFileUploader.css';
 
 /**
- * TextFileUploader - Single .txt file upload component for prompt enhancement
- * Reads file content and merges it into the prompt textarea (chat-style AI interface pattern)
+ * TextFileUploader - .txt or .lean file upload component for prompt context
+ * Reads file contents and passes them to the parent for prompt/context handling.
  */
 function TextFileUploader({ 
   onFileLoaded, 
@@ -24,8 +24,8 @@ function TextFileUploader({
   };
 
   const handleFileChange = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
 
     // Reset file input to allow re-uploading the same file
     event.target.value = '';
@@ -33,31 +33,35 @@ function TextFileUploader({
     // Clear previous status
     setStatus(null);
 
-    // Validate file type
-    if (!file.name.toLowerCase().endsWith('.txt')) {
-      setStatus({
-        type: 'error',
-        message: 'Please select a .txt file'
-      });
-      autoHideStatus();
-      return;
-    }
+    for (const file of files) {
+      const lowerFileName = file.name.toLowerCase();
+      const isAllowedFile = lowerFileName.endsWith('.txt') || lowerFileName.endsWith('.lean');
 
-    // Validate file size
-    const fileSizeMB = file.size / (1024 * 1024);
-    if (fileSizeMB > maxSizeMB) {
-      setStatus({
-        type: 'error',
-        message: `File exceeds ${maxSizeMB}MB limit (actual: ${fileSizeMB.toFixed(2)}MB)`
-      });
-      autoHideStatus();
-      return;
+      if (!isAllowedFile) {
+        setStatus({
+          type: 'error',
+          message: 'Please select only .txt or .lean files'
+        });
+        autoHideStatus();
+        return;
+      }
+
+      const fileSizeMB = file.size / (1024 * 1024);
+      if (fileSizeMB > maxSizeMB) {
+        setStatus({
+          type: 'error',
+          message: `${file.name} exceeds ${maxSizeMB}MB limit (actual: ${fileSizeMB.toFixed(2)}MB)`
+        });
+        autoHideStatus();
+        return;
+      }
     }
 
     // Show confirmation if prompt already has content
     if (confirmIfNotEmpty && existingPromptLength > 100) {
+      const fileText = files.length === 1 ? 'the file' : `${files.length} files`;
       const confirmed = window.confirm(
-        'Prompt already contains text. This will ADD the file content to the end. Continue?'
+        `Prompt already contains text. This will add ${fileText} as labeled context blocks at the end. Continue?`
       );
       if (!confirmed) {
         return;
@@ -67,27 +71,32 @@ function TextFileUploader({
     // Read file
     setIsLoading(true);
     try {
-      const content = await readFileContent(file);
-      
-      // Strip BOM if present (UTF-8 BOM: 0xEF 0xBB 0xBF)
-      const cleanContent = content.charCodeAt(0) === 0xFEFF ? content.slice(1) : content;
+      const loadedFiles = [];
 
-      // Handle empty or whitespace-only files
-      if (!cleanContent.trim()) {
-        setStatus({
-          type: 'error',
-          message: 'File is empty or contains only whitespace'
-        });
-        autoHideStatus();
-        return;
+      for (const file of files) {
+        const content = await readFileContent(file);
+
+        // Strip BOM if present (UTF-8 BOM: 0xEF 0xBB 0xBF)
+        const cleanContent = content.charCodeAt(0) === 0xFEFF ? content.slice(1) : content;
+
+        if (!cleanContent.trim()) {
+          setStatus({
+            type: 'error',
+            message: `${file.name} is empty or contains only whitespace`
+          });
+          autoHideStatus();
+          return;
+        }
+
+        loadedFiles.push({ name: file.name, content: cleanContent });
       }
 
-      // Calculate character counts
-      const addedChars = cleanContent.length;
+      const addedChars = loadedFiles.reduce((total, item) => total + item.content.length, 0);
       const totalChars = existingPromptLength + addedChars;
 
-      // Call parent callback
-      onFileLoaded(cleanContent, file.name);
+      for (const item of loadedFiles) {
+        onFileLoaded(item.content, item.name);
+      }
 
       // Show success message
       const charCountMsg = showCharCount 
@@ -100,8 +109,8 @@ function TextFileUploader({
 
       setStatus({
         type: 'success',
-        message: `✓ ${file.name} added${charCountMsg}${warningMsg}`,
-        filename: file.name
+        message: `✓ ${loadedFiles.length} file${loadedFiles.length === 1 ? '' : 's'} added${charCountMsg}${warningMsg}`,
+        filename: loadedFiles.map(item => item.name).join(', ')
       });
 
       autoHideStatus();
@@ -183,10 +192,11 @@ function TextFileUploader({
       <input
         ref={fileInputRef}
         type="file"
-        accept=".txt"
+        accept=".txt,.lean,text/plain,text/x-lean"
+        multiple
         onChange={handleFileChange}
         style={{ display: 'none' }}
-        aria-label="Upload text file to add to prompt"
+        aria-label="Upload .txt or .lean files to add as context"
         disabled={disabled || isLoading}
       />
       
@@ -195,7 +205,7 @@ function TextFileUploader({
         onClick={handleButtonClick}
         disabled={disabled || isLoading}
         type="button"
-        title="Upload a .txt file to add its content to your prompt"
+        title="Upload .txt or .lean files to add as labeled context"
       >
         {isLoading ? (
           <>
@@ -204,7 +214,7 @@ function TextFileUploader({
           </>
         ) : (
           <>
-            📎 Upload .txt File
+            📎 Upload .txt or .lean files
           </>
         )}
       </button>

@@ -7,7 +7,7 @@ alwaysApply: true
 
 ## Overview
 
-The Autonomous Research Mode is Part 3 of the MOTO Math Variant system. It is a self-directing three-tier research system that autonomously generates brainstorm topics, builds knowledge databases, produces complete mathematical research papers, and can synthesize a final answer based on a high-level research topic centered around the user prompt.
+The Autonomous Research Mode is Part 3 of MOTO's self-directing three-tier research system. It autonomously generates brainstorm topics, builds knowledge databases, produces rigorous solution-oriented research papers or reports, and can synthesize a final answer centered on the user's high-level objective. Mathematics and formal proof remain first-class when relevant.
 
 **Example User Prompt**: "Solve the Langlands Bridge problem" or "Advance understanding of the Riemann Hypothesis"
 
@@ -17,21 +17,33 @@ The Autonomous Research Mode is Part 3 of the MOTO Math Variant system. It is a 
 - Part 3 (Autonomous Research) self-directs topic selection, brainstorming, and paper generation
 
 **Three-Tier Architecture**:
-- **Tier 1**: Brainstorm aggregation databases (mathematical concept exploration)
-- **Tier 2**: Finished mathematical research papers (compiled from brainstorm databases)
+- **Tier 1**: Brainstorm aggregation databases (solution concept, mechanism, evidence, algorithm, and mathematical exploration)
+- **Tier 2**: Finished rigorous research papers or solution reports (compiled from brainstorm databases)
 - **Tier 3**: Final answer synthesis (short-form answer or long-form volume from Tier 2 papers)
 
 ## Design Philosophy
 
 **Self-Directing Research**: The AI autonomously identifies the most valuable research avenues based on the high-level goal prompt.
 
-**Basin Exploration**: Each brainstorm topic represents a "basin" of related mathematical concepts. The system explores each basin until sufficiently complete, then generates a paper.
+**Domain-General Strategy**: Ordinary topic exploration/selection, completion review, reference selection, title selection, and continuation aggressively pursue the strongest solution path for the exact objective using domain- and claim-appropriate rigor. When Mathematical Proofs is allowed, mathematics and formal proof remain first-class when useful under the eager startup proof-framing emphasis; when disabled in Allowed Outputs, that framing is skipped. Positive proof framing is emphasis, not a hard mathematical admission requirement for every ordinary contribution.
+
+**Basin Exploration**: Each brainstorm topic represents a "basin" of related solution concepts, mechanisms, evidence, algorithms, designs, or mathematical structures. The system explores each basin until sufficiently complete, then generates a paper.
 
 **Cumulative Knowledge**: All brainstorm databases and papers persist, building a comprehensive research library over time.
 
 **Model Weight Exploration**: Completion review uses SPECIAL SELF-VALIDATION MODE because only the same model can assess whether its own weights have been exhausted for a given topic.
 
-**External Verification Allowed**: The autonomous system may use the model's pre-trained mathematical knowledge, RAG context from prior work, user prompt, and external verification/search when the selected model/provider supports it. Internal AI-generated context remains non-authoritative and should be treated skeptically.
+**External Verification Allowed**: The autonomous system may use the model's domain and mathematical knowledge, RAG context from prior work, user prompt, and external verification/search when the selected model/provider supports it. Internal AI-generated context remains non-authoritative and should be treated skeptically.
+
+## Progressive Solution Path
+
+Each autonomous research session owns exactly one durable Progressive Solution Path across all topics, brainstorms, papers, proof checkpoints, and Tier 3 phases. It remains absent from prompts and UI until five cumulative accepted Tier 1 brainstorm submissions in that session; topic/title mini-aggregator acceptances, paper edits, validator decisions, and proof events do not count or create independent owners. After activation, only the bounded Main Submitter 1-approved canonical revision is optional advisory direct context and may be ignored for a better prompt-serving route.
+
+The activation count is a persisted, monotonic session-wide counter of real Tier 1 accept events, distinct from the post-cleanup retained submission count. The autonomous parent is its sole writer; child Aggregators receive the shared manager for context/proposals without writing topic-local counts. It never resets at topic boundaries and resumes from durable metadata/workflow/solution-path state.
+
+Existing semantic LLM validators may separately propose a material route, goal, evidence, or meaningful-step-status update in their normal JSON response. Missing/malformed extensions do not affect the primary result; selectors, submitters, deterministic checks, Lean/SMT/tools, and integrity gates do not originate proposals. Proposals queue durably and non-blockingly for serial transactional review under the exact Main Submitter 1 provider/model/host/reasoning/fallback/context/output/Supercharge configuration. Hard failures enter user-repair state and resume only through the explicit generation-fenced retry action. Stop/crash/session resume preserves plan and queue; explicit session Clear/new-run removes them and is serialized against reacquisition.
+
+The Workflow panel hides the path before activation. After activation it distinguishes no-approved-plan, queued/reviewing updates, approved plans, and repair-required proposals; the typed snapshot separately exposes active/resumable ownership. Snapshot/event updates are fenced by run identity and lifecycle generation so stale cross-run responses cannot replace the current view.
 
 ---
 
@@ -145,7 +157,6 @@ Topic exploration runs before EVERY new topic selection cycle — no exceptions.
 The autonomous topic submitter decides what to work on next. It can:
 1. **Generate a NEW topic**: Identify the next most valuable brainstorm avenue
 2. **Continue an EXISTING topic**: Resume work on an incomplete brainstorm
-3. **Combine EXISTING topics**: Merge multiple related brainstorms into a unified topic
 
 ### Topic Submitter Context
 The submitter receives:
@@ -166,15 +177,14 @@ The submitter receives:
 - Topic selection rejection history (last 5)
 
 ### Decision Criteria
-When choosing between new / continue / combine:
-- **New Topic**: When all existing topics are complete OR when a new mathematical avenue more aggressively attacks the user's WHOLE question as stated
+When choosing between new / continue:
+- **New Topic**: When all existing topics are complete OR when a new solution avenue more aggressively attacks the user's WHOLE question as stated
 - **Continue Existing**: When an incomplete brainstorm still attacks the whole prompt, or the next best necessary piece if a whole-question attack is absolutely not possible in one superintelligence brainstorm
-- **Combine Topics**: When multiple existing brainstorms together produce a more direct rigorous route to the full prompt than keeping them separate
 
 ### Hard Code Guard: continue_existing on Completed Brainstorms
 The coordinator enforces a **hard code guard** in `_execute_topic_selection`: if the LLM selects `continue_existing` on a brainstorm whose status is `"complete"`, the action is **rejected** and the topic selection loop retries. This prevents runaway re-brainstorming on already-completed topics regardless of LLM judgment. The LLM prompt and validator prompt both instruct against this, but the code guard is the authoritative enforcement.
 
-JSON schema and examples defined in `json-prompt-design.mdc`. Fields: `action` (new_topic/continue_existing/combine_topics), `topic_id`, `topic_ids`, `topic_prompt`, `reasoning`.
+Production prompt/parser/model code is authoritative for the exact JSON contract. High-level fields: `action` (new_topic/continue_existing), `topic_id`, `topic_prompt`, `reasoning`.
 
 ---
 
@@ -193,20 +203,18 @@ Receives the SAME context as the topic submitter:
 ### Validation Criteria
 
 **ACCEPT if**:
-1. New topic addresses a genuinely valuable mathematical avenue not yet covered
-2. Continue existing makes sense given the brainstorm's current state and mathematical depth
-3. Combine topics is justified by genuine mathematical connections
-4. Choice is relevant to the user's research goal
-5. Reasoning is sound and mathematically grounded
+1. New topic addresses a genuinely valuable solution avenue not yet covered
+2. Continue existing makes sense given the brainstorm's current state and the depth appropriate to the objective
+3. Choice is relevant to the user's research goal
+4. Reasoning is sound and grounded under the rigor appropriate to its domain and claim types
 
 **REJECT if**:
 1. New topic duplicates an existing brainstorm
 2. Continue existing on a brainstorm that should be marked complete
-3. Combine topics lacks clear mathematical justification
-4. Choice ignores more valuable research avenues
-5. Reasoning is flawed or lacks mathematical rigor
+3. Choice ignores more valuable research avenues
+4. Reasoning is flawed or lacks the rigor appropriate to its domain and claim types
 
-JSON schema defined in `json-prompt-design.mdc`. Fields: `decision` (accept/reject), `reasoning`.
+High-level fields: `decision` (accept/reject), `reasoning`; production prompt/parser/model code owns the exact contract.
 
 ### Rejection Feedback
 When rejected, the validator's reasoning is added to the topic submitter's rolling feedback cache (last 5 rejections), similar to aggregator submitter rejection logs.
@@ -219,10 +227,10 @@ When rejected, the validator's reasoning is added to the topic submitter's rolli
 
 ### Purpose - The Crucial Mechanism for Compounding Knowledge
 
-The autonomous research system's power comes from its ability to **compound knowledge across research cycles**. Each completed paper represents distilled mathematical insights that can inform and enhance future brainstorm explorations.
+The autonomous research system's power comes from its ability to **compound knowledge across research cycles**. Each completed paper represents distilled mechanisms, evidence, designs, algorithms, mathematical results, proofs, or other solution insights that can inform and enhance future brainstorm explorations.
 
 By selecting reference papers BEFORE brainstorming begins, submitters can:
-- Build upon promising mathematical frameworks from prior AI-generated papers while independently re-checking their claims
+- Build upon promising mechanisms, evidence, designs, algorithms, mathematical frameworks, or proofs from prior AI-generated papers while independently re-checking their claims
 - Avoid re-exploring territory already covered in depth
 - Identify novel connections between new topics and previously explored results
 - Accelerate convergence on valuable insights by standing on prior work
@@ -272,7 +280,7 @@ Context: Direct inject if fits (~40% budget), RAG if too large. No truncation.
 - Current brainstorm topic prompt (direct injection)
 - ALL Tier 2 paper titles + abstracts + outlines (direct injection if fits, RAG if too large)
 
-JSON schemas defined in `json-prompt-design.mdc`. Two-step: submitter requests paper expansions (`expand_papers`, `proceed_without_references`), then makes final selection (`selected_papers`). Max 3 papers total for the topic cycle.
+Two-step contract: the submitter requests paper expansions (`expand_papers`, `proceed_without_references`), then makes the final selection (`selected_papers`). Production prompt/parser/model code owns the exact contract. Maximum 3 papers total for the topic cycle.
 
 **Context Handling (DIRECT INJECTION FIRST, RAG SECOND):**
 
@@ -303,8 +311,8 @@ JSON schemas defined in `json-prompt-design.mdc`. Two-step: submitter requests p
 Once a topic is validated and references selected, standard aggregation begins on that brainstorm topic.
 
 ### Architecture
-- **3 Submitters**: Generate mathematical insights for the brainstorm topic
-- **1 Validator**: Validates submissions (mathematical rigor, novelty, relevance)
+- **3 Submitters**: Generate objective-relevant solution contributions for the brainstorm topic
+- **1 Validator**: Validates submissions for domain- and claim-appropriate rigor, novelty, and relevance
 - **Pruning**: Cleanup review runs on the child Aggregator's run-local 7-acceptance cadence (same mechanism as Part 1)
 - **Same as Part 1 Aggregator**: Uses identical submitter/validator patterns, RAG cycling, etc.
 - **PARALLEL EXECUTION**: Submitters run in parallel regardless of boost status (boost is routing-only)
@@ -432,7 +440,7 @@ Assess whether the current brainstorm has been sufficiently explored relative to
    - If CONTINUE_BRAINSTORM: Add feedback to rolling cache, return to aggregation
    - If WRITE_PAPER: Proceed to paper writing workflow (Tier 2)
 
-JSON schemas defined in `json-prompt-design.mdc`. Completion submitter: `decision` (continue_brainstorm/write_paper), `reasoning`, `suggested_additions`. Self-validator: `validated` (bool), `reasoning`.
+High-level contract: completion submitter uses `decision` (continue_brainstorm/write_paper), `reasoning`, and `suggested_additions`; self-validator uses `validated` (bool) and `reasoning`. Production prompt/parser/model code owns the exact contract.
 
 ### Completion Review Context
 - User's high-level research prompt
@@ -473,7 +481,7 @@ Once completion review decides WRITE_PAPER (and self-validates), the system tran
 
 ### Two-Step Browsing Workflow (Additional Mode)
 
-Same two-step browsing workflow as pre-brainstorm selection (expand request → final selection). JSON schemas defined in `json-prompt-design.mdc`. Already-selected papers shown as context; submitter requests expansion of remaining papers, then selects additional ones. Already-selected papers cannot be removed.
+Same production two-step browsing contract as pre-brainstorm selection (expand request → final selection). Already-selected papers are shown as context; the submitter requests expansion of remaining papers, then selects additional ones. Already-selected papers cannot be removed.
 
 **Validator Role**: 
 - Reference selection is handled by the dedicated reference selector workflow and hard caps
@@ -517,7 +525,7 @@ Same two-step browsing workflow as pre-brainstorm selection (expand request → 
 
 **Purpose**: Choose a title for the paper that will be compiled from this brainstorm. The selector sees 5 pre-validated candidate titles and may select one, synthesize, or propose a new title with justification.
 
-JSON schema defined in `json-prompt-design.mdc`. Fields: `paper_title`, `reasoning`.
+High-level fields: `paper_title`, `reasoning`; production prompt/parser/model code owns the exact contract.
 
 **DISTINCTION FOR TITLE VALIDATION:**
 
@@ -744,12 +752,12 @@ When the child compiler completes the abstract phase and the parent wrapper obse
    - User's high-level research prompt
    - Instruction: "Review all papers and determine if ANY ONE paper should be REMOVED due to redundancy"
 
-JSON schema defined in `json-prompt-design.mdc`. Fields: `should_remove` (bool), `paper_id` (or null), `reasoning`.
+High-level fields: `should_remove` (bool), `paper_id` (or null), `reasoning`; production prompt/parser/model code owns the exact contract.
 
 2. **Removal Criteria**:
    - Paper is REDUNDANT with other papers (content fully covered elsewhere)
    - Paper was MARGINALLY useful but other papers provide better coverage
-   - Paper's unique contributions are minimal compared to other papers
+   - Paper's unique solution mechanism, evidence, derivation, design, implementation, algorithm, theorem/proof, validation method, or risk analysis is minimal compared to other papers
 
 4. **Conservative Approach**:
    - When in doubt, DO NOT remove
@@ -796,6 +804,7 @@ Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answe
 2. **Independent Rejection Feedback**: Tier 3 has its own 10-rejection cache, separate from Tiers 1/2
 3. **System Termination**: Once the final answer is complete, the autonomous system stops
 4. **Modular Code Reuse**: Uses existing Tier 2 paper writing infrastructure (no duplicate code)
+5. **Domain-Appropriate Synthesis**: Tier 3 presents the strongest defensible direct answer under the applicable rigor/evidence standard, distinguishes demonstrated results from proposals and required validation, and retains mathematics/formal proof as first-class modalities when relevant.
 
 ### Trigger Condition
 
@@ -808,7 +817,7 @@ Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answe
 
 ### Phase 1: Certainty Assessment
 
-**Purpose**: Assess what can be answered WITH CERTAINTY from existing research papers.
+**Purpose**: Assess the strongest defensible answer and the evidence status of its components from existing research papers.
 
 **Two-Step Paper Browsing** (same pattern as reference selection):
 
@@ -824,13 +833,13 @@ Tier 3 synthesizes all accumulated research (Tier 2 papers) into a **final answe
 **Certainty Levels**:
 | Level | Description |
 |-------|-------------|
-| `total_answer` | User's question can be FULLY answered with high confidence |
-| `partial_answer` | Question can be partially answered with certainty |
-| `no_answer_known` | Existing research doesn't provide an answer - MORE RESEARCH NEEDED |
-| `appears_impossible` | The question appears mathematically impossible |
+| `total_answer` | Complete answer is well-supported at the applicable standard |
+| `partial_answer` | Only identified portions are well-supported |
+| `no_answer_known` | Available papers do not support a defensible answer - MORE RESEARCH NEEDED |
+| `appears_impossible` | Objective appears mathematically impossible, physically/constraint infeasible, internally inconsistent, or otherwise unsupported for a clearly reasoned reason |
 | `other` | Special cases |
 
-JSON schema defined in `json-prompt-design.mdc`. Fields: `certainty_level` (total_answer/partial_answer/no_answer_known/appears_impossible/other), `known_certainties_summary`, `reasoning`.
+High-level fields: `certainty_level` (total_answer/partial_answer/no_answer_known/appears_impossible/other), `known_certainties_summary`, `reasoning`; production prompt/parser/model code owns the exact contract.
 
 **Special Case - `no_answer_known`**:
 - If certainty assessment returns `no_answer_known`, Tier 3 exits
@@ -848,15 +857,15 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `certainty_level` (tota
 | Format | Use Case |
 |--------|----------|
 | `short_form` | Answer can be presented coherently in single paper |
-| `long_form` | Answer requires curated collection, multiple perspectives |
+| `long_form` | Genuinely independent solution components require a curated collection |
 
 **Decision Factors**:
 - Complexity of user's question
-- Number and diversity of relevant papers
+- Independent mechanisms, evidence, implementations, proofs, validations, or risk analyses
 - Whether single coherent narrative is possible
-- Whether papers naturally form a cohesive volume
+- Whether the solution has a genuine multi-chapter dependency structure; paper count alone is insufficient
 
-JSON schema defined in `json-prompt-design.mdc`. Fields: `answer_format` (short_form/long_form), `reasoning`.
+High-level fields: `answer_format` (short_form/long_form), `reasoning`; production prompt/parser/model code owns the exact contract.
 
 **Validation**: Dedicated answer-format validation reviews the selection (10-rejection feedback loop)
 
@@ -873,7 +882,7 @@ JSON schema defined in `json-prompt-design.mdc`. Fields: `answer_format` (short_
 
 **Paper Title Requirement**: Title must DIRECTLY and TRANSPARENTLY answer the user's question.
 
-JSON schema same as paper title selection (defined in `json-prompt-design.mdc`). Title must directly and transparently answer the user's question.
+The production final-title contract follows paper title selection. The title must directly and transparently answer the user's question; production prompt/parser/model code owns the exact contract.
 
 ### Phase 3B: Long Form Answer (Volume)
 
@@ -897,7 +906,7 @@ JSON schema same as paper title selection (defined in `json-prompt-design.mdc`).
 | `introduction` | Introduction paper (frames the volume, written LAST) |
 | `conclusion` | Conclusion paper (synthesizes findings, written second-to-last) |
 
-JSON schema defined in `json-prompt-design.mdc`. Fields: `volume_title`, `chapters` (array with chapter_type/paper_id/title/order/description), `outline_complete`, `reasoning`.
+High-level fields: `volume_title`, `chapters` (array with chapter_type/paper_id/title/order/description), `outline_complete`, `reasoning`; production prompt/parser/model code owns the exact contract.
 
 **Paper Writing Order (Long Form)**:
 1. **Gap Papers** (if any): Write in chapter order
@@ -1201,21 +1210,21 @@ Archive IDs are untrusted path components. Resolve `answer_id`, `paper_id`, and 
 
 Runs automatically after every completed brainstorm (Tier 1) and completed Tier 2 paper-library paper, gated on `system_config.lean4_enabled`. Tier 3 short-form final papers may reuse the same paper-completion path; long-form volume chapters are saved as final-answer artifacts and do not currently run this checkpoint. When disabled, proof verification must not invoke Lean/proof model work or block brainstorm/paper completion.
 
-**Proof Framing Gate (one-shot, at autonomous start)**: On fresh autonomous starts, the coordinator runs `_run_proof_framing_gate()` before research begins. A single LLM call on the user prompt decides `is_proof_amenable` (`build_proof_framing_gate_prompt` → `autonomous_proof_framing_gate` role). The gate errs on the side of `true` when formal proof can help the user's prompt — it returns `false` when the prompt is purely empirical, engineering-focused, or has no meaningful prompt-relevant mathematical content. If `true`, `PROOF_FRAMING_CONTEXT` (which directs submissions to pursue theorems/lemmas/formalizations that directly answer, support, or advance the user prompt, with novelty/non-triviality valuable only inside that boundary) is appended to every subsequent submitter prompt via `_append_proof_framing()` and persisted to workflow state for crash recovery. Decision is broadcast via `proof_framing_decided`. Lean/proof execution remains separately gated by `lean4_enabled`.
+**Proof Framing Gate (one-shot, at autonomous start; essential when proof output is allowed)**: On fresh autonomous starts with Mathematical Proofs allowed, the coordinator runs `_run_proof_framing_gate()` before research begins. When Mathematical Proofs is disabled in Allowed Outputs, the framing model call and all proof-specific prompt context—including framing, direct proof-database context, failed-proof hints, known-proof summaries, and Assistant proof-memory packs for Autonomous and its child Aggregator/Compiler roles—are skipped, including on resume. Otherwise this LLM proof-emphasis gateway, its eager true bias, persistence/resume, and later prompt injection must not be bypassed, deferred, narrowed, or weakened. A single LLM call on the user prompt decides `is_proof_amenable` (`build_proof_framing_gate_prompt` → `autonomous_proof_framing_gate` role). The gate errs on the side of `true` when formal proof can help the user's prompt — it returns `false` when the prompt is purely empirical, engineering-focused, or has no meaningful prompt-relevant mathematical content. If `true`, `PROOF_FRAMING_CONTEXT` (which directs submissions to pursue theorems/lemmas/formalizations that directly answer, support, or advance the user prompt, with novelty/non-triviality valuable only inside that boundary) is appended to every subsequent submitter prompt via `_append_proof_framing()` and persisted to workflow state for crash recovery. Decision is broadcast via `proof_framing_decided`. Lean/proof execution remains separately gated by `lean4_enabled`, and the complete enabled Lean pipeline remains protected.
 
 **Automatic proof rounds**: Proofs-only autonomous runs let brainstorm proof checkpoints run the pipeline below for up to 4 rounds. Round 1 uses normal candidate identification. After each completed round, the coordinator asks again whether there are any remaining proofs in the same source that directly solve the user's prompt or substantially advance a solution path, with newly verified proofs visible through the proof-library context. The checkpoint stops early when a round finds no candidates. When research papers and mathematical proofs are both enabled, automatic proof checkpoints after brainstorming and after completed paper writing are single-round so paper generation remains the main output path. Manual proof checks, deferred paper retry checks, compiler rigor, and LeanOJ are single-round unless their own mode rules say otherwise. The per-source reservation spans the whole automatic multi-round checkpoint, and completed earlier rounds must never overwrite an active later-round resume cursor.
 
-**Assistant memory-support role**: When Session History Memory is enabled, each active workflow uses one shared Assistant memory role (`autonomous_assistant` for autonomous, `leanoj_assistant` for LeanOJ), not one Assistant per submitter/proof candidate/solver lane. Assistant runs beside eligible non-validator, non-critique brainstorming, selection, writing, proof, and Tier 3 roles as optional verified proof-memory support; short-lived topic/title exploration candidate mini-aggregators are excluded. It may provide up to 7 prior verified proof supports from enabled proof-history corpora and reuse useful packs for two eligible receiver reads before refresh, but validators never receive Assistant context and parent workflows never wait on Assistant. Assistant skips true no-external-history targets because it only performs proof-memory retrieval for now. Durable cooldown is keyed to stable run scope, grouping transient task IDs/roles while preserving real source/session separation; zero-useful retrieval can eventually shut down for the run, while stagnant same-pack retrieval backs off without shutdown. User live activity should show normal Assistant retrieval result summaries and explicit Assistant model-output failures, not skip/backoff/shutdown turns. Stale live packs/state clear only on explicit reset/clear or Session History Memory disable.
+**Assistant memory-support role**: When Session History Memory is enabled, each active workflow uses one shared Assistant memory role (`autonomous_assistant` for autonomous, `leanoj_assistant` for LeanOJ), not one Assistant per submitter/proof candidate/solver lane. Assistant runs beside eligible non-validator, non-critique brainstorming, selection, writing, proof, and Tier 3 roles as optional verified Lean proof-history support; it cannot redirect or mathematically reinterpret an unrelated parent goal, and returning no support is valid. Short-lived topic/title exploration candidate mini-aggregators are excluded. It may provide up to 7 prior verified proof supports from enabled proof-history corpora and reuse useful packs for two eligible receiver reads before refresh, but validators never receive Assistant context and parent workflows never wait on Assistant. Lean 4 formalization attempts may reuse the last available Assistant proof pack, but they must not refresh Assistant retrieval until the Lean attempt phase has finished. Assistant skips true no-external-history targets because it only performs proof-memory retrieval for now. Durable cooldown is keyed to stable run scope, grouping transient task IDs/roles while preserving real source/session separation; zero-useful retrieval can eventually shut down for the run, while stagnant same-pack retrieval backs off without shutdown. User live activity should show normal Assistant retrieval result summaries and explicit Assistant model-output failures, not skip/backoff/shutdown turns. Top-level Stop clears live/latest packs; schema-compatible SQLite cache state may remain for re-filtered reuse, while explicit Clear/reset or Session History Memory disable clears durable run-scoped state.
 
 **Pipeline** (`backend/autonomous/core/proof_verification_stage.py`):
 1. **Candidate identification** — `ProofIdentificationAgent` (`build_proof_identification_prompt`) extracts prompt-relevant, high-impact new/novel theorem candidates from brainstorm or paper content. For brainstorms, the brainstorm topic is bounded source-local metadata only and must not broaden eligibility beyond proofs that directly solve, or visibly build toward solving, the user prompt. This stage is not a general known-knowledge-base builder: candidates are ordered by impact on the user prompt (direct solutions/impossibility results first, then decisive reductions, obstructions, and structural theorems that themselves make major progress). Candidate JSON includes non-empty `expected_novelty_tier`, `prompt_relevance_rationale`, `novelty_rationale`, and `why_not_standard_known_result`; invalid, missing-rationale, or `not_novel` candidates are skipped before Lean 4 cost is incurred. Routine helpers, supporting lemmas, trivial/easy proofs, standard/textbook/Mathlib restatements, off-prompt curiosities, program-local firsts, minor reformulations, and single-tactic/routine proof goals are rejected even as fallback targets.
 2. **Optional Mathlib lemma search** — `MathlibLemmaSearchAgent` surfaces relevant existing lemmas into the formalization prompt, tied to the target theorem, user prompt, and brainstorm topic when present
 3. **Optional SMT early-exit** — when `smt_enabled`, `SmtClient` classifies candidates conservatively; only valid `unsat` checks become Lean tactic hints (for example `nativeDecide`, `omega`, `decide`, `norm_num`, `linarith`, or `polyrith`-style hints). `sat`, `unknown`, failed translation, and non-amenable candidates produce no hint. SMT results are never stored as standalone proofs; prompts receive the same user prompt + brainstorm topic relevance context
-4. **Lean 4 formalization attempts** — two-phase retry: up to 3 full-proof attempts via `ProofFormalizationAgent.prove_candidate`, then up to 2 multi-tactic script attempts via `prove_candidate_tactic_script` (5 total per candidate). Formalization prompts receive the same source title/brainstorm topic context plus the complete source brainstorm/paper as mandatory direct context; focused excerpts are supplemental only. The latest Assistant memory pack may be injected as optional proof-pattern/dependency guidance, dropping it before mandatory source context if the prompt would overflow. Direct `search_lean_proofs` prefetch/tool loops are explicit legacy/debug or narrow emergency-repair paths only, not the normal retrieval path. When full SyntheticLib4 Lean code is injected into a prompt and the formalization succeeds, MOTO records a local non-whole-code `model_visible_context` usage attestation; live whole-code usage submission remains tied to the future SyntheticLib4 service contract. Prompt source reads strip appended generated-proof sections so verified proofs enter through the explicit proof-library context, while canonical proof files and user-visible appendices remain preserved. If the complete source cannot fit, fail visibly instead of silently truncating or proving from excerpt-only context. Prior `FailedProofCandidate` failure hints from `proof_database.inject_failure_hints_into_prompt()` thread into each retry.
-5. **Post-Lean preservation + novelty check** — hard integrity rejects only fake proof devices such as new `axiom`/`constant`/`opaque`; statement mismatch is classified as a downshift, never a discard. `autonomous_proof_novelty` ranks the actual Lean-verified theorem against standard references/Mathlib, prompt relevance, and the proof library; program-local firsts are not novel.
-6. **Storage** — `proof_registration.register_verified_lean_proof()` uses `proof_database.add_proof_if_absent()` to persist novel and known proofs as session-aware records (`proofs_index.json`, `proof_<id>.json`, `proof_<id>_lean.lean`). Dependency extraction runs after initial registration and patches the stored record afterward; `proof_verified` may therefore emit before dependency metadata is attached. Same-source duplicate detection is scoped to source type/id + normalized theorem statement + normalized Lean code and must return `duplicate=True` to callers so source files are not appended twice. Cross-source exact theorem/code matches are stored as non-novel reused proof occurrences without spending a novelty API call. If a Lean-accepted proof nevertheless proves a different or narrower theorem than the intended candidate, store the actual theorem statement and retain the original target in notes; this is preservation of a real artifact, not permission to target supporting lemmas. If the active/current `proofs_index.json` is corrupt, rebuild from existing `proof_*.json` record files instead of replacing the library with an empty index; cross-session library scans may skip unreadable historical indexes unless explicitly rebuilt. Automatic proof checkpoints append source-file proof sections only for non-duplicate novel records. User-triggered "Try to Prove This" / manual proof checks append any non-duplicate Lean-verified proof to the target brainstorm or paper source appendix regardless of novelty rating; preserving known verified proofs here is intentional RALPH-loop state so users can inspect validated work and later checks avoid redoing exact proofs that ranked `not_novel`. Cross-session read access is provided by `proof_database.list_proof_library()` (all sessions, novelty-filtered) and `proof_database.get_library_proof(session_id, proof_id)`, consumed by the `ProofLibrary` UI component and `/api/proofs/library` endpoints.
+4. **Lean 4 formalization attempts** — two-phase retry: up to 3 full-proof attempts via `ProofFormalizationAgent.prove_candidate`, then up to 2 multi-tactic script attempts via `prove_candidate_tactic_script` (5 total per candidate). Formalization prompts receive the same source title/brainstorm topic context plus the complete source brainstorm/paper as mandatory direct context; focused excerpts are supplemental only. The last available Assistant memory pack may be injected as optional proof-pattern/dependency guidance, dropping it before mandatory source context if the prompt would overflow; formalization attempts reuse that pack without scheduling Assistant refreshes from Lean feedback. Direct `search_lean_proofs` prefetch/tool loops are explicit legacy/debug or narrow emergency-repair paths only, not the normal retrieval path. Provider max-output truncation before usable Lean code is a failed attempt with live activity, not a research-stopping provider failure. When full SyntheticLib4 Lean code is injected into a prompt and the formalization succeeds, MOTO records a local non-whole-code `model_visible_context` usage attestation; live whole-code usage submission remains tied to the future SyntheticLib4 service contract. Prompt source reads strip appended generated-proof sections so verified proofs enter through the explicit proof-library context, while canonical proof files and user-visible appendices remain preserved. If the complete source cannot fit, fail visibly instead of silently truncating or proving from excerpt-only context. Prior `FailedProofCandidate` failure hints from `proof_database.inject_failure_hints_into_prompt()` thread into each retry.
+5. **Post-Lean preservation + novelty check** — hard integrity rejects only fake proof devices such as new `axiom`/`constant`/`opaque`; statement mismatch is classified as a downshift, never a discard. `autonomous_proof_novelty` ranks the actual Lean-verified theorem against public/standard references, Mathlib, and current prompt relevance without private proof-history input; program-local firsts are not novel. Novelty classifier malformed/schema-invalid JSON gets one bounded sanitized retry before falling back to `not_novel`.
+6. **Storage** — Every newly Lean-verified current-run occurrence gets a full record and independent novelty pass even when private history has identical theorem/code. Afterward, enabled historical MOTO/manual/LeanOJ corpora are silently checked by versioned canonical theorem+Lean identity with the current run/session excluded. A prompt-novel cross-run exact match retains its independent tier/reasoning as provenance and receives the searchable `duplicate_novel` storage/display overlay; `not_novel` remains unchanged, and no duplicate suppresses current-run context or persistence. Persist canonical user prompts and stable run IDs; SyntheticLib4 integrity hashes remain separate from internal canonical hashes.
 
-**Unified proof search**: Assistant is the preferred owner of routine workflow-memory retrieval. Unified proof search retrieves bounded, provenance-carrying, fully Lean-verified examples from prior MOTO proof history, LeanOJ verified artifacts, manual proof history, and authorized SyntheticLib4 snapshots while excluding active/current-run proof records; the configured Assistant LLM then selects/refines at most 7 model-visible supports. Do not add a second model-rater role separate from Assistant, and do not publish live support packs without configured Assistant LLM selection. Search is not candidate discovery, not a workflow stop condition, and not a replacement for MOTO Lean/integrity/registration gates; SyntheticLib4/search unavailability should return structured warnings while local workflows continue where possible.
+**Unified proof search**: Assistant owns routine workflow-memory retrieval from prior MOTO, LeanOJ, manual, and authorized SyntheticLib4 history while excluding the requesting run/session from fresh and reused packs. Exact neighborhoods use `moto-proof-identity-v1` and composite `(corpus, run_id, session_id, source_type, source_id)` occurrence identity. Derived SQLite schema v2 stores canonical columns and atomically publishes a sibling rebuild when schema/identity compatibility fails. SyntheticLib4 publisher hashes remain integrity data. Assistant selects at most 7 supports; search never changes candidate eligibility or bypasses proof gates.
 
 **Parallelism (two-phase execution per stage run)**: Steps 2–4 above (the per-candidate "Phase A" pipeline: lemma search → optional SMT hint → `prove_candidate` → `prove_candidate_tactic_script` → `proof_attempts_exhausted` broadcast on failure) run concurrently across identified candidates inside a single `ProofVerificationStage.run()` invocation. `system_config.proof_max_parallel_candidates` controls Phase A batching: the default is `6`; `0` (env: `MOTO_PROOF_MAX_PARALLEL_CANDIDATES` / `PROOF_MAX_PARALLEL_CANDIDATES`) means unlimited; positive values run strict batches of that size before the next batch starts. Phase A parallelizes agent/model work, but actual Lean 4 subprocess verification is serialized by `Lean4Client` behind a shared execution lock so all candidates queue one-at-a-time against the shared Mathlib workspace; LSP mode remains independently serialized by its operation lock and subprocess fallback uses the same shared queue. The identification stage (step 1) filters off-prompt, trivial, and well-known results before Phase A begins, so Phase A only processes prompt-relevant theorem candidates. Completed candidates are consumed as tasks finish, and steps 5–6 (the "Phase B" post-processing: novelty assessment, `add_proof`, dependency extraction via `ProofDependencyExtractor`, `append_proofs_section`, `novel_proof_discovered` / `known_proof_verified` broadcast, `record_failed_candidate` for brainstorm failures) are performed strictly **one-at-a-time** in Phase-A completion order inside that driver loop so later candidates can observe earlier stored proofs as MOTO dependencies. If any Phase-A task raises account-credit exhaustion, the driver cancels siblings and re-raises so the autonomous coordinator persists the proof checkpoint pause and waits for OpenRouter reset before retrying. Other Phase-A exceptions cancel siblings, save an error checkpoint, broadcast completion with error state, and return `had_error=True` so the coordinator recovery path can continue without orphaned background API calls. `should_stop` is plumbed into each Phase-A pipeline and checked before each Phase-B pass, so a stop-request short-circuits cleanly without leaking tasks.
 
@@ -1231,7 +1240,7 @@ Runs automatically after every completed brainstorm (Tier 1) and completed Tier 
 
 **Proof runtime config snapshot** (`research_metadata.set_proof_runtime_config`): Captures a `ProofRuntimeConfigSnapshot` with three `ProofRoleConfigSnapshot` entries — `brainstorm` (from first aggregator submitter config), `paper` (from Rigor & Proofs Submitter config for proof work), `validator` (from validator config). Each holds provider, model_id, openrouter_provider, openrouter_reasoning_effort, lm_studio_fallback_id, context_window, max_output_tokens, and supercharge_enabled. Lets manual checks run without an active autonomous session when a request snapshot is not supplied.
 
-**Proof WebSocket events** are broadcast through the standard `/api/ws` stream for user-visible progress. Do not make every internal progress notification a rule-level invariant, but keep frontend-consumed events stable and update the hosted contract/API version when changing them. Autonomous proof-round progress events include `proof_round_index` and `proof_max_rounds`. `proof_verified` is emitted only after the proof has passed integrity checks and has been registered/reused in the proof database; payloads include `proof_id`. Novel/known/duplicate proof registration events include the validator's `novelty_tier` and `novelty_reasoning` so live activity can show whether the Lean 4 proof was rated novel or not novel.
+**Proof WebSocket events** are broadcast through the standard `/api/ws` stream for user-visible progress. Keep frontend-consumed events stable and bump the hosted contract when changing them. `proof_verified` emits only after registration/reuse and includes `proof_id`; novelty events expose the stored display tier/reasoning, while independent novelty and duplicate provenance live in typed proof records.
 
 **Proof Stage Critical Invariants**:
 1. Proof stage is skipped when `lean4_enabled=False`; it must not run Lean/proof model work or block brainstorm or paper completion
@@ -1239,19 +1248,19 @@ Runs automatically after every completed brainstorm (Tier 1) and completed Tier 
 3. Subprocess checker must continue to work when `lean4_lsp_enabled=False`; LSP path must not regress subprocess behavior when enabled. Missing/corrupt `.olean` cache errors must trigger one workspace repair/retry, then fail the current check with `LEAN 4 WORKSPACE ERROR` if repair fails; these infrastructure failures must not fall through into tactic mode, emit `proof_attempts_exhausted`, or burn all proof attempts as ordinary Lean feedback
 4. Proof storage is session-aware (`session_manager` → `get_proofs_dir()`) and falls back to the legacy `backend/data/proofs/` layout when no session is active
 5. Per-source reservation lock prevents concurrent proof checks on the same `{source_type}:{source_id}` (autonomous vs manual interleaving)
-6. Novel proofs become highest-priority direct-injection context for subsequent brainstorm/paper submitters via `proof_database.inject_into_prompt()` and stored `ProofRecord` summaries; `inject_failure_hints_into_prompt()` is reserved for unresolved failed proof targets
+6. Only independently prompt-novel, non-duplicate display tiers become highest-priority direct-injection context via `proof_database.inject_into_prompt()`; `duplicate_novel` and `not_novel` remain searchable but excluded there. Failure hints are limited to unresolved active/resumable targets, and clear/archive removes failed candidates while preserving verified history.
 7. Proof certificates stay text-based (`.lean` source + JSON metadata) — no binary artifacts
 8. Hosted/generic mode keeps `lean4_enabled` and `smt_enabled` default false and the hosted image stays Lean-free and Z3-free (no proof binaries in the `python:3.12-slim` runtime)
-9. Proof framing gate runs once on fresh autonomous starts; the resulting `proof_framing_active` flag and `PROOF_FRAMING_CONTEXT` are persisted in workflow state for crash recovery. Lean/proof model execution remains controlled by `lean4_enabled`.
+9. When Mathematical Proofs is allowed, the proof framing gate runs once on fresh autonomous starts; the resulting `proof_framing_active` flag and `PROOF_FRAMING_CONTEXT` are persisted in workflow state for crash recovery. When proof output is disabled, the gate and framing injection are skipped on fresh starts and resume. Lean/proof model execution remains controlled by `lean4_enabled`.
 10. Candidate identification (`build_proof_identification_prompt`) is an impact-first user-prompt relevance gate, not a known-knowledge-base builder. It rejects off-prompt curiosities, routine helper lemmas, supporting lemmas, trivial/easy proofs, standard/textbook/Mathlib restatements, program-local firsts, minor reformulations/local formalizations, and single-tactic/routine proof goals, then returns candidates ordered by direct impact on the user's prompt: direct solutions or impossibility results first, then decisive reductions, obstructions, and structural theorems that themselves make major progress on the requested problem. Candidate prompts require expected novelty plus non-empty prompt-relevance, novelty, and anti-standard-result rationale fields; invalid, missing-rationale, or `not_novel` candidates are skipped before Lean cost. Every candidate that passes this gate is attempted — `proof_max_parallel_candidates` defaults to 6, `0` runs all Phase A work without a batch cap, and positive values run strict batches without truncating the post-identification candidate list; actual Lean 4 subprocess verification queues one-at-a-time through `Lean4Client`, and Phase B (novelty / `add_proof` / dependency extraction / brainstorm+paper `append_proofs_section` / novel/known broadcasts / `record_failed_candidate`) remains strictly serialized in Phase-A completion order so intra-batch MOTO dependencies and per-source proof appending stay coherent
-10b. Proof-identification transport, empty-output, malformed/schema-invalid JSON, or no-JSON reasoning-only failures must preserve the proof checkpoint as an error; only a valid JSON no-candidates response may advance past proof checking as no candidates.
+10b. Proof-identification empty-output, provider output truncation, malformed/schema-invalid JSON, or no-JSON reasoning-only failures get one bounded sanitized JSON retry; if recovery still fails, preserve the proof checkpoint as an error. Only a valid JSON no-candidates response may advance past proof checking as no candidates.
 11. Each Phase-A task owns its own `ProofIdentificationAgent` / `MathlibLemmaSearchAgent` / `ProofFormalizationAgent` instance to keep per-agent `task_sequence` counters collision-free; account-credit exhaustion cancels siblings and preserves the checkpoint for provider pause/retry, while other Phase-A failures cancel siblings and return a structured `had_error=True` stage result for coordinator recovery
 12. `should_stop` propagates into Phase A and is re-checked before each Phase-B pass so stop-requests short-circuit without leaking tasks or partially-applied Phase-B writes. Autonomous proof checkpoints persist the resolved candidate cursor, processed candidate IDs, proof labels/indexes, Lean attempt feedback, and post-Lean metadata needed for Phase B (including accepted theorem names/code) in workflow state so provider-credit pause, Stop/Start, restart, and model changes resume remaining candidates instead of re-identifying from Proof A; provider pauses during Phase A or Phase B must preserve the same checkpoint. Proof checkpoint completion markers are source- and round-trigger-scoped and must not transfer between brainstorms/papers or overwrite active later-round cursors.
 13. Compiler rigor mode (`submit_rigor_lean_theorem`, `_rigor_loop`) is NOT parallelized and is capped at 5 consecutive cycles per rigor loop — rigor cycles discover, verify, and route one theorem per cycle (inline for eligible existing-paper claims, appendix-only for extension-derived theorems or placement fallback) so each verified theorem lands in the paper before the next discovery; the parallel candidate pipeline lives only in `ProofVerificationStage`
 14. Post-Lean integrity scanning rejects newly introduced `axiom`, `constant`, and `opaque` declarations even when the declaration name appears on following lines. Generated source text is not an authorization baseline unless explicitly passed as allowed baseline.
 15. Lean-accepted real proof code is preservation-worthy even when it misses the intended candidate. Alignment classifiers may downshift the stored theorem statement and ranking may classify it as `not_novel`, but the proof artifact must not be discarded except for hard integrity failures.
 16. Unified proof/history search is bounded retrieval support only. It must never broaden proof candidate identification beyond the user's prompt, replace mandatory source context, or count SyntheticLib4 retrieved records as new MOTO proofs without the normal MOTO artifact path.
-17. Assistant memory-support retrieval is a parallel, non-blocking configured LLM role across eligible non-validator, non-critique brainstorming, writing, proof, selection/path, and final-answer roles. It provides optional up-to-7 verified proof supports, reuses useful packs for two eligible receiver reads before refresh, skips no-external-history targets, uses durable run-scoped cooldown for repeated zero-useful or stagnant retrieval, shuts down only for repeated zero-useful retrieval in the current run, hides skip/backoff/shutdown turns from live activity while showing Assistant model-output failures, clears stale live packs/state on explicit reset/clear or Session History Memory disable, and never alters phase transitions or candidate eligibility.
+17. Assistant memory-support retrieval is a parallel, non-blocking configured LLM role across eligible non-validator, non-critique brainstorming, writing, proof, selection/path, and final-answer roles. It provides optional up-to-7 verified supports and reuses useful packs for two eligible receiver reads before refresh, but every cached/latest/stale/OAuth-cooldown reuse is re-filtered against the requesting stable run/session; an emptied pack falls through to normal retrieval. Durable run-scoped cooldown, hidden skip/backoff/shutdown activity, explicit failure visibility, clear/reset semantics, and phase/candidate neutrality remain unchanged.
 
 ---
 

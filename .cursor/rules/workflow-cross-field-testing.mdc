@@ -1,0 +1,39 @@
+---
+description: MOTO cross-field workflow testing and deep verification requirements
+alwaysApply: true
+---
+
+# Cross-Field Workflow Testing
+
+## #1 Rule: The Testing System Must Remain a Removable Overlay
+
+The testing system is its own system that sits on top of the current production
+program. Production code, launch paths, builds, and runtime behavior must never depend
+on the testing folders, test artifacts, test-only imports, or test-only state. A user
+must be able to delete the entire testing system (including `tests/` and generated test
+artifacts) and still have a fully functioning MOTO program with unchanged production
+behavior. This separability requirement takes priority over every other testing rule.
+
+MOTO uses a project-specific testing overlay that combines executable product-law
+invariants, deterministic state recombination, bounded real-code adapters with faked
+dependencies, isolated scenario/result artifacts, inverse target-risk analysis, and a
+support graph.
+
+- Treat `tests/workflow_harness/invariant_catalog.py` and
+  `tests/workflow_testing_plans/02_invariant_catalog.md` as the stable product-law catalog.
+  Add invariant IDs instead of renaming existing IDs.
+- Keep the overlay removable and behavior-neutral. Never add production dependencies on
+  the testing system, runtime shortcuts, hidden stops/caps, impossible state transitions,
+  or production-only test behavior.
+- Keep external providers, Lean/SMT, browser services, credentials, and mutable runtime
+  roots faked, blocked, or isolated unless a test explicitly owns that integration.
+- Record safely unobservable interactions as `blocked`; never report synthetic coverage
+  as a real-code pass.
+- Run focused tests while developing and `npm run test:workflows` after workflow-test or
+  deterministic-artifact changes.
+- Run `npm run test:deep` after every major build and after substantial orchestration,
+  persistence, provider, proof, prompt/RAG, event-contract, runtime-root, or cross-mode
+  change. It is additive: run `npm test` separately for normal backend/frontend coverage.
+- Regenerate deterministic cross-field artifacts with
+  `python -m tests.workflow_cross_field.artifacts` when their inputs change, then verify
+  that the checked-in projection is clean.

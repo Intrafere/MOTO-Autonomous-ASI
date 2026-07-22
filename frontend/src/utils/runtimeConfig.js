@@ -9,7 +9,14 @@ function toScopedKey(key) {
   if (!storagePrefix || typeof key !== 'string' || key.length === 0) {
     return key;
   }
+  if (key.startsWith(`${storagePrefix}:`)) {
+    return key;
+  }
   return `${storagePrefix}:${key}`;
+}
+
+export function getNamespacedStorageKey(key) {
+  return toScopedKey(key);
 }
 
 export function installNamespacedLocalStorage() {

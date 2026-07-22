@@ -21,7 +21,9 @@ from backend.shared.openrouter_client import (
     CreditExhaustionError,
     OpenRouterPrivacyPolicyError,
     RateLimitError,
-    FreeModelExhaustedError
+    FreeModelExhaustedError,
+    OpenRouterInvalidResponseError,
+    OpenRouterNoEndpointsError,
 )
 from backend.shared.openai_codex_client import OpenAICodexError, OAuthUsageLimitError, openai_codex_client
 from backend.shared.sakana_fugu_client import SakanaFuguError, sakana_fugu_client
@@ -34,8 +36,17 @@ from backend.shared.free_model_manager import free_model_manager
 from backend.shared.json_parser import sanitize_model_output_for_retry_context
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import ModelConfig
-from backend.shared.model_error_utils import is_transient_model_call_error
+from backend.shared.model_error_utils import (
+    is_provider_context_length_error,
+    is_retryable_model_output_error,
+    is_transient_model_call_error,
+)
 from backend.shared.provider_notification_store import record_provider_notification
+from backend.shared.provider_errors import (
+    ProviderContextLengthError,
+    ProviderRouteError,
+    ProviderRouteIdentity,
+)
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.response_extraction import extract_response_text
@@ -111,16 +122,32 @@ def oauth_live_activity_error_message(error: Exception) -> str:
 def _is_provider_context_length_error(error: Exception) -> bool:
     """Return true when the provider rejected the request as too large."""
     detail = oauth_live_activity_error_message(error).lower()
-    raw = str(error or "").lower()
-    markers = (
-        "context_length_exceeded",
-        "context length exceeded",
-        "context window",
-        "input exceeds",
-        "request too large",
-        "prompt is too long",
+    return is_provider_context_length_error(error) or is_provider_context_length_error(Exception(detail))
+
+
+def _typed_provider_context_error(
+    error: Exception,
+    *,
+    provider: str,
+    model: str,
+    route_kind: str = "primary",
+) -> ProviderContextLengthError:
+    """Create a redacted typed context rejection without replaying provider text."""
+    if isinstance(error, ProviderContextLengthError):
+        return error.with_route_context(
+            role_id=error.route.role_id,
+            task_id=error.route.task_id,
+            route_kind=route_kind,
+        )
+    return ProviderContextLengthError(
+        f"{provider} rejected the request because its input exceeded the provider context limit.",
+        route=ProviderRouteIdentity(
+            provider=provider,
+            model=model,
+            route_kind=route_kind,
+        ),
+        cause=error,
     )
-    return any(marker in detail or marker in raw for marker in markers)
 
 
 class RetryableProviderError(RuntimeError):
@@ -297,6 +324,10 @@ class APIClientManager:
         self._oauth_cooldown_fallback_roles: set[str] = set()
         self._oauth_error_notified: set[str] = set()
         self._retryable_provider_backoff_state: Dict[str, int] = {}
+
+        # Top-level workflow owners may suppress proof-only Assistant memory for
+        # a run without changing the user's persisted Session History setting.
+        self._assistant_memory_suppression_owners: set[str] = set()
         
         # Lock for thread-safe state updates
         self._state_lock = asyncio.Lock()
@@ -945,28 +976,43 @@ class APIClientManager:
         else:
             self._role_fallback_state[role_id] = "lm_studio"
         
-        # Log configuration with provider details if OpenRouter
+        # Routine role registration is frequent (especially when restoring workflows).
+        # Keep the details available for diagnostics without flooding normal startup logs.
         if config.provider == "openrouter":
             or_model = config.openrouter_model_id or config.model_id
             provider_str = f" via {config.openrouter_provider}" if config.openrouter_provider else ""
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
-            logger.info(f"Configured role '{role_id}': provider=openrouter, model={or_model}{provider_str}{fallback_str}")
+            logger.debug(f"Configured role '{role_id}': provider=openrouter, model={or_model}{provider_str}{fallback_str}")
         elif config.provider == "openai_codex_oauth":
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
-            logger.info(f"Configured role '{role_id}': provider=openai_codex_oauth, model={config.model_id}{fallback_str}")
+            logger.debug(f"Configured role '{role_id}': provider=openai_codex_oauth, model={config.model_id}{fallback_str}")
         elif config.provider == "xai_grok_oauth":
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
-            logger.info(f"Configured role '{role_id}': provider=xai_grok_oauth, model={config.model_id}{fallback_str}")
+            logger.debug(f"Configured role '{role_id}': provider=xai_grok_oauth, model={config.model_id}{fallback_str}")
         elif config.provider == "sakana_fugu":
             fallback_str = f", fallback={config.lm_studio_fallback_id}" if config.lm_studio_fallback_id else ""
-            logger.info(f"Configured role '{role_id}': provider=sakana_fugu, model={config.model_id}{fallback_str}")
+            logger.debug(f"Configured role '{role_id}': provider=sakana_fugu, model={config.model_id}{fallback_str}")
         else:
-            logger.info(f"Configured role '{role_id}': provider=lm_studio, model={config.model_id}")
+            logger.debug(f"Configured role '{role_id}': provider=lm_studio, model={config.model_id}")
 
     def get_role_config(self, role_id: str) -> Optional[ModelConfig]:
         """Return a configured role snapshot without exposing mutable internals."""
         config = self._role_model_configs.get(role_id)
         return config.model_copy() if config is not None else None
+
+    def set_assistant_memory_suppressed(self, owner: str, suppressed: bool) -> None:
+        """Set run-scoped Assistant proof-memory suppression for one owner."""
+        owner_key = str(owner or "").strip()
+        if not owner_key:
+            return
+        if suppressed:
+            self._assistant_memory_suppression_owners.add(owner_key)
+        else:
+            self._assistant_memory_suppression_owners.discard(owner_key)
+
+    def _assistant_memory_is_suppressed(self) -> bool:
+        """Return whether an active workflow has disabled proof-memory context."""
+        return bool(self._assistant_memory_suppression_owners)
 
     @classmethod
     def _assistant_memory_role_is_excluded(cls, role_id: str, task_id: str, prompt: str) -> bool:
@@ -985,6 +1031,8 @@ class APIClientManager:
             "integrity",
             "gate",
             "novelty",
+            "formalization",
+            "proof_form",
         )
         if any(marker in role_key for marker in excluded_markers):
             return True
@@ -1091,6 +1139,7 @@ class APIClientManager:
         prompt: str,
         *,
         workflow_mode_override: Optional[str] = None,
+        run_id_override: str = "",
     ) -> AssistantTargetSnapshot:
         workflow_mode = workflow_mode_override or cls._assistant_workflow_mode_for_role(role_id)
         target_kind = cls._assistant_target_kind_for_role(role_id, task_id, prompt)
@@ -1172,6 +1221,18 @@ class APIClientManager:
             source_title = f"{role_id} {task_id}".strip()
             source_type = role_id
             source_id = task_id
+        formal_target_kinds = {
+            "proof_candidate",
+            "lean_error",
+            "theorem_discovery",
+            "master_proof",
+            "paper_claim",
+        }
+        uses_formal_proof_context = (
+            target_kind in formal_target_kinds
+            or workflow_mode == "manual_proof_check"
+            or (workflow_mode == "leanoj" and target_kind == "final_solver")
+        )
         return AssistantTargetSnapshot(
             workflow_mode=workflow_mode,
             target_kind=target_kind,
@@ -1191,8 +1252,9 @@ class APIClientManager:
             source_title=source_title,
             source_type=source_type,
             source_id=source_id,
+            run_id=run_id_override,
             source_titles=source_titles,
-            imports=["Mathlib"],
+            imports=["Mathlib"] if uses_formal_proof_context else [],
         )
 
     @classmethod
@@ -1309,7 +1371,10 @@ class APIClientManager:
         intentionally left untouched. Initial single-user messages may still
         receive memory before tools are offered to the model.
         """
-        if not system_config.agent_conversation_memory_enabled:
+        if (
+            not system_config.agent_conversation_memory_enabled
+            or self._assistant_memory_is_suppressed()
+        ):
             return messages, ""
         if role_config is None:
             return messages, ""
@@ -1327,6 +1392,9 @@ class APIClientManager:
             task_id,
             prompt,
             workflow_mode_override=workflow_mode_override,
+            run_id_override=await self._assistant_run_id_for_workflow(
+                workflow_mode_override or self._assistant_workflow_mode_for_role(role_id)
+            ),
         )
         target_hash = assistant_proof_search_coordinator.submit_target(snapshot)
         pack = assistant_proof_search_coordinator.get_latest_pack(target_hash)
@@ -1370,7 +1438,10 @@ class APIClientManager:
         non-blocking Assistant lifecycle as normal completions, even if the
         prompt later overflows and no model call is made.
         """
-        if not system_config.agent_conversation_memory_enabled:
+        if (
+            not system_config.agent_conversation_memory_enabled
+            or self._assistant_memory_is_suppressed()
+        ):
             return ""
         async with self._state_lock:
             role_config = self._role_model_configs.get(role_id)
@@ -1386,9 +1457,40 @@ class APIClientManager:
             task_id,
             prompt,
             workflow_mode_override=workflow_mode_override,
+            run_id_override=await self._assistant_run_id_for_workflow(
+                workflow_mode_override or self._assistant_workflow_mode_for_role(role_id)
+            ),
         )
         target_hash = assistant_proof_search_coordinator.submit_target(snapshot)
         return target_hash
+
+    @staticmethod
+    async def _assistant_run_id_for_workflow(workflow_mode: str) -> str:
+        """Resolve durable workflow identity without deriving it from model prompts."""
+        mode = str(workflow_mode or "").strip().lower()
+        if mode in {"aggregator", "compiler", "manual_proof_check"}:
+            try:
+                from backend.autonomous.memory.proof_database import manual_proof_database
+                return await manual_proof_database.get_or_create_active_run_id()
+            except Exception:
+                logger.debug("Could not resolve active manual Assistant run ID", exc_info=True)
+                return ""
+        if mode == "autonomous":
+            try:
+                from backend.autonomous.memory.session_manager import session_manager
+                return str(session_manager.session_id or "").strip() if session_manager.is_session_active else ""
+            except Exception:
+                logger.debug("Could not resolve autonomous Assistant run ID", exc_info=True)
+                return ""
+        if mode == "leanoj":
+            try:
+                from backend.leanoj.core.leanoj_coordinator import leanoj_coordinator
+                state = getattr(leanoj_coordinator, "_state", None)
+                return str(getattr(state, "session_id", "") or "").strip()
+            except Exception:
+                logger.debug("Could not resolve LeanOJ Assistant run ID", exc_info=True)
+                return ""
+        return ""
 
     @staticmethod
     def _append_assistant_memory_block(prompt: str, assistant_context: str) -> str:
@@ -1397,7 +1499,9 @@ class APIClientManager:
             "OPTIONAL ASSISTANT MEMORY CONTEXT:\n"
             f"{assistant_context}\n\n"
             "Use the Assistant memory only when it is relevant. It is supporting context, "
-            "not validator feedback, not a requirement to cite, and not a replacement for the user prompt."
+            "not validator feedback, not a requirement to cite, and not a replacement for the user prompt. "
+            "These proof supports cannot redirect or mathematically reinterpret the user objective, "
+            "and they do not require mathematics or formal proof."
         )
 
     def _prompt_fits_role_budget(
@@ -1682,6 +1786,50 @@ class APIClientManager:
         Returns:
             API response dict
         """
+        try:
+            return await self._generate_completion_once_routed(
+                task_id=task_id,
+                role_id=role_id,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                tools=tools,
+                tool_choice=tool_choice,
+                **kwargs,
+            )
+        except (ProviderRouteError, ProviderContextLengthError) as error:
+            if error.route.role_id == role_id and error.route.task_id == task_id:
+                raise
+            route_kind = error.route.route_kind
+            if error.route.provider == "lm_studio":
+                configured = self._role_model_configs.get(role_id)
+                if configured and configured.provider != "lm_studio":
+                    route_kind = "fallback"
+            configured = self._role_model_configs.get(role_id)
+            raise error.with_route_context(
+                role_id=role_id,
+                task_id=task_id,
+                route_kind=route_kind,
+                configured_provider=configured.provider if configured else "",
+                configured_model=configured.model_id if configured else model,
+            ) from error
+
+    async def _generate_completion_once_routed(
+        self,
+        task_id: str,
+        role_id: str,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, str]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Execute one routed call; the public helper adds safe route context."""
         forced_boost_mode = kwargs.pop("_moto_force_boost_mode", None)
         consume_boost_count = kwargs.pop("_moto_consume_boost_count", True)
         strict_boost = kwargs.pop("_moto_strict_boost", False)
@@ -2004,6 +2152,31 @@ class APIClientManager:
                     raise RuntimeError(f"Strict boost call credits exhausted for task {task_id}: {e}") from e
                 # Continue to primary model routing below
                 
+            except ProviderContextLengthError as e:
+                duration_ms = (time.time() - start_time) * 1000
+                await boost_logger.log_boost_call(
+                    task_id=task_id,
+                    role_id=role_id,
+                    model=boost_model,
+                    prompt_preview=prompt_preview,
+                    response_content="",
+                    duration_ms=duration_ms,
+                    success=False,
+                    error=e.safe_message,
+                    boost_mode=boost_mode,
+                )
+                typed_error = _typed_provider_context_error(
+                    e,
+                    provider="openrouter",
+                    model=boost_model,
+                    route_kind="boost",
+                )
+                if strict_boost:
+                    raise typed_error from e
+                logger.warning(
+                    "Boost context limit rejected task %s; trying primary route",
+                    task_id,
+                )
             except Exception as e:
                 # Log the failed boost call
                 duration_ms = (time.time() - start_time) * 1000
@@ -2531,9 +2704,11 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=str(e),
+                        error=oauth_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
+                if is_retryable_model_output_error(e):
+                    raise
                 if role_config.lm_studio_fallback_id:
                     async with self._state_lock:
                         self._role_fallback_state[role_id] = "lm_studio"
@@ -2544,6 +2719,12 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
+                    if _is_provider_context_length_error(e):
+                        raise _typed_provider_context_error(
+                            e,
+                            provider="sakana_fugu",
+                            model=sakana_model,
+                        ) from e
                     if is_transient_model_call_error(e):
                         raise self._as_retryable_provider_error(
                             provider="sakana_fugu",
@@ -2551,10 +2732,6 @@ class APIClientManager:
                             role_id=role_id,
                             model=sakana_model,
                             error=e,
-                        ) from e
-                    if _is_provider_context_length_error(e):
-                        raise ValueError(
-                            f"Sakana Fugu context_length_exceeded for role '{role_id}': {e}"
                         ) from e
                     await self._broadcast_unrecoverable_sakana_fugu_error(
                         role_id=role_id,
@@ -2578,9 +2755,11 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=str(e),
+                        error=oauth_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
+                if is_retryable_model_output_error(e):
+                    raise
                 if role_config.lm_studio_fallback_id:
                     async with self._state_lock:
                         self._role_fallback_state[role_id] = "lm_studio"
@@ -2592,6 +2771,12 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
+                    if _is_provider_context_length_error(e):
+                        raise _typed_provider_context_error(
+                            e,
+                            provider="sakana_fugu",
+                            model=sakana_model,
+                        ) from e
                     if is_transient_model_call_error(e):
                         raise self._as_retryable_provider_error(
                             provider="sakana_fugu",
@@ -2599,10 +2784,6 @@ class APIClientManager:
                             role_id=role_id,
                             model=sakana_model,
                             error=e,
-                        ) from e
-                    if _is_provider_context_length_error(e):
-                        raise ValueError(
-                            f"Sakana Fugu context_length_exceeded for role '{role_id}': {e}"
                         ) from e
                     await self._broadcast_unrecoverable_sakana_fugu_error(
                         role_id=role_id,
@@ -2776,9 +2957,11 @@ class APIClientManager:
                             tokens_used=None,
                             duration_ms=duration_ms,
                             success=False,
-                            error=str(e),
+                            error=oauth_live_activity_error_message(e),
                             phase=self._current_autonomous_phase,
                         )
+                    if is_retryable_model_output_error(e):
+                        raise
                     if role_config.lm_studio_fallback_id:
                         async with self._state_lock:
                             self._role_fallback_state[role_id] = "lm_studio"
@@ -2789,6 +2972,12 @@ class APIClientManager:
                         )
                         model = role_config.lm_studio_fallback_id
                     else:
+                        if _is_provider_context_length_error(e):
+                            raise _typed_provider_context_error(
+                                e,
+                                provider="openai_codex_oauth",
+                                model=codex_model,
+                            ) from e
                         if is_transient_model_call_error(e):
                             raise self._as_retryable_provider_error(
                                 provider="openai_codex_oauth",
@@ -2796,10 +2985,6 @@ class APIClientManager:
                                 role_id=role_id,
                                 model=codex_model,
                                 error=e,
-                            ) from e
-                        if _is_provider_context_length_error(e):
-                            raise ValueError(
-                                f"OpenAI Codex context_length_exceeded for role '{role_id}': {e}"
                             ) from e
                         await self._broadcast_unrecoverable_codex_error(
                             role_id=role_id,
@@ -2823,9 +3008,11 @@ class APIClientManager:
                             tokens_used=None,
                             duration_ms=duration_ms,
                             success=False,
-                            error=str(e),
+                            error=oauth_live_activity_error_message(e),
                             phase=self._current_autonomous_phase,
                         )
+                    if is_retryable_model_output_error(e):
+                        raise
                     if role_config.lm_studio_fallback_id:
                         async with self._state_lock:
                             self._role_fallback_state[role_id] = "lm_studio"
@@ -2837,6 +3024,12 @@ class APIClientManager:
                         )
                         model = role_config.lm_studio_fallback_id
                     else:
+                        if _is_provider_context_length_error(e):
+                            raise _typed_provider_context_error(
+                                e,
+                                provider="openai_codex_oauth",
+                                model=codex_model,
+                            ) from e
                         if is_transient_model_call_error(e):
                             raise self._as_retryable_provider_error(
                                 provider="openai_codex_oauth",
@@ -2844,10 +3037,6 @@ class APIClientManager:
                                 role_id=role_id,
                                 model=codex_model,
                                 error=e,
-                            ) from e
-                        if _is_provider_context_length_error(e):
-                            raise ValueError(
-                                f"OpenAI Codex context_length_exceeded for role '{role_id}': {e}"
                             ) from e
                         await self._broadcast_unrecoverable_codex_error(
                             role_id=role_id,
@@ -2944,9 +3133,11 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=str(e),
+                        error=oauth_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
+                if is_retryable_model_output_error(e):
+                    raise
                 if role_config.lm_studio_fallback_id:
                     async with self._state_lock:
                         self._role_fallback_state[role_id] = "lm_studio"
@@ -2957,6 +3148,12 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
+                    if _is_provider_context_length_error(e):
+                        raise _typed_provider_context_error(
+                            e,
+                            provider="xai_grok_oauth",
+                            model=xai_model,
+                        ) from e
                     if is_transient_model_call_error(e):
                         raise self._as_retryable_provider_error(
                             provider="xai_grok_oauth",
@@ -2964,10 +3161,6 @@ class APIClientManager:
                             role_id=role_id,
                             model=xai_model,
                             error=e,
-                        ) from e
-                    if _is_provider_context_length_error(e):
-                        raise ValueError(
-                            f"xAI Grok context_length_exceeded for role '{role_id}': {e}"
                         ) from e
                     await self._broadcast_unrecoverable_xai_grok_error(
                         role_id=role_id,
@@ -2991,9 +3184,11 @@ class APIClientManager:
                         tokens_used=None,
                         duration_ms=duration_ms,
                         success=False,
-                        error=str(e),
+                        error=oauth_live_activity_error_message(e),
                         phase=self._current_autonomous_phase,
                     )
+                if is_retryable_model_output_error(e):
+                    raise
                 if role_config.lm_studio_fallback_id:
                     async with self._state_lock:
                         self._role_fallback_state[role_id] = "lm_studio"
@@ -3005,6 +3200,12 @@ class APIClientManager:
                     )
                     model = role_config.lm_studio_fallback_id
                 else:
+                    if _is_provider_context_length_error(e):
+                        raise _typed_provider_context_error(
+                            e,
+                            provider="xai_grok_oauth",
+                            model=xai_model,
+                        ) from e
                     if is_transient_model_call_error(e):
                         raise self._as_retryable_provider_error(
                             provider="xai_grok_oauth",
@@ -3012,10 +3213,6 @@ class APIClientManager:
                             role_id=role_id,
                             model=xai_model,
                             error=e,
-                        ) from e
-                    if _is_provider_context_length_error(e):
-                        raise ValueError(
-                            f"xAI Grok context_length_exceeded for role '{role_id}': {e}"
                         ) from e
                     await self._broadcast_unrecoverable_xai_grok_error(
                         role_id=role_id,
@@ -3219,6 +3416,30 @@ class APIClientManager:
                 except CreditExhaustionError as inner_e:
                     logger.warning(f"Rotated model {alt_model} credit exhaustion: {inner_e}")
                     break
+                except OpenRouterPrivacyPolicyError:
+                    raise
+                except ProviderContextLengthError as inner_e:
+                    raise inner_e.with_route_context(
+                        role_id=role_id,
+                        task_id=task_id,
+                        route_kind="free_rotation",
+                        configured_provider=configured_provider,
+                        configured_model=configured_model,
+                    ) from inner_e
+                except OpenRouterNoEndpointsError as inner_e:
+                    free_model_manager.mark_model_failed(alt_model)
+                    logger.warning(
+                        "Rotated model %s has no available endpoint, trying next: %s",
+                        alt_model,
+                        inner_e,
+                    )
+                except (OpenRouterInvalidResponseError, ValueError) as inner_e:
+                    free_model_manager.mark_model_failed(alt_model)
+                    logger.warning(
+                        "Rotated model %s failed provider call, trying next: %s",
+                        alt_model,
+                        inner_e,
+                    )
 
         # Step 2: Auto-Selector Backup — try openrouter/free
         if free_model_manager.auto_selector_enabled:
@@ -3266,6 +3487,14 @@ class APIClientManager:
                 if free_model_manager.is_account_exhausted():
                     free_model_manager.clear_account_exhaustion()
                 return result
+            except ProviderContextLengthError as inner_e:
+                raise inner_e.with_route_context(
+                    role_id=role_id,
+                    task_id=task_id,
+                    route_kind="auto_selector",
+                    configured_provider=configured_provider,
+                    configured_model=configured_model,
+                ) from inner_e
             except (RateLimitError, CreditExhaustionError) as inner_e:
                 logger.warning(f"Auto-selector '{auto_model}' also failed: {inner_e}")
 

@@ -842,6 +842,12 @@ class HighParamSubmitter:
             source_material_context=source_material_context,
             source_material_label=self._source_material_label,
         )
+        from backend.shared.solution_path.integration import with_budgeted_solver_plan
+        prompt = with_budgeted_solver_plan(
+            prompt,
+            getattr(self, "solution_path_manager", None),
+            self.available_input_tokens,
+        )
 
         if count_tokens(prompt) > max_allowed:
             logger.warning("Rigor discovery prompt too large; retrying without RAG evidence")
@@ -978,9 +984,14 @@ class HighParamSubmitter:
             return None
 
         if not success:
-            last_error = attempts[-1].error_output if attempts else ""
+            last_feedback = attempts[-1] if attempts else None
+            last_error = last_feedback.error_output if last_feedback else ""
             if MANDATORY_FULL_SOURCE_CONTEXT_OVERFLOW_PREFIX.lower() in last_error.lower():
-                raise ValueError(last_error)
+                from backend.autonomous.agents.proof_formalization_agent import (
+                    ProofFormalizationContextOverflowError,
+                )
+
+                raise ProofFormalizationContextOverflowError(last_feedback)
             # Record as an open proof target so the next rigor cycle's
             # discovery step can optionally retry it.
             try:
@@ -1204,6 +1215,12 @@ class HighParamSubmitter:
             proof_id=proof_id,
             placement_attempt=placement_attempt,
             validator_rejection_feedback=validator_rejection_feedback,
+        )
+        from backend.shared.solution_path.integration import with_budgeted_solver_plan
+        prompt = with_budgeted_solver_plan(
+            prompt,
+            getattr(self, "solution_path_manager", None),
+            self.available_input_tokens,
         )
 
         max_allowed = rag_config.get_available_input_tokens(

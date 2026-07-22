@@ -3,6 +3,7 @@ Aggregator API routes.
 """
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from typing import List, Optional
+import asyncio
 import logging
 from pathlib import Path
 import aiofiles
@@ -16,7 +17,7 @@ from backend.shared.token_tracker import token_tracker
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.manual_proof_context import get_manual_proof_context_lock
-from backend.shared.workflow_start_guard import workflow_start_guard
+from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.aggregator.core.coordinator import coordinator
@@ -24,8 +25,10 @@ from backend.aggregator.core.context_allocator import context_allocator
 from backend.aggregator.memory.event_log import event_log
 from backend.aggregator.memory.shared_training import (
     clear_manual_aggregator_prompt,
+    clear_manual_main_submitter_config,
     load_manual_aggregator_prompt,
     save_manual_aggregator_prompt,
+    save_manual_main_submitter_config,
     shared_training_memory,
 )
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
@@ -39,11 +42,57 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/aggregator", tags=["aggregator"])
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+ALLOWED_UPLOAD_EXTENSIONS = {".txt", ".lean"}
+AGGREGATOR_WORKFLOW_OWNER = "manual_aggregator"
+_aggregator_workflow_lease: WorkflowLease | None = None
+
+
+def _release_aggregator_workflow_lease() -> None:
+    global _aggregator_workflow_lease
+    workflow_start_guard.release(_aggregator_workflow_lease)
+    _aggregator_workflow_lease = None
+
+
+coordinator.top_level_terminal_callback = _release_aggregator_workflow_lease
 
 MANUAL_PROOF_ACTIVE_KEYS = {
     "brainstorm:manual_aggregator",
     "paper:manual_compiler_current",
 }
+
+
+async def _delete_uploaded_file(file_ref: str) -> bool:
+    """Delete a logical upload filename from the upload root."""
+    safe_filename = validate_single_path_component(file_ref, "filename")
+    if Path(safe_filename).suffix.lower() not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise ValueError("Only .txt and .lean uploads are managed here")
+
+    uploads_dir = Path(system_config.user_uploads_dir)
+    file_path = resolve_path_within_root(uploads_dir, safe_filename)
+    if not file_path.exists():
+        return False
+    if not file_path.is_file():
+        raise ValueError("Upload path is not a file")
+
+    await asyncio.to_thread(file_path.unlink)
+    return True
+
+
+async def _clear_uploaded_files() -> int:
+    """Clear text/Lean user uploads so stale files cannot seed later workflows."""
+    uploads_dir = Path(system_config.user_uploads_dir)
+    if not uploads_dir.exists():
+        return 0
+
+    deleted = 0
+    for file_path in uploads_dir.iterdir():
+        if (
+            file_path.is_file()
+            and file_path.suffix.lower() in ALLOWED_UPLOAD_EXTENSIONS
+        ):
+            await asyncio.to_thread(file_path.unlink)
+            deleted += 1
+    return deleted
 
 
 async def _manual_proof_clear_blocker() -> Optional[str]:
@@ -145,6 +194,10 @@ async def _require_openrouter_host_provider_available(
 
 def _get_start_conflict() -> Optional[str]:
     """Return a user-facing conflict message if another workflow is active."""
+    if workflow_start_guard.active_owner:
+        if workflow_start_guard.active_owner == AGGREGATOR_WORKFLOW_OWNER:
+            return "Aggregator is already running"
+        return "Cannot start Aggregator while another workflow is running. Stop it first."
     if coordinator.is_running:
         return "Aggregator is already running"
 
@@ -208,6 +261,10 @@ async def _ensure_manual_event_log_loaded_for_read() -> None:
 @router.post("/start")
 async def start_aggregator(request: AggregatorStartRequest):
     """Start the aggregator system."""
+    global _aggregator_workflow_lease
+    manual_solution_path = None
+    parent_start_committed = False
+    coordinator_started = False
     try:
         async with workflow_start_guard.reserve():
             conflict = _get_start_conflict()
@@ -349,6 +406,106 @@ async def start_aggregator(request: AggregatorStartRequest):
                 ),
             )
 
+            # One durable plan spans the active manual Aggregator -> Compiler run.
+            from pathlib import Path
+            from backend.shared.solution_path import (
+                build_review_prompt,
+                compact_review_prompt,
+                review_with_json_retry,
+                solution_path_registry,
+            )
+            primary_submitter = next(
+                (
+                    config
+                    for config in request.submitter_configs
+                    if config.submitter_id == 1
+                ),
+                None,
+            )
+            if primary_submitter is None:
+                raise ValueError(
+                    "Main Submitter 1 is required for solution-path review."
+                )
+            await save_manual_main_submitter_config(
+                primary_submitter.model_dump(mode="json")
+            )
+            reviewer_role_id = "manual_solution_path_reviewer"
+            api_client_manager.configure_role(
+                reviewer_role_id,
+                ModelConfig(
+                    provider=primary_submitter.provider,
+                    model_id=primary_submitter.model_id,
+                    openrouter_model_id=(
+                        primary_submitter.model_id
+                        if primary_submitter.provider == "openrouter"
+                        else None
+                    ),
+                    openrouter_provider=primary_submitter.openrouter_provider,
+                    openrouter_reasoning_effort=primary_submitter.openrouter_reasoning_effort,
+                    lm_studio_fallback_id=primary_submitter.lm_studio_fallback_id,
+                    context_window=primary_submitter.context_window,
+                    max_output_tokens=primary_submitter.max_output_tokens,
+                    supercharge_enabled=primary_submitter.supercharge_enabled,
+                ),
+            )
+
+            async def review_solution_path(proposal, current_plan):
+                prompt = build_review_prompt(
+                    user_prompt=request.user_prompt,
+                    proposal=proposal,
+                    current_plan=current_plan,
+                )
+                from backend.shared.response_extraction import extract_message_text
+
+                async def call(messages):
+                    return await api_client_manager.generate_completion(
+                        task_id=f"agg_sub1_solution_path_{proposal.review_count:03d}",
+                        role_id=reviewer_role_id,
+                        model=primary_submitter.model_id,
+                        messages=messages,
+                        temperature=0.0,
+                        max_tokens=primary_submitter.max_output_tokens,
+                    )
+
+                return await review_with_json_retry(
+                    prompt=prompt,
+                    call_completion=call,
+                    extract_text=lambda response: extract_message_text(
+                        response["choices"][0]["message"]
+                    ),
+                    context_window=primary_submitter.context_window,
+                    max_output_tokens=primary_submitter.max_output_tokens,
+                    compact_prompt=compact_review_prompt(
+                        user_prompt=request.user_prompt,
+                        proposal=proposal,
+                        current_plan=current_plan,
+                    ),
+                )
+
+            manual_solution_path = await solution_path_registry.acquire(
+                Path(system_config.data_dir) / "solution_paths",
+                workflow_mode="manual",
+                user_prompt=request.user_prompt,
+                stable_run_id="manual",
+                reviewer=review_solution_path,
+            )
+            # Keep Assistant as the final configured role for compatibility
+            # with settings/defaulting observers; the dedicated reviewer keeps
+            # its independent role ID and immutable copied configuration.
+            api_client_manager.configure_role(
+                "aggregator_assistant",
+                ModelConfig(
+                    provider=assistant_provider,
+                    model_id=assistant_model,
+                    openrouter_provider=assistant_openrouter_provider,
+                    openrouter_reasoning_effort=assistant_reasoning_effort,
+                    lm_studio_fallback_id=assistant_fallback,
+                    context_window=assistant_context_size,
+                    max_output_tokens=assistant_max_output_tokens,
+                    supercharge_enabled=assistant_supercharge_enabled,
+                ),
+            )
+
             # Initialize coordinator with per-submitter configs (includes OpenRouter provider fields)
             await coordinator.initialize(
                 user_prompt=request.user_prompt,
@@ -364,11 +521,19 @@ async def start_aggregator(request: AggregatorStartRequest):
                 validator_lm_studio_fallback=request.validator_lm_studio_fallback,
                 validator_supercharge_enabled=request.validator_supercharge_enabled,
                 creativity_emphasis_boost_enabled=request.creativity_emphasis_boost_enabled,
+                solution_path_manager=manual_solution_path,
             )
             # Start coordinator
             token_tracker.reset()
             token_tracker.start_timer()
             await coordinator.start()
+            coordinator_started = coordinator.is_running
+            if not coordinator_started:
+                raise RuntimeError("Aggregator did not enter running state")
+            _aggregator_workflow_lease = workflow_start_guard.commit(
+                AGGREGATOR_WORKFLOW_OWNER
+            )
+            parent_start_committed = True
 
             return {
                 "status": "started",
@@ -386,22 +551,34 @@ async def start_aggregator(request: AggregatorStartRequest):
         # Other errors
         logger.error(f"Failed to start aggregator: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        if coordinator_started and not parent_start_committed:
+            await coordinator.stop()
+            token_tracker.stop_timer()
+        if manual_solution_path is not None and not parent_start_committed:
+            await manual_solution_path.stop()
 
 
 @router.post("/stop")
 async def stop_aggregator():
     """Stop the aggregator system."""
-    try:
-        await coordinator.stop()
-        await assistant_proof_search_coordinator.stop_all(
-            broadcast=True,
-            reason="aggregator_stopped",
-        )
-        token_tracker.stop_timer()
-        return {"status": "stopped", "message": "Aggregator system stopped"}
-    except Exception as e:
-        logger.error(f"Failed to stop aggregator: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    async with workflow_start_guard.reserve():
+        try:
+            await coordinator.stop()
+            if getattr(coordinator, "solution_path_manager", None) is not None:
+                await coordinator.solution_path_manager.stop()
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="aggregator_stopped",
+            )
+            if coordinator.is_running:
+                raise RuntimeError("Aggregator remained active after stop")
+            token_tracker.stop_timer()
+            _release_aggregator_workflow_lease()
+            return {"status": "stopped", "message": "Aggregator system stopped"}
+        except Exception as e:
+            logger.error(f"Failed to stop aggregator: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/status", response_model=SystemStatus)
@@ -467,7 +644,7 @@ async def save_results():
 async def clear_all_submissions():
     """Clear all accepted submissions and reset the system."""
     try:
-        async with get_manual_proof_context_lock():
+        async with workflow_start_guard.reserve(), get_manual_proof_context_lock():
             if compiler_coordinator.is_running:
                 raise HTTPException(
                     status_code=409,
@@ -478,23 +655,32 @@ async def clear_all_submissions():
                 raise HTTPException(status_code=409, detail=blocker)
             if coordinator.is_running:
                 await coordinator.stop()
+            _release_aggregator_workflow_lease()
             archived_proofs = await manual_proof_database.archive_current_run(
                 Path(system_config.data_dir) / "manual_proof_runs",
                 user_prompt=await load_manual_aggregator_prompt(),
                 reason="manual_aggregator_clear_all",
             )
             await coordinator.clear_all_submissions()
+            from backend.shared.solution_path import solution_path_registry
+            await solution_path_registry.clear_run(
+                Path(system_config.data_dir) / "solution_paths", "manual"
+            )
+            coordinator.solution_path_manager = None
             await assistant_proof_search_coordinator.stop_all(
                 broadcast=True,
                 reason="aggregator_cleared",
             )
             await assistant_proof_search_coordinator.clear_cooldown_state()
             await clear_manual_aggregator_prompt()
+            await clear_manual_main_submitter_config()
+            deleted_uploads = await _clear_uploaded_files()
         
         return {
             "status": "cleared",
             "message": "All submissions cleared and system reset",
             "archived_manual_proofs": archived_proofs,
+            "deleted_uploads": deleted_uploads,
         }
     except HTTPException:
         raise
@@ -508,12 +694,18 @@ async def upload_file(file: UploadFile = File(...)):
     """Upload a user file."""
     try:
         safe_filename = validate_single_path_component(file.filename, "filename")
-        if not safe_filename.lower().endswith(".txt"):
-            raise HTTPException(status_code=400, detail="Only .txt uploads are supported")
+        if Path(safe_filename).suffix.lower() not in ALLOWED_UPLOAD_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Only .txt and .lean uploads are supported")
 
         content = await file.read(MAX_UPLOAD_BYTES + 1)
         if len(content) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=413, detail="Upload exceeds 5 MB limit")
+        try:
+            decoded_content = content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="Uploads must be UTF-8 encoded text files")
+        if not decoded_content.strip():
+            raise HTTPException(status_code=400, detail="Upload is empty or contains only whitespace")
 
         uploads_dir = Path(system_config.user_uploads_dir)
         uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -534,6 +726,24 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to upload file: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.delete("/upload-file/{filename}")
+async def delete_uploaded_file(filename: str):
+    """Remove a previously uploaded user file."""
+    try:
+        deleted = await _delete_uploaded_file(filename)
+        return {
+            "status": "deleted" if deleted else "not_found",
+            "filename": validate_single_path_component(filename, "filename"),
+            "deleted": deleted,
+        }
+    except ValueError as e:
+        logger.warning("Rejected unsafe upload deletion request: %s", e)
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to delete uploaded file: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

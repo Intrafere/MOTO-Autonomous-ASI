@@ -184,19 +184,10 @@ class VolumeOrganizer:
                 current_volume = organization.model_dump()
                 validator_feedback = feedback
         
-        # Force completion on max iterations
-        logger.warning(f"VolumeOrganizer: Forcing completion at iteration {self.MAX_ITERATIONS}")
-        
-        if current_volume:
-            organization = VolumeOrganization(
-                volume_title=current_volume.get("volume_title", "Research Volume"),
-                chapters=[VolumeChapter(**ch) for ch in current_volume.get("chapters", [])],
-                outline_complete=True,
-                revision_reasoning="Forced completion after maximum iterations"
-            )
-            await final_answer_memory.save_volume_organization(organization)
-            return organization
-        
+        logger.error(
+            "VolumeOrganizer: No validator-approved completed organization after "
+            f"{self.MAX_ITERATIONS} iterations"
+        )
         return None
     
     async def _generate_organization(
@@ -230,6 +221,11 @@ class VolumeOrganizer:
             # Validate prompt size
             prompt_tokens = count_tokens(prompt)
             max_input = self._calculate_max_input_tokens()
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt, getattr(self, "solution_path_manager", None), max_input
+            )
+            prompt_tokens = count_tokens(prompt)
             
             if prompt_tokens > max_input:
                 logger.error(f"VolumeOrganizer: Prompt too large ({prompt_tokens} > {max_input})")
@@ -265,48 +261,80 @@ class VolumeOrganizer:
             
             # Parse JSON using central utility
             data = parse_json(content)
-            
-            # Parse chapters
+            volume_title = data.get("volume_title")
+            outline_complete = data.get("outline_complete")
+            reasoning = data.get("reasoning")
+            chapter_items = data.get("chapters")
+            if not isinstance(volume_title, str) or not volume_title.strip():
+                raise ValueError("Volume organization requires a non-empty volume_title")
+            if type(outline_complete) is not bool:
+                raise ValueError("Volume organization requires outline_complete to be a boolean")
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                raise ValueError("Volume organization requires non-empty reasoning")
+            if not isinstance(chapter_items, list) or not chapter_items:
+                raise ValueError("Volume organization requires a non-empty chapters list")
+
             chapters = []
-            for ch in data.get("chapters", []):
+            for index, ch in enumerate(chapter_items, start=1):
+                if not isinstance(ch, dict):
+                    raise ValueError(f"Volume chapter {index} must be an object")
+                chapter_type = ch.get("chapter_type")
+                title = ch.get("title")
+                order = ch.get("order")
+                status = ch.get("status", "pending")
+                description = ch.get("description", "")
+                paper_id = ch.get("paper_id")
+                if chapter_type not in {
+                    "existing_paper", "introduction", "conclusion", "gap_paper"
+                }:
+                    raise ValueError(f"Volume chapter {index} has invalid chapter_type")
+                if not isinstance(title, str) or not title.strip():
+                    raise ValueError(f"Volume chapter {index} requires a non-empty title")
+                if type(order) is not int or order < 1:
+                    raise ValueError(f"Volume chapter {index} requires a positive integer order")
+                if status not in {"pending", "writing", "complete"}:
+                    raise ValueError(f"Volume chapter {index} has invalid status")
+                if not isinstance(description, str):
+                    raise ValueError(f"Volume chapter {index} description must be a string")
+                if chapter_type == "existing_paper" and (
+                    not isinstance(paper_id, str) or not paper_id.strip()
+                ):
+                    raise ValueError(
+                        f"Existing-paper chapter {index} requires a non-empty paper_id"
+                    )
                 chapter = VolumeChapter(
-                    chapter_type=ch.get("chapter_type", "existing_paper"),
-                    paper_id=ch.get("paper_id"),
-                    title=ch.get("title", "Untitled Chapter"),
-                    order=ch.get("order", len(chapters) + 1),
-                    status=ch.get("status", "pending"),
-                    description=ch.get("description", "")
+                    chapter_type=chapter_type,
+                    paper_id=paper_id.strip() if isinstance(paper_id, str) else None,
+                    title=title.strip(),
+                    order=order,
+                    status=status,
+                    description=description.strip(),
                 )
                 chapters.append(chapter)
             
-            # Ensure we have introduction and conclusion
-            has_intro = any(ch.chapter_type == "introduction" for ch in chapters)
-            has_conclusion = any(ch.chapter_type == "conclusion" for ch in chapters)
-            
-            if not has_intro:
-                chapters.insert(0, VolumeChapter(
-                    chapter_type="introduction",
-                    title="Introduction",
-                    order=1,
-                    description="Introduction to the volume"
-                ))
-            
-            if not has_conclusion:
-                chapters.append(VolumeChapter(
-                    chapter_type="conclusion",
-                    title="Conclusion",
-                    order=len(chapters) + 1,
-                    description="Conclusion of the volume"
-                ))
-            
-            # Fix ordering if needed
-            chapters = self._normalize_chapter_order(chapters)
+            intro_count = sum(ch.chapter_type == "introduction" for ch in chapters)
+            conclusion_count = sum(ch.chapter_type == "conclusion" for ch in chapters)
+            if intro_count != 1 or conclusion_count != 1:
+                raise ValueError(
+                    "Volume organization requires exactly one introduction and one conclusion"
+                )
+            orders = [ch.order for ch in chapters]
+            if sorted(orders) != list(range(1, len(chapters) + 1)):
+                raise ValueError("Volume chapter orders must be unique and contiguous from 1")
+            ordered = sorted(chapters, key=lambda chapter: chapter.order)
+            if (
+                ordered[0].chapter_type != "introduction"
+                or ordered[-1].chapter_type != "conclusion"
+            ):
+                raise ValueError(
+                    "Volume organization must place introduction first and conclusion last"
+                )
             
             return VolumeOrganization(
-                volume_title=data.get("volume_title", "Research Volume"),
-                chapters=chapters,
-                outline_complete=data.get("outline_complete", False),
-                revision_reasoning=data.get("reasoning", "")
+                volume_title=volume_title.strip(),
+                chapters=ordered,
+                outline_complete=outline_complete,
+                revision_reasoning=reasoning.strip(),
             )
             
         except FreeModelExhaustedError:
@@ -371,6 +399,10 @@ class VolumeOrganizer:
                 papers_summary=all_papers,
                 volume_organization=organization.model_dump()
             )
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(
+                prompt, getattr(self, "solution_path_manager", None)
+            )
             
             # Validate prompt size
             prompt_tokens = count_tokens(prompt)
@@ -412,8 +444,16 @@ class VolumeOrganizer:
             
             # Parse JSON using central utility
             data = parse_json(content)
-            
+            from backend.shared.solution_path.integration import enqueue_optional_update
             decision = data.get("decision", "reject")
+            await enqueue_optional_update(
+                data,
+                getattr(self, "solution_path_manager", None),
+                proposer_role=f"{self.role_id}_validator",
+                source_task_id=task_id,
+                source_phase="volume_organization_validation",
+                source_decision=decision if decision in {"accept", "reject"} else None,
+            )
             reasoning = data.get("reasoning", "No reasoning provided")
             
             return decision == "accept", reasoning

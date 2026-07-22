@@ -141,37 +141,17 @@ class CompilerRAGManager:
             
             logger.info(f"Initial load: Processing aggregator database with {submission_count} submissions")
             
-            # ACQUIRE GLOBAL RAG LOCK FOR ENTIRE INITIAL LOAD
-            # This prevents the aggregator's re-chunking from interrupting between chunk sizes
-            await rag_operation_lock.acquire("Compiler initial load (all 4 chunk sizes)")
-            
-            try:
+            async with rag_operation_lock.operation("Compiler initial load (all 4 chunk sizes)"):
                 # Load the aggregator database file directly as a user file
                 # This will chunk it at all 4 configs (256/512/768/1024)
                 aggregator_file_path = str(shared_training_memory.file_path)
                 
                 if Path(aggregator_file_path).exists():
-                    # Import ingestion pipeline to manually control chunking
-                    from backend.aggregator.ingestion.pipeline import ingestion_pipeline
-                    
-                    # Ingest at all 4 chunk sizes
-                    chunks_by_size = await ingestion_pipeline.ingest_file(
+                    await rag_manager.add_document(
                         aggregator_file_path,
-                        rag_config.submitter_chunk_intervals,  # All 4 configs
+                        chunk_sizes=rag_config.submitter_chunk_intervals,
                         is_user_file=True,
-                        trusted_roots=[
-                            system_config.data_dir,
-                            system_config.user_uploads_dir,
-                        ],
                     )
-                    
-                    # Add all chunks while holding the lock
-                    for chunk_size, chunks in chunks_by_size.items():
-                        await rag_manager._add_chunks(chunks, chunk_size)
-                    
-                    # Track document
-                    rag_manager.document_count += 1
-                    rag_manager.permanent_documents.add(Path(aggregator_file_path).name)
                     
                     logger.info(f"Aggregator database loaded as user file: {submission_count} submissions, 4 chunk configs")
                 else:
@@ -181,10 +161,6 @@ class CompilerRAGManager:
                 self.aggregator_submissions_ragged = submission_count
                 self._aggregator_db_loaded = True
                 
-            finally:
-                # ALWAYS RELEASE LOCK
-                rag_operation_lock.release()
-            
         except Exception as e:
             logger.error(f"Failed to load aggregator database: {e}")
             raise
@@ -196,45 +172,41 @@ class CompilerRAGManager:
         Removes old chunks and re-adds the entire updated file with global lock.
         """
         try:
-            # ACQUIRE GLOBAL RAG LOCK
-            await rag_operation_lock.acquire("Compiler re-RAG aggregator DB")
+            async with rag_operation_lock.operation("Compiler re-RAG aggregator DB"):
+                # Import here to avoid circular dependency
+                from backend.aggregator.memory.shared_training import shared_training_memory
             
-            # Import here to avoid circular dependency
-            from backend.aggregator.memory.shared_training import shared_training_memory
+                current_count = await shared_training_memory.get_insights_count()
             
-            current_count = await shared_training_memory.get_insights_count()
+                if current_count <= self.aggregator_submissions_ragged:
+                    logger.info("Incremental re-RAG: No new aggregator submissions to process")
+                    return
             
-            if current_count <= self.aggregator_submissions_ragged:
-                logger.info("Incremental re-RAG: No new aggregator submissions to process")
-                return
-            
-            new_submissions_count = current_count - self.aggregator_submissions_ragged
-            logger.info(f"Incremental re-RAG: Processing {new_submissions_count} new aggregator submissions ({current_count} total)")
+                new_submissions_count = current_count - self.aggregator_submissions_ragged
+                logger.info(f"Incremental re-RAG: Processing {new_submissions_count} new aggregator submissions ({current_count} total)")
             
             # Remove old aggregator database chunks from RAG
-            aggregator_file_path = str(shared_training_memory.file_path)
-            await rag_manager.remove_document("rag_shared_training.txt")
+                aggregator_file_path = str(shared_training_memory.file_path)
+                await rag_manager.remove_document(Path(aggregator_file_path).name)
             
             # Re-add the entire updated file with all 4 chunk configs
-            if Path(aggregator_file_path).exists():
-                await rag_manager.add_document(
-                    aggregator_file_path,
-                    chunk_sizes=rag_config.submitter_chunk_intervals,  # All 4 configs
-                    is_user_file=True  # Treated as permanent, never evicted
-                )
-                logger.info(f"Incremental re-RAG complete: {new_submissions_count} new submissions added ({current_count} total)")
-            else:
-                logger.error(f"Aggregator database file not found during re-RAG: {aggregator_file_path}")
+                if Path(aggregator_file_path).exists():
+                    await rag_manager.add_document(
+                        aggregator_file_path,
+                        chunk_sizes=rag_config.submitter_chunk_intervals,
+                        is_user_file=True
+                    )
+                    logger.info(f"Incremental re-RAG complete: {new_submissions_count} new submissions added ({current_count} total)")
+                else:
+                    logger.error(f"Aggregator database file not found during re-RAG: {aggregator_file_path}")
+                    return
             
             # Update tracking
-            self.aggregator_submissions_ragged = current_count
+                self.aggregator_submissions_ragged = current_count
             
         except Exception as e:
             logger.error(f"Failed to incrementally re-RAG aggregator database: {e}")
             raise
-        finally:
-            # ALWAYS RELEASE LOCK
-            rag_operation_lock.release()
     
     async def retrieve_for_mode(
         self,

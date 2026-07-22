@@ -8,6 +8,7 @@ from pathlib import Path
 
 from backend.shared.config import rag_config
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
 from backend.shared.utils import count_tokens
 from backend.aggregator.core.rag_manager import rag_manager
 
@@ -25,12 +26,38 @@ class ContextAllocationError(Exception):
         available_tokens: int | None = None,
         context_window: int | None = None,
         output_reserve: int | None = None,
+        route: ProviderRouteIdentity | None = None,
+        cause: BaseException | None = None,
     ) -> None:
         super().__init__(message)
         self.required_tokens = required_tokens
         self.available_tokens = available_tokens
         self.context_window = context_window
         self.output_reserve = output_reserve
+        self.route = route
+        self.cause = cause
+
+    @classmethod
+    def from_provider_error(
+        cls,
+        error: ProviderContextLengthError,
+        message: str,
+        *,
+        required_tokens: int | None = None,
+        available_tokens: int | None = None,
+        context_window: int | None = None,
+        output_reserve: int | None = None,
+    ) -> "ContextAllocationError":
+        """Translate provider overflow while preserving its effective route."""
+        return cls(
+            message,
+            required_tokens=required_tokens,
+            available_tokens=available_tokens,
+            context_window=context_window,
+            output_reserve=output_reserve,
+            route=error.route,
+            cause=error,
+        )
 
 
 class ContextAllocator:

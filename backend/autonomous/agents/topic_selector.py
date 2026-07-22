@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class TopicSelectorAgent:
     """
     Agent that selects the next brainstorm topic.
-    Can choose to start a new topic, continue existing, or combine topics.
+    Can choose to start a new topic or continue an existing incomplete topic.
     
     Context handling:
     - Direct injects all metadata summaries (brainstorms, papers, rejections)
@@ -130,6 +130,13 @@ class TopicSelectorAgent:
                 if prompt_tokens > max_input_tokens:
                     logger.error(f"TopicSelector: Even after truncation, prompt ({prompt_tokens}) exceeds limit ({max_input_tokens})")
                     return None
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt,
+                getattr(self, "solution_path_manager", None),
+                max_input_tokens,
+            )
+            prompt_tokens = count_tokens(prompt)
             
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -179,17 +186,20 @@ class TopicSelectorAgent:
                 
                 # Validate required fields
                 action = data.get("action", "")
-                if action not in ["new_topic", "continue_existing", "combine_topics"]:
+                if action not in ["new_topic", "continue_existing"]:
                     logger.error(f"TopicSelector: Invalid action: {action}")
+                    return None
+                reasoning = data.get("reasoning")
+                if not isinstance(reasoning, str) or not reasoning.strip():
+                    logger.error("TopicSelector: Missing non-empty reasoning")
                     return None
                 
                 # Create submission
                 submission = TopicSelectionSubmission(
                     action=action,
                     topic_id=data.get("topic_id"),
-                    topic_ids=data.get("topic_ids", []),
                     topic_prompt=data.get("topic_prompt", ""),
-                    reasoning=data.get("reasoning", "No reasoning provided")
+                    reasoning=reasoning.strip(),
                 )
                 
                 # Validate based on action
@@ -197,11 +207,7 @@ class TopicSelectorAgent:
                     logger.error("TopicSelector: continue_existing requires topic_id")
                     return None
                 
-                if action == "combine_topics" and len(submission.topic_ids) < 2:
-                    logger.error("TopicSelector: combine_topics requires at least 2 topic_ids")
-                    return None
-                
-                if action in ["new_topic", "combine_topics"] and not submission.topic_prompt:
+                if action == "new_topic" and not submission.topic_prompt:
                     logger.error(f"TopicSelector: {action} requires topic_prompt")
                     return None
                 
@@ -244,7 +250,7 @@ class TopicSelectorAgent:
         """
         await autonomous_rejection_logs.add_topic_selection_rejection(
             action=submission.action,
-            proposed_topic=submission.topic_prompt or submission.topic_id or str(submission.topic_ids),
+            proposed_topic=submission.topic_prompt or submission.topic_id or "",
             rejection_reasoning=rejection_reasoning
         )
         logger.info(f"TopicSelector: Logged rejection for action={submission.action}")

@@ -198,9 +198,13 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'proof_retry_started':
         return `Retrying ${data.count || 0} failed proof candidate(s) against paper ${data.source_id}`;
       case 'proof_check_no_candidates':
-        return `${proofRoundLabel() || 'Proof check'} found no formal theorem candidates in ${data.source_type} ${data.source_id}`;
-      case 'proof_check_candidates_found':
-        return `${proofRoundLabel() || 'Proof check'} candidates found: ${data.count || 0}`;
+        return `${proofRoundLabel() ? `${proofRoundLabel()} discovery` : 'Proof discovery'} found 0 proof candidates; no proofs will be attempted`;
+      case 'proof_check_candidates_found': {
+        const count = Number(data.count || 0);
+        const subject = count === 1 ? 'proof candidate' : 'proof candidates';
+        const prefix = proofRoundLabel() ? `${proofRoundLabel()} discovery` : 'Proof discovery';
+        return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
+      }
       case 'proof_attempt_started':
         return `${proofName}, Attempt ${data.attempt || 1} started: ${proofTarget}`;
       case 'proof_attempt_failed':

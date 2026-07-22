@@ -46,6 +46,7 @@ import {
 } from '../../utils/autonomousProfiles';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
+import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
 import ProofStrengthBadge from '../ProofStrengthBadge';
 import RawSettingsEditor from '../RawSettingsEditor';
 import { readBooleanStorage } from '../../utils/safeStorage';
@@ -442,8 +443,8 @@ const AutonomousResearchSettings = ({
   const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
-  const [freeModelLooping, setFreeModelLooping] = useState(true);
-  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(true);
+  const [freeModelLooping, setFreeModelLooping] = useState(false);
+  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(false);
   const [tier3Enabled, setTier3Enabled] = useState(false);
   const [isLoadedFromStorage, setIsLoadedFromStorage] = useState(false);
 
@@ -465,7 +466,7 @@ const AutonomousResearchSettings = ({
   const [proofSettingsLspIdleTimeout, setProofSettingsLspIdleTimeout] = useState('600');
   const [proofSettingsMaxParallelCandidates, setProofSettingsMaxParallelCandidates] = useState('6');
   const [proofSettingsSmtEnabled, setProofSettingsSmtEnabled] = useState(false);
-  const [proofSettingsSmtTimeout, setProofSettingsSmtTimeout] = useState('30');
+  const [proofSettingsSmtTimeout, setProofSettingsSmtTimeout] = useState('300');
   const [savingProofSettings, setSavingProofSettings] = useState(false);
   const [proofSettingsMessage, setProofSettingsMessage] = useState('');
   
@@ -659,8 +660,8 @@ const AutonomousResearchSettings = ({
 
       try {
         const freeModelSettings = await openRouterAPI.getFreeModelSettings();
-        setFreeModelLooping(freeModelSettings.looping_enabled ?? true);
-        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? true);
+        setFreeModelLooping(freeModelSettings.looping_enabled ?? false);
+        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? false);
       } catch (err) {
         console.error('Failed to load free model settings:', err);
       }
@@ -765,7 +766,7 @@ const AutonomousResearchSettings = ({
         setProofSettingsLspIdleTimeout(String(status.lean4_lsp_idle_timeout ?? 600));
         setProofSettingsMaxParallelCandidates(String(status.proof_max_parallel_candidates ?? 6));
         setProofSettingsSmtEnabled(Boolean(status.smt_enabled));
-        setProofSettingsSmtTimeout(String(status.smt_timeout ?? 30));
+        setProofSettingsSmtTimeout(String(status.smt_timeout ?? 300));
       } catch (err) {
         console.error('Failed to load Lean 4 proof status:', err);
       }
@@ -1526,7 +1527,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
       ? Math.max(0, parsedMaxParallelCandidates)
       : 6;
     const parsedSmtTimeout = parseInt(proofSettingsSmtTimeout, 10);
-    const smtTimeout = Number.isFinite(parsedSmtTimeout) ? parsedSmtTimeout : 30;
+    const smtTimeout = Number.isFinite(parsedSmtTimeout) ? parsedSmtTimeout : 300;
 
     try {
       setSavingProofSettings(true);
@@ -1950,22 +1951,16 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             >
               🔗 OpenRouter Model List
             </button>
-            <label
-              className="settings-checkbox-label model-refresh-controls__toggle"
-              style={{ cursor: isRunning ? 'not-allowed' : 'pointer' }}
-            >
-              <input
-                type="checkbox"
-                checked={freeOnly}
-                onChange={(e) => setFreeOnly(e.target.checked)}
-                disabled={isRunning}
-                style={{ marginRight: '0.5rem' }}
-              />
-              Free models only
-            </label>
+            <OpenRouterFreeModelsControl
+              checked={freeOnly}
+              disabled={isRunning}
+              onChange={setFreeOnly}
+            />
           </>
         )}
-        {developerModeEnabled ? (
+        {developerModeEnabled && (
+          <>
+          {hasOpenRouterKey && <span className="model-refresh-controls__divider" aria-hidden="true" />}
           <label
             className="settings-checkbox-label model-refresh-controls__toggle"
             style={{ cursor: isRunning ? 'not-allowed' : 'pointer' }}
@@ -1978,10 +1973,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             />
             Edit Raw
           </label>
-        ) : (
-          <span className="settings-developer-mode-hint">
-            Developer mode: press Shift + Z + X to toggle raw JSON settings.
-          </span>
+          </>
         )}
       </div>
 
@@ -2157,7 +2149,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
 
         <RoleConfig
           title="Assistant"
-          hint="Runs in parallel during brainstorming, writing, proof work, and final-answer work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases do not receive Assistant context."
+          hint="Runs in parallel during brainstorming, writing, proof work, and final-answer work to retrieve up to 7 relevant verified proof-memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases do not receive Assistant context."
           rolePrefix="assistant"
           localConfig={localConfig}
           handleProviderChange={handleProviderChange}

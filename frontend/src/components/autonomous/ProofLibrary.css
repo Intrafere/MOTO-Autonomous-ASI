@@ -1,3 +1,19 @@
+.proof-library .run-history-group-header.proof-prompt-group-header {
+  appearance: none;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+}
+
+.proof-library .proof-prompt-group-chevron {
+  margin-left: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.proof-library .proof-prompt-group > .run-history-group-body {
+  padding: 1rem;
+}
+
 /* ProofLibrary.css - Proof-specific overrides for the FinalAnswerLibrary layout */
 
 .proof-library .library-header h2 {
@@ -11,6 +27,10 @@
 
 .proof-card--known {
   border-left: 3px solid #666;
+}
+
+.proof-card--duplicate-novel {
+  border-left: 3px solid #8b5cf6;
 }
 
 /* Tier-specific card accents */
@@ -40,6 +60,11 @@
 .proof-badge--known {
   background: #555;
   color: #ccc;
+}
+
+.proof-badge--duplicate-novel {
+  background: linear-gradient(135deg, #8b5cf6 0%, #c4b5fd 100%);
+  color: #140a2e;
 }
 
 /* Tier-specific badges */

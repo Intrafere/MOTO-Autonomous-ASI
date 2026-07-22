@@ -15,6 +15,7 @@ from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import BrainstormMetadata
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
+from backend.autonomous.memory.proof_database import is_duplicate_novel_tier
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class BrainstormMemory:
                 topic_prompt=topic_prompt,
                 status="in_progress",
                 submission_count=0,
+                total_acceptances=0,
                 created_at=datetime.now(),
                 last_activity=datetime.now(),
                 papers_generated=[]
@@ -274,6 +276,7 @@ class BrainstormMemory:
                 metadata = await self.get_metadata(topic_id)
                 if metadata:
                     metadata.submission_count += 1
+                    metadata.total_acceptances += 1
                     metadata.last_activity = datetime.now()
                     await self._save_metadata(metadata)
                 
@@ -349,10 +352,14 @@ class BrainstormMemory:
                     theorem_statement = str(getattr(proof, "theorem_statement", "") or proof.get("theorem_statement", "")).strip()
                     proof_id = str(getattr(proof, "proof_id", "") or proof.get("proof_id", "")).strip()
                     novel = bool(getattr(proof, "novel", False) if hasattr(proof, "novel") else proof.get("novel", False))
+                    novelty_tier = str(getattr(proof, "novelty_tier", "") or proof.get("novelty_tier", "")).strip()
                     lean_code = str(getattr(proof, "lean_code", "") or proof.get("lean_code", "")).strip()
                     if proof_id and proof_id in existing_ids:
                         continue
-                    status = "Verified (Novel)" if novel else "Verified (Known)"
+                    if is_duplicate_novel_tier(novelty_tier):
+                        status = "Verified (Duplicate Novel)"
+                    else:
+                        status = "Verified (Novel)" if novel else "Verified (Known)"
 
                     lines.extend(
                         [
@@ -639,68 +646,6 @@ class BrainstormMemory:
     
     # Note: Completion feedback methods moved to autonomous_rejection_logs.py
     # to avoid duplication and maintain single source of truth
-    
-    # ========================================================================
-    # TOPIC COMBINATION
-    # ========================================================================
-    
-    async def combine_topics(
-        self, 
-        new_topic_id: str, 
-        new_topic_prompt: str,
-        source_topic_ids: List[str]
-    ) -> Optional[BrainstormMetadata]:
-        """
-        Combine multiple brainstorm topics into a new one.
-        Merges all submissions from source topics.
-        """
-        async with self._lock:
-            # Create new brainstorm
-            metadata = BrainstormMetadata(
-                topic_id=new_topic_id,
-                topic_prompt=new_topic_prompt,
-                status="in_progress",
-                submission_count=0,
-                created_at=datetime.now(),
-                last_activity=datetime.now(),
-                papers_generated=[]
-            )
-            
-            # Collect all papers from source topics
-            for source_id in source_topic_ids:
-                source_meta = await self.get_metadata(source_id)
-                if source_meta:
-                    metadata.papers_generated.extend(source_meta.papers_generated)
-            
-            # Remove duplicates
-            metadata.papers_generated = list(set(metadata.papers_generated))
-            
-            # Create empty database file
-            # NOTE: Do NOT write header comments here - they get interpreted as submission content
-            # by the fallback parsing in shared_training.py
-            db_path = self._get_database_path(new_topic_id)
-            async with aiofiles.open(db_path, 'w', encoding='utf-8') as f:
-                await f.write("")  # Empty file - submissions will be added below
-            
-            # Merge submissions from all source topics
-            submission_counter = 0
-            for source_id in source_topic_ids:
-                submissions = await self.get_submissions_list(source_id)
-                for sub in submissions:
-                    submission_counter += 1
-                    async with aiofiles.open(db_path, 'a', encoding='utf-8') as f:
-                        await f.write(f"\n{'=' * 80}\n")
-                        await f.write(f"SUBMISSION #{submission_counter} | Accepted: {datetime.now().isoformat()}\n")
-                        await f.write(f"(Originally from {source_id})\n")
-                        await f.write(f"{'=' * 80}\n\n")
-                        await f.write(sub['content'])
-                        await f.write("\n")
-            
-            metadata.submission_count = submission_counter
-            await self._save_metadata(metadata)
-            
-            logger.info(f"Combined {len(source_topic_ids)} topics into {new_topic_id} with {submission_counter} submissions")
-            return metadata
     
     # ========================================================================
     # DELETE OPERATIONS

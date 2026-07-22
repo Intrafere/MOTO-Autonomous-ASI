@@ -1,0 +1,26 @@
+{
+  "adapter": "real_route",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "autonomous_current_and_history",
+    "manual_active_and_history",
+    "leanoj_current_and_history",
+    "pairwise_sentinels"
+  ],
+  "fields": [
+    "proof_scope_isolation",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "proof_scope.manual_not_in_autonomous_current"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_proof_scope_matrix_isolated_under_temp_root",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+}

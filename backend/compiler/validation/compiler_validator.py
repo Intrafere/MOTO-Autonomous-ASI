@@ -1,7 +1,6 @@
 """
 Compiler validator - validates document edits for coherence, rigor, and placement.
 """
-import json
 import logging
 import uuid
 from typing import Optional, Dict, Any, Callable, Tuple
@@ -12,7 +11,6 @@ from backend.shared.models import CompilerSubmission, CompilerValidationResult
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
-from backend.aggregator.validation.json_validator import json_validator
 from backend.compiler.memory.paper_memory import (
     paper_memory,
     PAPER_ANCHOR,
@@ -24,15 +22,30 @@ from backend.compiler.memory.outline_memory import outline_memory
 logger = logging.getLogger(__name__)
 
 
-CLAIM_TYPE_VALIDATION_RULES = """CLAIM TYPE VALIDATION (CRITICAL):
-- Classify substantive claims as one of: theoretical claim, literature claim, empirical claim, or artifact claim.
-- Theoretical claims are acceptable only if they are supported by sound derivation, proof, or explicit assumptions in the document.
-- Literature claims are acceptable only if they include explicit in-text citations identifying the external source. Vague phrases like "studies show" are insufficient.
-- Empirical claims include benchmark numbers, latency, throughput, speedups, accuracy, perplexity, ablations, hardware metrics, measured runtimes, and evaluation outcomes.
-- Artifact claims include statements about code, kernels, experiments, benchmark logs, reproductions, or accompanying implementations.
-- Empirical or artifact claims may be presented as established fact ONLY when backed by an explicit external citation or a provided artifact in context.
-- If empirical or artifact support is absent, acceptable wording is limited to hypothesis, expected benefit, design target, proposed experiment, validation plan, limitation, or future work.
-- Reject content that invents citations, experiments, benchmark numbers, hardware measurements, datasets, or code artifacts."""
+CLAIM_TYPE_VALIDATION_RULES = """CLAIM-TYPE AND DOMAIN-APPROPRIATE VALIDATION (CRITICAL):
+- Classify each substantive claim by the standard that can actually establish it; a submission may contain several claim types.
+- Mathematical/theoretical claims require a sound derivation or proof, or clearly stated assumptions and a correctly delimited conjectural/conditional status. Check definitions, quantifiers, edge cases, and inferential steps when applicable.
+- Literature/historical claims require an explicit in-text citation identifying the external source. Vague authority phrases such as "studies show" are insufficient, and citations must not be invented.
+- Empirical claims include measured outcomes, benchmark numbers, latency, throughput, speedups, accuracy, perplexity, ablations, hardware metrics, datasets, and experimental observations. Established empirical claims require an explicit external citation or a provided artifact; otherwise they must be framed as hypotheses, predictions, targets, protocols, or proposed evaluations.
+- Artifact claims include statements that code, kernels, experiments, logs, datasets, reproductions, or implementations exist or have particular behavior. They require a cited or provided inspectable artifact; a proposed artifact must be labeled as proposed.
+- Engineering/software claims require a technically coherent mechanism, explicit requirements and constraints, compatible interfaces, feasible resource assumptions, relevant complexity or performance reasoning, failure-mode analysis, and a verification/evaluation route. A design is not validated merely because it is plausible prose.
+- Strategic/policy/causal claims require an explicit objective, actors and constraints, a defensible causal model, intervention mechanism, assumptions, countervailing effects and risks, and measurable evaluation or falsification criteria. Correlation, intention, or narrative plausibility alone does not establish causation.
+- Accept mixed or other domain claims under the strongest applicable standard: factual accuracy, logical validity, methodological soundness, provenance, feasibility, and independent checkability.
+- Reject fabricated evidence, citations, experiments, metrics, datasets, implementations, capabilities, guarantees, or causal certainty."""
+
+MATHEMATICAL_RIGOR_CLAIM_RULES = """CLAIM TYPE VALIDATION (CRITICAL):
+- Mathematical and theoretical claims are acceptable only when supported by sound derivation, proof, or explicit assumptions in the document.
+- Literature claims require explicit in-text citations identifying the external source; vague authority claims are insufficient.
+- Empirical or artifact claims may be stated as established fact only when backed by an explicit citation or provided artifact.
+- Without that support, empirical or artifact material must remain a hypothesis, expected benefit, proposed validation, limitation, or future work.
+- Reject invented citations, experiments, metrics, datasets, code artifacts, or mathematical support."""
+
+PRIMARY_VALIDATION_FINAL_REMINDER = (
+    "\n\nFINAL RESPONSE REQUIREMENT: Return exactly one JSON object matching "
+    "the primary validation schema above. The primary decision and required "
+    "boolean checks are authoritative; any optional advisory extension must "
+    "not replace, weaken, or contradict them."
+)
 
 
 def _diagnostic_char_info(text: str, max_chars: int = 100) -> str:
@@ -340,13 +353,8 @@ def find_with_normalized_hyphens(needle: str, haystack: str) -> Tuple[int, str]:
     return (-1, "")
 
 
-class JSONParseError(Exception):
-    """Raised when JSON parsing fails - signals need for retry"""
-    def __init__(self, message: str, response: str, parse_error: Exception):
-        self.message = message
-        self.response = response
-        self.parse_error = parse_error
-        super().__init__(message)
+class ValidatorContractError(ValueError):
+    """Raised only when model output violates the validator JSON contract."""
 
 
 class CompilerValidator:
@@ -364,6 +372,7 @@ class CompilerValidator:
         user_prompt: str,
         websocket_broadcaster: Optional[Callable] = None,
         proof_database_store=None,
+        solution_path_manager=None,
     ):
         self.model_name = model_name
         self.user_prompt = (
@@ -372,6 +381,7 @@ class CompilerValidator:
             else user_prompt
         )
         self.websocket_broadcaster = websocket_broadcaster
+        self.solution_path_manager = solution_path_manager
         self._initialized = False
         
         # Task tracking for workflow panel and boost integration
@@ -396,60 +406,46 @@ class CompilerValidator:
         logger.info(f"Compiler validator initialized with model: {self.model_name}")
     
     
-    def _parse_json_response(self, response: str) -> Dict[str, Any]:
+    @staticmethod
+    def _validate_primary_validation_contract(
+        parsed: Any,
+        *,
+        require_checks: bool,
+    ) -> Dict[str, Any]:
+        """Validate only the primary response fields used by the compiler.
+
+        Optional extensions such as ``solution_path_update`` deliberately remain
+        outside this contract so their omission or malformed content cannot alter
+        an otherwise valid primary decision.
         """
-        Parse JSON response using central parse_json utility.
-        Raises JSONParseError on failure to signal retry needed.
-        
-        The central parse_json() handles:
-        - Reasoning tokens (<think>...</think>)
-        - Markdown code blocks (```json ... ```)
-        - Control tokens
-        - LaTeX escape sequences
-        - Malformed JSON detection
-        - Enhanced error logging
-        """
-        try:
-            # Use central parse_json for consistent sanitization and parsing
-            return parse_json(response)
-        except (json.JSONDecodeError, ValueError) as e:
-            # Raise custom exception to signal retry needed
-            logger.error(f"Compiler validator: JSON parse failed - {e}")
-            raise JSONParseError(f"Failed to parse JSON response", response, e)
-    
-    def _fallback_parse(self, response: str) -> Dict[str, Any]:
-        """
-        Fallback parser for when all JSON parse attempts fail.
-        Uses keyword heuristics to extract decision from natural language.
-        
-        Strategy: Look for "accept" vs "reject" keywords in response.
-        """
-        response_lower = response.lower()
-        
-        # Detect decision via keywords
-        decision = "reject"  # Default to reject for safety
-        if 'accepted: true' in response_lower or 'decision: accept' in response_lower:
-            decision = "accept"
-        elif 'accepted: false' in response_lower or 'decision: reject' in response_lower:
-            decision = "reject"
-        elif 'accept' in response_lower and 'reject' not in response_lower:
-            decision = "accept"
-        elif 'reject' in response_lower:
-            decision = "reject"
-        
-        logger.warning(f"CompilerValidator: Fallback parser used (determined decision={decision} from keywords)")
-        
-        return {
-            'decision': decision,
-            'reasoning': response,  # Full response, no truncation
-        }
+        if not isinstance(parsed, dict):
+            raise ValidatorContractError("Validation response must be a JSON object")
+
+        decision = parsed.get("decision")
+        if decision not in {"accept", "reject"}:
+            raise ValidatorContractError(
+                "decision must be exactly 'accept' or 'reject'"
+            )
+
+        reasoning = parsed.get("reasoning")
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            raise ValidatorContractError("reasoning must be a non-empty string")
+
+        if require_checks:
+            for field in ("coherence_check", "rigor_check", "placement_check"):
+                if type(parsed.get(field)) is not bool:
+                    raise ValidatorContractError(f"{field} must be a boolean")
+
+        return parsed
     
     async def _parse_json_with_retry(
         self, 
         response: str, 
         original_prompt: str,
         system_prompt: str,
-        retry_count: int = 0
+        retry_count: int = 0,
+        *,
+        require_checks: bool = True,
     ) -> Dict[str, Any]:
         """
         Parse JSON with a single conversational retry on failure.
@@ -461,7 +457,7 @@ class CompilerValidator:
         Flow:
         1. Attempt parse via parse_json()
         2. If fails: ask LLM to reformat via conversation (single attempt)
-        3. If still fails: use _fallback_parse()
+        3. If still invalid: raise a contract error for structured rejection
         
         Args:
             response: LLM response to parse
@@ -470,20 +466,25 @@ class CompilerValidator:
             retry_count: Current retry attempt (0-indexed) - kept for API compatibility
         
         Returns:
-            Parsed dict (from JSON or fallback)
+            Parsed and structurally valid primary response dict
         """
         # First attempt: try to parse JSON directly
         try:
             parsed = parse_json(response)
-            return parsed
+            return self._validate_primary_validation_contract(
+                parsed,
+                require_checks=require_checks,
+            )
             
         except Exception as parse_error:
             logger.warning(f"CompilerValidator: JSON parse failed, attempting single retry: {parse_error}")
             
-            # If we're already in a retry, use fallback immediately to prevent deep recursion
+            # If already in a retry, fail closed instead of inferring a decision
+            # from malformed prose.
             if retry_count > 0:
-                logger.info("CompilerValidator: Already in retry, using fallback parser")
-                return self._fallback_parse(response)
+                raise ValidatorContractError(
+                    "Validation JSON contract remained invalid after retry"
+                ) from parse_error
             
             # Build retry prompt asking for reformatted JSON. Keep failed-output
             # context, but sanitize it before any replay in prompt or assistant turn.
@@ -497,6 +498,8 @@ class CompilerValidator:
                 f"YOUR PREVIOUS RESPONSE:\n{failed_output_preview}\n\n"
                 f"PARSE ERROR: {str(parse_error)}\n\n"
                 "Please provide the exact same validation decision in valid JSON format.\n"
+                "Retain the one valid optional top-level `solution_path_update` from "
+                "your previous response if present; omission remains valid.\n"
                 "CRITICAL: Properly escape backslashes (use \\\\) and quotes (use \\\").\n"
                 "Respond with ONLY the corrected JSON, no explanation."
             )
@@ -544,24 +547,32 @@ class CompilerValidator:
                 
                 if not retry_response.get("choices"):
                     logger.error("CompilerValidator: Retry request returned no choices")
-                    return self._fallback_parse(response)
+                    raise ValidatorContractError(
+                        "Validation JSON retry returned no choices"
+                    )
                 
                 message = retry_response["choices"][0]["message"]
                 retry_output = extract_message_text(message)
                 
                 try:
                     parsed = parse_json(retry_output)
+                    parsed = self._validate_primary_validation_contract(
+                        parsed,
+                        require_checks=require_checks,
+                    )
                     logger.info("CompilerValidator: Retry succeeded!")
                     return parsed
                 except Exception as retry_parse_error:
                     logger.warning(f"CompilerValidator: Retry parse failed: {retry_parse_error}")
-                    return self._fallback_parse(response)
+                    raise ValidatorContractError(
+                        "Validation JSON contract remained invalid after bounded retry"
+                    ) from retry_parse_error
                     
             except RetryableProviderError:
                 raise
             except Exception as retry_error:
                 logger.error(f"CompilerValidator: Retry request failed - {retry_error}")
-                return self._fallback_parse(response)
+                raise
     
     def _handle_protected_marker_old_string(
         self,
@@ -707,6 +718,37 @@ class CompilerValidator:
                 placement_check=False,  # THIS is the issue - wrong operation for empty document
                 json_valid=True,
                 validation_stage="pre-validation"
+            )
+
+        if (
+            submission.operation == "full_content"
+            and not document_is_empty
+            and submission.mode != "outline_create"
+        ):
+            logger.warning(
+                "Pre-validation failed: full_content cannot replace a non-empty %s",
+                document_name,
+            )
+            return CompilerValidationResult(
+                submission_id=submission.submission_id,
+                decision="reject",
+                reasoning=(
+                    "NON_EMPTY_FULL_CONTENT_ERROR: operation='full_content' is only "
+                    f"valid when the {document_name} is empty. Replacing a populated "
+                    f"{document_name} would discard existing work.\n\n"
+                    "FIX REQUIRED:\n"
+                    "1. Use replace, insert_after, or delete with an exact old_string.\n"
+                    "2. Preserve all existing sections and system-managed markers."
+                ),
+                summary=(
+                    f"full_content cannot replace a non-empty {document_name} "
+                    "(pre-validation)"
+                ),
+                coherence_check=True,
+                rigor_check=True,
+                placement_check=False,
+                json_valid=True,
+                validation_stage="pre-validation",
             )
         
         # Only check operations that require old_string matching
@@ -1015,6 +1057,7 @@ class CompilerValidator:
             CompilerValidationResult
         """
         logger.info(f"Validating {submission.mode} submission: {submission.submission_id}")
+        validation_mode = self._get_effective_validation_mode(submission)
         
         # PRE-PROCESSING: Strip any placeholder text from submission content and new_string
         # Instead of rejecting, we silently strip placeholders to simplify the workflow
@@ -1057,7 +1100,16 @@ class CompilerValidator:
             return string_match_result
         
         # Build validation prompt
-        prompt = self._build_validation_prompt(submission, current_paper, current_outline)
+        prompt = self._build_validation_prompt(
+            submission,
+            current_paper,
+            current_outline,
+            validation_mode=validation_mode,
+        )
+        if validation_mode != "rigor_lean_placement":
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(prompt, self.solution_path_manager)
+        prompt += PRIMARY_VALIDATION_FINAL_REMINDER
         
         # CRITICAL: Verify actual prompt size fits in context window
         from backend.shared.utils import count_tokens
@@ -1119,13 +1171,31 @@ class CompilerValidator:
             llm_output = extract_message_text(message)
             
             # Parse JSON response with retry logic
-            validation_data = await self._parse_json_with_retry(
-                llm_output,
-                prompt,
-                "",  # system_prompt not used in this call
-                0  # initial retry count
-            )
-            
+            try:
+                validation_data = await self._parse_json_with_retry(
+                    llm_output,
+                    prompt,
+                    "",  # system_prompt not used in this call
+                    0,  # initial retry count
+                )
+            except ValidatorContractError as contract_error:
+                logger.warning(
+                    "CompilerValidator: rejecting structurally invalid validation response: %s",
+                    contract_error,
+                )
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+                return CompilerValidationResult(
+                    submission_id=submission.submission_id,
+                    decision="reject",
+                    reasoning=f"Invalid validator JSON contract: {contract_error}",
+                    summary="Invalid validator JSON contract",
+                    coherence_check=False,
+                    rigor_check=False,
+                    placement_check=False,
+                    json_valid=False,
+                    validation_stage="llm_validation",
+                )
             # Extract validation decision
             decision = validation_data.get("decision", "reject")
             reasoning = validation_data.get("reasoning", "No reasoning provided")
@@ -1139,16 +1209,46 @@ class CompilerValidator:
             # of truth for mathematical rigor. Force rigor_check=True regardless
             # of what the LLM emitted so the criterion is never the reason for
             # a rejection on this kind of submission.
-            if (
-                submission.mode == "rigor"
-                and (submission.metadata or {}).get("rigor_mode") == "lean_placement"
-            ):
+            if validation_mode == "rigor_lean_placement":
                 if not rigor:
                     logger.info(
                         "Validator returned rigor_check=False for lean_placement submission; "
                         "forcing True because Lean 4 verified the math."
                     )
                 rigor = True
+
+            if decision == "accept" and not (coherence and rigor and placement):
+                failed_checks = [
+                    name
+                    for name, passed in (
+                        ("coherence_check", coherence),
+                        ("rigor_check", rigor),
+                        ("placement_check", placement),
+                    )
+                    if not passed
+                ]
+                logger.warning(
+                    "CompilerValidator: converting inconsistent acceptance to rejection; "
+                    "failed checks: %s",
+                    ", ".join(failed_checks),
+                )
+                decision = "reject"
+                reasoning = (
+                    f"{reasoning}\n\n"
+                    "CONTRACT CONSISTENCY: Acceptance requires every applicable "
+                    f"validation check to pass. Failed: {', '.join(failed_checks)}."
+                )
+
+            if validation_mode != "rigor_lean_placement":
+                from backend.shared.solution_path.integration import enqueue_optional_update
+                await enqueue_optional_update(
+                    validation_data,
+                    self.solution_path_manager,
+                    proposer_role=self.role_id,
+                    source_task_id=task_id,
+                    source_phase=f"compiler_{submission.mode}_validation",
+                    source_decision=decision,
+                )
             
             # Create summary for rejection log (max 750 chars)
             summary = reasoning[:750]
@@ -1206,6 +1306,9 @@ class CompilerValidator:
         logger.info(f"Validating brainstorm retroactive operation: {brainstorm_op.action}")
         
         prompt = self._build_brainstorm_validation_prompt(brainstorm_op, brainstorm_content)
+        from backend.shared.solution_path.integration import with_validator_hook
+        prompt = with_validator_hook(prompt, self.solution_path_manager)
+        prompt += PRIMARY_VALIDATION_FINAL_REMINDER
         
         actual_prompt_tokens = count_tokens(prompt)
         from backend.shared.config import system_config, rag_config
@@ -1257,9 +1360,42 @@ class CompilerValidator:
             message = response["choices"][0]["message"]
             llm_output = extract_message_text(message)
             
-            validation_data = await self._parse_json_with_retry(llm_output, prompt, "", 0)
-            
+            try:
+                validation_data = await self._parse_json_with_retry(
+                    llm_output,
+                    prompt,
+                    "",
+                    0,
+                    require_checks=False,
+                )
+            except ValidatorContractError as contract_error:
+                logger.warning(
+                    "CompilerValidator: rejecting structurally invalid brainstorm validation: %s",
+                    contract_error,
+                )
+                if self.task_tracking_callback:
+                    self.task_tracking_callback("completed", task_id)
+                return CompilerValidationResult(
+                    submission_id=str(uuid.uuid4()),
+                    decision="reject",
+                    reasoning=f"Invalid validator JSON contract: {contract_error}",
+                    summary="Invalid validator JSON contract",
+                    coherence_check=False,
+                    rigor_check=False,
+                    placement_check=False,
+                    json_valid=False,
+                    validation_stage="llm_validation",
+                )
+            from backend.shared.solution_path.integration import enqueue_optional_update
             decision = validation_data.get("decision", "reject")
+            await enqueue_optional_update(
+                validation_data,
+                self.solution_path_manager,
+                proposer_role=self.role_id,
+                source_task_id=task_id,
+                source_phase="retroactive_brainstorm_validation",
+                source_decision=decision if decision in {"accept", "reject"} else None,
+            )
             reasoning = validation_data.get("reasoning", "No reasoning provided")
             
             result = CompilerValidationResult(
@@ -1315,9 +1451,9 @@ OPERATION TYPE: {action.upper()}
         if action == "delete":
             system_prompt += """VALIDATION CRITERIA (DELETE):
 A brainstorm submission should be REMOVED if it:
-1. Contains mathematical errors or logically unsound reasoning
+1. Contains factual, technical, mathematical, methodological, or logical errors under the standards appropriate to its claims and domain
 2. Is redundant with other submissions (content fully covered elsewhere)
-3. Contradicts established mathematical principles evident in other submissions
+3. Contradicts well-supported constraints, evidence, principles, or verified results evident in other submissions
 4. Was marginally useful but provides no unique value given the current database state
 
 KEEP the submission if:
@@ -1330,10 +1466,10 @@ CONSERVATIVE DEFAULT: When in doubt, reject the removal (keep the submission).
         elif action == "edit":
             system_prompt += """VALIDATION CRITERIA (EDIT):
 A brainstorm submission edit should be ACCEPTED if:
-1. The corrected version fixes a genuine mathematical error
+1. The corrected version fixes a genuine factual, technical, mathematical, methodological, or logical error
 2. The corrected version is more accurate than the original
 3. The correction improves the submission's value to the knowledge pool
-4. The correction is mathematically sound and well-justified
+4. The correction is sound and well-justified under the rigor appropriate to its domain and claim types
 
 REJECT the edit if:
 1. The original was not actually wrong
@@ -1346,10 +1482,10 @@ CONSERVATIVE DEFAULT: When in doubt, reject the edit (keep the original).
         elif action == "add":
             system_prompt += """VALIDATION CRITERIA (ADD):
 A new brainstorm submission should be ACCEPTED if:
-1. It adds genuinely new mathematical insight not already in the database
+1. It adds a genuinely new, objective-relevant insight, mechanism, design, algorithm, experiment, impossibility argument, implementation path, risk analysis, mathematical result, or other solution contribution not already in the database
 2. It connects existing concepts in novel ways
-3. It provides concrete methods, theorems, proofs, or techniques
-4. It is grounded in established mathematical principles
+3. It provides concrete methods, evidence plans, artifacts, theorems, proofs, techniques, or other actionable advances appropriate to the objective
+4. Its claims are grounded in appropriate evidence, sound reasoning, explicit assumptions, or rigorous derivation as their types require
 
 REJECT the addition if:
 1. It is redundant with existing submissions
@@ -1436,32 +1572,36 @@ Output your decision ONLY as JSON:
         
         return result.strip()
     
+    @staticmethod
+    def _get_effective_validation_mode(submission: CompilerSubmission) -> str:
+        """Resolve the validator mode once for all downstream behavior."""
+        if (
+            submission.mode == "rigor"
+            and (submission.metadata or {}).get("rigor_mode") == "lean_placement"
+        ):
+            return "rigor_lean_placement"
+        return submission.mode
+
     def _build_validation_prompt(
         self,
         submission: CompilerSubmission,
         current_paper: str,
-        current_outline: Optional[str]
+        current_outline: Optional[str],
+        *,
+        validation_mode: Optional[str] = None,
     ) -> str:
         """Build validation prompt based on submission mode."""
+        validation_mode = validation_mode or self._get_effective_validation_mode(submission)
         # Route to appropriate system prompt based on mode
-        if submission.mode in ["outline_create", "outline_update"]:
-            system_prompt = self._get_outline_validation_system_prompt(submission.mode)
+        if validation_mode in ["outline_create", "outline_update"]:
+            system_prompt = self._get_outline_validation_system_prompt(validation_mode)
         else:
-            # For rigor submissions backed by a Lean 4 verified theorem, swap in
-            # the placement-only criteria. Anything else falls through to the
-            # normal paper-validation prompt for the submission's mode.
-            rigor_mode_hint = (submission.metadata or {}).get("rigor_mode")
-            effective_mode = (
-                "rigor_lean_placement"
-                if submission.mode == "rigor" and rigor_mode_hint == "lean_placement"
-                else submission.mode
-            )
-            system_prompt = self._get_paper_validation_system_prompt(effective_mode)
+            system_prompt = self._get_paper_validation_system_prompt(validation_mode)
         
         parts = [
             system_prompt,
             "\n---\n",
-            self._get_validation_json_schema(),
+            self._get_validation_json_schema(validation_mode),
             "\n---\n",
             f"USER COMPILER-DIRECTING PROMPT:\n{self.user_prompt}",
             "\n---\n",
@@ -1475,7 +1615,7 @@ Output your decision ONLY as JSON:
         # For Lean 4 verified theorem placement, surface the Lean certificate
         # to the validator so it can reference what was verified.
         metadata = submission.metadata or {}
-        if submission.mode == "rigor" and metadata.get("rigor_mode") == "lean_placement":
+        if validation_mode == "rigor_lean_placement":
             parts.append("LEAN 4 VERIFICATION CERTIFICATE (DO NOT RE-EVALUATE MATH):\n")
             parts.append(f"Proof ID: {metadata.get('lean_proof_id', 'unknown')}\n")
             parts.append(f"Theorem statement: {metadata.get('theorem_statement', '')}\n")
@@ -1507,7 +1647,7 @@ Output your decision ONLY as JSON:
     
     def _get_outline_validation_system_prompt(self, mode: str) -> str:
         """Get system prompt for OUTLINE validation (outline_create, outline_update)."""
-        base_prompt = """You are validating a mathematical document outline submission. Your role is to decide if this submission should be ACCEPTED or REJECTED.
+        base_prompt = """You are validating an outline for a rigorous research paper or solution report. Decide whether the submission should be ACCEPTED or REJECTED according to the user's exact compiler-directing objective and the claim types and domain actually involved.
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
 
@@ -1522,7 +1662,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + CLAIM_TYPE_VALIDATION_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what AI agents explored, NOT what has been established. Treat it as optional working evidence and independently assess the proposed route with domain-appropriate rigor.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -1549,26 +1689,26 @@ FOR CRITERION #11 (NO PLACEHOLDER TEXT): This checks the SUBMISSION ONLY, not th
 
 REQUIRED SECTION STRUCTURE (MANDATORY):
 Every outline MUST include these sections with these exact names in this exact order:
-1. **Abstract** - OPTIONAL - If included, must be named "Abstract", "I. Abstract", or "0. Abstract" (appears first if present)
+1. **Abstract** - OPTIONAL - If included, must use the unnumbered heading "Abstract" (appears first if present)
 2. **Introduction** - Must be named exactly "Introduction" or "I. Introduction" (REQUIRED)
 3. **Body Sections** - At least one body section (II, III, IV, etc.) between Introduction and Conclusion (REQUIRED)
 4. **Conclusion** - Must be named exactly "Conclusion" or "N. Conclusion" (always LAST content section) (REQUIRED)
 
-OUTLINE VALIDATION CRITERIA:
-1. SECTION_STRUCTURE: MUST include Introduction, at least one Body section, and Conclusion with exact names (Abstract is optional but recommended)
-2. SECTION_ORDER: [Abstract →] Introduction → Body sections → Conclusion (this exact order, where Abstract is optional)
-3. COHERENCE: Logically structured with clear sections and subsections
-4. COMPLETENESS: Makes effective use of any source material it chooses to use and does not omit clearly crucial material for its chosen scope
-5. ALIGNMENT: Aligns with user's compiler-directing prompt goals
-6. COMPREHENSIVENESS: Provides sufficient detail to guide mathematical document construction
-7. MATHEMATICAL PROGRESSION: Body sections follow logical progression (definitions → main results → theorems → proofs)
-8. IN-TEXT CITATIONS ONLY: Must NOT include a separate References or Citations section
-9. ANCHOR PRESERVATION: Must not attempt to add content after the end-of-outline anchor markers
-10. LOGICAL GROUNDING: Outline may draw from aggregator database material, reference papers, or rigorous reasoning, but it must remain grounded in sound mathematical principles and avoid unfounded claims
-11. NO PLACEHOLDER TEXT: Must not contain any placeholder markers (e.g., "[HARD CODED PLACEHOLDER FOR...", "[PLACEHOLDER FOR...", "TO BE WRITTEN AFTER..."). Placeholders are structural markers only - all submitted content must be actual outline content.
-12. EMPIRICAL PROVENANCE: Must not include unsupported numeric empirical claims in section/subsection headings or outline prose unless explicitly backed by citation or provided artifact support
+OUTLINE VALIDATION DIMENSIONS (ALL TEN MUST PASS):
+1. COHERENCE: Sections and subsections form a clear, internally consistent argument.
+2. DOMAIN-APPROPRIATE CORRECTNESS: The planned route uses the standards and progression appropriate to its claims and domain.
+3. DIRECT SOLUTION VALUE: It defines an answer-bearing route to the exact objective rather than a broad survey or easier adjacent problem.
+4. PLACEMENT CONTEXT: Each proposed component has a clear position in the required [Abstract →] Introduction → Body → Conclusion order.
+5. NON-REDUNDANCY: Sections make distinct necessary contributions without repetitive coverage.
+6. OUTLINE ADHERENCE: The submission preserves required section names/order and, for updates, remains compatible with already-constructed content.
+7. CLAIM-TYPE PROVENANCE: Planned claims have an independently checkable support route under the claim-type rules above.
+8. SPECIFICITY AND ACTIONABILITY: It identifies concrete arguments, mechanisms, tests, decisions, or deliverables sufficient to guide construction.
+9. NOVELTY WITHOUT FABRICATION: It aggressively pursues the strongest credible novel route while exposing assumptions and never inventing support.
+10. NO PLACEHOLDER OR MARKER VIOLATIONS: It does not include protected text or place content after the outline anchors.
 
-**CRITICAL**: Criterion #11 checks the SUBMISSION CONTENT ONLY. The CURRENT OUTLINE may contain system-managed anchor markers (normal and expected). Do NOT reject a submission just because anchor markers exist in the current outline - only reject if the SUBMISSION ITSELF contains placeholder or anchor text (pre-validation at line 326 catches this before you see it).
+ADDITIONAL FORMAT RULE: Use in-text citations only; do not create a separate References or Citations section.
+
+**CRITICAL**: Dimension #10 checks the SUBMISSION CONTENT ONLY. The CURRENT OUTLINE may contain system-managed anchor markers (normal and expected). Do NOT reject a submission just because anchor markers exist in the current outline - only reject if the SUBMISSION ITSELF contains placeholder or anchor text (pre-validation catches this before you see it).
 
 SOURCE MATERIAL POLICY:
 - The aggregator/brainstorm database is optional support, not a mandatory checklist
@@ -1576,6 +1716,7 @@ SOURCE MATERIAL POLICY:
 - Do reject if the outline ignores clearly crucial source material in a way that makes its chosen scope weak, incoherent, or misaligned with the user prompt
 - Accept selective or divergent outline structures when they better serve the user's prompt and remain rigorous
 - Prefer outlines that organize the strongest rigorous direct answer to the user's prompt, rather than broad exploratory coverage
+- Mathematics remains fully supported and should use theorem/proof progression when useful, but do not reject a non-mathematical outline merely because it lacks definitions, theorems, or proofs
 
 YOUR TASK:
 Verify the submission meets ALL criteria above. Accept only if ALL criteria pass. Reject if ANY criterion fails.
@@ -1583,11 +1724,11 @@ Verify the submission meets ALL criteria above. Accept only if ALL criteria pass
 REJECTION CATEGORIES (provide specific feedback):
 - MISSING_REQUIRED_SECTION: Missing Introduction or Conclusion (must have both with exact names; Abstract is optional)
 - INCORRECT_SECTION_ORDER: Sections are out of order (must be: [Abstract →] Introduction → Body → Conclusion, where Abstract is optional)
-- INCORRECT_SECTION_NAME: Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction"; if Abstract included, must be "Abstract", "I. Abstract", or "0. Abstract")
-- STRUCTURAL: Body sections not in logical mathematical progression order
+- INCORRECT_SECTION_NAME: Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction"; if Abstract is included, it must use the unnumbered heading "Abstract")
+- STRUCTURAL: Body sections do not follow the domain-appropriate solution progression
 - INCOMPLETENESS: Missing clearly crucial source material or necessary structure for the chosen scope
 - MISALIGNMENT: Doesn't serve user's compiler-directing prompt goals
-- INSUFFICIENT_DETAIL: Lacks necessary granularity to guide mathematical document construction
+- INSUFFICIENT_DETAIL: Lacks necessary granularity to guide rigorous document construction
 - FORMAT_VIOLATION: Includes separate References/Citations section (NOT allowed)
 - ANCHOR_VIOLATION: Content placed after outline anchor markers
 - EMPIRICAL_PROVENANCE: Unsupported benchmark, hardware, or artifact claim presented as established fact
@@ -1599,9 +1740,8 @@ You MUST check if the submission content contains these EXACT section headers:
 1. **Abstract Header Check (OPTIONAL)**:
    ✓ VALID: A line containing ONLY "Abstract" (case-insensitive, may have whitespace)
    ✓ VALID: "Abstract" or "ABSTRACT" or "  Abstract  "
-   ✓ VALID: "I. Abstract" or "0. Abstract" (numbered variants also acceptable)
    ✓ VALID: Omitting Abstract entirely (it's optional - some outlines don't include it)
-   ❌ INVALID: "Summary of the paper" or "Abstract: This paper" (if including Abstract, use proper format)
+   ❌ INVALID: "I. Abstract", "0. Abstract", "Summary of the paper", or "Abstract: This paper" (if including Abstract, use the unnumbered heading)
    
 2. **Introduction Header Check (REQUIRED)**:
    ✓ VALID: "Introduction" or "I. Introduction" (case-insensitive)
@@ -1633,11 +1773,11 @@ This is an OUTLINE showing section names - not the actual paper content."
         mode_specific = {
             "outline_create": """MODE-SPECIFIC CRITERIA (Outline Creation):
 - Outline MUST include: Introduction, at least one Body section, Conclusion (Abstract is optional)
-- Section names MUST match exactly: "Introduction", "Conclusion" (if Abstract included: "Abstract", "I. Abstract", or "0. Abstract")
+- Section names MUST match exactly: "Introduction", "Conclusion" (if Abstract is included: unnumbered "Abstract")
 - Outline makes effective use of any helpful aggregator database content when relevant, but need not mirror all entries
-- Outline provides clear structure for mathematical document construction
+- Outline provides a clear, direct, answer-bearing structure for rigorous document construction
 - Outline aligns with user's compiler-directing prompt
-- Body sections follow logical mathematical progression
+- Body sections follow the domain-appropriate solution progression; mathematical work retains definitions/results/theorems/proofs when relevant
 - Outline is comprehensive enough to guide entire exposition
 
 FEEDBACK FOR ITERATIVE REFINEMENT:
@@ -1670,27 +1810,28 @@ EXAMPLE OF CORRECT FORMAT:
 FEEDBACK QUALITY EXAMPLES:
 
 ✅ GOOD (Specific and Actionable):
-"REJECTION REASON: MISSING_REQUIRED_SECTION - Abstract
+"REJECTION REASON: MISSING_REQUIRED_SECTION - Introduction
 
 VALIDATION CRITERIA FAILED: #1 SECTION_STRUCTURE
 
 WHAT I SAW:
-Your outline starts with: 'Summary of the paper's core contribution...'
+Your outline starts directly with: 'II. Core Mechanism'
 
 WHAT I EXPECTED:
-First line: 'Abstract' (just this word, no descriptive text)
+An Introduction section before the body sections.
 
 FIX REQUIRED:
-1. Remove the descriptive text from line 1
-2. Replace it with ONLY the word 'Abstract'
-3. The outline lists section names, not content
+1. Add 'I. Introduction' before 'II. Core Mechanism'
+2. Keep the body sections after Introduction
+3. Keep Conclusion as the final required core section
 
 EXAMPLE:
-Abstract
-
 I. Introduction
    A. Historical context
-   ..."
+   ...
+II. Core Mechanism
+   ...
+III. Conclusion"
 
 ❌ BAD (Vague):
 "The outline needs more detail in the main results section."
@@ -1716,7 +1857,7 @@ REJECT if: Missing Introduction/Conclusion, incorrect section names, or any othe
 - Update maintains logical progression consistency with existing outline structure
 - Update doesn't require modification of already-constructed document content
 - Changes are substantive, not cosmetic
-- New sections maintain mathematical document ordering
+- New sections maintain the domain-appropriate argument and solution ordering
 - Update does NOT add a References or Citations section
 
 CRITICAL ADDITIVITY CHECK:
@@ -1734,7 +1875,123 @@ REJECT if: Update is unnecessary, harmful, breaks required section structure, or
         return base_prompt + mode_specific.get(mode, mode_specific["outline_create"])
     
     def _get_paper_validation_system_prompt(self, mode: str) -> str:
-        """Get system prompt for DOCUMENT validation (construction, review, rigor)."""
+        """Route ordinary writing and protected rigor modes to isolated prompts."""
+        if mode == "rigor":
+            return self._get_mathematical_rigor_validation_system_prompt(mode)
+        if mode == "rigor_lean_placement":
+            return self._get_lean_placement_validation_system_prompt()
+
+        base_prompt = """You are validating an exact-edit submission to a rigorous research paper or solution report. Decide whether it should be ACCEPTED or REJECTED according to the user's exact compiler-directing objective and the standards appropriate to the claims and domain actually present.
+
+⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
+
+ALL supplied brainstorm databases, accepted submissions, papers, references, outlines, and prior document content are AI-generated working evidence. They are not authoritative merely because this system generated or accepted them. Independently check claims under the strongest applicable standard, do not invent support, and use internal context selectively when it improves the direct solution.
+
+""" + CLAIM_TYPE_VALIDATION_RULES + """
+
+ORDINARY VALIDATION DIMENSIONS (ALL MUST PASS):
+1. COHERENCE: The edit is clear, internally consistent, and preserves holistic document flow.
+2. DOMAIN-APPROPRIATE CORRECTNESS: The edit satisfies the applicable mathematical, logical, factual, technical, methodological, engineering, empirical, or causal standard. The `rigor_check` JSON field reports this applicable rigor; it does not require mathematics when mathematics is irrelevant.
+3. DIRECT SOLUTION VALUE: The edit materially advances the strongest credible answer or solution route to the user's exact objective, rather than adding a broad survey, decorative exposition, or an easier adjacent task.
+4. PLACEMENT CONTEXT: The content fits naturally at the pre-validated exact-edit location and at the current construction stage.
+5. NON-REDUNDANCY: The edit adds necessary value without repeating existing content or duplicating an existing section or subsection header in the current document.
+6. OUTLINE ADHERENCE: The edit serves the promised solution structure and scope. Selective departure from source material is allowed; conflict with the operative outline is not.
+7. CLAIM-TYPE PROVENANCE: Every substantive claim satisfies the claim-type rules above, with uncertainty and proposals labeled honestly.
+8. SPECIFICITY AND ACTIONABILITY: The content states concrete mechanisms, arguments, requirements, tests, implications, or next inferential steps at the level needed for independent assessment.
+9. NOVELTY WITHOUT FABRICATION: Prefer a genuinely stronger or less conventional supported route when available, but reject novelty obtained through unsupported claims, invented evidence, or concealed assumptions.
+10. MARKER AND PLACEHOLDER INTEGRITY: Submission content contains no protected marker or placeholder and does not place content beyond the document boundary.
+
+CLAIM-SENSITIVE SOLUTION FORMS:
+- Mathematics may use definitions, lemmas, theorems, derivations, proofs, and corollaries; unsupported theorem claims fail applicable rigor.
+- Algorithms/software may use constraints, architecture, algorithms, correctness arguments, interfaces, complexity, implementation details, and evaluation plans.
+- Engineering may use requirements, mechanisms, designs, tradeoffs, feasibility, failure modes, and verification.
+- Empirical science may use hypotheses or models, prior cited evidence, protocols, falsifiable predictions, analysis plans, and limitations.
+- Strategy, policy, and causal analysis may use objectives, constraints, causal models, interventions, risks, countereffects, and evaluation.
+These are examples, not mandatory templates. Judge the form that best solves the exact objective.
+
+SOURCE MATERIAL POLICY:
+- Brainstorm/aggregator content and references are optional evidence, not a mandatory checklist.
+- Do not reject selective non-use or principled departure when the result is stronger, independently defensible, and better aligned with the prompt.
+- Reject omission of clearly necessary material when it makes the chosen route incoherent, incorrect, infeasible, or nonresponsive.
+
+PRE-VALIDATED EXACT-EDIT CONTRACT:
+- Exact matching and uniqueness of `old_string` have already been checked.
+- Preserve operation semantics and judge the placement and meaning of `new_string`; do not re-run string matching.
+- For `replace`, assess whether the replacement improves the target passage.
+- For `insert_after`, assess continuity after the anchor.
+- For `delete`, assess whether removal improves the document without creating gaps.
+- For `full_content`, assess fit with the outline and current construction phase.
+
+SYSTEM-MANAGED MARKERS:
+The CURRENT DOCUMENT may contain these expected structural markers:
+- [HARD CODED PLACEHOLDER FOR THE ABSTRACT SECTION - TO BE WRITTEN AFTER THE INTRODUCTION IS COMPLETE]
+- [HARD CODED PLACEHOLDER FOR INTRODUCTION SECTION - TO BE WRITTEN AFTER THE CONCLUSION SECTION IS COMPLETE]
+- [HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION - TO BE WRITTEN AFTER THE BODY SECTION IS COMPLETE]
+- [HARD CODED THEOREMS APPENDIX START -- LEAN 4 VERIFIED THEOREMS BELOW]
+- [HARD CODED THEOREMS APPENDIX END -- ALL APPENDIX CONTENT SHOULD BE ABOVE THIS LINE]
+- [HARD CODED END-OF-PAPER MARK -- ALL CONTENT SHOULD BE ABOVE THIS LINE]
+Never reject merely because those markers occur in the CURRENT DOCUMENT. Reject if submission content includes or alters them, crosses either theorem-appendix boundary, places ordinary paper content inside the theorem appendix, or places any content beyond the end-of-paper boundary.
+
+STRUCTURAL RULES:
+- Do not create a separate References or Citations section; citations, when needed, are in-text.
+- Do not duplicate a header already written in the CURRENT DOCUMENT. The outline is a template and does not itself make a header duplicate.
+- Reject forward-looking section previews outside the Introduction; submitted content should perform its promised analytical or solution work.
+"""
+
+        mode_specific = {
+            "construction": """
+MODE-SPECIFIC CRITERIA (Document Construction):
+- Preserve the established reverse writing order: body first, then Conclusion, then Introduction, then Abstract. It is correct for an empty paper's first `full_content` submission to begin with a body section while system placeholders reserve later sections.
+- Complete the central solution components promised for the current outline section with rigorous, independently checkable, domain-appropriate content.
+- Theorems, derivations, proofs, and LaTeX remain valid and preferred when the objective benefits from them, but non-mathematical work must not be rejected merely for lacking them.
+- Integrate used source material coherently and conservatively; unsupported empirical or artifact claims must remain proposals, hypotheses, targets, or validation plans.
+- Reject content that is merely generic background, a structural preview, or an indirect detour when a more direct answer-bearing contribution is available.
+
+ACCEPT only if all ten ordinary dimensions and these construction criteria pass.
+REJECT with concrete, actionable feedback naming the failed dimension, the specific issue, and the required correction.""",
+            "review": """
+MODE-SPECIFIC CRITERIA (Document Review):
+- The edit must correct or materially improve a real issue in directness, correctness, coherence, placement, redundancy, outline adherence, claim provenance, specificity, supported novelty, or presentation.
+- Apply domain-specific review: proof gaps for mathematics; correctness, complexity, interfaces, implementation, and failure modes for software/engineering; protocols, analysis, provenance, and limitations for empirical work; assumptions, mechanisms, countereffects, risks, and evaluation for strategic/causal work.
+- Prefer conservative no-edit behavior over cosmetic churn or speculative additions.
+- Reject fabricated citations, artifacts, evaluations, metrics, guarantees, or causal certainty, and appropriately downgrade unsupported claims.
+
+ACCEPT only if all ten ordinary dimensions pass and the edit is substantively beneficial.
+REJECT with concrete, actionable feedback naming the failed dimension, the specific issue, and the required correction."""
+        }
+        return base_prompt + mode_specific.get(mode, mode_specific["construction"])
+
+    def _get_lean_placement_validation_system_prompt(self) -> str:
+        """Get the isolated placement-only prompt for a Lean-verified theorem."""
+        return """MODE-SPECIFIC CRITERIA (Lean 4 Verified Theorem Placement):
+
+You are validating only the placement and narrative integration of a theorem already formally verified by the Lean 4 toolchain.
+
+CRITICAL AUTHORITY BOUNDARY:
+- The LEAN 4 VERIFICATION CERTIFICATE in the user prompt contains the verified theorem statement and compiled proof.
+- Lean 4 is the source of truth for mathematical validity.
+- You MUST NOT re-evaluate or reject the theorem on correctness, soundness, edge-case, assumption, novelty, empirical, artifact, source-use, or ordinary domain-rigor grounds.
+- Set `rigor_check=true` unconditionally. The system also forces this field to true.
+
+YOUR ONLY DECISION CRITERIA:
+1. PLACEMENT_FIT: The insertion location makes sense in the surrounding narrative, outline, definitions, and mathematical progression.
+2. INTRODUCTION_FORMAT: The prose clearly presents a theorem statement matching the verified statement, explicitly says it was "verified in Lean 4", and points to the Theorems Appendix for the full Lean proof.
+3. NARRATIVE_COHERENCE: The insertion preserves sentence flow and leaves no dangling references or contradiction with established definitions.
+4. NO_INLINE_LEAN_DUPLICATION: The main paper does not contain the full Lean proof body. A short informal explanation is allowed; the Lean code belongs in the appendix.
+
+Exact matching and uniqueness of `old_string` have already been pre-validated. Judge placement, not string existence. System-managed placeholders and anchors in the CURRENT DOCUMENT are expected; the submission itself must not alter them or cross the document boundary.
+
+You MAY reject only for a genuine placement or narrative defect, a mismatched presentation statement, a missing "verified in Lean 4" marker, a missing Theorems Appendix reference, or duplication of the full Lean code inline. If placement attempt 2 of 2 is rejected, the system preserves the theorem in the appendix.
+
+REJECTION FEEDBACK FORMAT:
+"REJECTION REASON: [PLACEMENT_FIT|STATEMENT_PRESENTATION_MISMATCH|MISSING_LEAN_MARKER|MISSING_APPENDIX_REFERENCE|NARRATIVE_COHERENCE|LEAN_CODE_DUPLICATED_INLINE]
+ISSUE: [What is wrong with placement or prose, never the verified mathematics]
+FIX: [Concrete narrative or placement adjustment]"
+
+ACCEPT if placement is reasonable, the verified statement is presented accurately with the Lean marker and appendix reference, narrative flow is coherent, and full Lean code is not pasted inline."""
+
+    def _get_mathematical_rigor_validation_system_prompt(self, mode: str) -> str:
+        """Get the protected mathematical theorem-enhancement validation prompt."""
         base_prompt = """You are validating a mathematical document construction submission. Your role is to decide if this submission should be ACCEPTED or REJECTED.
 
 ⚠️ CRITICAL - INTERNAL CONTENT WARNING ⚠️
@@ -1748,7 +2005,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
-""" + CLAIM_TYPE_VALIDATION_RULES + """
+""" + MATHEMATICAL_RIGOR_CLAIM_RULES + """
 
  The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
  
@@ -1952,58 +2209,58 @@ ISSUE: [What's wrong]
 FIX: [What would be acceptable]"
 
 ACCEPT if: All general criteria + mode-specific criteria met
-REJECT if: Enhancement doesn't add rigor, reduces quality, introduces unsound mathematical claims, or placement context inappropriate""",
-
-            "rigor_lean_placement": """MODE-SPECIFIC CRITERIA (Lean 4 Verified Theorem Placement):
-
-CRITICAL: The theorem in this submission has ALREADY been formally verified by the Lean 4 toolchain. Its mathematical validity is NOT in question and you MUST NOT re-evaluate it.
-
-The LEAN 4 VERIFICATION CERTIFICATE block earlier in this prompt shows the exact theorem statement and Lean 4 proof that compiled successfully. Lean 4 is the source of truth for the mathematical content.
-
-YOUR ONLY JOB on this submission is to judge PLACEMENT and NARRATIVE INTEGRATION:
-
-1. PLACEMENT_FIT: Does the insertion location make sense given the surrounding narrative, outline structure, and mathematical progression of the paper at this point?
-2. INTRODUCTION_FORMAT: Does the inline text correctly present the theorem to the reader, including:
-   - A clear theorem statement matching the verified statement
-   - An explicit "verified in Lean 4" marker in the prose
-   - A reference pointing the reader to the Theorems Appendix (where the full Lean proof is stored)
-3. NARRATIVE_COHERENCE: Does surrounding prose remain coherent after the insertion? No dangling references, no broken sentence flow, no contradiction with established definitions.
-4. NO_DUPLICATION: The inline text must not copy the full Lean proof body into the main paper (the proof lives in the appendix only). A short informal proof sketch is fine; the Lean code itself should NOT be inlined.
-
-RULES:
-- You MUST set rigor_check=true unconditionally: Lean 4 has already verified the math. The `rigor_check` field is forced to true by the system regardless of your response.
-- You MUST NOT reject on mathematical grounds (correctness, soundness, edge cases, assumptions). That decision has been made by Lean 4.
-- You MAY reject on placement, narrative, duplication of the Lean code, or missing "verified in Lean 4" marker / appendix reference.
-- If this is placement attempt 2 of 2 and you reject again, the system will route the theorem to the Theorems Appendix only. Reserve rejection for genuine placement/narrative problems.
-
-REJECTION FEEDBACK FORMAT:
-If rejecting, use this structure:
-"REJECTION REASON: [PLACEMENT_FIT|MISSING_LEAN_MARKER|MISSING_APPENDIX_REFERENCE|NARRATIVE_COHERENCE|LEAN_CODE_DUPLICATED_INLINE|etc.]
-ISSUE: [What's wrong with the placement or prose, not the math]
-FIX: [Concrete adjustment the submitter should make on the next placement attempt]"
-
-ACCEPT if: Placement location is reasonable, introduction prose correctly cites the Lean 4 verification and appendix, narrative remains coherent, and the Lean proof body is NOT duplicated inline.
-REJECT if: Placement is clearly inappropriate, the "verified in Lean 4" / appendix reference is missing, narrative breaks, or the full Lean code is pasted into the main paper text."""
+REJECT if: Enhancement doesn't add rigor, reduces quality, introduces unsound mathematical claims, or placement context inappropriate"""
         }
         
-        return base_prompt + mode_specific.get(mode, mode_specific["construction"])
+        # This helper is reachable only through the protected plain-rigor branch.
+        # Never fall back to ordinary writing or Lean-placement criteria here.
+        return base_prompt + mode_specific["rigor"]
     
-    def _get_validation_json_schema(self) -> str:
+    def _get_validation_json_schema(self, mode: Optional[str] = None) -> str:
         """Get JSON schema for validation response."""
+        if mode == "rigor_lean_placement":
+            return """
+REQUIRED JSON FORMAT:
+{
+  "decision": "accept" or "reject",
+  "reasoning": "string - detailed explanation limited to placement and narrative integration",
+  "coherence_check": boolean - true if the surrounding narrative remains coherent,
+  "rigor_check": boolean - MUST be true because Lean 4 has already verified the theorem,
+  "placement_check": boolean - true if the verified theorem is naturally placed with the required Lean marker and appendix reference
+}
+
+Example (accept):
+{
+  "decision": "accept",
+  "reasoning": "The verified theorem follows its definitions, its presentation matches the certificate, the prose says verified in Lean 4 and points to the Theorems Appendix, and no Lean proof body is duplicated inline.",
+  "coherence_check": true,
+  "rigor_check": true,
+  "placement_check": true
+}
+
+Example (reject - placement only):
+{
+  "decision": "reject",
+  "reasoning": "The theorem is inserted before the notation used in its statement is introduced. Move the same verified result after the notation paragraph and retain the Lean-verification marker and appendix reference.",
+  "coherence_check": false,
+  "rigor_check": true,
+  "placement_check": false
+}
+"""
         return """
 REQUIRED JSON FORMAT:
 {
   "decision": "accept" or "reject",
   "reasoning": "string - detailed explanation of decision",
   "coherence_check": boolean - true if coherent,
-  "rigor_check": boolean - true if maintains/improves rigor,
+  "rigor_check": boolean - in ordinary outline/construction/review modes, true if the submission satisfies the rigor applicable to its claims and domain; in protected rigor modes, follow that mode's mathematical/Lean instructions,
   "placement_check": boolean - true if content fits naturally at this location (exact string match already verified by pre-validation)
 }
 
 Example (accept):
 {
   "decision": "accept",
-  "reasoning": "This section follows the outline, builds logically from the existing definitions, and maintains coherent narrative flow. The new content fits naturally after the preliminaries section and appropriately introduces the theoretical framework. No redundancy with existing material.",
+  "reasoning": "This section follows the outline, directly advances the requested solution, satisfies the applicable claim standards, and fits naturally after the established prerequisites without repeating existing material.",
   "coherence_check": true,
   "rigor_check": true,
   "placement_check": true
@@ -2012,7 +2269,7 @@ Example (accept):
 Example (reject - placement context issue):
 {
   "decision": "reject",
-  "reasoning": "While the content is coherent and rigorous, it doesn't fit naturally at this location. The submission introduces advanced results before the necessary preliminaries have been established. This content should appear later in the document after the foundational material.",
+  "reasoning": "While the content is coherent and meets the applicable rigor standard, it does not fit naturally here because it depends on constraints and evidence that the document has not established. Move it after those prerequisites or establish them first.",
   "coherence_check": true,
   "rigor_check": true,
   "placement_check": false
@@ -2021,24 +2278,9 @@ Example (reject - placement context issue):
 Example (reject - inappropriate for section):
 {
   "decision": "reject",
-  "reasoning": "The content doesn't align with the outline structure. According to the outline, this section should cover geometric stability criteria, but the submitted content discusses applications. This material belongs in Section VI (Applications), not here.",
+  "reasoning": "The content does not align with the outline structure. This section is assigned to the core mechanism and its verification, but the submission discusses downstream deployment strategy. That material belongs in the later applications section.",
   "coherence_check": true,
   "rigor_check": true,
   "placement_check": false
 }
 """
-    
-    def _parse_validation_response(self, response: str) -> Optional[dict]:
-        """Parse validation response JSON using centralized validator."""
-        try:
-            valid, parsed, error = json_validator.validate_compiler_validator_json(response)
-            
-            if not valid:
-                logger.error(f"JSON validation failed for compiler validator: {error}")
-                return None
-            
-            return parsed
-            
-        except Exception as e:
-            logger.error(f"Failed to parse validation response: {e}")
-            return None

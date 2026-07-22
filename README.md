@@ -1,14 +1,20 @@
 # MOTO Autonomous ASI
-## Autonomous Prototype Superintelligence - Automated Theorem Generation with Lean 4 Math Proof Verification
-**Version: 1.1.02**
+## Autonomous Prototype Superintelligence for Rigorous Research and Solution Generation, with Optional Lean 4 Proof Verification
+**Version: 1.1.03**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 20.19+](https://img.shields.io/badge/node-20.19+-green.svg)](https://nodejs.org/)
+[![ChatGPT Subscription](https://img.shields.io/badge/ChatGPT_Subscription-Codex_OAuth-10a37f.svg)](https://chatgpt.com/)
+[![SuperGrok Subscription](https://img.shields.io/badge/SuperGrok_Subscription-xAI_OAuth-black.svg)](https://grok.com/)
+[![Sakana Fugu Subscription](https://img.shields.io/badge/Sakana_Fugu-Subscription_API-e85d75.svg)](https://sakana.ai/fugu/)
+[![OpenRouter: API Key](https://img.shields.io/badge/OpenRouter-API_Key-6467f2.svg)](https://openrouter.ai/)
+[![LM Studio: Local Models](https://img.shields.io/badge/LM_Studio-Local_Models-7c3aed.svg)](https://lmstudio.ai/)
 
-**A breakthrough in AI automated theorem generation. MOTO is an autonomous research system powered by Intrafere Research Group's new prototype-superintelligence discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/): a combination of reiterative brainstorming, validation, feedback, and pruning that creates prototype-level superintelligence using creative/combinatory multi-model data from nearly any combination of AI models. When enabled, MOTO pairs this exploration with Lean 4 machine-checked proofs for the exact formal theorem statements it successfully proves.**
 
-MOTO generates novel and publication-worthy research papers, and it can formalize candidate theorems and lemmas in Lean 4 while only storing proofs that Lean 4 accepts as mathematically verified. Lean 4 automation gives the user machine-checked verification for the exact formal statements produced, while informal papers and interpretations should still be reviewed with scrutiny. Unlike programs that may look similar, MOTO finds novel solutions with 0 creative user input required after launch: press start and let it run for hours or days while it autonomously searches for new solution paths. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness can also easily be modified for topics such as general academic research, chatbots, niche research, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.
+**A breakthrough in AI-automated theorem generation. Press the one-click launcher file "Click To Launch MOTO.bat" to run the program. MOTO is an autonomous research and solution-generation system powered by Intrafere Research Group's prototype-superintelligence discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/): a combination of reiterative brainstorming, validation, feedback, and pruning that creates prototype-level superintelligence using creative/combinatory multi-model data from nearly any combination of AI models. When relevant and enabled, MOTO pairs this exploration with automated theorem generation and Lean 4 machine-checked proofs for the exact formal statements it successfully proves.**
+
+MOTO is a fully automated invention and research generator. It generates novel and publication-worthy research papers, and it can formalize candidate theorems and lemmas in Lean 4 while only storing proofs that Lean 4 accepts as mathematically verified. Lean 4 automation gives the user machine-checked verification for the exact formal statements produced, while informal papers and interpretations should still be reviewed with scrutiny. Unlike programs that may look similar, MOTO finds novel solutions with 0 creative user input required after launch: press start and let it run for hours or days while it autonomously searches for new solution paths. This exact version of MOTO is customized to be useful for any discipline with an interest in creative and novel solution generation in S.T.E.M.: physicists, engineers, mathematicians, chemists, researchers, etc. This harness and the discovery of Top-P exploration can also easily be modified for topics such as chatbots, niche research, AI CAD and 3D model generation, AI image generation, robotics, or anything requiring creative output and/or general autonomy. MOTO's novel brainstorming and rejection/validation stage allows autonomous long-term runtime without user intervention — if desired, research can be conducted for days or weeks without user input.
 
 ### The Core Discovery: Top-P Exploration 
 
@@ -38,9 +44,11 @@ Give the program a try — MOTO is as cool as it sounds. Windows has a one-click
 
 ---
 
-## Outline of "MOTO - S.T.E.M. Mathematics Variant"
+## Outline of MOTO's S.T.E.M. Research and Solution System
 
-MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward (novelty seeking AI) mathematics researcher designed to run for days at a time after you press start, without user interaction. This program can support multiple simultaneous models working in parallel from local LM Studio, OpenRouter API keys, desktop OAuth providers such as OpenAI Codex/ChatGPT and xAI Grok/SuperGrok, or a mix of those providers.
+MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward, novelty-seeking S.T.E.M. research and solution system designed to run for days at a time after you press start, without user interaction. Mathematics, theorem discovery, and formal proof remain first-class capabilities whenever relevant. This program can support multiple simultaneous models working in parallel from local LM Studio, OpenRouter API keys, desktop OAuth providers such as OpenAI Codex/ChatGPT and xAI Grok/SuperGrok, or a mix of those providers.
+
+On Windows desktop, MOTO prevents idle-triggered system sleep while a top-level workflow is active and restores normal power behavior when it stops. The display may still turn off, and explicit Sleep, Hibernate, shutdown, and critical-battery actions are not blocked. Hosted/generic mode does not use this desktop power request.
 
 ### Key Features
 
@@ -427,9 +435,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-## ⚠️ Disclaimer
+## ⚠️ Limitations and Responsible Use
 
-All content generated by this system is for informational purposes only. Papers are autonomously generated with the novelty-seeking MOTO harness without peer review or user oversight beyond the original prompt. AI-generated content may contain fabricated or unverified claims presented with high confidence - all content should be viewed with extreme scrutiny and independently verified before use. Users are responsible for how they use generated content. All users must follow terms of service, conditions, etc. from all 3rd party applications.
+MOTO produces autonomous, AI-generated research outputs that may contain incorrect, incomplete, misleading, or fabricated claims. Outputs are not peer reviewed and should not be treated as authoritative or relied upon without independent verification by a qualified reviewer. Users are responsible for evaluating outputs and for complying with the terms and policies of any third-party models, services, or data sources they use with MOTO.
+
+The software itself is provided under the MIT License. See [LICENSE](LICENSE) for its warranty and liability terms.
 
 ---
 
@@ -477,8 +487,10 @@ Because the heavy model inference happens in the cloud, MOTO can run on very mod
 
 ---
 
-**Built for autonomous mathematical research in STEM. Powered by multi-agent AI.**
+**Built for autonomous rigorous S.T.E.M. research and solution generation, with mathematics and Lean-verified proofs as first-class capabilities. Powered by multi-agent AI.**
 
 ---
 
 Intrafere™ and Intrafere Research Group™ are trademarks of Intrafere LLC. All rights reserved.
+
+Third-party names and trademarks belong to their respective owners. Compatibility does not imply endorsement, sponsorship, or partnership.

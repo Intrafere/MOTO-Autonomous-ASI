@@ -1,0 +1,27 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "paper_head_and_tail_preserved",
+    "generated_appendix_absent",
+    "verified_library_context_present",
+    "rigor_message_captured"
+  ],
+  "fields": [
+    "prompt_context",
+    "proof_scope_isolation",
+    "proof_runtime_gating"
+  ],
+  "invariants": [
+    "prompt.generated_appendices_stripped",
+    "proof_scope.generated_appendices_stripped_from_prompts"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_model_visible_prompts_strip_generated_proof_appendices",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_e_prompt_boundaries.py"
+}

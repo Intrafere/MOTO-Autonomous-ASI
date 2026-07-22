@@ -15,15 +15,21 @@ from backend.autonomous.agents.proof_formalization_agent import ProofFormalizati
 from backend.autonomous.agents.proof_identification_agent import ProofIdentificationAgent
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
 from backend.autonomous.memory.paper_library import paper_library
+from backend.autonomous.memory.proof_database import is_prompt_injection_novel_tier
 from backend.autonomous.core.proof_registration import register_verified_lean_proof
 from backend.shared.config import system_config
+from backend.shared.context_overflow import (
+    CONTEXT_OVERFLOW_RESOLUTION,
+    CONTEXT_OVERFLOW_STOP_REASON,
+    context_overflow_model_payload,
+)
 from backend.shared.lean_proof_integrity import validate_full_lean_proof_integrity
 from backend.shared.model_error_utils import (
     format_transient_provider_error,
     is_non_retryable_model_error,
     is_transient_model_call_error,
 )
-from backend.shared.api_client_manager import RetryableProviderError
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.models import ProofAttemptFeedback, ProofAttemptResult, ProofCandidate, ProofStageResult, SmtHint
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.provider_pause import is_provider_credit_pause_error
@@ -64,10 +70,21 @@ class ProofVerificationStage:
     _active_sources: set[str] = set()
     _active_sources_lock: Optional[asyncio.Lock] = None
 
-    def __init__(self) -> None:
+    def __init__(self, solution_path_manager: Any = None) -> None:
         self._novelty_task_sequence = 0
         self._integrity_task_sequence = 0
         self._dependency_extractor = ProofDependencyExtractor()
+        self.solution_path_manager = solution_path_manager
+
+    @staticmethod
+    def _proof_workflow_mode(trigger: str) -> str:
+        if trigger == "manual_compiler_save":
+            return "compiler"
+        if trigger == "manual_compiler_aggregator":
+            return "aggregator"
+        if trigger == "manual":
+            return "manual_proof_check"
+        return "autonomous"
 
     @classmethod
     def _get_active_sources_lock(cls) -> asyncio.Lock:
@@ -358,7 +375,11 @@ class ProofVerificationStage:
                 z3_output=z3_raw[:2000],
             )
         except Exception as exc:
-            if is_non_retryable_model_error(exc):
+            if (
+                is_non_retryable_model_error(exc)
+                or isinstance(exc, RetryableProviderError)
+                or is_transient_model_call_error(exc)
+            ):
                 raise
             logger.debug("SMT check failed for theorem %s in %s %s: %s", candidate.theorem_id, source_type, source_id, exc)
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
@@ -461,6 +482,8 @@ class ProofVerificationStage:
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
         prior_round_results: str = "",
+        canonical_user_prompt: str = "",
+        run_id: str = "",
     ) -> ProofStageResult:
         """Run proof identification, formalization, Lean 4 checking, and novelty review."""
         result = ProofStageResult(source_type=source_type, source_id=source_id)
@@ -501,6 +524,7 @@ class ProofVerificationStage:
                         for index, candidate in enumerate(list(resolved_candidates), start=1)
                     ],
                     "processed_candidate_ids": sorted(processed_candidate_ids),
+                    "deferred_candidate_ids": list(result.deferred_candidate_ids),
                     "attempts_by_candidate": {
                         theorem_id: [
                             attempt.model_dump(mode="json")
@@ -563,6 +587,7 @@ class ProofVerificationStage:
                 context_window=submitter_context,
                 max_output_tokens=submitter_max_tokens,
                 role_id=f"autonomous_proof_identification_{role_suffix}",
+                solution_path_manager=self.solution_path_manager,
             )
 
             resolved_candidates = await self._resolve_candidates(
@@ -824,8 +849,14 @@ class ProofVerificationStage:
                                 and ProofFormalizationAgent.is_context_overflow_feedback(attempts[-1])
                             )
                             if context_overflow:
-                                result.had_error = True
-                                result.error_message = error_summary
+                                # This candidate is deferred, not failed. Do not add it
+                                # to results or processed IDs: its checkpoint remains
+                                # eligible after proof-model/context settings change.
+                                if candidate.theorem_id not in result.deferred_candidate_ids:
+                                    result.deferred_candidate_ids.append(candidate.theorem_id)
+                                mark_batch_outcome_processed(batch_index)
+                                await save_checkpoint("running")
+                                continue
                             if source_type == "brainstorm" and trigger != "retry" and not context_overflow:
                                 await novel_proofs_db.record_failed_candidate(
                                     source_id,
@@ -959,7 +990,7 @@ class ProofVerificationStage:
 
                         registration = await register_verified_lean_proof(
                             proof_database=novel_proofs_db,
-                            user_prompt=user_prompt,
+                            user_prompt=canonical_user_prompt or user_prompt,
                             theorem_statement=stored_theorem_statement,
                             lean_code=lean_code,
                             validator_model=validator_model,
@@ -982,9 +1013,11 @@ class ProofVerificationStage:
                             base_event=base_event,
                             proof_label=proof_label,
                             retry_origin_source_id=candidate.origin_source_id,
+                            run_id=run_id,
                         )
                         stored_record = registration.record
                         is_novel = stored_record.novel
+                        is_prompt_novel = is_prompt_injection_novel_tier(stored_record.novelty_tier)
                         result.verified_count += 1
 
                         await self._broadcast(
@@ -1057,12 +1090,12 @@ class ProofVerificationStage:
                             )
 
                         if self._should_append_verified_proof(
-                            is_novel=is_novel,
+                            is_novel=is_prompt_novel,
                             duplicate=registration.duplicate,
                             append_proof_callback=append_proof_callback,
                             append_known_proofs=self._should_append_known_proofs_for_trigger(trigger),
                         ):
-                            if is_novel and not registration.duplicate:
+                            if is_prompt_novel and not registration.duplicate:
                                 result.novel_count += 1
                             if append_proof_callback is not None:
                                 await append_proof_callback(stored_record)
@@ -1100,7 +1133,8 @@ class ProofVerificationStage:
             if partial_stop:
                 return result
 
-            await save_checkpoint("complete")
+            checkpoint_status = "deferred" if result.deferred_candidate_ids else "complete"
+            await save_checkpoint(checkpoint_status)
             await self._broadcast(
                 broadcast_fn,
                 "proof_check_complete",
@@ -1109,6 +1143,7 @@ class ProofVerificationStage:
                     "novel_count": result.novel_count,
                     "verified_count": result.verified_count,
                     "total_candidates": result.total_candidates,
+                    "deferred_candidate_ids": list(result.deferred_candidate_ids),
                 },
             )
             return result
@@ -1304,6 +1339,67 @@ class ProofVerificationStage:
                         "retry_origin_source_id": current_candidate.origin_source_id,
                     },
                 )
+            elif ProofFormalizationAgent.is_context_overflow_feedback(feedback):
+                configured_payload = context_overflow_model_payload(
+                    api_client_manager.get_role_config(formalization_agent.role_id)
+                )
+                route_payload = {
+                    key: value
+                    for key, value in {
+                        "configured_model": feedback.configured_model,
+                        "configured_provider": feedback.configured_provider,
+                        "effective_model": feedback.effective_model,
+                        "effective_provider": feedback.effective_provider,
+                    }.items()
+                    if value
+                }
+                overflow_origin = feedback.overflow_origin or "provider"
+                is_local_preflight = overflow_origin == "local_preflight"
+                message = (
+                    "Proof formalization deferred before provider invocation: the mandatory "
+                    f"prompt requires {feedback.prompt_tokens:,} input tokens but the configured "
+                    f"input budget is {feedback.max_input_tokens:,}. Lean 4 was not run. Increase "
+                    "the proof model context window, reduce its output reserve, or reduce source context."
+                    if is_local_preflight
+                    and feedback.prompt_tokens is not None
+                    and feedback.max_input_tokens is not None
+                    else (
+                        "Proof formalization deferred before provider invocation because the mandatory "
+                        "prompt exceeds the configured local input budget. Lean 4 was not run. Increase "
+                        "the proof model context window, reduce its output reserve, or reduce source context."
+                        if is_local_preflight
+                        else (
+                            "Proof formalization deferred: the selected provider rejected the proof "
+                            "prompt because it exceeded the model context window. Lean 4 was not run. "
+                            "Choose a larger-context proof model or reduce source context."
+                        )
+                    )
+                )
+                await self._broadcast(
+                    broadcast_fn,
+                    "proof_context_overflow",
+                    {
+                        **base_event,
+                        "workflow_mode": self._proof_workflow_mode(trigger),
+                        "fatal": False,
+                        "overflow_origin": overflow_origin,
+                        "role_id": formalization_agent.role_id,
+                        **configured_payload,
+                        **route_payload,
+                        "reason": CONTEXT_OVERFLOW_STOP_REASON,
+                        "message": message,
+                        "resolution": CONTEXT_OVERFLOW_RESOLUTION,
+                        "error_detail": feedback.error_output,
+                        "theorem_id": current_candidate.theorem_id,
+                        "theorem_statement": current_candidate.statement,
+                        "proof_label": proof_label,
+                        "attempt": feedback.attempt,
+                        "strategy": feedback.strategy,
+                        "prompt_tokens": feedback.prompt_tokens,
+                        "max_input_tokens": feedback.max_input_tokens,
+                        "retry_origin_source_id": current_candidate.origin_source_id,
+                    },
+                )
             else:
                 lean_response = self._lean_response_summary(feedback)
                 await self._broadcast(
@@ -1323,8 +1419,18 @@ class ProofVerificationStage:
                     },
                 )
 
-        full_attempt_count = sum(1 for attempt in active_attempts if attempt.strategy == "full_script")
-        tactic_attempt_count = sum(1 for attempt in active_attempts if attempt.strategy == "tactic_script")
+        full_attempt_count = sum(
+            1
+            for attempt in active_attempts
+            if attempt.strategy == "full_script"
+            and not ProofFormalizationAgent.is_context_overflow_feedback(attempt)
+        )
+        tactic_attempt_count = sum(
+            1
+            for attempt in active_attempts
+            if attempt.strategy == "tactic_script"
+            and not ProofFormalizationAgent.is_context_overflow_feedback(attempt)
+        )
         full_remaining = max(0, 3 - full_attempt_count)
         tactic_remaining = max(0, 2 - tactic_attempt_count)
         success = False
@@ -1412,6 +1518,8 @@ class ProofVerificationStage:
         source_type: str,
         source_id: str,
         user_prompt: str,
+        canonical_user_prompt: str = "",
+        run_id: str = "",
         submitter_model: str,
         submitter_context: int,
         submitter_max_tokens: int,
@@ -1432,6 +1540,8 @@ class ProofVerificationStage:
             source_type=source_type,
             source_id=source_id,
             user_prompt=user_prompt,
+            canonical_user_prompt=canonical_user_prompt,
+            run_id=run_id,
             submitter_model=submitter_model,
             submitter_context=submitter_context,
             submitter_max_tokens=submitter_max_tokens,

@@ -12,6 +12,8 @@ import asyncio
 import logging
 import hashlib
 import time
+import gc
+import platform
 from pathlib import Path
 
 from backend.shared.config import rag_config, system_config
@@ -21,8 +23,15 @@ from backend.shared.rag_lock import rag_operation_lock
 from backend.shared.utils import count_tokens
 from backend.shared.log_redaction import redact_log_text
 from backend.aggregator.ingestion.pipeline import ingestion_pipeline
+from backend.aggregator.core.chroma_cache import (
+    abort_chroma_cache_rebuild,
+    complete_chroma_cache_rebuild,
+    maintain_chroma_cache_directory,
+    quarantine_chroma_cache,
+)
 
 logger = logging.getLogger(__name__)
+CHROMA_DELETE_BATCH_SIZE = 1000
 
 
 class RAGManager:
@@ -31,20 +40,15 @@ class RAGManager:
     """
     
     def __init__(self):
-        # ChromaDB client
-        self.chroma_client = chromadb.PersistentClient(
-            path=system_config.chroma_db_dir,
-            settings=Settings(anonymized_telemetry=False)
-        )
-        
-        # Collections for different chunk sizes
+        # Open Chroma lazily so imports are filesystem side-effect free and the
+        # runtime root can be bound before first use.
+        self.chroma_client = None
         self.collections = {}
-        for size in rag_config.submitter_chunk_intervals:
-            collection_name = f"chunks_{size}"
-            self.collections[size] = self.chroma_client.get_or_create_collection(
-                name=collection_name,
-                metadata={"chunk_size": size}
-            )
+        self._root_identity = None
+        self._prepared_root_identities = set()
+        # Rust collection/client wrappers can retain Windows directory handles
+        # until their finalizers run even after the shared system is stopped.
+        gc.collect()
         
         # In-memory chunk storage for BM25
         self.chunks_by_size: Dict[int, List[DocumentChunk]] = {
@@ -65,6 +69,223 @@ class RAGManager:
         self.document_count = 0
         self.permanent_documents = set()  # User files never evicted
         self.document_access_order: OrderedDict = OrderedDict()  # LRU tracking: source_name -> last_access_time
+
+    @property
+    def is_initialized(self) -> bool:
+        return self.chroma_client is not None
+
+    def _prepare_process_generation_cache_locked(self) -> Path | None:
+        """Replace prior-process Windows Chroma state before Rust can open it."""
+        identity = system_config.runtime_root_identity()
+        if identity in self._prepared_root_identities:
+            return None
+        if platform.system() != "Windows" or system_config.generic_mode:
+            self._prepared_root_identities.add(identity)
+            return None
+
+        cache_dir = Path(system_config.chroma_db_dir)
+        if not cache_dir.exists():
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            self._prepared_root_identities.add(identity)
+            return None
+
+        _, quarantine = quarantine_chroma_cache(
+            system_config.chroma_db_dir,
+            system_config.data_dir,
+        )
+        if quarantine is not None:
+            logger.warning(
+                "Replaced prior-process Windows Chroma cache before native initialization; "
+                "RAG sources will be rebuilt lazily from durable files."
+            )
+        return quarantine
+
+    def _ensure_initialized_locked(self) -> None:
+        """Worker-only open; callers must hold the async lifecycle boundary."""
+        identity = system_config.runtime_root_identity()
+        if self.chroma_client is not None and self._root_identity == identity:
+            return
+        if self.chroma_client is not None:
+            self._close_locked()
+            self._reset_memory_state()
+        quarantine = self._prepare_process_generation_cache_locked()
+        if quarantine is None:
+            self._maintain_persistent_cache()
+        try:
+            self.chroma_client = chromadb.PersistentClient(
+                path=system_config.chroma_db_dir,
+                settings=Settings(anonymized_telemetry=False),
+            )
+            self.collections = {
+                size: self.chroma_client.get_or_create_collection(
+                    name=f"chunks_{size}",
+                    metadata={"chunk_size": size},
+                )
+                for size in rag_config.submitter_chunk_intervals
+            }
+            self._root_identity = identity
+        except BaseException:
+            self._close_locked()
+            try:
+                abort_chroma_cache_rebuild(
+                    system_config.chroma_db_dir,
+                    system_config.data_dir,
+                    quarantine,
+                )
+            finally:
+                self._prepared_root_identities.discard(identity)
+            raise
+        else:
+            self._prepared_root_identities.add(identity)
+            if quarantine is not None:
+                complete_chroma_cache_rebuild(
+                    system_config.chroma_db_dir,
+                    system_config.data_dir,
+                    quarantine,
+                )
+
+    async def ensure_initialized(self) -> None:
+        async with rag_operation_lock.operation("Chroma initialize"):
+            await self._await_native_worker(
+                "Chroma initialize",
+                self._ensure_initialized_locked,
+            )
+
+    async def prepare_process_generation_cache(self) -> None:
+        """Prepare the active cache before any workflow can enter Chroma."""
+        async with rag_operation_lock.operation("Chroma process-generation prepare"):
+            await self._await_native_worker(
+                "Chroma process-generation prepare",
+                self._ensure_initialized_locked,
+            )
+
+    async def _await_native_worker(self, operation_name: str, func, *args, **kwargs):
+        """Run one native call and drain it before propagating cancellation."""
+        worker = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            uncancel = getattr(current, "uncancel", None)
+            pending_cancellations = 0
+            if callable(uncancel):
+                while current is not None and current.cancelling():
+                    uncancel()
+                    pending_cancellations += 1
+            try:
+                try:
+                    await asyncio.shield(worker)
+                except Exception:
+                    logger.debug(
+                        "Chroma worker failed while completing cancelled operation %s",
+                        operation_name,
+                        exc_info=True,
+                    )
+            finally:
+                for _ in range(pending_cancellations):
+                    if current is not None:
+                        current.cancel()
+            raise
+
+    async def _run_chroma_call(
+        self,
+        operation_name: str,
+        chunk_size: int,
+        method_name: str,
+        *args,
+        **kwargs,
+    ):
+        """Run one Chroma call serially and never abandon its native worker.
+
+        Cancelling ``asyncio.to_thread`` only cancels the awaiter; the native
+        Chroma/Rust call keeps running. Waiting for that worker before releasing
+        the global lock prevents a subsequent reset/query from entering Chroma
+        concurrently with the abandoned call.
+        """
+        async with rag_operation_lock.operation(operation_name):
+            await self._await_native_worker(
+                f"{operation_name} initialization",
+                self._ensure_initialized_locked,
+            )
+            collection = self.collections[chunk_size]
+            return await self._await_native_worker(
+                operation_name,
+                getattr(collection, method_name),
+                *args,
+                **kwargs,
+            )
+
+    def _close_locked(self) -> None:
+        """Release the current Chroma client without touching durable data."""
+        client = self.chroma_client
+        if client is not None:
+            close_client = getattr(client, "close", None)
+            stop = getattr(getattr(client, "_system", None), "stop", None)
+            if callable(close_client):
+                try:
+                    close_client()
+                except Exception as exc:
+                    logger.debug("Chroma client close reported: %s", exc)
+            elif callable(stop):  # Compatibility with older supported Chroma.
+                try:
+                    stop()
+                except Exception as exc:
+                    logger.debug("Chroma client stop reported: %s", exc)
+            clear_system_cache = getattr(client, "clear_system_cache", None)
+            if callable(clear_system_cache):
+                try:
+                    clear_system_cache()
+                except Exception as exc:
+                    logger.debug("Chroma shared-system cache cleanup reported: %s", exc)
+        self.chroma_client = None
+        self.collections = {}
+        self._root_identity = None
+
+    def _reset_memory_state(self) -> None:
+        self.chunks_by_size = {size: [] for size in rag_config.submitter_chunk_intervals}
+        self.bm25_index = {size: None for size in rag_config.submitter_chunk_intervals}
+        self.rewrite_cache.clear()
+        self.bm25_cache.clear()
+        self.context_pack_cache.clear()
+        self.document_count = 0
+        self.permanent_documents.clear()
+        self.document_access_order.clear()
+
+    async def close(self) -> None:
+        """Drain native work, then close the Chroma client exactly once."""
+        async with rag_operation_lock.operation("Chroma close"):
+            await self._await_native_worker("Chroma close", self._close_locked)
+
+    async def reset(self) -> None:
+        """Close Chroma and clear all process-local retrieval state."""
+        async with rag_operation_lock.operation("Chroma reset"):
+            await self._await_native_worker("Chroma reset", self._close_locked)
+            self._reset_memory_state()
+
+    def _maintain_persistent_cache(self) -> None:
+        """Clean orphaned Chroma cache artifacts before opening the client."""
+        try:
+            result = maintain_chroma_cache_directory(
+                system_config.chroma_db_dir,
+                system_config.data_dir,
+            )
+        except Exception as exc:
+            logger.warning("Chroma cache maintenance skipped: %s", exc)
+            return
+
+        if result.reset_performed:
+            logger.warning(
+                "Chroma cache was reset to remove %d orphaned UUID directories; "
+                "RAG sources will be re-indexed from durable files as workflows start.",
+                result.unreferenced_uuid_dir_count,
+            )
+        else:
+            logger.debug(
+                "Chroma cache maintenance completed without reset: %s (%d UUID dirs, %d unreferenced).",
+                result.reason,
+                result.uuid_dir_count,
+                result.unreferenced_uuid_dir_count,
+            )
     
     async def add_document(
         self,
@@ -250,49 +471,44 @@ class RAGManager:
             return
         
         texts = [chunk.text for chunk in chunks]
+        await self.ensure_initialized()
+        embeddings = await api_client_manager.get_embeddings(texts)
 
-        embeddings = None
-        lock_acquired = False
-        if system_config.generic_mode:
-            embeddings = await api_client_manager.get_embeddings(texts)
-            await rag_operation_lock.acquire(f"RAGManager add_chunks write (size={chunk_size})")
-            lock_acquired = True
-        else:
-            await rag_operation_lock.acquire(f"RAGManager add_chunks (size={chunk_size})")
-            lock_acquired = True
-        try:
-            if embeddings is None:
-                embeddings = await api_client_manager.get_embeddings(texts)
+        # Update chunks with embeddings and tokens
+        for chunk, embedding in zip(chunks, embeddings):
+            chunk.embedding = embedding
+            chunk.tokens = chunk.text.lower().split()
 
-            # Update chunks with embeddings and tokens
-            for chunk, embedding in zip(chunks, embeddings):
-                chunk.embedding = embedding
-                chunk.tokens = chunk.text.lower().split()
-
-            # ChromaDB writes stay under the global RAG lock in both modes.
+        # Commit the native write and its process-local mirror under one owner.
+        operation_name = f"Chroma upsert (size={chunk_size})"
+        async with rag_operation_lock.operation(operation_name):
+            await self._await_native_worker(
+                f"{operation_name} initialization",
+                self._ensure_initialized_locked,
+            )
             collection = self.collections[chunk_size]
             try:
-                await asyncio.to_thread(
-                    collection.add,
+                await self._await_native_worker(
+                    operation_name,
+                    collection.upsert,
                     ids=[chunk.chunk_id for chunk in chunks],
                     embeddings=embeddings,
                     documents=texts,
-                    metadatas=[chunk.metadata for chunk in chunks]
+                    metadatas=[chunk.metadata for chunk in chunks],
                 )
-                logger.debug(f"Added {len(chunks)} chunks to ChromaDB collection (size={chunk_size})")
+                logger.debug(f"Upserted {len(chunks)} chunks in ChromaDB collection (size={chunk_size})")
             except Exception as e:
-                logger.error(f"CRITICAL: ChromaDB add failed for chunk_size={chunk_size}: {type(e).__name__}: {e}")
-                logger.error(f"Attempting to add {len(chunks)} chunks with IDs: {[c.chunk_id for c in chunks][:5]}...")
+                logger.error(f"CRITICAL: ChromaDB upsert failed for chunk_size={chunk_size}: {type(e).__name__}: {e}")
+                logger.error(f"Attempting to upsert {len(chunks)} chunks with IDs: {[c.chunk_id for c in chunks][:5]}...")
                 raise
 
-            # Add to memory
-            self.chunks_by_size[chunk_size].extend(chunks)
-
-            # Invalidate BM25 index for this size
+            incoming_ids = {chunk.chunk_id for chunk in chunks}
+            self.chunks_by_size[chunk_size] = [
+                existing
+                for existing in self.chunks_by_size[chunk_size]
+                if existing.chunk_id not in incoming_ids
+            ] + chunks
             self.bm25_index[chunk_size] = None
-        finally:
-            if lock_acquired:
-                rag_operation_lock.release()
     
     async def _rewrite_query(self, query: str) -> List[str]:
         """Stage A: Expand query into semantic variants."""
@@ -334,6 +550,7 @@ class RAGManager:
         include_source_prefixes: Optional[List[str]] = None
     ) -> List[Tuple[DocumentChunk, float]]:
         """Stage B: Hybrid BM25 + Vector search."""
+        await self.ensure_initialized()
         # Work from a stable snapshot so threaded scoring does not race with
         # concurrent RAG add/remove operations mutating the live chunk lists.
         chunks = list(self._filter_chunks_by_source_scope(
@@ -379,7 +596,6 @@ class RAGManager:
         candidate_chunks: Optional[List[DocumentChunk]] = None
     ) -> List[Tuple[DocumentChunk, float]]:
         """Vector similarity search with retry logic for HNSW index race conditions."""
-        collection = self.collections[chunk_size]
         chunks = candidate_chunks if candidate_chunks is not None else self.chunks_by_size[chunk_size]
         
         if not chunks:
@@ -403,8 +619,10 @@ class RAGManager:
             
             for attempt in range(max_retries):
                 try:
-                    results = await asyncio.to_thread(
-                        collection.query,
+                    results = await self._run_chroma_call(
+                        f"Chroma query (size={chunk_size})",
+                        chunk_size,
+                        "query",
                         query_embeddings=[query_embedding],
                         n_results=min(rag_config.hybrid_recall_top_k, len(chunks))
                     )
@@ -717,17 +935,21 @@ class RAGManager:
             for chunk in chunks:
                 if removed < overflow and not chunk.is_permanent:
                     evict_ids.append(chunk.chunk_id)
-                    chunk.embedding = None
                     removed += 1
                 else:
                     keep.append(chunk)
 
             if evict_ids:
-                collection = self.collections[chunk_size]
                 try:
-                    await asyncio.to_thread(collection.delete, ids=evict_ids)
+                    await self._run_chroma_call(
+                        f"Chroma chunk-cap delete (size={chunk_size})",
+                        chunk_size,
+                        "delete",
+                        ids=evict_ids,
+                    )
                 except Exception as e:
                     logger.error(f"ChromaDB delete during chunk cap enforcement (size={chunk_size}): {e}")
+                    raise
 
                 self.chunks_by_size[chunk_size] = keep
                 self.bm25_index[chunk_size] = None
@@ -772,99 +994,93 @@ class RAGManager:
             )
     
     async def remove_document(self, source_name: str) -> None:
-        """Remove a document from all collections."""
-        was_tracked = source_name in self.document_access_order
-        
-        for chunk_size in rag_config.submitter_chunk_intervals:
-            # Remove from memory
-            self.chunks_by_size[chunk_size] = [
-                c for c in self.chunks_by_size[chunk_size]
-                if c.source_file != source_name
-            ]
-            
-            # Remove from ChromaDB
-            collection = self.collections[chunk_size]
-            # Get IDs for this source
-            results = await asyncio.to_thread(collection.get, where={"source_file": source_name})
-            if results['ids']:
-                await asyncio.to_thread(collection.delete, ids=results['ids'])
-            
-            # Invalidate BM25
-            self.bm25_index[chunk_size] = None
-        
-        if was_tracked:
-            self.document_count = max(0, self.document_count - 1)
-        
-        # Clean up LRU tracking
-        if source_name in self.document_access_order:
-            del self.document_access_order[source_name]
-        if source_name in self.permanent_documents:
+        """Remove a source from every collection before changing memory."""
+        async with rag_operation_lock.operation(f"Chroma source removal: {source_name}"):
+            await self._await_native_worker(
+                f"Chroma source removal initialization: {source_name}",
+                self._ensure_initialized_locked,
+            )
+            was_tracked = source_name in self.document_access_order
+            failures = []
+            for chunk_size in rag_config.submitter_chunk_intervals:
+                try:
+                    await self._delete_matching_ids(
+                        chunk_size,
+                        f"Chroma document delete (size={chunk_size})",
+                        where={"source_file": source_name},
+                    )
+                except Exception as exc:
+                    failures.append(f"chunks_{chunk_size}: {exc}")
+            if failures:
+                raise RuntimeError(
+                    f"Failed to remove RAG source {source_name!r}: {'; '.join(failures)}"
+                )
+
+            for chunk_size in rag_config.submitter_chunk_intervals:
+                self.chunks_by_size[chunk_size] = [
+                    c for c in self.chunks_by_size[chunk_size]
+                    if c.source_file != source_name
+                ]
+                self.bm25_index[chunk_size] = None
+
+            if was_tracked:
+                self.document_count = max(0, self.document_count - 1)
+            self.document_access_order.pop(source_name, None)
             self.permanent_documents.discard(source_name)
         
         logger.info("Removed document: %s", redact_log_text(source_name, 120))
-    
-    def clear_all_documents(self) -> None:
-        """Clear all documents from RAG database (synchronous for cleanup).
-        
-        Uses graceful degradation: clears what it can even if some operations fail.
-        Only raises if critical operations (collection creation) fail.
-        """
-        logger.info("Clearing all documents from RAG database...")
-        
-        collection_errors = []
-        
-        try:
-            # Delete all collections (non-critical if individual deletions fail)
-            for chunk_size in list(self.collections.keys()):
-                try:
-                    self.chroma_client.delete_collection(f"chunks_{chunk_size}")
-                    logger.info(f"Deleted collection chunks_{chunk_size}")
-                except Exception as e:
-                    collection_errors.append(f"chunks_{chunk_size}: {e}")
-                    logger.warning(f"Failed to delete collection chunks_{chunk_size}: {e}")
-            
-            # Recreate fresh collections (CRITICAL - must succeed)
-            self.collections = {}
-            for size in rag_config.submitter_chunk_intervals:
-                collection_name = f"chunks_{size}"
-                try:
-                    self.collections[size] = self.chroma_client.get_or_create_collection(
-                        name=collection_name,
-                        metadata={"chunk_size": size}
-                    )
-                    logger.info(f"Recreated collection {collection_name}")
-                except Exception as e:
-                    logger.error(f"CRITICAL: Failed to recreate collection {collection_name}: {e}")
-                    raise  # Critical failure - cannot continue without collections
-            
-            # Clear in-memory storage (safe operations)
-            self.chunks_by_size = {
-                size: [] for size in rag_config.submitter_chunk_intervals
-            }
-            
-            # Clear BM25 indices
-            self.bm25_index = {
-                size: None for size in rag_config.submitter_chunk_intervals
-            }
-            
-            # Clear caches
-            self.rewrite_cache.clear()
-            self.bm25_cache.clear()
-            self.context_pack_cache.clear()
-            
-            # Reset counters
-            self.document_count = 0
-            self.permanent_documents.clear()
-            self.document_access_order.clear()
-            
-            if collection_errors:
-                logger.warning(f"RAG cleared with {len(collection_errors)} non-critical warnings: {'; '.join(collection_errors)}")
-            else:
-                logger.info("Successfully cleared all RAG documents")
-            
-        except Exception as e:
-            logger.error(f"CRITICAL error clearing RAG database: {e}")
-            raise
+
+    async def _delete_matching_ids(self, chunk_size: int, operation_name: str, *, where=None) -> int:
+        async with rag_operation_lock.operation(operation_name):
+            await self._await_native_worker(
+                f"{operation_name} initialization",
+                self._ensure_initialized_locked,
+            )
+            collection = self.collections[chunk_size]
+            deleted = 0
+            previous_batch = None
+            while True:
+                results = await self._await_native_worker(
+                    f"{operation_name} lookup",
+                    collection.get,
+                    limit=CHROMA_DELETE_BATCH_SIZE,
+                    include=[],
+                    **({"where": where} if where else {}),
+                )
+                ids = tuple(results.get("ids") or ())
+                if not ids:
+                    return deleted
+                if ids == previous_batch:
+                    raise RuntimeError(f"{operation_name} made no progress")
+                await self._await_native_worker(
+                    operation_name,
+                    collection.delete,
+                    ids=list(ids),
+                )
+                deleted += len(ids)
+                previous_batch = ids
+
+    async def clear_all_documents_async(self) -> None:
+        """Atomically replace the rebuildable Chroma cache with an empty cache."""
+        async with rag_operation_lock.operation("Chroma cache rebuild"):
+            await asyncio.to_thread(self._close_locked)
+            self._reset_memory_state()
+            cache_dir, quarantine = await asyncio.to_thread(
+                quarantine_chroma_cache,
+                system_config.chroma_db_dir,
+                system_config.data_dir,
+            )
+            try:
+                await asyncio.to_thread(self._ensure_initialized_locked)
+            except BaseException:
+                # Leave the marker/quarantine for deterministic startup recovery.
+                raise
+            await asyncio.to_thread(
+                complete_chroma_cache_rebuild,
+                cache_dir,
+                system_config.data_dir,
+                quarantine,
+            )
 
 
 # Global RAG manager instance

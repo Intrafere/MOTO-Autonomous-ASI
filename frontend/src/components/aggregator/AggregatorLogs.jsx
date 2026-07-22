@@ -6,6 +6,7 @@ import { MANUAL_AGGREGATOR_PROOF_SOURCE_ID } from '../../hooks/useProofCheckRunt
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  formatSolutionPathEventMessage,
   buildRejectionFeedbackNoticeActivity,
   getActivityClass,
   getActivityIcon,
@@ -36,7 +37,27 @@ const ASSISTANT_MEMORY_EVENTS = [
   'assistant_proof_pack_updated',
   'assistant_proof_pack_failed',
 ];
+const SOLUTION_PATH_EVENTS = [
+  'solution_path_activated',
+  'solution_path_proposal_queued',
+  'solution_path_proposal_reviewing',
+  'solution_path_updated',
+  'solution_path_proposal_rejected',
+  'solution_path_proposal_retry_queued',
+  'solution_path_proposal_user_repair_required',
+  'solution_path_proposal_resumed',
+];
 const HIDDEN_AGGREGATOR_ACTIVITY_EVENTS = new Set(['new_submission']);
+
+export const shouldIncludeAggregatorProofContextOverflow = (data = {}) => (
+  data.source_type === 'brainstorm'
+  && data.source_id === MANUAL_AGGREGATOR_PROOF_SOURCE_ID
+);
+
+export const shouldIncludeAggregatorSolutionPathEvent = (data = {}) => {
+  const workflowMode = String(data.workflow_mode || data.mode || '').toLowerCase();
+  return !workflowMode || workflowMode === 'aggregator';
+};
 
 const normalizeAggregatorEventName = (eventName = '') => {
   switch (eventName) {
@@ -170,6 +191,10 @@ const countLatestRejectionStreak = (events) => {
   return count;
 };
 
+export const formatAggregatorPersistedOverflowMessage = (event = {}) => (
+  formatContextOverflowActivityMessage(event.metadata || {})
+);
+
 export default function AggregatorLogs() {
   const [events, setEvents] = useState([]);
   const [status, setStatus] = useState(null);
@@ -197,9 +222,16 @@ export default function AggregatorLogs() {
       websocket.on('cleanup_review_complete', handleCleanupComplete),
       websocket.on('cleanup_review_error', handleCleanupError),
       websocket.on('context_overflow_error', handleContextOverflow),
+      websocket.on('proof_context_overflow', handleProofContextOverflow),
       websocket.on('hung_connection_alert', handleHungConnectionAlert),
       websocket.on('assistant_proof_pack_updated', (data) => handleAssistantProofPackEvent('assistant_proof_pack_updated', data)),
       websocket.on('assistant_proof_pack_failed', (data) => handleAssistantProofPackEvent('assistant_proof_pack_failed', data)),
+      ...SOLUTION_PATH_EVENTS.map((eventName) => (
+        websocket.on(eventName, (data = {}) => {
+          if (!shouldIncludeAggregatorSolutionPathEvent(data)) return;
+          addEvent(eventName, formatSolutionPathEventMessage(eventName, data), data);
+        })
+      )),
       ...MANUAL_PROOF_EVENTS.map((eventName) => (
         websocket.on(eventName, (data) => handleManualProofEvent(eventName, data))
       )),
@@ -254,6 +286,12 @@ export default function AggregatorLogs() {
             message: formatAssistantProofPackEventMessage(event.type, event.data || {}),
           };
         }
+        if (event.type === 'proof_context_overflow') {
+          return {
+            ...event,
+            message: formatContextOverflowActivityMessage(event.data || {}),
+          };
+        }
         if (!MANUAL_PROOF_EVENTS.includes(event.type)) {
           return event;
         }
@@ -265,6 +303,22 @@ export default function AggregatorLogs() {
     } catch (error) {
       console.error('Failed to load manual Aggregator live activity:', error);
       return [];
+    }
+  };
+
+  const formatPersistedEventMessage = (event = {}) => {
+    switch (event.type) {
+      case 'submission_accepted':
+        return `✓ ${event.message}`;
+      case 'submission_rejected':
+        return `✗ ${event.message}`;
+      case 'proof_attempt_failed':
+      case 'proof_attempts_exhausted':
+        return formatProofEvent(event.type, event.metadata || {});
+      case 'context_overflow_error':
+        return formatAggregatorPersistedOverflowMessage(event);
+      default:
+        return event.message || event.type || 'Aggregator event';
     }
   };
 
@@ -294,20 +348,6 @@ export default function AggregatorLogs() {
     return [];
   };
 
-  const formatPersistedEventMessage = (event = {}) => {
-    switch (event.type) {
-      case 'submission_accepted':
-        return `✓ ${event.message}`;
-      case 'submission_rejected':
-        return `✗ ${event.message}`;
-      case 'proof_attempt_failed':
-      case 'proof_attempts_exhausted':
-        return formatProofEvent(event.type, event.metadata || {});
-      default:
-        return event.message || event.type || 'Aggregator event';
-    }
-  };
-
   const loadInitialEvents = async () => {
     const [manualEvents, backendEvents] = await Promise.all([
       Promise.resolve(readStoredManualEvents()),
@@ -327,7 +367,10 @@ export default function AggregatorLogs() {
   const persistManualEvents = (nextEvents) => {
     try {
       const manualEvents = nextEvents.filter((event) => (
-        MANUAL_PROOF_EVENTS.includes(event.type) || ASSISTANT_MEMORY_EVENTS.includes(event.type)
+        MANUAL_PROOF_EVENTS.includes(event.type)
+        || ASSISTANT_MEMORY_EVENTS.includes(event.type)
+        || SOLUTION_PATH_EVENTS.includes(event.type)
+        || event.type === 'proof_context_overflow'
       ));
       localStorage.setItem(
         AGGREGATOR_LIVE_ACTIVITY_STORAGE_KEY,
@@ -406,6 +449,13 @@ export default function AggregatorLogs() {
     addEvent('context_overflow_error', formatContextOverflowActivityMessage(data), data);
   };
 
+  const handleProofContextOverflow = (data = {}) => {
+    if (!shouldIncludeAggregatorProofContextOverflow(data)) {
+      return;
+    }
+    addEvent('proof_context_overflow', formatContextOverflowActivityMessage(data), data);
+  };
+
   const handleAssistantProofPackEvent = (eventName, data = {}) => {
     const workflowMode = String(data.workflow_mode || '');
     const sourceId = String(data.source_id || '');
@@ -429,14 +479,23 @@ export default function AggregatorLogs() {
     addEvent(eventName, formatProofEvent(eventName, data), data);
   };
 
+  const proofRoundPrefix = (data = {}) => {
+    const round = Number(data.proof_round_index || 0);
+    const maxRounds = Number(data.proof_max_rounds || 0);
+    return round > 0 && maxRounds > 1 ? `Proof round ${round}/${maxRounds} discovery` : 'Proof discovery';
+  };
+
   const formatProofEvent = (eventName, data = {}) => {
     switch (eventName) {
       case 'proof_check_started':
         return 'Proof check started for the manual Aggregator database';
       case 'proof_check_no_candidates':
-        return 'No formal theorem candidates found in the manual Aggregator database';
-      case 'proof_check_candidates_found':
-        return `Proof candidates found: ${data.count || 0}`;
+        return `${proofRoundPrefix(data)} found 0 proof candidates; no proofs will be attempted`;
+      case 'proof_check_candidates_found': {
+        const count = Number(data.count || 0);
+        const subject = count === 1 ? 'proof candidate' : 'proof candidates';
+        return `${proofRoundPrefix(data)} found ${count} ${subject}; ${count} will be attempted`;
+      }
       case 'proof_attempt_started':
         return `Lean proof attempt started: ${proofTargetLabel(data)}`;
       case 'proof_lean_accepted':

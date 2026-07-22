@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import importlib
 import json
 import ntpath
@@ -1347,7 +1348,7 @@ def _set_smt_env_flags(
 ) -> None:
     env["MOTO_SMT_ENABLED"] = "1" if enabled else "0"
     env["MOTO_Z3_PATH"] = z3_path
-    env["MOTO_SMT_TIMEOUT"] = env.get("MOTO_SMT_TIMEOUT", "").strip() or "30"
+    env["MOTO_SMT_TIMEOUT"] = env.get("MOTO_SMT_TIMEOUT", "").strip() or "300"
 
 
 def install_lean4(
@@ -1623,21 +1624,78 @@ def install_z3(runtime: InstanceRuntime, env: dict[str, str]) -> None:
     print()
 
 
-def npm_output_reports_vulnerabilities(output: str) -> bool:
-    normalized = (output or "").lower()
-    return (
-        "vulnerabilit" in normalized
-        and (
-            "npm audit fix" in normalized
-            or "severity" in normalized
-            or "to address all issues" in normalized
-        )
+def run_frontend_npm_audit(npm_cmd: str, frontend_path: str) -> bool:
+    """Run read-only high/critical npm audit and return whether the user should be warned."""
+    audit_result = subprocess.run(
+        [npm_cmd, "audit", "--audit-level=high"],
+        cwd=frontend_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
     )
+    audit_output = (audit_result.stdout or "").strip()
+    if audit_output:
+        print(audit_output)
+
+    if audit_result.returncode == 0:
+        return False
+
+    cprint(
+        "WARNING: npm reported high/critical frontend dependency advisories. "
+        "The launcher will not rewrite dependencies locally; the auto-updater will apply the tested fix "
+        "with the next MOTO update after maintainers update the lockfile.",
+        YELLOW,
+    )
+    return True
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def frontend_lockfile_install_current(frontend_dir: Path, package_lock_path: Path) -> bool:
+    marker_path = frontend_dir / "node_modules" / ".moto_package_lock.sha256"
+    if not marker_path.exists():
+        return False
+    try:
+        return marker_path.read_text(encoding="utf-8").strip() == file_sha256(package_lock_path)
+    except OSError:
+        return False
+
+
+def write_frontend_lockfile_install_marker(frontend_dir: Path, package_lock_path: Path) -> None:
+    marker_path = frontend_dir / "node_modules" / ".moto_package_lock.sha256"
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(file_sha256(package_lock_path), encoding="utf-8")
+    except OSError as exc:
+        cprint(f"WARNING: Could not write frontend dependency marker: {exc}", YELLOW)
+
+
+def npm_output_is_windows_file_lock_error(output: str) -> bool:
+    normalized = (output or "").lower()
+    return "eperm" in normalized and ("unlink" in normalized or "operation not permitted" in normalized)
+
+
+def frontend_install_command(npm_cmd: str, frontend_dir: Path, package_lock_path: Path) -> list[str]:
+    if not package_lock_path.exists():
+        return [npm_cmd, "install"]
+
+    node_modules_path = frontend_dir / "node_modules"
+    if node_modules_path.exists():
+        return [npm_cmd, "install", "--package-lock=false", "--no-save"]
+    return [npm_cmd, "ci"]
 
 
 def install_frontend_dependencies() -> tuple[str, bool]:
     cprint("[5/8] Checking Node.js dependencies...", YELLOW)
-    frontend_path = str(SCRIPT_DIR / "frontend")
+    frontend_dir = SCRIPT_DIR / "frontend"
+    frontend_path = str(frontend_dir)
     if not os.path.isdir(frontend_path):
         print()
         cprint("============================================================", RED)
@@ -1657,8 +1715,31 @@ def install_frontend_dependencies() -> tuple[str, bool]:
         cprint("Reinstall Node.js from https://nodejs.org/ and ensure npm is included in PATH.", YELLOW)
         exit_with_pause(1)
 
+    package_lock_path = frontend_dir / "package-lock.json"
+    node_modules_path = frontend_dir / "node_modules"
+    install_args = frontend_install_command(npm_cmd, frontend_dir, package_lock_path)
+    if package_lock_path.exists():
+        if node_modules_path.exists() and frontend_lockfile_install_current(frontend_dir, package_lock_path):
+            cprint("Frontend dependencies match package-lock.json; skipping reinstall.", GREEN)
+            vulnerability_warning = run_frontend_npm_audit(npm_cmd, frontend_path)
+            cprint("Node.js dependencies up to date", GREEN)
+            print()
+            return npm_cmd, vulnerability_warning
+        if install_args[1] == "ci":
+            cprint("Installing frontend dependencies from package-lock.json with `npm ci`...", YELLOW)
+        else:
+            cprint(
+                "Reconciling existing frontend dependencies without modifying package files...",
+                YELLOW,
+            )
+    else:
+        cprint(
+            "WARNING: frontend/package-lock.json is missing; falling back to `npm install` for this launch.",
+            YELLOW,
+        )
+
     npm_result = subprocess.run(
-        [npm_cmd, "install"],
+        install_args,
         cwd=frontend_path,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -1674,59 +1755,17 @@ def install_frontend_dependencies() -> tuple[str, bool]:
         cprint("ERROR: Failed to install Node.js dependencies", RED)
         cprint("============================================================", RED)
         print()
+        if package_lock_path.exists() and node_modules_path.exists() and npm_output_is_windows_file_lock_error(npm_output):
+            cprint("A frontend native module appears to be locked by another process.", YELLOW)
+            cprint("Close running MOTO/Vite/Node processes and launch again.", YELLOW)
         cprint("Please check:", YELLOW)
         cprint("- Internet connection is working", YELLOW)
         cprint("- package.json exists in frontend directory", YELLOW)
         exit_with_pause(1)
+    elif package_lock_path.exists():
+        write_frontend_lockfile_install_marker(frontend_dir, package_lock_path)
 
-    # ──────────────────────────────────────────────────────────────────────
-    # SECURITY-CRITICAL: Automatic npm vulnerability remediation.
-    # PERMANENT LAUNCHER INVARIANT: Do not remove, disable, weaken, or bypass
-    # this npm audit-fix system. If an agent accidentally removes or breaks it,
-    # the agent must restore it immediately with no exceptions before continuing
-    # any other launcher/updater work.
-    # npm audit fix is the program's self-healing mechanism for dependency
-    # CVEs. Removing it leaves the runtime exposed to known exploits with
-    # no user-visible signal that remediation has stopped occurring.
-    # ──────────────────────────────────────────────────────────────────────
-    vulnerability_warning = npm_output_reports_vulnerabilities(npm_output)
-    if vulnerability_warning:
-        print()
-        cprint("npm reported vulnerabilities — running `npm audit fix`...", YELLOW)
-        fix_result = subprocess.run(
-            [npm_cmd, "audit", "fix"],
-            cwd=frontend_path,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
-        fix_output = (fix_result.stdout or "").strip()
-        if fix_output:
-            print(fix_output)
-
-        still_vulnerable = npm_output_reports_vulnerabilities(fix_output)
-        if fix_result.returncode != 0 or still_vulnerable:
-            cprint("Standard fix insufficient — running `npm audit fix --force`...", YELLOW)
-            force_result = subprocess.run(
-                [npm_cmd, "audit", "fix", "--force"],
-                cwd=frontend_path,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-            )
-            force_output = (force_result.stdout or "").strip()
-            if force_output:
-                print(force_output)
-            if force_result.returncode == 0:
-                cprint("npm audit fix --force completed.", GREEN)
-                vulnerability_warning = False
-            else:
-                cprint("npm audit fix --force could not fully resolve all vulnerabilities.", YELLOW)
-        else:
-            cprint("npm audit fix completed.", GREEN)
-            vulnerability_warning = False
+    vulnerability_warning = run_frontend_npm_audit(npm_cmd, frontend_path)
 
     cprint("Node.js dependencies up to date", GREEN)
     print()
@@ -1804,6 +1843,68 @@ def is_pid_running(pid: int) -> bool:
     return True
 
 
+def wait_for_backend_health(
+    backend_url: str,
+    backend_service: LaunchedService,
+    *,
+    timeout_seconds: float = 45.0,
+    poll_interval_seconds: float = 0.25,
+) -> dict:
+    """Wait for the launched backend's readiness endpoint or fail with diagnostics."""
+    health_url = f"{backend_url.rstrip('/')}/api/health"
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "no response"
+    while time.monotonic() < deadline:
+        if not is_pid_running(backend_service.pid):
+            log_hint = f" Check backend log: {backend_service.log_path}" if backend_service.log_path else ""
+            raise RuntimeError(f"{backend_service.title} exited before becoming healthy.{log_hint}")
+        try:
+            request = Request(health_url, headers={"Accept": "application/json"})
+            with urlopen(request, timeout=min(2.0, max(0.1, deadline - time.monotonic()))) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if response.status == 200 and payload.get("status") == "healthy":
+                return payload
+            last_error = f"unexpected health response: {payload!r}"
+        except (OSError, URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+            last_error = str(exc)
+        time.sleep(poll_interval_seconds)
+    log_hint = f" Backend log: {backend_service.log_path}" if backend_service.log_path else ""
+    raise RuntimeError(
+        f"{backend_service.title} did not become healthy within {timeout_seconds:g} seconds "
+        f"({last_error}).{log_hint}"
+    )
+
+
+def wait_for_frontend_ready(
+    frontend_url: str,
+    frontend_service: LaunchedService,
+    *,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 0.25,
+) -> None:
+    """Wait for Vite to serve the UI, detecting an early launcher child exit."""
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "no response"
+    while time.monotonic() < deadline:
+        if not is_pid_running(frontend_service.pid):
+            log_hint = f" Check frontend log: {frontend_service.log_path}" if frontend_service.log_path else ""
+            raise RuntimeError(f"{frontend_service.title} exited before becoming ready.{log_hint}")
+        try:
+            request = Request(frontend_url, headers={"Accept": "text/html"})
+            with urlopen(request, timeout=min(2.0, max(0.1, deadline - time.monotonic()))) as response:
+                if response.status == 200:
+                    return
+                last_error = f"HTTP {response.status}"
+        except (OSError, URLError, TimeoutError) as exc:
+            last_error = str(exc)
+        time.sleep(poll_interval_seconds)
+    log_hint = f" Frontend log: {frontend_service.log_path}" if frontend_service.log_path else ""
+    raise RuntimeError(
+        f"{frontend_service.title} did not become ready within {timeout_seconds:g} seconds "
+        f"({last_error}).{log_hint}"
+    )
+
+
 def start_services(
     runtime: InstanceRuntime,
     env: dict[str, str],
@@ -1829,10 +1930,6 @@ def start_services(
             if not has_desktop_session():
                 cprint("No DISPLAY/WAYLAND desktop session is active, so you may need to open the frontend URL manually.", YELLOW)
         print()
-    cprint("Starting services automatically in 3 seconds...", YELLOW)
-    time.sleep(3)
-    print()
-
     backend_args = [
         get_python_command(),
         "-m",
@@ -1853,11 +1950,9 @@ def start_services(
         log_root=runtime.log_root,
     )
 
-    cprint("Waiting for backend to initialize...", YELLOW)
-    time.sleep(5)
-    if backend_service.mode != "window" and not is_pid_running(backend_service.pid):
-        log_hint = f" Check {backend_service.log_path} for details." if backend_service.log_path else ""
-        raise RuntimeError(f"{backend_service.title} exited during startup.{log_hint}")
+    cprint("Waiting for backend health check...", YELLOW)
+    wait_for_backend_health(backend_url, backend_service)
+    cprint("Backend is healthy.", GREEN)
 
     if runtime.is_default and not runtime.explicit_override:
         write_runtime_lock(runtime.data_root, backend_service.pid, runtime.instance_id, runtime.backend_port)
@@ -1871,11 +1966,9 @@ def start_services(
         log_root=runtime.log_root,
     )
 
-    cprint("Waiting for frontend to initialize...", YELLOW)
-    time.sleep(8)
-    if frontend_service.mode != "window" and not is_pid_running(frontend_service.pid):
-        log_hint = f" Check {frontend_service.log_path} for details." if frontend_service.log_path else ""
-        raise RuntimeError(f"{frontend_service.title} exited during startup.{log_hint}")
+    cprint("Waiting for frontend readiness...", YELLOW)
+    wait_for_frontend_ready(frontend_url, frontend_service)
+    cprint("Frontend is ready.", GREEN)
 
     register_active_instance(
         instance_id=runtime.instance_id,
@@ -1885,7 +1978,6 @@ def start_services(
         frontend_port=runtime.frontend_port,
         data_root=runtime.data_root,
         log_root=runtime.log_root,
-        keyring_namespace=runtime.secret_namespace,
         storage_prefix=runtime.storage_prefix,
     )
 
@@ -1908,7 +2000,6 @@ def start_services(
                 instance_id=runtime.instance_id,
                 data_root=runtime.data_root,
                 log_root=runtime.log_root,
-                keyring_namespace=runtime.secret_namespace,
                 storage_prefix=runtime.storage_prefix,
             )
         except OSError as exc:
@@ -1948,7 +2039,13 @@ def print_success_footer(
     cprint(f"  {frontend_url}", CYAN)
     print()
     if vulnerability_warning:
-        cprint("npm audit fix could not fully resolve all reported vulnerabilities. Review with `npm audit` in `frontend/`.", YELLOW)
+        cprint(
+            "npm audit reported high/critical frontend advisories. "
+            "The launcher did not mutate dependencies; the auto-updater will apply the tested fix "
+            "with the next MOTO update after maintainers update the lockfile.",
+            YELLOW,
+        )
+        cprint("For details, run `npm audit --audit-level=high` in `frontend/`.", YELLOW)
         print()
     if backend_service.mode == "background" or frontend_service.mode == "background":
         cprint(f"To stop this instance: stop the launcher-managed backend/frontend processes for {runtime.instance_id}.", YELLOW)

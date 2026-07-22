@@ -523,6 +523,15 @@ class OpenAICodexClient:
         """Map user-facing Codex aliases onto the backend model id/request knobs."""
         if model == cls.CODEX_SPARK_HIGH_MODEL_ID:
             return cls.CODEX_SPARK_MODEL_ID, "high"
+        # Some Codex catalogs expose named variants as selectable entries while
+        # the Responses backend accepts the base model plus a reasoning effort.
+        # Keep the selected alias in MOTO metadata, but normalize the request.
+        named_effort = {
+            "gpt-5.6-luna": "high",
+            "gpt-5.6-terra": "medium",
+        }.get(model)
+        if named_effort:
+            return "gpt-5.6-sol", named_effort
         return model, reasoning_effort
 
     @staticmethod

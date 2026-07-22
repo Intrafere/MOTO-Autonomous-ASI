@@ -1,0 +1,25 @@
+{
+  "adapter": "real_route",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "route_start_stop",
+    "saved_output",
+    "temp_root_containment"
+  ],
+  "fields": [
+    "workflow_filesystem_state",
+    "runtime_exclusivity",
+    "prompt_context"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_manual_aggregator_route_lifecycle_output_and_temp_root",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+}

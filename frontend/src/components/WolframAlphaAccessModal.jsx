@@ -116,7 +116,7 @@ export default function WolframAlphaAccessModal({
         </div>
 
         <p className="settings-hint">
-          Enable Wolfram Alpha tool calls for computational verification during compiler/autonomous construction mode. Use a Wolfram Alpha App ID with full results enabled.
+          Enable Wolfram Alpha tool calls for computational verification during compiler/autonomous construction mode. Use a Wolfram Alpha App ID with full results enabled. Wolfram Alpha is like giving your AI a very advanced calculator.
         </p>
 
         <label className="settings-checkbox-label settings-checkbox-label--stacked" style={{ marginBottom: '1rem' }}>

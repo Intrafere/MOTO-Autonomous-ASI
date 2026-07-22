@@ -18,15 +18,30 @@ from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
 from backend.aggregator.core.context_allocator import ContextAllocationError, context_allocator
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.local_training import LocalTrainingMemory
 from backend.aggregator.prompts.submitter_prompts import (
     CREATIVITY_EMPHASIS_BOOST_PROMPT,
     build_submitter_prompt,
+    get_submitter_json_schema,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _requires_lean_retry_schema(llm_output: str, lean4_enabled: bool) -> bool:
+    """Keep malformed Lean candidate retries on the proof-gated response variant."""
+    return bool(
+        lean4_enabled
+        and (
+            '"lean_proof"' in llm_output
+            or '"lean_code"' in llm_output
+            or '"theorem_statement"' in llm_output
+        )
+    )
+
 
 class SubmitterAgent:
     """
@@ -51,6 +66,7 @@ class SubmitterAgent:
         local_rejection_log_template: Optional[str] = None,
         reset_local_rejection_log_on_initialize: bool = False,
         assistant_workflow_mode_override: Optional[str] = None,
+        solution_path_manager: Optional[Any] = None,
     ):
         self.submitter_id = submitter_id
         self.model_name = model_name
@@ -64,6 +80,7 @@ class SubmitterAgent:
         self.coordinator = coordinator
         self.creativity_emphasis_boost_enabled = creativity_emphasis_boost_enabled
         self.assistant_workflow_mode_override = assistant_workflow_mode_override
+        self.solution_path_manager = solution_path_manager
         
         # Per-submitter context settings (fall back to global config if not provided)
         self.context_window = context_window if context_window is not None else rag_config.submitter_context_window
@@ -271,8 +288,12 @@ class SubmitterAgent:
 
             # CRITICAL: Verify actual prompt size fits in context window
             from backend.shared.utils import count_tokens
-            actual_prompt_tokens = count_tokens(prompt)
             max_allowed_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt, self.solution_path_manager, max_allowed_tokens
+            )
+            actual_prompt_tokens = count_tokens(prompt)
 
             if creativity_emphasized and actual_prompt_tokens > max_allowed_tokens:
                 logger.warning(
@@ -304,6 +325,9 @@ class SubmitterAgent:
                     rag_evidence,
                     creativity_emphasized=False,
                     lean4_enabled=system_config.lean4_enabled,
+                )
+                prompt = with_budgeted_solver_plan(
+                    prompt, self.solution_path_manager, max_allowed_tokens
                 )
                 actual_prompt_tokens = count_tokens(prompt)
             
@@ -358,6 +382,23 @@ class SubmitterAgent:
                     call_metadata = api_client_manager.extract_call_metadata(response)
                     break  # Success
                     
+                except ProviderContextLengthError as e:
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
+                    raise ContextAllocationError.from_provider_error(
+                        e,
+                        f"Submitter {self.submitter_id} context overflow or provider context mismatch: "
+                        f"the assembled prompt requires {actual_prompt_tokens:,} tokens and the configured "
+                        f"input budget is {max_allowed_tokens:,} tokens (context window: {self.context_window:,}, "
+                        f"output reserve: {self.max_output_tokens:,}). The provider rejected the request "
+                        "as too large, so the loaded/provider context is smaller than configured. Please condense "
+                        "into a new prompt and restart, select a larger-context model, or reload the local model "
+                        "with the configured context window.",
+                        required_tokens=actual_prompt_tokens,
+                        available_tokens=max_allowed_tokens,
+                        context_window=self.context_window,
+                        output_reserve=self.max_output_tokens,
+                    ) from e
                 except (httpx.HTTPStatusError, ValueError) as e:
                     error_msg = str(e)
                     is_400_or_context = "400" in error_msg or "context" in error_msg.lower()
@@ -447,6 +488,23 @@ class SubmitterAgent:
                 # Two-stage conversational retry before final rejection
                 logger.info(f"Submitter {self.submitter_id}: Initial JSON parse failed, attempting conversational retry")
                 logger.debug(f"Parse error: {error}")
+
+                lean_retry_required = _requires_lean_retry_schema(
+                    llm_output,
+                    system_config.lean4_enabled,
+                )
+                retry_schema = get_submitter_json_schema(
+                    lean4_enabled=system_config.lean4_enabled
+                )
+                retry_variant_instruction = (
+                    "Your failed response is recognizable as a Lean proof candidate. "
+                    "You MUST preserve submission_type=\"lean_proof\" and every required "
+                    "Lean proof field from the schema below; do not convert it into an ordinary idea.\n\n"
+                    if lean_retry_required
+                    else
+                    "Return one complete allowed response variant from the schema below. "
+                    "Do not drop its submission_type or required fields.\n\n"
+                )
                 
                 # Stage 1: Guide proper JSON escaping for LaTeX
                 retry_prompt_1 = (
@@ -460,11 +518,9 @@ class SubmitterAgent:
                     "2. Do NOT double-escape: \\\\\\\\mathbb is WRONG, \\\\mathbb is CORRECT\n"
                     "3. Escape quotes inside strings: use \\\" for literal quotes\n"
                     "4. Avoid malformed unicode escapes (must be exactly \\uXXXX with 4 hex digits)\n\n"
-                    "Please provide your submission again in valid JSON format:\n"
-                    "{\n"
-                    '  "submission": "your mathematical submission (LaTeX allowed, escape backslashes)",\n'
-                    '  "reasoning": "your reasoning (LaTeX allowed, escape backslashes)"\n'
-                    "}\n\n"
+                    f"{retry_variant_instruction}"
+                    "Please provide your submission again using this complete schema:\n"
+                    f"{retry_schema}\n\n"
                     "Respond with ONLY the JSON object, no markdown, no explanation."
                 )
                 
@@ -537,11 +593,9 @@ class SubmitterAgent:
                                 "- \\mathbb becomes \\\\mathbb in JSON\n"
                                 "- \\( becomes \\\\( in JSON\n"
                                 "- Do NOT double-escape: \\\\\\\\mathbb is WRONG\n\n"
-                                "Example format:\n"
-                                "{\n"
-                                '  "submission": "For \\\\mathbb{Z}, we have \\\\phi: G \\\\to H",\n'
-                                '  "reasoning": "This establishes the \\\\pi_1 connection"\n'
-                                "}\n\n"
+                                f"{retry_variant_instruction}"
+                                "Use this complete schema and preserve the selected response variant:\n"
+                                f"{retry_schema}\n\n"
                                 "Respond with ONLY the JSON, nothing else."
                             )
                             

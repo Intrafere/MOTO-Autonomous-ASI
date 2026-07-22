@@ -36,6 +36,66 @@ jobs:
       - name: Run Python tests
         run: python -m pytest
 
+  deep-workflow-tests:
+    name: Deep workflow containment
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
+
+      - name: Run deep workflow suite
+        run: python tests/run_deep_workflows.py 2>&1 | tee deep-workflow.log
+
+      - name: Upload deep workflow failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-workflow-failure-log
+          path: deep-workflow.log
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-native-lifecycle:
+    name: Windows native Chroma lifecycle
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-asyncio
+
+      - name: Run native and lifecycle race regressions
+        run: >-
+          python -m pytest
+          tests/regressions/test_chroma_native_lifecycle.py
+          tests/regressions/test_rag_clear_bounded.py
+          tests/unit/test_chroma_cache_cleanup.py
+          tests/test_workflow_start_guard_ownership.py
+
   frontend-build:
     name: Frontend build
     runs-on: ubuntu-latest
@@ -59,5 +119,25 @@ jobs:
       - name: Audit production frontend dependencies
         run: npm audit --omit=dev --audit-level=high
 
+      - name: Run frontend tests
+        run: npm run test
+
       - name: Build frontend
         run: npm run build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser smoke tests
+        run: npm run test:browser
+
+      - name: Upload browser smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke-artifacts
+          path: |
+            playwright-report/
+            test-results/playwright/
+          if-no-files-found: ignore
+          retention-days: 7

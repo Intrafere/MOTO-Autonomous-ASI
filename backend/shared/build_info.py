@@ -25,7 +25,7 @@ _DEFAULT_BUILD_INFO = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build5-v54",
+    "api_contract_version": "build5-v73",
 }
 
 _ENV_OVERRIDES = {

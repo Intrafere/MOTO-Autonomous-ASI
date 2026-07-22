@@ -16,11 +16,28 @@ from backend.shared.config import system_config
 from backend.shared.embedding_readiness import require_embedding_provider_ready
 from backend.shared.models import LeanOJStartRequest
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
-from backend.shared.workflow_start_guard import workflow_start_guard
+from backend.shared.workflow_start_guard import WorkflowLease, workflow_start_guard
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/leanoj", tags=["leanoj"])
+LEANOJ_WORKFLOW_OWNER = "leanoj"
+_leanoj_workflow_lease: WorkflowLease | None = None
+
+
+def release_leanoj_workflow_lease() -> None:
+    global _leanoj_workflow_lease
+    workflow_start_guard.release(_leanoj_workflow_lease)
+    _leanoj_workflow_lease = None
+
+
+def commit_leanoj_workflow_lease() -> WorkflowLease:
+    global _leanoj_workflow_lease
+    _leanoj_workflow_lease = workflow_start_guard.commit(LEANOJ_WORKFLOW_OWNER)
+    return _leanoj_workflow_lease
+
+
+leanoj_coordinator.top_level_terminal_callback = release_leanoj_workflow_lease
 
 
 def _leanoj_sessions_base_dir() -> Path:
@@ -66,6 +83,8 @@ def _leanoj_prompt(payload: dict[str, Any]) -> str:
     request_payload = _leanoj_request_payload(payload)
     return (
         str(request_payload.get("user_prompt") or "").strip()
+        or str(payload.get("user_prompt") or "").strip()
+        or str(payload.get("prompt") or "").strip()
         or str(payload.get("selected_topic") or "").strip()
         or "Proof Solver problem"
     )
@@ -98,6 +117,7 @@ def _build_leanoj_final_proof(payload: dict[str, Any]) -> dict[str, Any] | None:
         "proof_id": proof_id,
         "shared_proof_id": shared_proof_id,
         "session_id": session_id,
+        "run_id": session_id,
         "proof_kind": "final",
         "theorem_name": "Final Proof Solver Submission",
         "theorem_statement": prompt,
@@ -146,6 +166,7 @@ def _build_leanoj_subproofs(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "proof_id": proof_id,
                 "shared_proof_id": shared_proof_id,
                 "session_id": session_id,
+                "run_id": session_id,
                 "proof_kind": "subproof",
                 "theorem_name": return_title,
                 "theorem_statement": theorem_or_lemma or request_text or "Verified Proof Solver subproof",
@@ -188,6 +209,7 @@ def _build_leanoj_session_summary(payload: dict[str, Any], proofs: list[dict[str
     subproof_count = sum(1 for proof in proofs if proof.get("proof_kind") == "subproof")
     return {
         "session_id": session_id,
+        "run_id": session_id,
         "user_prompt": prompt,
         "selected_topic": str(payload.get("selected_topic") or ""),
         "created_at": _leanoj_created_at(payload),
@@ -209,6 +231,10 @@ def _sort_leanoj_proofs(proofs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _get_start_conflict() -> Optional[str]:
+    if workflow_start_guard.active_owner:
+        if workflow_start_guard.active_owner == LEANOJ_WORKFLOW_OWNER:
+            return "Proof Solver is already running"
+        return "Cannot start Proof Solver while another workflow is running. Stop it first."
     if leanoj_coordinator.is_active:
         return "Proof Solver is already running"
     if coordinator.is_running:
@@ -268,8 +294,17 @@ async def start_leanoj(request: LeanOJStartRequest):
             _validate_start_role_limits(request)
             await require_embedding_provider_ready()
             resumed = await leanoj_coordinator.resume_or_initialize(request)
-            if not leanoj_coordinator.start_in_background():
-                raise HTTPException(status_code=400, detail="Proof Solver is already running")
+            try:
+                commit_leanoj_workflow_lease()
+                if not leanoj_coordinator.start_in_background():
+                    raise HTTPException(status_code=400, detail="Proof Solver is already running")
+            except BaseException:
+                if leanoj_coordinator.is_active:
+                    await leanoj_coordinator.stop()
+                release_leanoj_workflow_lease()
+                raise
+            if not leanoj_coordinator.is_active:
+                release_leanoj_workflow_lease()
             return {
                 "success": True,
                 "message": "Proof Solver resumed" if resumed else "Proof Solver started",
@@ -288,20 +323,24 @@ async def start_leanoj(request: LeanOJStartRequest):
 @router.post("/stop")
 async def stop_leanoj():
     """Stop the active Proof Solver run."""
-    try:
-        await leanoj_coordinator.stop()
-        await assistant_proof_search_coordinator.stop_all(
-            broadcast=True,
-            reason="leanoj_stopped",
-        )
-        return {
-            "success": True,
-            "message": "Proof Solver stopped",
-            "status": leanoj_coordinator.get_status(),
-        }
-    except Exception as exc:
-        logger.exception("Failed to stop Proof Solver")
-        raise HTTPException(status_code=500, detail=str(exc))
+    async with workflow_start_guard.reserve():
+        try:
+            await leanoj_coordinator.stop()
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="leanoj_stopped",
+            )
+            if leanoj_coordinator.is_active:
+                raise RuntimeError("Proof Solver remained active after stop")
+            release_leanoj_workflow_lease()
+            return {
+                "success": True,
+                "message": "Proof Solver stopped",
+                "status": leanoj_coordinator.get_status(),
+            }
+        except Exception as exc:
+            logger.exception("Failed to stop Proof Solver")
+            raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/clear")
@@ -309,21 +348,23 @@ async def clear_leanoj(confirm: bool = False):
     """Clear saved Proof Solver progress."""
     if not confirm:
         raise HTTPException(status_code=400, detail="Confirmation required. Use ?confirm=true to clear Proof Solver progress.")
-    try:
-        await leanoj_coordinator.clear()
-        await assistant_proof_search_coordinator.stop_all(
-            broadcast=True,
-            reason="leanoj_cleared",
-        )
-        await assistant_proof_search_coordinator.clear_cooldown_state()
-        return {
-            "success": True,
-            "message": "Proof Solver progress cleared",
-            "status": leanoj_coordinator.get_status(),
-        }
-    except Exception as exc:
-        logger.exception("Failed to clear Proof Solver progress")
-        raise HTTPException(status_code=500, detail=str(exc))
+    async with workflow_start_guard.reserve():
+        try:
+            await leanoj_coordinator.clear()
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="leanoj_cleared",
+            )
+            await assistant_proof_search_coordinator.clear_cooldown_state()
+            release_leanoj_workflow_lease()
+            return {
+                "success": True,
+                "message": "Proof Solver progress cleared",
+                "status": leanoj_coordinator.get_status(),
+            }
+        except Exception as exc:
+            logger.exception("Failed to clear Proof Solver progress")
+            raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.get("/status")
@@ -372,7 +413,7 @@ async def get_leanoj_library(include_subproofs: bool = True):
     current_status = leanoj_coordinator.get_status()
     current_session_id = str(current_status.get("session_id") or "")
     if current_session_id:
-        payloads_by_session[current_session_id] = current_status
+        payloads_by_session.pop(current_session_id, None)
 
     proofs: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []

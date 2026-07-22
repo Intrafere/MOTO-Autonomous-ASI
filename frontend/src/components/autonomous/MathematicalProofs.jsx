@@ -57,6 +57,9 @@ function createEmptyGraphState() {
 
 function getTierBadge(proof) {
   const tier = proof.novelty_tier;
+  if (tier === 'duplicate_novel') {
+    return { cardClass: 'duplicate-novel', badgeClass: 'duplicate-novel', label: 'Duplicate Novel Proof' };
+  }
   if (tier === 'major_mathematical_discovery') {
     return { cardClass: 'platinum', badgeClass: 'platinum', label: 'Major Mathematical Discovery' };
   }
@@ -73,6 +76,10 @@ function getTierBadge(proof) {
     return { cardClass: 'gold', badgeClass: 'gold', label: 'Novel Proof' };
   }
   return { cardClass: 'known', badgeClass: 'known', label: 'Known Proof' };
+}
+
+function isPromptNovelProof(proof) {
+  return Boolean(proof?.novel && proof?.novelty_tier !== 'duplicate_novel');
 }
 
 function isManualProofEvent(data = {}) {
@@ -157,10 +164,20 @@ function MathematicalProofs({
     if (!selectedProofId) {
       return;
     }
-    setFilter('novel');
+    const selectedProof = proofs.find((proof) => proof.proof_id === selectedProofId);
+    if (!selectedProof) {
+      return;
+    }
+    if (selectedProof.novelty_tier === 'duplicate_novel') {
+      setFilter('duplicate_novel');
+    } else if (!isPromptNovelProof(selectedProof)) {
+      setFilter('all');
+    } else {
+      setFilter('novel');
+    }
     setViewMode('list');
     setExpandedProofId(selectedProofId);
-  }, [selectedProofId]);
+  }, [proofs, selectedProofId]);
 
   const expandedDependencyState = expandedProofId ? dependencyStateByProofId[expandedProofId] : null;
 
@@ -372,7 +389,8 @@ function MathematicalProofs({
   }, [availableSources, manualSourceId, manualSourceType]);
 
   const counts = useMemo(() => {
-    const novel = proofs.filter((proof) => proof.novel).length;
+    const novel = proofs.filter(isPromptNovelProof).length;
+    const duplicateNovel = proofs.filter((proof) => proof.novelty_tier === 'duplicate_novel').length;
     const majorDiscovery = proofs.filter((proof) => proof.novelty_tier === 'major_mathematical_discovery').length;
     const discovery = proofs.filter((proof) => proof.novelty_tier === 'mathematical_discovery').length;
     const variant = proofs.filter((proof) => proof.novelty_tier === 'novel_variant').length;
@@ -381,6 +399,7 @@ function MathematicalProofs({
     return {
       total: proofs.length,
       novel,
+      duplicateNovel,
       known: proofs.length - novel,
       majorDiscovery,
       discovery,
@@ -392,7 +411,10 @@ function MathematicalProofs({
 
   const visibleProofs = useMemo(() => {
     if (filter === 'novel') {
-      return proofs.filter((proof) => proof.novel);
+      return proofs.filter(isPromptNovelProof);
+    }
+    if (filter === 'duplicate_novel') {
+      return proofs.filter((proof) => proof.novelty_tier === 'duplicate_novel');
     }
     if (filter === 'major_mathematical_discovery') {
       return proofs.filter((proof) => proof.novelty_tier === 'major_mathematical_discovery');
@@ -539,6 +561,12 @@ function MathematicalProofs({
               onClick={() => setFilter('novel_formulation')}
             >
               Formalization ({counts.formulation || 0})
+            </button>
+            <button
+              className={`math-proofs-filter math-proofs-filter--duplicate-novel ${filter === 'duplicate_novel' ? 'active' : ''}`}
+              onClick={() => setFilter('duplicate_novel')}
+            >
+              Duplicate Novel ({counts.duplicateNovel || 0})
             </button>
             <button
               className={`math-proofs-filter ${filter === 'all' ? 'active' : ''}`}
@@ -725,8 +753,11 @@ function MathematicalProofs({
                       Download .lean
                     </button>
                     <button
+                      type="button"
                       className="math-proof-expand"
                       onClick={() => setExpandedProofId(isExpanded ? null : proof.proof_id)}
+                      aria-expanded={isExpanded}
+                      aria-controls={`proof-details-${proof.proof_id}`}
                     >
                       {isExpanded ? 'Hide Details' : 'View Details'}
                     </button>
@@ -740,7 +771,12 @@ function MathematicalProofs({
                 </div>
 
                 {isExpanded && (
-                  <div className="math-proof-details">
+                  <div
+                    id={`proof-details-${proof.proof_id}`}
+                    className="math-proof-details"
+                    role="region"
+                    aria-label={`Details for ${proof.theorem_name || proof.theorem_statement}`}
+                  >
                     <div className="math-proof-actions">
                       <button
                         type="button"

@@ -28,7 +28,7 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
   const [activeSection, setActiveSection] = useState('overview');
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [showArchiveModal, setShowArchiveModal] = useState(false);
-  const [showLatex, setShowLatex] = useState(false); // Raw text by default for performance with large docs
+  const [showLatex, setShowLatex] = useState(true);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const containerRef = useRef(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);

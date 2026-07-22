@@ -1,0 +1,26 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "allowed_outputs",
+    "provider_pause_resume",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "outputs.proofs_only_no_paper_phase",
+    "provider.pause_preserves_checkpoint",
+    "provider.stop_resume_preserves_pause",
+    "provider.reset_wakes_without_corrupting_checkpoint"
+  ],
+  "max_steps": 16,
+  "must_exercise": [
+    "provider_pause",
+    "stop_resume",
+    "reset_credit"
+  ],
+  "result_ids": [
+    "generated_allowed_outputs_provider_pause_resume_seed_7",
+    "generated_allowed_outputs_provider_pause_resume_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_allowed_outputs_provider_pause_resume"
+}

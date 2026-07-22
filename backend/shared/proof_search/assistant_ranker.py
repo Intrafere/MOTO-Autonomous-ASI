@@ -20,6 +20,7 @@ _CORPUS_TRUST = {
     "leanoj": 0.95,
     "syntheticlib4": 0.9,
 }
+_MIN_TARGET_RELEVANCE = 0.015
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,8 @@ def _rank_candidates(
             + 0.10 * lexical_score
             + 0.05 * recency_score
         )
+        if max(lexical_score, dependency_score, import_score, exact_score) < _MIN_TARGET_RELEVANCE:
+            continue
         ranked.append(
             RankedProofCandidate(
                 record=record,
@@ -209,7 +212,14 @@ def _rank_candidates(
             )
         )
 
-    ranked.sort(key=lambda candidate: candidate.score, reverse=True)
+    ranked.sort(
+        key=lambda candidate: (
+            -candidate.score,
+            -candidate.exact_score,
+            -candidate.lexical_score,
+            candidate.record.search_id,
+        )
+    )
     return ranked
 
 

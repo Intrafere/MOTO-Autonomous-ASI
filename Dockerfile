@@ -1,3 +1,14 @@
+# MOTO HOSTED API-ONLY IMAGE
+#
+# This image is intended for deployment behind MOTO's authenticated
+# control-plane proxy, for web host deployment. It is not currently a standalone desktop/web image that allows GUI access. This system is in development and contains bugs.
+#
+# Required at runtime:
+#   MOTO_INSTANCE_ID
+#   MOTO_INTERNAL_PROXY_SECRET
+#
+# For ordinary local use, run the Windows or Ubuntu desktop launcher, i.e. "Click to Launch MOTO.bat" for Windows.
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

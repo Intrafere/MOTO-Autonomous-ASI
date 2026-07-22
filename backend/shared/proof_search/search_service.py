@@ -6,6 +6,7 @@ from pathlib import Path
 
 from backend.shared.config import system_config
 from backend.shared.proof_search.indexer import ProofSearchIndexer
+from backend.shared.proof_identity import CANONICAL_PROOF_IDENTITY_VERSION
 from backend.shared.proof_search.models import (
     CorpusOverview,
     ProofSearchRequest,
@@ -18,14 +19,20 @@ from backend.shared.proof_search.syntheticlib4_sources import (
     load_syntheticlib4_fixture_records,
     normalize_syntheticlib4_record,
 )
-from backend.shared.syntheticlib4_client import syntheticlib4_client
+from backend.shared.syntheticlib4_client import SyntheticLib4Client, syntheticlib4_client
 
 
 class ProofSearchService:
     """Coordinates source normalization and the local SQLite proof-search index."""
 
-    def __init__(self, index_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        index_path: Path | None = None,
+        *,
+        syntheticlib4_source: SyntheticLib4Client | None = None,
+    ) -> None:
         self._explicit_index_path = Path(index_path) if index_path else None
+        self._syntheticlib4_source = syntheticlib4_source or syntheticlib4_client
         self._lock = asyncio.Lock()
 
     @property
@@ -73,6 +80,7 @@ class ProofSearchService:
         pool_limit: int,
         exclude_corpus_scopes: list[str] | None = None,
         exclude_session_ids: list[str] | None = None,
+        exclude_run_ids: list[str] | None = None,
     ) -> list[UnifiedProofSearchRecord]:
         """Return a wider internal candidate pool for Assistant ranking.
 
@@ -90,6 +98,34 @@ class ProofSearchService:
             pool_limit=pool_limit,
             exclude_corpus_scopes=exclude_corpus_scopes,
             exclude_session_ids=exclude_session_ids,
+            exclude_run_ids=exclude_run_ids,
+        )
+
+    async def exact_identity_neighborhood(
+        self,
+        *,
+        theorem_statement_hashes: list[str],
+        lean_code_hashes: list[str],
+        corpora: list[str],
+        exclude_run_ids: list[str] | None = None,
+        exclude_session_ids: list[str] | None = None,
+        identity_version: str = CANONICAL_PROOF_IDENTITY_VERSION,
+        limit: int = 256,
+    ) -> list[UnifiedProofSearchRecord]:
+        enabled = set(default_proof_search_corpora())
+        filtered = [corpus for corpus in corpora if corpus in enabled]
+        if not filtered:
+            return []
+        await self._ensure_index()
+        return await asyncio.to_thread(
+            ProofSearchIndexer(self.index_path).exact_identity_neighborhood,
+            theorem_statement_hashes=theorem_statement_hashes,
+            lean_code_hashes=lean_code_hashes,
+            corpora=filtered,
+            exclude_run_ids=exclude_run_ids,
+            exclude_session_ids=exclude_session_ids,
+            identity_version=identity_version,
+            limit=limit,
         )
 
     async def get_record(
@@ -98,6 +134,8 @@ class ProofSearchService:
         corpus: str,
         proof_id: str,
         session_id: str | None = None,
+        search_id: str | None = None,
+        run_id: str | None = None,
     ) -> UnifiedProofSearchRecord | None:
         """Fetch one indexed proof and hydrate SyntheticLib4 fixture code when available."""
         if corpus not in set(default_proof_search_corpora()):
@@ -108,12 +146,15 @@ class ProofSearchService:
             corpus=corpus,
             proof_id=proof_id,
             session_id=session_id,
+            search_id=search_id,
+            run_id=run_id,
         )
+
         if record is None or record.corpus != "syntheticlib4" or record.lean_code:
             return record
 
         hydrated = await asyncio.to_thread(
-            syntheticlib4_client.hydrate_proof,
+            self._syntheticlib4_source.hydrate_proof,
             record.external_fingerprint or record.proof_id,
         )
         if not hydrated or not str(hydrated.get("lean_code") or "").strip():
@@ -130,9 +171,39 @@ class ProofSearchService:
             raise ValueError("SyntheticLib4 hydration Lean-code hash mismatch")
         return hydrated_record
 
+    async def support_lineage(
+        self,
+        *,
+        theorem_statement_hash: str,
+        lean_code_hash: str,
+        corpora: list[str],
+        exclude_run_ids: list[str],
+        exclude_session_ids: list[str],
+        offset: int,
+        limit: int,
+    ) -> tuple[int, list[dict[str, str]]]:
+        enabled = set(default_proof_search_corpora())
+        filtered = [corpus for corpus in corpora if corpus in enabled]
+        if not filtered:
+            return 0, []
+        await self._ensure_index()
+        return await asyncio.to_thread(
+            ProofSearchIndexer(self.index_path).support_lineage,
+            theorem_statement_hash=theorem_statement_hash,
+            lean_code_hash=lean_code_hash,
+            corpora=filtered,
+            exclude_run_ids=exclude_run_ids,
+            exclude_session_ids=exclude_session_ids,
+            offset=offset,
+            limit=limit,
+        )
+
     async def _ensure_index(self) -> None:
-        if self.index_path.exists() and not await asyncio.to_thread(
-            self._sources_are_newer_than_index
+        indexer = ProofSearchIndexer(self.index_path)
+        if (
+            self.index_path.exists()
+            and await asyncio.to_thread(indexer.is_compatible)
+            and not await asyncio.to_thread(self._sources_are_newer_than_index)
         ):
             return
         await self.rebuild_index()
@@ -178,7 +249,9 @@ class ProofSearchService:
     async def _load_records(self) -> list[UnifiedProofSearchRecord]:
         records: list[UnifiedProofSearchRecord] = []
         try:
-            records.extend(load_syntheticlib4_fixture_records())
+            records.extend(
+                load_syntheticlib4_fixture_records(self._syntheticlib4_source)
+            )
         except Exception:
             # SyntheticLib4 is optional; local MOTO proof search should still work.
             records.extend([])

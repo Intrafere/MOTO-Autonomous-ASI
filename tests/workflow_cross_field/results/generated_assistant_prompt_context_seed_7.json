@@ -1,0 +1,52 @@
+{
+  "action_ids": [
+    "start_autonomous_papers_and_proofs",
+    "refresh_assistant_pack",
+    "prepare_prompt_context",
+    "disable_session_history"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "autonomous",
+    "final_phase": "topic_exploration"
+  },
+  "evidence": [
+    "assistant_disable",
+    "assistant_pack",
+    "prompt_context"
+  ],
+  "exercised_invariants": [
+    "assistant.disable_clears_live_pack",
+    "assistant.no_validator_injection",
+    "prompt.validator_excludes_assistant_memory"
+  ],
+  "fields": [
+    "assistant_memory",
+    "prompt_context"
+  ],
+  "invariants": [
+    "assistant.disable_clears_live_pack",
+    "assistant.no_validator_injection",
+    "prompt.validator_excludes_assistant_memory"
+  ],
+  "observed_fields": [
+    "allowed_outputs",
+    "assistant_memory",
+    "prompt_context",
+    "proof_scope_isolation",
+    "websocket_api_contracts"
+  ],
+  "replay": [
+    "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
+    "refresh_assistant_pack(proof_ids=('prior-proof-1', 'prior-proof-2'))",
+    "prepare_prompt_context()",
+    "toggle_session_history_memory(enabled=False)"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_assistant_prompt_context_seed_7",
+  "schema_version": 1,
+  "seed": 7,
+  "target_artifact": "targets/generated_assistant_prompt_context.json",
+  "target_id": "generated_assistant_prompt_context"
+}

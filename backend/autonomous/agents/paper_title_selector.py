@@ -265,6 +265,12 @@ class PaperTitleSelectorAgent:
                 raise ValueError(
                     "Title generation prompt exceeds context limit even after shedding optional title context."
                 )
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt,
+                getattr(self, "solution_path_manager", None),
+                max_input_tokens,
+            )
 
             self.task_sequence += 1
             
@@ -296,9 +302,13 @@ class PaperTitleSelectorAgent:
             # Parse JSON using central utility
             data = parse_json(content)
             
-            title = data.get("paper_title", "")
-            if not title:
+            title = data.get("paper_title")
+            reasoning = data.get("reasoning")
+            if not isinstance(title, str) or not title.strip():
                 logger.error("PaperTitleSelector: No title in response")
+                return None
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                logger.error("PaperTitleSelector: Missing non-empty reasoning")
                 return None
             
             # Notify task completed successfully
@@ -306,8 +316,8 @@ class PaperTitleSelectorAgent:
                 self.task_tracking_callback("completed", task_id)
             
             return PaperTitleSelection(
-                paper_title=title,
-                reasoning=data.get("reasoning", "")
+                paper_title=title.strip(),
+                reasoning=reasoning.strip(),
             )
             
         except FreeModelExhaustedError:
@@ -346,6 +356,10 @@ class PaperTitleSelectorAgent:
                 reference_papers=reference_papers,
                 proposed_title=proposed_title,
                 title_reasoning=title_reasoning
+            )
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(
+                prompt, getattr(self, "solution_path_manager", None)
             )
 
             max_input_tokens = rag_config.get_available_input_tokens(
@@ -390,9 +404,21 @@ class PaperTitleSelectorAgent:
             
             # Parse JSON using central utility
             data = parse_json(content)
-            
+            from backend.shared.solution_path.integration import enqueue_optional_update
             decision = data.get("decision", "").lower()
-            reasoning = data.get("reasoning", "No reasoning provided")
+            reasoning = data.get("reasoning")
+            if decision not in {"accept", "reject"}:
+                return False, "Title validator requires decision to be exactly accept or reject"
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                return False, "Title validator requires non-empty reasoning"
+            await enqueue_optional_update(
+                data,
+                getattr(self, "solution_path_manager", None),
+                proposer_role="paper_title_validator",
+                source_task_id=task_id,
+                source_phase="paper_title_validation",
+                source_decision=decision,
+            )
             
             # Notify task completed successfully
             if self.task_tracking_callback:
@@ -401,7 +427,7 @@ class PaperTitleSelectorAgent:
             if decision == "accept":
                 return True, ""
             else:
-                return False, reasoning
+                return False, reasoning.strip()
                 
         except FreeModelExhaustedError:
             raise

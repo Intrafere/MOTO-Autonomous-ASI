@@ -1,0 +1,23 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "brainstorm_appendix_stripped",
+    "paper_appendix_stripped"
+  ],
+  "fields": [
+    "prompt_context",
+    "proof_scope_isolation"
+  ],
+  "invariants": [
+    "proof_scope.generated_appendices_stripped_from_prompts"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_generated_proof_appendix_stripping",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_bc_lifecycles.py"
+}

@@ -47,6 +47,20 @@ function formatSolverName(solver) {
   return String(solver || 'Proof Solver').replace(/^LeanOJ\b/, 'Proof Solver');
 }
 
+function getCurrentProofDisplay(proof) {
+  const prompt = String(proof.user_prompt || '').trim();
+  const statement = String(proof.theorem_statement || '').trim();
+  const sourceTitle = String(proof.source_title || '').trim();
+  const statementIsPrompt = Boolean(prompt && statement === prompt);
+  const sourceIsPrompt = Boolean(prompt && sourceTitle === prompt);
+  return {
+    title: statementIsPrompt
+      ? (proof.theorem_name || (proof.proof_kind === 'final' ? 'Final verified submission' : 'Verified proof'))
+      : (statement || proof.theorem_name || proof.proof_id),
+    summary: sourceIsPrompt ? '' : sourceTitle,
+  };
+}
+
 export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0 }) {
   const [proofs, setProofs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -106,7 +120,6 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
     }
     return proofs;
   }, [filter, proofs]);
-
   const handleDownloadLean = (proof) => {
     if (!proof.lean_code) return;
     downloadTextFile(proof.lean_code, `${proof.theorem_name || proof.proof_id}.lean`);
@@ -210,6 +223,7 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
           {visibleProofs.map((proof) => {
             const isExpanded = expandedProofId === proof.library_id;
             const badge = getProofBadge(proof);
+            const display = getCurrentProofDisplay(proof);
             return (
               <article key={proof.library_id} className={`math-proof-card ${badge.cardClass}`}>
                 <div className="math-proof-card-header">
@@ -222,9 +236,9 @@ export default function LeanOJMathematicalProofs({ api, status, refreshToken = 0
                         {proof.session_id}
                       </span>
                     </div>
-                    <h3>{proof.theorem_statement}</h3>
+                    <h3>{display.title}</h3>
                     <p className="math-proof-summary">
-                      {truncate(proof.source_title || proof.user_prompt || 'Lean 4 verified this Proof Solver proof.')}
+                      {truncate(display.summary || 'Lean 4 verified this Proof Solver proof.')}
                     </p>
                   </div>
 

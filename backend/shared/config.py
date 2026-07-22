@@ -304,7 +304,7 @@ class SystemConfig(BaseSettings):
         validation_alias=AliasChoices("MOTO_Z3_PATH", "Z3_PATH"),
     )
     smt_timeout: int = Field(
-        default=30,
+        default=300,
         validation_alias=AliasChoices("MOTO_SMT_TIMEOUT", "SMT_TIMEOUT"),
     )
     
@@ -362,6 +362,92 @@ class SystemConfig(BaseSettings):
     
     # Session-based organization (preferred for new features)
     auto_sessions_base_dir: Optional[str] = None
+    runtime_root_generation: int = 0
+
+    _DERIVED_DATA_PATHS = {
+        "user_uploads_dir": ("user_uploads",),
+        "chroma_db_dir": ("chroma_db",),
+        "shared_training_file": ("rag_shared_training.txt",),
+        "compiler_outline_file": ("compiler_outline.txt",),
+        "compiler_paper_file": ("compiler_paper.txt",),
+        "compiler_rejections_file": ("compiler_last_10_rejections.txt",),
+        "compiler_acceptances_file": ("compiler_last_10_acceptances.txt",),
+        "compiler_declines_file": ("compiler_last_10_declines.txt",),
+        "auto_brainstorms_dir": ("auto_brainstorms",),
+        "auto_papers_dir": ("auto_papers",),
+        "auto_papers_archive_dir": ("auto_papers", "archive"),
+        "auto_research_metadata_file": ("auto_research_metadata.json",),
+        "auto_research_stats_file": ("auto_research_stats.json",),
+        "auto_workflow_state_file": ("auto_workflow_state.json",),
+        "auto_research_topic_rejections_file": ("auto_research_topic_rejections.txt",),
+        "auto_sessions_base_dir": ("auto_sessions",),
+    }
+
+    @staticmethod
+    def _normalized_root(value: str | Path, label: str) -> Path:
+        raw = str(value or "").strip()
+        if not raw:
+            raise ValueError(f"{label} must be a non-empty path.")
+        return Path(raw).expanduser().resolve(strict=False)
+
+    def runtime_root_identity(self) -> tuple[str, str, int]:
+        """Return the stable identity used by late-bound mutable stores."""
+        return (
+            str(self._normalized_root(self.data_dir, "data root")),
+            str(self._normalized_root(self.logs_dir or "", "logs root")),
+            self.runtime_root_generation,
+        )
+
+    def assert_path_in_data_root(self, path: str | Path, label: str = "mutable path") -> Path:
+        """Validate that a mutable path belongs to the currently bound data root."""
+        root = self._normalized_root(self.data_dir, "data root")
+        candidate = Path(path).expanduser().resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Stale {label} is outside the active data root: {candidate} (active root: {root})."
+            ) from exc
+        return candidate
+
+    def bind_runtime_roots(
+        self,
+        data_root: str | Path,
+        logs_root: str | Path | None = None,
+    ) -> tuple[str, str, int]:
+        """Atomically bind and validate the complete mutable runtime path graph."""
+        data_path = self._normalized_root(data_root, "data root")
+        logs_path = (
+            self._normalized_root(logs_root, "logs root")
+            if logs_root is not None
+            else (
+                Path("backend/logs").resolve(strict=False)
+                if data_path == Path("backend/data").resolve(strict=False)
+                else data_path / "_logs"
+            )
+        )
+
+        derived = {
+            field_name: str(data_path.joinpath(*parts))
+            for field_name, parts in self._DERIVED_DATA_PATHS.items()
+        }
+        lean_workspace = str(data_path / "lean4_workspace")
+
+        # Validate the complete graph before mutating any field.
+        for field_name, candidate in {**derived, "lean4_workspace_dir": lean_workspace}.items():
+            candidate_path = Path(candidate).resolve(strict=False)
+            try:
+                candidate_path.relative_to(data_path)
+            except ValueError as exc:
+                raise ValueError(f"Derived runtime path escaped data root: {field_name}") from exc
+
+        self.data_dir = str(data_path)
+        self.logs_dir = str(logs_path)
+        for field_name, value in derived.items():
+            setattr(self, field_name, value)
+        self.lean4_workspace_dir = lean_workspace
+        self.runtime_root_generation += 1
+        return self.runtime_root_identity()
 
     @model_validator(mode="after")
     def _derive_instance_paths(self) -> "SystemConfig":
@@ -433,4 +519,12 @@ class SystemConfig(BaseSettings):
 # Global configuration instances
 rag_config = RAGConfig()
 system_config = SystemConfig()
+
+
+def bind_runtime_roots(
+    data_root: str | Path,
+    logs_root: str | Path | None = None,
+) -> tuple[str, str, int]:
+    """Supported process-wide API for atomically rebinding mutable runtime roots."""
+    return system_config.bind_runtime_roots(data_root, logs_root)
 

@@ -47,6 +47,10 @@ logger = logging.getLogger(__name__)
 WOLFRAM_MAX_CALLS_PER_SUBMISSION = 20
 
 
+class WolframFinalizationError(RuntimeError):
+    """Raised when a tool-using model will not produce final JSON after the cap."""
+
+
 def _hash_text_for_audit(value: str) -> str:
     text = value or ""
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest() if text else ""
@@ -261,6 +265,14 @@ class WritingSubmitter:
                 rag_evidence=context_pack.text
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt,
+                getattr(self, "solution_path_manager", None),
+                rag_config.get_available_input_tokens(
+                    self.context_window, self.max_output_tokens
+                ),
+            )
 
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -416,6 +428,14 @@ class WritingSubmitter:
                 rag_evidence=context_pack.text
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt,
+                getattr(self, "solution_path_manager", None),
+                rag_config.get_available_input_tokens(
+                    self.context_window, self.max_output_tokens
+                ),
+            )
 
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -489,6 +509,8 @@ class WritingSubmitter:
             
             # Check if update needed
             needs_update = data.get("needs_update", False)
+            if type(needs_update) is not bool:
+                raise ValueError("outline_update needs_update must be a boolean")
             
             if not needs_update:
                 # Notify task completed even when no update needed
@@ -496,19 +518,37 @@ class WritingSubmitter:
                     self.task_tracking_callback("completed", task_id)
                 logger.info("Outline update not needed")
                 return None
-            
-            # Create submission
-            # Content is already properly decoded by json.loads() - no additional processing needed
-            content = data.get("content", "")
+
+            operation = data.get("operation", "")
+            if operation != "insert_after":
+                raise ValueError(
+                    "outline_update requires operation='insert_after' when needs_update=true"
+                )
+
+            old_string = _normalize_string_field(data.get("old_string", ""))
+            new_string = _normalize_string_field(data.get("new_string", ""))
+            reasoning = data.get("reasoning", "")
+            if not old_string.strip():
+                raise ValueError(
+                    "outline_update requires non-empty old_string when needs_update=true"
+                )
+            if not new_string.strip():
+                raise ValueError(
+                    "outline_update requires non-empty new_string when needs_update=true"
+                )
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                raise ValueError(
+                    "outline_update requires non-empty reasoning when needs_update=true"
+                )
             
             submission = CompilerSubmission(
                 submission_id=str(uuid.uuid4()),
                 mode="outline_update",
-                content=content,
-                operation=data.get("operation", "replace"),
-                old_string=_normalize_string_field(data.get("old_string", "")),
-                new_string=_normalize_string_field(data.get("new_string", "")),
-                reasoning=data.get("reasoning", ""),
+                content=new_string,
+                operation=operation,
+                old_string=old_string,
+                new_string=new_string,
+                reasoning=reasoning,
                 metadata={}
             )
             
@@ -666,6 +706,12 @@ class WritingSubmitter:
                     rejection_feedback=rejection_feedback
                 )
             logger.info(f"Prompt built: {len(prompt)} chars")
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt,
+                getattr(self, "solution_path_manager", None),
+                max_allowed_tokens,
+            )
 
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -706,6 +752,8 @@ class WritingSubmitter:
                     initial_prompt=prompt,
                 )
             except RetryableProviderError:
+                raise
+            except WolframFinalizationError:
                 raise
             except Exception as exc:
                 # Any tool-loop failure falls back to the plain single-shot
@@ -760,9 +808,13 @@ class WritingSubmitter:
             
             # Check if construction needed
             needs_construction = data.get("needs_construction", True)  # Default True for backward compat
+            if type(needs_construction) is not bool:
+                raise ValueError("construction needs_construction must be a boolean")
             
             # Extract section_complete flag (new phase-based system)
             section_complete = data.get("section_complete", False)
+            if type(section_complete) is not bool:
+                raise ValueError("construction section_complete must be a boolean")
             
             if not needs_construction:
                 logger.info(f"Construction not needed - section_complete={section_complete}")
@@ -794,24 +846,40 @@ class WritingSubmitter:
                     self.task_tracking_callback("completed", task_id)
                 return None
             
-            # Validate content not empty when needs_construction=True
-            # The actual content is in "new_string" field, NOT "content"
+            # Validate exact-edit fields according to the requested operation.
+            operation = data.get("operation", "full_content")
+            old_string_content = _normalize_string_field(data.get("old_string", ""))
             new_string_content = _normalize_string_field(data.get("new_string", ""))
-            if not new_string_content or not new_string_content.strip():
-                logger.warning(f"Construction marked as needed but new_string is empty. Data keys: {list(data.keys())}")
+            if operation == "delete":
+                fields_valid = bool(old_string_content.strip()) and not new_string_content.strip()
+            elif operation in {"replace", "insert_after", "full_content"}:
+                fields_valid = bool(new_string_content.strip())
+            else:
+                fields_valid = False
+
+            if not fields_valid:
+                logger.warning(
+                    "Construction has invalid exact-edit fields for operation=%r. Data keys: %s",
+                    operation,
+                    list(data.keys()),
+                )
                 # Notify task completed (failed but still completed)
                 if self.task_tracking_callback:
                     self.task_tracking_callback("completed", task_id)
                 return None
+
+            submission_content = (
+                old_string_content if operation == "delete" else new_string_content
+            )
             
             # Create submission with section_complete flag
             submission = CompilerSubmission(
                 submission_id=str(uuid.uuid4()),
                 mode="construction",
-                content=new_string_content,  # Use new_string as the content
-                operation=data.get("operation", "full_content"),
-                old_string=_normalize_string_field(data.get("old_string", "")),
-                new_string=new_string_content,  # Already normalized above
+                content=submission_content,
+                operation=operation,
+                old_string=old_string_content,
+                new_string=new_string_content,
                 reasoning=data.get("reasoning", ""),
                 section_complete=section_complete,
                 metadata={
@@ -898,6 +966,14 @@ class WritingSubmitter:
                 review_focus=review_focus
             )
             logger.info(f"Prompt built: {len(prompt)} chars")
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt,
+                getattr(self, "solution_path_manager", None),
+                rag_config.get_available_input_tokens(
+                    self.context_window, self.max_output_tokens
+                ),
+            )
 
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -1215,12 +1291,10 @@ class WritingSubmitter:
                     ),
                 })
 
-        # Loop cap reached without a clean finalization - surface whatever
-        # text the last assistant turn produced, or empty string.
-        for turn in reversed(messages):
-            if turn.get("role") == "assistant" and turn.get("content"):
-                return str(turn["content"]), wolfram_calls, turn
-        return "", wolfram_calls, {}
+        raise WolframFinalizationError(
+            "The writer continued requesting tools and did not produce final JSON "
+            "after the Wolfram Alpha call budget was exhausted."
+        )
 
     async def _broadcast_wolfram_event(
         self,
@@ -1372,7 +1446,7 @@ class WritingSubmitter:
             "outline_update": (
                 '{\n'
                 '  "needs_update": true,\n'
-                '  "operation": "insert_after | replace",\n'
+                '  "operation": "insert_after",\n'
                 '  "old_string": "exact text from outline (escape backslashes)",\n'
                 '  "new_string": "new sections (LaTeX allowed, escape backslashes)",\n'
                 '  "reasoning": "explanation"\n'

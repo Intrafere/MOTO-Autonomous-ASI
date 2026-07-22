@@ -1,0 +1,30 @@
+{
+  "actions": [
+    "start_manual_compiler",
+    "enable_manual_lean",
+    "run_manual_proof_check",
+    "refresh_assistant_pack",
+    "clear"
+  ],
+  "adapter": "model",
+  "artifact_type": "scenario",
+  "expected_result": "passed",
+  "fields": [
+    "proof_scope_isolation",
+    "workflow_filesystem_state",
+    "assistant_memory"
+  ],
+  "invariants": [
+    "proof_scope.manual_not_in_autonomous_current",
+    "proof_scope.manual_clear_archives_active",
+    "state.clear_removes_active_preserves_history",
+    "assistant.disable_clears_live_pack"
+  ],
+  "must_exercise": [
+    "manual_proof",
+    "manual_archive",
+    "assistant_pack"
+  ],
+  "scenario_id": "model_manual_proof_clear_scope_assistant",
+  "schema_version": 1
+}

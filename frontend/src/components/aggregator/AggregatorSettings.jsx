@@ -30,6 +30,7 @@ import {
 } from '../../utils/oauthProviders';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
+import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
 import ProofStrengthBadge from '../ProofStrengthBadge';
 import RawSettingsEditor from '../RawSettingsEditor';
 import '../autonomous/AutonomousResearch.css';
@@ -292,8 +293,8 @@ export default function AggregatorSettings({
   const [sakanaFuguModelError, setSakanaFuguModelError] = useState('');
   const [loadingOpenRouter, setLoadingOpenRouter] = useState(false);
   const [freeOnly, setFreeOnly] = useState(false);
-  const [freeModelLooping, setFreeModelLooping] = useState(true);
-  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(true);
+  const [freeModelLooping, setFreeModelLooping] = useState(false);
+  const [freeModelAutoSelector, setFreeModelAutoSelector] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
   const [editRawSettings, setEditRawSettings] = useState(false);
   const [rawSettingsText, setRawSettingsText] = useState('');
@@ -350,8 +351,8 @@ export default function AggregatorSettings({
       }
       try {
         const freeModelSettings = await openRouterAPI.getFreeModelSettings();
-        setFreeModelLooping(freeModelSettings.looping_enabled ?? true);
-        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? true);
+        setFreeModelLooping(freeModelSettings.looping_enabled ?? false);
+        setFreeModelAutoSelector(freeModelSettings.auto_selector_enabled ?? false);
       } catch (error) {
         console.error('Failed to load free model settings:', error);
       }
@@ -411,9 +412,10 @@ export default function AggregatorSettings({
       freeModelAutoSelector,
       modelProviders,
       creativityEmphasisBoostEnabled: config.creativityEmphasisBoostEnabled,
+      uploadedFiles: config.uploadedFiles || [],
     };
     localStorage.setItem('aggregator_settings', JSON.stringify(settings));
-  }, [isLoaded, config.userPrompt, config.validatorModel, config.validatorContextSize, config.assistantModel, config.assistantProvider, config.assistantOpenrouterProvider, config.assistantOpenrouterReasoningEffort, config.assistantLmStudioFallback, config.assistantContextSize, config.assistantMaxOutput, config.assistantSuperchargeEnabled, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback, validatorSuperchargeEnabled, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders, config.creativityEmphasisBoostEnabled]);
+  }, [isLoaded, config.userPrompt, config.validatorModel, config.validatorContextSize, config.assistantModel, config.assistantProvider, config.assistantOpenrouterProvider, config.assistantOpenrouterReasoningEffort, config.assistantLmStudioFallback, config.assistantContextSize, config.assistantMaxOutput, config.assistantSuperchargeEnabled, numSubmitters, submitterConfigs, validatorProvider, validatorOpenrouterProvider, validatorOpenrouterReasoningEffort, validatorLmStudioFallback, validatorSuperchargeEnabled, validatorMaxOutput, freeOnly, freeModelLooping, freeModelAutoSelector, modelProviders, config.creativityEmphasisBoostEnabled, config.uploadedFiles]);
 
   useEffect(() => {
     if (lmStudioEnabled) {
@@ -1081,11 +1083,11 @@ export default function AggregatorSettings({
     setValidatorSuperchargeEnabled(nextValidatorSuperchargeEnabled);
     setValidatorMaxOutput(nextValidatorMaxOutput);
     setFreeOnly(rawSettings.freeOnly ?? false);
-    setFreeModelLooping(rawSettings.freeModelLooping ?? true);
-    setFreeModelAutoSelector(rawSettings.freeModelAutoSelector ?? true);
+    setFreeModelLooping(rawSettings.freeModelLooping ?? false);
+    setFreeModelAutoSelector(rawSettings.freeModelAutoSelector ?? false);
     setModelProviders(nextModelProviders);
     openRouterAPI
-      .setFreeModelSettings(rawSettings.freeModelLooping ?? true, rawSettings.freeModelAutoSelector ?? true)
+      .setFreeModelSettings(rawSettings.freeModelLooping ?? false, rawSettings.freeModelAutoSelector ?? false)
       .catch(() => {});
 
     const hasRawUserPrompt = Object.prototype.hasOwnProperty.call(rawSettings, 'userPrompt');
@@ -1120,8 +1122,8 @@ export default function AggregatorSettings({
         freeOnly: rawSettings.freeOnly ?? false,
         validatorOpenrouterReasoningEffort: nextValidatorOpenrouterReasoningEffort,
         validatorSuperchargeEnabled: nextValidatorSuperchargeEnabled,
-        freeModelLooping: rawSettings.freeModelLooping ?? true,
-        freeModelAutoSelector: rawSettings.freeModelAutoSelector ?? true,
+        freeModelLooping: rawSettings.freeModelLooping ?? false,
+        freeModelAutoSelector: rawSettings.freeModelAutoSelector ?? false,
         modelProviders: nextModelProviders,
       }));
     }
@@ -1209,17 +1211,15 @@ export default function AggregatorSettings({
                 <button onClick={() => fetchOpenRouterModels(freeOnly)} className="secondary" disabled={loadingOpenRouter}>
                   {loadingOpenRouter ? 'Loading...' : 'Refresh OpenRouter Models'}
                 </button>
-                <label className="settings-checkbox-label model-refresh-controls__toggle">
-                  <input
-                    type="checkbox"
-                    checked={freeOnly}
-                    onChange={(e) => setFreeOnly(e.target.checked)}
-                  />
-                  Free models only
-                </label>
+                <OpenRouterFreeModelsControl
+                  checked={freeOnly}
+                  onChange={setFreeOnly}
+                />
               </>
             )}
-            {developerModeEnabled ? (
+            {developerModeEnabled && (
+              <>
+              {hasOpenRouterKey && <span className="model-refresh-controls__divider" aria-hidden="true" />}
               <label className="settings-checkbox-label model-refresh-controls__toggle">
                 <input
                   type="checkbox"
@@ -1228,10 +1228,7 @@ export default function AggregatorSettings({
                 />
                 Edit Raw
               </label>
-            ) : (
-              <span className="settings-developer-mode-hint">
-                Developer mode: press Shift + Z + X to toggle raw JSON settings.
-              </span>
+              </>
             )}
           </div>
 
@@ -1484,7 +1481,7 @@ export default function AggregatorSettings({
           <div className="settings-group">
             <h4>Assistant</h4>
             <p className="settings-info">
-              Runs in parallel during brainstorming and proof work to retrieve up to 7 relevant memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases never receive Assistant context.
+              Runs in parallel during brainstorming and proof work to retrieve up to 7 relevant verified proof-memory supports from Session History Memory and SyntheticLib4 when enabled. Validators and critique phases never receive Assistant context.
             </p>
             <div
               className={`submitter-config-section${(config.assistantProvider || validatorProvider) === 'openrouter' ? ' role-config-card--openrouter-orange' : ''}`}

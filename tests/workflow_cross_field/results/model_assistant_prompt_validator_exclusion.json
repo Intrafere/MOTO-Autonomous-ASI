@@ -1,0 +1,31 @@
+{
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "assistant_pack",
+    "assistant_disable",
+    "prompt_context"
+  ],
+  "fields": [
+    "assistant_memory",
+    "prompt_context"
+  ],
+  "invariants": [
+    "assistant.no_validator_injection",
+    "assistant.disable_clears_live_pack",
+    "prompt.validator_excludes_assistant_memory"
+  ],
+  "replay": [
+    "start_autonomous_papers_and_proofs",
+    "refresh_assistant_pack",
+    "prepare_prompt_context",
+    "disable_session_history"
+  ],
+  "result": "passed",
+  "scenario_id": "model_assistant_prompt_validator_exclusion",
+  "schema_version": 1,
+  "seed": null,
+  "source": "curated",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+}

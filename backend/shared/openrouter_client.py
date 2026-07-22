@@ -13,7 +13,13 @@ import time
 from typing import List, Dict, Any, Optional
 
 from backend.shared.config import system_config
+from backend.shared.free_model_manager import supports_text_chat_model
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.provider_errors import (
+    ProviderContextLengthError,
+    ProviderRouteError,
+    ProviderRouteIdentity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +210,8 @@ class OpenRouterClient:
             # Filter for free models if requested
             if free_only:
                 filtered_models = []
+                free_model_count = 0
+                skipped_non_text = 0
                 for model in models:
                     pricing = model.get("pricing", {})
                     prompt_price = pricing.get("prompt", "0")
@@ -213,12 +221,22 @@ class OpenRouterClient:
                     try:
                         is_free = float(prompt_price) == 0.0 and float(completion_price) == 0.0
                         if is_free:
-                            filtered_models.append(model)
+                            free_model_count += 1
+                            if supports_text_chat_model(model):
+                                filtered_models.append(model)
+                            else:
+                                skipped_non_text += 1
                     except (ValueError, TypeError):
                         # Skip models with invalid pricing data
                         continue
                 
-                logger.info(f"Filtered {len(filtered_models)} free models out of {len(models)} total")
+                logger.info(
+                    "Filtered %s free text models out of %s free models (%s total%s)",
+                    len(filtered_models),
+                    free_model_count,
+                    len(models),
+                    f", skipped {skipped_non_text} non-text free models" if skipped_non_text else "",
+                )
                 return sorted(filtered_models, key=lambda m: m.get("name", m.get("id", "")))
             
             # Return all models sorted by name
@@ -708,6 +726,29 @@ class OpenRouterClient:
                         f"OpenRouter credits exhausted for model '{model}'. "
                         f"Falling back to LM Studio."
                     )
+
+                route = ProviderRouteIdentity(
+                    provider="openrouter",
+                    model=model,
+                    host_provider=provider or "",
+                )
+                if any(
+                    marker in error_detail_lower
+                    for marker in (
+                        "context_length_exceeded",
+                        "context length exceeded",
+                        "exceeds the context window",
+                        "maximum context size",
+                        "input exceeds",
+                        "request too large",
+                        "prompt is too long",
+                    )
+                ):
+                    raise ProviderContextLengthError(
+                        "OpenRouter rejected the request because its input exceeded the provider context limit.",
+                        route=route,
+                        cause=e,
+                    ) from e
                 
                 logger.error(
                     f"OpenRouter HTTP {e.response.status_code} error (attempt {attempt + 1}/{self.MAX_RETRIES}): "
@@ -719,9 +760,18 @@ class OpenRouterClient:
                     await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
                     continue
                 
-                raise ValueError(f"OpenRouter API error: {error_detail}")
+                raise ProviderRouteError(
+                    f"OpenRouter API error: {error_detail}",
+                    route=route,
+                    cause=e,
+                ) from e
                 
-            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+            except (
+                httpx.ConnectError,
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.TimeoutException,
+            ) as e:
                 # Use repr(e) to get detailed exception info even if str(e) is empty
                 error_type = type(e).__name__
                 error_detail = repr(e) if not str(e) else str(e)
@@ -732,7 +782,15 @@ class OpenRouterClient:
                 if attempt < self.MAX_RETRIES - 1:
                     await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
                     continue
-                raise ValueError(f"OpenRouter connection failed after {self.MAX_RETRIES} attempts: [{error_type}] {error_detail}")
+                raise ProviderRouteError(
+                    f"OpenRouter connection failed after {self.MAX_RETRIES} attempts: [{error_type}] {error_detail}",
+                    route=ProviderRouteIdentity(
+                        provider="openrouter",
+                        model=model,
+                        host_provider=provider or "",
+                    ),
+                    cause=e,
+                ) from e
                 
             except Exception as e:
                 logger.error(f"OpenRouter unexpected error: {e}")

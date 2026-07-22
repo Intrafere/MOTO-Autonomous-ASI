@@ -166,7 +166,7 @@ export default function SyntheticLib4AccessModal({
         <div style={sectionStyle}>
           <h3 style={sectionHeadingStyle}>Contribution And Access</h3>
           <p style={bodyTextStyle}>
-            Users will be able to select 30 novel proofs to contribute. The database is only for novel solutions that are not already known to other proof databases, and many accepted solutions are expected to be too new for models to have trained on yet. Your local system must first deem them novel, then the SyntheticLib4 vetting system will double-check the results and decide whether they are contribution-worthy. If accepted, the contribution grants one month of access. Users can continue to contribute to extend their subscription beyond their initial month.
+            Users will be able to select 20 novel proofs to contribute. The database is only for novel solutions that are not already known to other proof databases, and many accepted solutions are expected to be too new for models to have trained on yet. Your local system must first deem them novel, then the SyntheticLib4 vetting system will double-check the results and decide whether they are contribution-worthy. If accepted, the contribution grants one month of access. Users can continue to contribute to extend their subscription beyond their initial month.
           </p>
           <p style={{ ...bodyTextStyle, marginBottom: 0 }}>
             Users who do not want to share proof data for access will be able to pay a small monthly fee instead. That fee supports ongoing model review, pruning, infrastructure, and ecosystem maintenance. The only data shared with our system is proof data manually selected by users; all other data remains private and local to users' computers.

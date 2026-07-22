@@ -1,0 +1,40 @@
+{
+  "action_ids": [
+    "start_leanoj",
+    "attempt_conflicting_start"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "leanoj",
+    "final_phase": "leanoj_brainstorm"
+  },
+  "evidence": [
+    "start_blocked"
+  ],
+  "exercised_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "fields": [
+    "runtime_exclusivity",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "observed_fields": [
+    "runtime_exclusivity",
+    "websocket_api_contracts",
+    "workflow_filesystem_state"
+  ],
+  "replay": [
+    "start_leanoj()",
+    "start_manual_compiler()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_runtime_start_exclusivity_seed_7",
+  "schema_version": 1,
+  "seed": 7,
+  "target_artifact": "targets/generated_runtime_start_exclusivity.json",
+  "target_id": "generated_runtime_start_exclusivity"
+}

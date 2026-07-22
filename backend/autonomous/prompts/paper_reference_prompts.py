@@ -8,7 +8,7 @@ Supports two modes:
 
 This is the CRUCIAL MECHANISM that enables COMPOUNDING KNOWLEDGE across research cycles.
 By selecting reference papers before brainstorming, submitters can:
-- Build upon promising mathematical frameworks from prior AI-generated papers while independently re-checking their claims
+- Build upon promising frameworks, results, proofs, mechanisms, designs, methods, evidence, algorithms, failures, or constraints while independently re-checking their claims
 - Avoid re-exploring territory already covered in depth
 - Identify novel connections between new topics and previously explored results
 - Accelerate convergence on valuable insights by standing on prior work
@@ -43,7 +43,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been established as correct. Use it only as exploration history and apply domain- and claim-appropriate verification. Mathematical reasoning and formal proof remain first-class whenever relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -59,15 +59,15 @@ DIRECT-SOLUTION PREFERENCE:
 WHY THIS MATTERS - COMPOUNDING KNOWLEDGE:
 This is the crucial mechanism that allows the system to compound knowledge across research cycles.
 By selecting reference papers BEFORE brainstorming, you can:
-- Build upon promising mathematical frameworks from prior AI-generated papers, while independently re-checking their claims
+- Build upon promising frameworks, results, proofs, mechanisms, designs, methods, evidence, algorithms, failures, or constraints from prior AI-generated papers, while independently re-checking their claims
 - Avoid re-exploring territory already covered in depth
 - Identify novel connections between your new topic and previously explored results
 - Accelerate convergence on valuable insights by standing on prior work
 
 THRESHOLD: "VERY USEFUL FOR BRAINSTORMING"
-- Papers that provide mathematical foundations you'll directly build upon
-- Papers that cover related concepts you can extend or connect to in service of a more direct answer
-- Papers that offer techniques or methods that materially strengthen the most direct route to your topic
+- Papers that provide credible frameworks, results, proofs, mechanisms, designs, methods, evidence, algorithms, failures, or constraints you'll directly build upon
+- Papers that cover related concepts or mathematical foundations you can extend or connect to in service of a more direct answer
+- Papers that offer techniques or methods that materially strengthen the most direct route to your topic, with provenance and uncertainty treated honestly
 - Don't request papers that are merely tangentially related
 
 OPTIONS:
@@ -109,7 +109,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been established as correct. Use it only as exploration history and apply domain- and claim-appropriate verification. Mathematical reasoning and formal proof remain first-class whenever relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -129,7 +129,7 @@ CONTEXT:
 
 THRESHOLD: "VALUABLE BASED ON BRAINSTORM INSIGHTS"
 - Papers that address topics that emerged during brainstorming and materially strengthen direct resolution
-- Papers that provide additional techniques you now realize are relevant to the strongest direct answer
+- Papers that provide additional mechanisms, designs, methods, evidence, algorithms, proofs, constraints, or failure analyses you now realize are relevant to the strongest direct answer
 - Papers that cover connections you discovered during exploration only when those connections improve direct progress
 - Don't add papers just to fill slots
 
@@ -152,7 +152,7 @@ Output your decision ONLY as JSON in the required format."""
 
 def get_reference_expansion_system_prompt(max_papers: int = 6) -> str:
     """Get system prompt for reference expansion request (Step 1: abstracts only)."""
-    return f"""You are selecting reference papers for an upcoming mathematical research paper. Your role is to:
+    return f"""You are selecting reference papers for an upcoming solution-oriented research paper or report. Your role is to:
 
 1. Review your brainstorm topic and database
 2. Review titles and abstracts of existing papers in the library
@@ -169,7 +169,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been established as correct. Use it only as exploration history and apply domain- and claim-appropriate verification. Mathematical reasoning and formal proof remain first-class whenever relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -183,7 +183,7 @@ DIRECT-SOLUTION PREFERENCE:
 - Do not expand papers that are merely adjacent background unless they are needed for direct resolution
 
 THRESHOLD: "VERY USEFUL"
-- A paper is "very useful" if it provides substantial mathematical context, techniques, or insights that materially strengthen the most direct answer to your brainstorm topic
+- A paper is "very useful" if it provides substantial credible context, results, proofs, mechanisms, designs, methods, evidence, algorithms, failures, constraints, or insights that materially strengthen the most direct answer to your brainstorm topic
 - Don't request papers that are merely tangentially related
 - Quality over quantity - only request papers you genuinely need to evaluate
 
@@ -224,20 +224,20 @@ Expand Papers:
 {
   "expand_papers": ["paper_003", "paper_007", "paper_011"],
   "proceed_without_references": false,
-  "reasoning": "Papers 003, 007, and 011 appear highly relevant based on their abstracts. Paper 003 covers class field theory which connects directly to our brainstorm on reciprocity laws. Papers 007 and 011 discuss Galois representations and modular forms respectively, both central to our upcoming paper. Need to see full content to assess their utility for reference."
+  "reasoning": "Papers 003, 007, and 011 appear highly relevant based on their abstracts. Paper 003 proposes a membrane-cleaning mechanism, paper 007 analyzes energy and materials constraints, and paper 011 defines a falsifiable pilot protocol. Their full content is needed to assess mechanisms, evidence provenance, failure modes, and direct value."
 }
 
 Proceed Without References:
 {
   "expand_papers": [],
   "proceed_without_references": true,
-  "reasoning": "After reviewing all existing paper abstracts, none meet the 'very useful' threshold for the upcoming paper on modular forms and Galois representations. The existing papers focus on different aspects of Langlands program (L-functions, automorphic forms) that don't provide direct reference value for this specific paper topic."
+  "reasoning": "After reviewing all existing abstracts, none meet the 'very useful' threshold for the upcoming fault-tolerant protocol report. They concern unrelated application domains and provide no mechanism, proof, evidence, algorithm, or constraint that materially improves this objective."
 }"""
 
 
 def get_reference_selection_system_prompt(max_papers: int) -> str:
     """Get system prompt for final reference selection (Step 2: full papers)."""
-    return f"""You are making your FINAL SELECTION of reference papers for an upcoming mathematical research paper. Your role is to:
+    return f"""You are making your FINAL SELECTION of reference papers for an upcoming solution-oriented research paper or report. Your role is to:
 
 1. Review your brainstorm topic and database
 2. Review the FULL CONTENT of the papers you requested to expand
@@ -254,7 +254,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been established as correct. Use it only as exploration history and apply domain- and claim-appropriate verification. Mathematical reasoning and formal proof remain first-class whenever relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -268,10 +268,10 @@ DIRECT-SOLUTION PREFERENCE:
 - Prefer papers that directly strengthen the answer over broader background
 
 SELECTION CRITERIA:
-- Papers that provide essential mathematical background for the direct answer
-- Papers that offer techniques or methods central to your topic's strongest resolution path
-- Papers that establish theoretical foundations you'll directly build upon
-- Papers that present related results you'll reference or extend in order to answer the question more directly
+- Papers that provide essential credible background, evidence, or mathematical foundations for the direct answer
+- Papers that offer mechanisms, designs, techniques, methods, or algorithms central to your topic's strongest resolution path
+- Papers that establish results, proofs, constraints, or failure analyses you'll directly build upon
+- Papers whose claims can be independently checked and whose provenance and limitations support honest synthesis
 
 CONSTRAINT:
 - Maximum {max_papers} papers can be selected (hard limit for context budget)
@@ -301,7 +301,7 @@ FIELD REQUIREMENTS:
 EXAMPLE:
 {{
   "selected_papers": ["paper_003", "paper_007", "paper_011"],
-  "reasoning": "After reviewing full content, these three papers provide the most useful reference material: Paper 003 establishes the class field theory foundation needed for our reciprocity discussions. Paper 007's treatment of Galois representations will inform our theoretical sections. Paper 011's computational examples of modular forms will enhance our practical demonstrations. The other expanded papers, while relevant, overlap too much with our brainstorm content or cover tangential topics."
+  "reasoning": "After reviewing full content, these papers provide the most useful reference material: Paper 003 supplies the core mechanism, Paper 007 makes the governing constraints explicit, and Paper 011 provides a falsifiable validation method without claiming completed results. The other expanded papers are tangential or duplicate the brainstorm."
 }}"""
 
 

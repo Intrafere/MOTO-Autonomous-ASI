@@ -1,0 +1,47 @@
+{
+  "action_ids": [
+    "start_autonomous_papers_and_proofs",
+    "emit_registered_proof_verified"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "autonomous",
+    "final_phase": "topic_exploration"
+  },
+  "evidence": [
+    "registered_proof_event",
+    "scoped_event"
+  ],
+  "exercised_invariants": [
+    "events.frontend_events_include_scope_phase",
+    "events.proof_verified_after_registration",
+    "proof_scope.autonomous_events_not_manual"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "proof_scope_isolation"
+  ],
+  "invariants": [
+    "events.frontend_events_include_scope_phase",
+    "events.proof_verified_after_registration",
+    "proof_scope.autonomous_events_not_manual"
+  ],
+  "observed_fields": [
+    "allowed_outputs",
+    "assistant_memory",
+    "prompt_context",
+    "proof_scope_isolation",
+    "websocket_api_contracts"
+  ],
+  "replay": [
+    "start_autonomous(lean_enabled=True, papers=True, proofs=True)",
+    "emit_registered_proof_verified(proof_id='registered-proof-1')"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_scoped_registered_proof_events_seed_29",
+  "schema_version": 1,
+  "seed": 29,
+  "target_artifact": "targets/generated_scoped_registered_proof_events.json",
+  "target_id": "generated_scoped_registered_proof_events"
+}

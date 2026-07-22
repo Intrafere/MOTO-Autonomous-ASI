@@ -1,0 +1,51 @@
+{
+  "action_ids": [
+    "start_manual_aggregator",
+    "emit_context_overflow_contract_events"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "manual_aggregator",
+    "final_phase": "manual_aggregation"
+  },
+  "evidence": [
+    "context_overflow"
+  ],
+  "exercised_invariants": [
+    "events.context_overflow_persists_across_reload",
+    "events.context_overflow_route_identity",
+    "events.context_overflow_terminal_stop_once",
+    "events.proof_context_overflow_nonfatal"
+  ],
+  "fields": [
+    "websocket_api_contracts",
+    "workflow_filesystem_state",
+    "provider_pause_resume",
+    "runtime_exclusivity",
+    "proof_runtime_gating"
+  ],
+  "invariants": [
+    "events.context_overflow_route_identity",
+    "events.context_overflow_persists_across_reload",
+    "events.context_overflow_terminal_stop_once",
+    "events.proof_context_overflow_nonfatal"
+  ],
+  "observed_fields": [
+    "proof_runtime_gating",
+    "provider_pause_resume",
+    "runtime_exclusivity",
+    "websocket_api_contracts",
+    "workflow_filesystem_state"
+  ],
+  "replay": [
+    "start_manual_aggregator()",
+    "emit_context_overflow_contract_events()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_context_overflow_contract_seed_29",
+  "schema_version": 1,
+  "seed": 29,
+  "target_artifact": "targets/generated_context_overflow_contract.json",
+  "target_id": "generated_context_overflow_contract"
+}

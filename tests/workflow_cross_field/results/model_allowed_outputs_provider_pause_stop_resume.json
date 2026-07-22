@@ -1,0 +1,36 @@
+{
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "provider_pause",
+    "stop_resume",
+    "reset_credit"
+  ],
+  "fields": [
+    "allowed_outputs",
+    "provider_pause_resume",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "outputs.proofs_only_no_paper_phase",
+    "provider.pause_preserves_checkpoint",
+    "provider.stop_resume_preserves_pause",
+    "provider.reset_wakes_without_corrupting_checkpoint"
+  ],
+  "replay": [
+    "start_autonomous_proofs_only",
+    "complete_topic_exploration",
+    "simulate_credit_exhaustion",
+    "complete_brainstorm",
+    "stop",
+    "resume",
+    "reset_credit"
+  ],
+  "result": "passed",
+  "scenario_id": "model_allowed_outputs_provider_pause_stop_resume",
+  "schema_version": 1,
+  "seed": null,
+  "source": "curated",
+  "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+}

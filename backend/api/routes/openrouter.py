@@ -423,8 +423,8 @@ async def set_free_model_settings(request: FreeModelSettings) -> Dict[str, Any]:
         }
     except RuntimeSettingsError as e:
         free_model_manager.configure(
-            looping=bool(previous_status.get("looping_enabled", True)),
-            auto_selector=bool(previous_status.get("auto_selector_enabled", True)),
+            looping=bool(previous_status.get("looping_enabled", False)),
+            auto_selector=bool(previous_status.get("auto_selector_enabled", False)),
         )
         logger.error(f"Failed to persist free model settings: {e}")
         raise HTTPException(status_code=500, detail="Failed to persist free model settings")

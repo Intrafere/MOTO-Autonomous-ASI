@@ -1,0 +1,26 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow",
+    "provider.stop_resume_preserves_pause"
+  ],
+  "max_steps": 10,
+  "must_exercise": [
+    "leanoj_draft",
+    "leanoj_skip",
+    "leanoj_force",
+    "stop_resume",
+    "leanoj_clear",
+    "start_blocked"
+  ],
+  "result_ids": [
+    "generated_leanoj_durable_lifecycle_seed_7",
+    "generated_leanoj_durable_lifecycle_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_leanoj_durable_lifecycle"
+}

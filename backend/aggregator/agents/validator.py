@@ -14,7 +14,12 @@ from backend.shared.api_client_manager import RetryableProviderError, api_client
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
+from backend.shared.solution_path.integration import (
+    enqueue_optional_update,
+    with_validator_hook,
+)
 from backend.aggregator.core.context_allocator import ContextAllocationError, context_allocator
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.prompts.validator_prompts import (
     build_validator_prompt,
@@ -51,6 +56,7 @@ class ValidatorAgent:
         user_files_content: Dict[str, str],
         websocket_broadcaster: Optional[Callable] = None,
         proof_database_store: Optional[Any] = None,
+        solution_path_manager: Optional[Any] = None,
     ):
         self.model_name = model_name
         self.user_prompt = (
@@ -61,6 +67,7 @@ class ValidatorAgent:
         self.user_files_content = user_files_content
         self.chunk_size = rag_config.validator_chunk_size  # Always 512
         self.websocket_broadcaster = websocket_broadcaster
+        self.solution_path_manager = solution_path_manager
         
         # Control
         self.is_running = False
@@ -151,6 +158,7 @@ class ValidatorAgent:
                 allocation["direct"],
                 rag_evidence
             )
+            prompt = with_validator_hook(prompt, self.solution_path_manager)
             
             # CRITICAL: Verify actual prompt size fits in context window
             from backend.shared.utils import count_tokens
@@ -213,6 +221,23 @@ class ValidatorAgent:
                     call_metadata = api_client_manager.extract_call_metadata(response)
                     break  # Success
                     
+                except ProviderContextLengthError as e:
+                    if self.task_tracking_callback:
+                        self.task_tracking_callback("completed", task_id)
+                    raise ContextAllocationError.from_provider_error(
+                        e,
+                        "Validator context overflow or provider context mismatch: the assembled prompt "
+                        f"requires {actual_prompt_tokens:,} tokens and the configured validator input budget "
+                        f"is {max_allowed_tokens:,} tokens (context window: {configured_context:,}, "
+                        f"output reserve: {rag_config.validator_max_output_tokens:,}). The provider rejected "
+                        "the request as too large. A complete and honest validation requires direct context "
+                        "injection. Please condense into a new prompt and restart, select a validator model "
+                        "with a larger context window, or reload the local model with the configured context window.",
+                        required_tokens=actual_prompt_tokens,
+                        available_tokens=max_allowed_tokens,
+                        context_window=configured_context,
+                        output_reserve=rag_config.validator_max_output_tokens,
+                    ) from e
                 except (httpx.HTTPStatusError, ValueError) as e:
                     error_msg = str(e)
                     is_400_or_context = "400" in error_msg or "context" in error_msg.lower()
@@ -271,6 +296,14 @@ class ValidatorAgent:
                             json_valid=False
                         )
                         
+                except ProviderContextLengthError as e:
+                    raise ContextAllocationError.from_provider_error(
+                        e,
+                        "Validator context overflow or provider context mismatch during JSON retry: "
+                        "the provider rejected the mandatory validation prompt as too large.",
+                        context_window=context_allocator.validator_context_window,
+                        output_reserve=rag_config.validator_max_output_tokens,
+                    ) from e
                 except RetryableProviderError:
                     raise
                 except Exception as e:
@@ -335,6 +368,8 @@ class ValidatorAgent:
                     '  "reasoning": "your reasoning here",\n'
                     '  "summary": "brief summary here"\n'
                     "}\n\n"
+                    "Retain the one valid optional top-level `solution_path_update` "
+                    "from your previous response if present; omission remains valid.\n"
                     "CRITICAL: Properly escape all backslashes (use \\\\) and quotes (use \\\").\n"
                     "Respond with ONLY the JSON object, no markdown, no explanation."
                 )
@@ -417,10 +452,17 @@ class ValidatorAgent:
             # Notify task completed successfully
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
-            
             # Extract summary with fallback for rejections
             # Schema requires summary for rejections, but some models may not provide it
             decision = parsed["decision"]
+            await enqueue_optional_update(
+                parsed,
+                self.solution_path_manager,
+                proposer_role=self.role_id,
+                source_task_id=task_id,
+                source_phase="submission_validation",
+                source_decision=decision,
+            )
             summary = parsed.get("summary", "").strip()
             
             # For rejections, if summary is missing/empty, use reasoning as fallback
@@ -441,6 +483,14 @@ class ValidatorAgent:
             
             return result
             
+        except ProviderContextLengthError as e:
+            raise ContextAllocationError.from_provider_error(
+                e,
+                "Validator context overflow or provider context mismatch: the provider rejected "
+                "the mandatory validation prompt as too large.",
+                context_window=context_allocator.validator_context_window,
+                output_reserve=rag_config.validator_max_output_tokens,
+            ) from e
         except ContextAllocationError:
             raise
         except Exception as e:
@@ -608,6 +658,11 @@ class ValidatorAgent:
                 allocation["direct"],
                 rag_evidence
             )
+            prompt = with_validator_hook(
+                prompt, self.solution_path_manager, batch=True
+            )
+            # A dual/triple response may originate at most one update for the
+            # batch as a whole, never one competing update per decision.
             
             # Verify prompt size
             from backend.shared.utils import count_tokens
@@ -691,7 +746,7 @@ class ValidatorAgent:
                         )
                         for s in submissions
                     ]
-            
+
             # Extract decisions from parsed response
             decisions_list = parsed.get("decisions", [])
             
@@ -709,7 +764,6 @@ class ValidatorAgent:
                     )
                     for s in submissions
                 ]
-            
             # Verify submission_number fields match expected order
             for i in range(batch_size):
                 expected_number = i + 1  # 1-indexed
@@ -756,6 +810,21 @@ class ValidatorAgent:
                     json_valid=True,
                     metadata={"llm_call": call_metadata}
                 ))
+
+            batch_decisions = {result.decision for result in results}
+            source_decision = (
+                next(iter(batch_decisions))
+                if len(batch_decisions) == 1
+                else "mixed"
+            )
+            await enqueue_optional_update(
+                parsed,
+                self.solution_path_manager,
+                proposer_role=self.role_id,
+                source_task_id=task_id,
+                source_phase="batch_submission_validation",
+                source_decision=source_decision,
+            )
             
             # Notify task completed successfully
             if self.task_tracking_callback:
@@ -767,6 +836,16 @@ class ValidatorAgent:
             
             return results
             
+        except ProviderContextLengthError as e:
+            raise ContextAllocationError.from_provider_error(
+                e,
+                "Validator context overflow or provider context mismatch during batch validation: "
+                "the provider rejected the mandatory validation prompt as too large.",
+                required_tokens=locals().get("actual_prompt_tokens"),
+                available_tokens=locals().get("max_allowed_tokens"),
+                context_window=context_allocator.validator_context_window,
+                output_reserve=rag_config.validator_max_output_tokens,
+            ) from e
         except (FreeModelExhaustedError, ContextAllocationError, RetryableProviderError):
             raise
         except Exception as e:
@@ -838,6 +917,9 @@ class ValidatorAgent:
         retry_prompt = (
             "Your previous response could not be parsed as valid JSON.\n\n"
             f"Please provide the same validation decisions in valid JSON format:{example_format}\n\n"
+            "The object may also retain the one valid optional top-level "
+            "`solution_path_update` from your previous response beside `decisions`; "
+            "never place it inside an individual decision. Omission remains valid.\n"
             "CRITICAL: Properly escape all backslashes (use \\\\) and quotes (use \\\").\n"
             "Respond with ONLY the JSON object, no markdown, no explanation."
         )
@@ -895,12 +977,64 @@ class ValidatorAgent:
                 parsed = parse_json(retry_output)
                 logger.info("Batch validator: Conversational retry succeeded!")
                 return parsed, call_metadata
+        except ProviderContextLengthError as e:
+            raise ContextAllocationError.from_provider_error(
+                e,
+                "Validator context overflow or provider context mismatch during batch JSON retry: "
+                "the provider rejected the mandatory validation prompt as too large.",
+                context_window=context_allocator.validator_context_window,
+                output_reserve=rag_config.validator_max_output_tokens,
+            ) from e
         except RetryableProviderError:
             raise
         except Exception as e:
             logger.warning(f"Batch validator: Retry failed - {e}")
         
         return None, {}
+
+    async def _retry_validator_json_parse(
+        self,
+        original_prompt: str,
+        failed_output: str,
+        task_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Run one bounded repair while preserving an optional path proposal."""
+        safe = sanitize_model_output_for_retry_context(
+            failed_output, max_chars=2000
+        )
+        repair = (
+            "Your previous validator response was invalid JSON. Return the exact "
+            "same primary decision as one corrected JSON object. Retain the one "
+            "valid optional top-level `solution_path_update` if present; omission "
+            "remains valid. Return JSON only."
+        )
+        messages = [
+            {"role": "user", "content": original_prompt},
+            {"role": "assistant", "content": safe},
+            {"role": "user", "content": repair},
+        ]
+        max_input = rag_config.get_available_input_tokens(
+            context_allocator.validator_context_window,
+            rag_config.validator_max_output_tokens,
+        )
+        if sum(count_tokens(item["content"]) for item in messages) > max_input:
+            messages = [
+                {"role": "user", "content": original_prompt},
+                {"role": "user", "content": repair},
+            ]
+        response = await api_client_manager.generate_completion(
+            task_id=f"{task_id}_json_retry",
+            role_id=self.role_id,
+            model=self.model_name,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=rag_config.validator_max_output_tokens,
+        )
+        if not response.get("choices"):
+            return None
+        message = response["choices"][0].get("message", {})
+        repaired = parse_json(extract_message_text(message))
+        return repaired if isinstance(repaired, dict) else None
     
     def _get_system_prompt(self) -> str:
         """Get system prompt for single submission."""
@@ -1001,6 +1135,7 @@ class ValidatorAgent:
                     context=user_files_context
                 )
                 logger.info(f"CLEANUP DEBUG: Built cleanup review prompt with direct injection, length: {len(prompt)} chars")
+            prompt = with_validator_hook(prompt, self.solution_path_manager)
             
             # Verify prompt size (should now always fit due to RAG handling)
             from backend.shared.utils import count_tokens
@@ -1039,6 +1174,16 @@ class ValidatorAgent:
                     temperature=0.0,  # Deterministic cleanup decisions
                     max_tokens=rag_config.validator_max_output_tokens
                 )
+            except ProviderContextLengthError as api_error:
+                raise ContextAllocationError.from_provider_error(
+                    api_error,
+                    "Validator context overflow or provider context mismatch during cleanup review: "
+                    "the provider rejected the mandatory cleanup prompt as too large.",
+                    required_tokens=actual_prompt_tokens,
+                    available_tokens=max_allowed_tokens,
+                    context_window=context_allocator.validator_context_window,
+                    output_reserve=rag_config.validator_max_output_tokens,
+                ) from api_error
             except Exception as api_error:
                 logger.error(f"CLEANUP DEBUG: API call failed: {api_error}")
                 # Notify task completed even on failure
@@ -1078,8 +1223,11 @@ class ValidatorAgent:
                 logger.warning(f"CLEANUP DEBUG: JSON PARSE FAILED: {e}")
                 logger.warning(f"CLEANUP DEBUG: Raw output that failed to parse:\n{llm_output}")
                 logger.warning(f"Cleanup review: JSON parse failed: {e}")
-                return None
-            
+                parsed = await self._retry_validator_json_parse(
+                    prompt, llm_output, task_id
+                )
+                if parsed is None:
+                    return None
             # Check if removal is recommended
             should_remove = parsed.get("should_remove", False)
             submission_number = parsed.get("submission_number")
@@ -1097,6 +1245,15 @@ class ValidatorAgent:
                 logger.warning("CLEANUP DEBUG: INVALID RESPONSE - should_remove=true but no submission_number provided")
                 logger.warning("Cleanup review: should_remove=true but no submission_number provided")
                 return None
+
+            await enqueue_optional_update(
+                parsed,
+                self.solution_path_manager,
+                proposer_role=self.role_id,
+                source_task_id=task_id,
+                source_phase="cleanup_review_validation",
+                source_decision="accept",
+            )
             
             logger.info(f"CLEANUP DEBUG: REMOVAL PROPOSED - submission #{submission_number}")
             logger.info(
@@ -1109,7 +1266,7 @@ class ValidatorAgent:
                 "reasoning": reasoning
             }
             
-        except FreeModelExhaustedError:
+        except (FreeModelExhaustedError, ContextAllocationError):
             raise
         except RetryableProviderError:
             raise
@@ -1199,6 +1356,7 @@ class ValidatorAgent:
                     all_submissions_formatted=all_submissions
                 )
                 logger.info(f"CLEANUP DEBUG: Built removal validation prompt with direct injection, length: {len(prompt)} chars")
+            prompt = with_validator_hook(prompt, self.solution_path_manager)
             
             # Verify prompt size (should now always fit due to RAG handling)
             from backend.shared.utils import count_tokens
@@ -1236,6 +1394,14 @@ class ValidatorAgent:
                     temperature=0.0,  # Deterministic removal validation
                     max_tokens=rag_config.validator_max_output_tokens
                 )
+            except ProviderContextLengthError as api_error:
+                raise ContextAllocationError.from_provider_error(
+                    api_error,
+                    "Validator context overflow or provider context mismatch during cleanup removal validation: "
+                    "the provider rejected the mandatory validation prompt as too large.",
+                    context_window=context_allocator.validator_context_window,
+                    output_reserve=rag_config.validator_max_output_tokens,
+                ) from api_error
             except Exception as api_error:
                 logger.error(f"CLEANUP DEBUG: API call failed: {api_error}")
                 # Notify task completed even on failure
@@ -1275,9 +1441,24 @@ class ValidatorAgent:
                 logger.warning(f"CLEANUP DEBUG: JSON PARSE FAILED: {e}")
                 logger.warning(f"CLEANUP DEBUG: Raw output that failed to parse:\n{llm_output}")
                 logger.warning(f"Removal validation: JSON parse failed: {e}")
-                return False
-            
+                parsed = await self._retry_validator_json_parse(
+                    prompt, llm_output, task_id
+                )
+                if parsed is None:
+                    return False
             decision = parsed.get("decision", "reject")
+            if decision not in {"accept", "reject"}:
+                logger.warning("Removal validation: invalid decision %r", decision)
+                return False
+            await enqueue_optional_update(
+                parsed,
+                self.solution_path_manager,
+                proposer_role=self.role_id,
+                source_task_id=task_id,
+                source_phase="cleanup_removal_validation",
+                source_decision=decision,
+            )
+
             reasoning = parsed.get("reasoning", "")
             
             logger.info(f"CLEANUP DEBUG: Parsed fields - decision={decision}")
@@ -1298,7 +1479,7 @@ class ValidatorAgent:
                 )
                 return False
                 
-        except FreeModelExhaustedError:
+        except (FreeModelExhaustedError, ContextAllocationError):
             raise
         except RetryableProviderError:
             raise

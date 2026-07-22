@@ -498,7 +498,9 @@ class JSONValidator:
         schema = {
             "decision": str,
             "reasoning": str,
-            "summary": str
+            "coherence_check": bool,
+            "rigor_check": bool,
+            "placement_check": bool,
         }
         valid, parsed, error = self.extract_and_validate_json(llm_output, schema)
         
@@ -506,6 +508,8 @@ class JSONValidator:
             # Additional validation for decision field
             if parsed["decision"] not in ["accept", "reject"]:
                 return False, None, f"Invalid decision value: {parsed['decision']}. Must be 'accept' or 'reject'"
+            if not parsed["reasoning"].strip():
+                return False, None, "reasoning must be a non-empty string"
         
         return valid, parsed, error
 

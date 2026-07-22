@@ -5,10 +5,66 @@ import {
   buildRejectionFeedbackNoticeActivity,
   formatAssistantProofPackEventMessage,
   formatAssistantProofPackMessage,
+  formatContextOverflowActivityMessage,
+  formatSolutionPathEventMessage,
   getActivityClass,
+  getActivityIcon,
   getAssistantProofPackDuplicateKey,
   shouldAddRejectionFeedbackNotice,
 } from './activityStyles';
+
+test('context overflow activity identifies the effective or configured model', () => {
+  expect(formatContextOverflowActivityMessage({
+    message: 'Research stopped.',
+    configured_model: 'configured/model',
+    configured_provider: 'openrouter',
+  })).toBe('Research stopped. Configured route: configured/model via openrouter.');
+
+  expect(formatContextOverflowActivityMessage({
+    message: 'Research stopped.',
+    configured_model: 'configured/model',
+    effective_model: 'fallback/model',
+    effective_provider: 'lm_studio',
+  })).toBe(
+    'Research stopped. Effective route: fallback/model via lm_studio. '
+    + 'Configured route: configured/model.'
+  );
+
+  expect(formatContextOverflowActivityMessage({
+    message: 'Proof formalization skipped.',
+    configured_model: 'configured/model',
+    configured_provider: 'openrouter',
+  })).toBe('Proof formalization skipped. Configured route: configured/model via openrouter.');
+});
+
+test('proof context overflow uses fatal activity styling without implying workflow stop', () => {
+  expect(getActivityClass('proof_context_overflow')).toBe('activity-reject');
+});
+
+test('styles and formats every solution-path lifecycle event', () => {
+  const expectations = {
+    solution_path_activated: ['◇', 'activity-info'],
+    solution_path_proposal_queued: ['+', 'activity-info'],
+    solution_path_proposal_reviewing: ['◎', 'activity-info'],
+    solution_path_updated: ['✓', 'activity-success'],
+    solution_path_proposal_rejected: ['✗', 'activity-reject'],
+    solution_path_proposal_retry_queued: ['↺', 'activity-warning'],
+    solution_path_proposal_user_repair_required: ['⚠', 'activity-warning'],
+    solution_path_proposal_resumed: ['▶', 'activity-info'],
+  };
+
+  Object.entries(expectations).forEach(([event, [icon, activityClass]]) => {
+    expect(getActivityIcon(event)).toBe(icon);
+    expect(getActivityClass(event)).toBe(activityClass);
+    expect(formatSolutionPathEventMessage(event, {})).not.toBe('Solution path changed.');
+  });
+  expect(formatSolutionPathEventMessage('solution_path_proposal_queued', {
+    queued_proposals: 2,
+  })).toContain('(2 queued)');
+  expect(formatSolutionPathEventMessage('solution_path_updated', {
+    message: 'Engine supplied message.',
+  })).toBe('Engine supplied message.');
+});
 
 test('formats clean empty Assistant proof pack as info instead of warning', () => {
   const message = formatAssistantProofPackMessage({
@@ -25,7 +81,7 @@ test('formats clean empty Assistant proof pack as info instead of warning', () =
   });
 
   expect(message).toBe(
-    'Assistant memory found no useful proofs from 64 candidates for brainstorm context during brainstorm via Assistant (openai/gpt-oss-20b): 0 local, 0 SyntheticLib4'
+    'Assistant memory found no useful proofs for brainstorm context during brainstorm via Assistant (openai/gpt-oss-20b): used 0 local and 0 SyntheticLib4'
   );
   expect(message).not.toContain('warning');
 });
@@ -60,9 +116,44 @@ test('formats Assistant model-output failure as an error activity', () => {
   };
 
   expect(formatAssistantProofPackEventMessage('assistant_proof_pack_failed', data)).toBe(
-    'Assistant memory model call failed for brainstorm context during brainstorm via Assistant (google/gemma-4-26b-a4b) from 64 candidates (20 shortlisted): No JSON found in response'
+    'Assistant memory model call failed for brainstorm context during brainstorm via Assistant (google/gemma-4-26b-a4b): No JSON found in response'
   );
   expect(getActivityClass('assistant_proof_pack_failed')).toBe('activity-reject');
+});
+
+test('formats federated Assistant lane counts without exposing proof content', () => {
+  const message = formatAssistantProofPackEventMessage('assistant_proof_pack_updated', {
+    result_count: 5,
+    max_result_count: 7,
+    candidate_count: 32,
+    shortlist_count: 21,
+    target_kind: 'paper',
+    local_result_count: 4,
+    syntheticlib4_result_count: 1,
+    retrieval_observability: {
+      raw_by_lane: {
+        local: { total: 40 },
+        duplicate_neighborhood: { total: 12 },
+        syntheticlib4: { total: 8 },
+      },
+      deduped_distinct: {
+        total: 48,
+        by_corpus: { moto: 40, syntheticlib4: 8 },
+      },
+      fused_cap_64: { total: 32 },
+      shortlist_21: { total: 21 },
+      final_selected: {
+        total: 5,
+        by_corpus: { moto: 4, syntheticlib4: 1 },
+      },
+      matching_runs_examined: 9,
+      matching_occurrences_examined: 60,
+    },
+  });
+
+  expect(message).toContain('reviewed 40 local and 8 SyntheticLib4');
+  expect(message).toContain('used 4 local and 1 SyntheticLib4');
+  expect(message).not.toContain('64 candidates');
 });
 
 test('adds rejection feedback notice on first and tenth consecutive rejection only', () => {

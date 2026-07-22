@@ -53,6 +53,7 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_RESOLUTION,
     CONTEXT_OVERFLOW_STOP_MESSAGE,
     CONTEXT_OVERFLOW_STOP_REASON,
+    context_overflow_model_payload,
 )
 from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
@@ -75,6 +76,7 @@ from backend.shared.provider_pause import (
     mark_provider_paused,
     wait_for_provider_resume,
 )
+from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.token_tracker import token_tracker
@@ -159,9 +161,44 @@ _LEANOJ_ACTIVE_PLAN_CONTEXT_TERMS = (
 )
 _LEANOJ_PROOF_SEARCH_MAX_TOKENS = 3500
 
+_SOLUTION_PATH_SEMANTIC_VALIDATOR_TASKS = {
+    "leanoj_topic_val",
+    "leanoj_brainstorm_val",
+    "leanoj_brainstorm_prune_val",
+    "leanoj_path_val",
+    "leanoj_master_proof_edit_val",
+    "leanoj_final_review",
+}
+_SOLUTION_PATH_SOLVER_ROLES = {
+    "leanoj_topic_generator",
+    "leanoj_topic_selector",
+    "leanoj_final_solver",
+    *{f"leanoj_brainstorm_submitter_{index}" for index in range(1, 11)},
+}
+
+
+def _solution_path_call_kind(task_prefix: str, role_id: str) -> str:
+    """Classify calls explicitly; Lean, integrity, novelty, and tools stay absent."""
+    if task_prefix in _SOLUTION_PATH_SEMANTIC_VALIDATOR_TASKS:
+        return "validator"
+    if role_id in _SOLUTION_PATH_SOLVER_ROLES:
+        return "solver"
+    return "excluded"
+
 
 class LeanOJConfigurationError(RuntimeError):
     """Non-retryable LeanOJ configuration problem."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        role_id: str = "",
+        route: ProviderRouteIdentity | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.route = route
+        self.role_id = role_id or (route.role_id if route else "")
 
 
 _BrainstormSubmission = tuple[int, str, dict[str, Any]]
@@ -278,6 +315,7 @@ class LeanOJCoordinator:
         self._request: Optional[LeanOJStartRequest] = None
         self._stop_event = asyncio.Event()
         self._main_task: Optional[asyncio.Task] = None
+        self.top_level_terminal_callback: Optional[Callable[[], Any]] = None
         self._broadcast_callback: BroadcastFn = None
         self._task_sequences: dict[str, int] = {}
 
@@ -302,6 +340,10 @@ class LeanOJCoordinator:
         self._pending_final_solver_assistant_target_hash = ""
         self._fatal_stop_reason: Optional[str] = None
         self._fatal_stop_message: str = ""
+        self._fatal_stop_payload: dict[str, Any] = {}
+        self.solution_path_manager = None
+        self._control_generation = 0
+        self._control_lock = asyncio.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -320,6 +362,12 @@ class LeanOJCoordinator:
 
     @staticmethod
     def _is_context_overflow_exception(exc: BaseException) -> bool:
+        if isinstance(exc, ProviderContextLengthError):
+            return True
+        cause = getattr(exc, "__cause__", None) or getattr(exc, "cause", None)
+        if isinstance(cause, BaseException) and cause is not exc:
+            if LeanOJCoordinator._is_context_overflow_exception(cause):
+                return True
         message = str(exc or "").lower()
         return (
             "context overflow" in message
@@ -329,21 +377,33 @@ class LeanOJCoordinator:
         )
 
     async def _handle_context_overflow_stop(self, exc: BaseException, *, role_id: str = "") -> None:
+        if self._fatal_stop_reason == CONTEXT_OVERFLOW_STOP_REASON:
+            return
+        overflow_phase = self._state.phase
         self._fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
         self._fatal_stop_message = CONTEXT_OVERFLOW_STOP_MESSAGE
         self._state.phase = "stopped"
         self._state.last_error = str(exc)
+        route = getattr(exc, "route", None)
+        if route is None:
+            cause = getattr(exc, "__cause__", None) or getattr(exc, "cause", None)
+            route = getattr(cause, "route", None)
+        role_id = role_id or (route.role_id if route else "")
+        role_config = api_client_manager.get_role_config(role_id) if role_id else None
+        overflow_payload = {
+            "workflow_mode": "leanoj",
+            "role_id": role_id,
+            **context_overflow_model_payload(role_config, route=route),
+            "phase": overflow_phase,
+            "reason": CONTEXT_OVERFLOW_STOP_REASON,
+            "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
+            "error_detail": str(exc),
+            "resolution": CONTEXT_OVERFLOW_RESOLUTION,
+        }
+        self._fatal_stop_payload = overflow_payload
         await self._persist_and_broadcast(
             "context_overflow_error",
-            {
-                "workflow_mode": "leanoj",
-                "role_id": role_id,
-                "phase": self._state.phase,
-                "reason": CONTEXT_OVERFLOW_STOP_REASON,
-                "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
-                "error_detail": str(exc),
-                "resolution": CONTEXT_OVERFLOW_RESOLUTION,
-            },
+            overflow_payload,
         )
 
     def get_state(self) -> LeanOJState:
@@ -449,6 +509,7 @@ class LeanOJCoordinator:
             phase="idle",
             session_id=f"leanoj_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}",
         )
+        await self._initialize_solution_path_manager(request)
 
         self._configure_roles(request)
         await self._persist_state()
@@ -489,6 +550,7 @@ class LeanOJCoordinator:
         self._request = request
         self._stop_event = asyncio.Event()
         self._configure_roles(request)
+        await self._initialize_solution_path_manager(request)
         self._restored_from_disk = True
         await self._persist_state()
         logger.info(
@@ -497,6 +559,68 @@ class LeanOJCoordinator:
             matching_state_file,
         )
         return True
+
+    async def _initialize_solution_path_manager(self, request: LeanOJStartRequest) -> None:
+        """Restore one durable plan manager for the entire LeanOJ run."""
+        from backend.shared.config import system_config
+        from backend.shared.solution_path import (
+            build_review_prompt,
+            compact_review_prompt,
+            review_with_json_retry,
+            solution_path_registry,
+        )
+
+        # LeanOJ role configs are positional; index zero is the user-facing
+        # Main Submitter 1.
+        primary = request.brainstorm_submitters[0]
+        reviewer_role_id = "leanoj_solution_path_reviewer"
+        self._configure_role(reviewer_role_id, primary)
+
+        async def review(proposal, current_plan):
+            prompt = build_review_prompt(
+                user_prompt=request.user_prompt,
+                proposal=proposal,
+                current_plan=current_plan,
+                extra_context=f"LEAN TEMPLATE:\n{request.lean_template}",
+            )
+
+            async def call(messages):
+                return await api_client_manager.generate_completion(
+                    task_id=self._next_task_id("leanoj_brainstorm_sub1"),
+                    role_id=reviewer_role_id,
+                    model=primary.model_id,
+                    messages=messages,
+                    max_tokens=primary.max_output_tokens,
+                    temperature=0.0,
+                )
+
+            return await review_with_json_retry(
+                prompt=prompt,
+                call_completion=call,
+                extract_text=lambda response: extract_message_text(
+                    response["choices"][0]["message"]
+                ),
+                context_window=primary.context_window,
+                max_output_tokens=primary.max_output_tokens,
+                compact_prompt=compact_review_prompt(
+                    user_prompt=request.user_prompt,
+                    proposal=proposal,
+                    current_plan=current_plan,
+                    extra_context=f"LEAN TEMPLATE:\n{request.lean_template}",
+                ),
+            )
+
+        root = Path(system_config.data_dir) / "solution_paths"
+        self.solution_path_manager = await solution_path_registry.acquire(
+            root,
+            workflow_mode="leanoj",
+            user_prompt=request.user_prompt,
+            stable_run_id=self._state.session_id,
+            reviewer=review,
+        )
+        await self.solution_path_manager.set_acceptance_count(
+            self._state.brainstorm_acceptance_events
+        )
 
     def start_in_background(self) -> bool:
         if self._main_task and not self._main_task.done():
@@ -561,6 +685,7 @@ class LeanOJCoordinator:
         self._state.is_running = True
         self._fatal_stop_reason = None
         self._fatal_stop_message = ""
+        self._fatal_stop_payload = {}
         if self._state.phase == "idle":
             self._state.phase = "initial_topic_candidates"
         elif self._state.phase in {"stopped", "error"}:
@@ -568,36 +693,39 @@ class LeanOJCoordinator:
         self._remember_active_phase()
         self._state.updated_at = datetime.now()
         self._state.last_error = ""
-        token_tracker.reset()
-        token_tracker.start_timer()
-        self._enable_api_logging()
-        await self._persist_and_broadcast("leanoj_started")
-        if self._state.provider_paused:
-            pause_payload = {
-                "reason": self._state.provider_pause_reason,
-                "role_id": self._state.provider_pause_role_id,
-                "message": self._state.provider_pause_message,
-                "phase": self._state.phase,
-            }
-            mark_provider_paused()
-            await self._persist_and_broadcast("leanoj_provider_paused", pause_payload)
-            await wait_for_provider_resume(self._should_stop)
-            if self._should_stop():
-                raise asyncio.CancelledError()
-            self._state.provider_paused = False
-            self._state.provider_pause_reason = ""
-            self._state.provider_pause_role_id = ""
-            self._state.provider_pause_message = ""
-            await self._persist_and_broadcast("leanoj_provider_resumed", pause_payload)
-
         try:
+            token_tracker.reset()
+            token_tracker.start_timer()
+            self._enable_api_logging()
+            await self._persist_and_broadcast("leanoj_started")
+            if self._state.provider_paused:
+                pause_payload = {
+                    "reason": self._state.provider_pause_reason,
+                    "role_id": self._state.provider_pause_role_id,
+                    "message": self._state.provider_pause_message,
+                    "phase": self._state.phase,
+                }
+                mark_provider_paused()
+                await self._persist_and_broadcast("leanoj_provider_paused", pause_payload)
+                await wait_for_provider_resume(self._should_stop)
+                if self._should_stop():
+                    raise asyncio.CancelledError()
+                self._state.provider_paused = False
+                self._state.provider_pause_reason = ""
+                self._state.provider_pause_role_id = ""
+                self._state.provider_pause_message = ""
+                await self._persist_and_broadcast("leanoj_provider_resumed", pause_payload)
+
             await self._run_workflow(self._request)
         except asyncio.CancelledError:
             raise
         except LeanOJConfigurationError as exc:
             if self._is_context_overflow_exception(exc):
                 logger.error("LeanOJ stopped for context overflow: %s", exc)
-                await self._handle_context_overflow_stop(exc)
+                await self._handle_context_overflow_stop(
+                    exc,
+                    role_id=getattr(exc, "role_id", ""),
+                )
             else:
                 logger.exception("LeanOJ workflow failed")
                 self._state.phase = "error"
@@ -606,7 +734,10 @@ class LeanOJCoordinator:
         except Exception as exc:
             if self._is_context_overflow_exception(exc):
                 logger.error("LeanOJ stopped for context overflow: %s", exc)
-                await self._handle_context_overflow_stop(exc)
+                await self._handle_context_overflow_stop(
+                    exc,
+                    role_id=getattr(exc, "role_id", ""),
+                )
             else:
                 logger.exception("LeanOJ workflow failed")
                 self._state.phase = "error"
@@ -615,6 +746,13 @@ class LeanOJCoordinator:
         finally:
             self._running = False
             self._state.is_running = False
+            if self.solution_path_manager is not None:
+                try:
+                    await self.solution_path_manager.stop()
+                except Exception:
+                    logger.exception(
+                        "Failed to stop LeanOJ solution-path worker during terminal cleanup"
+                    )
             if self._state.phase not in {"verified", "error"}:
                 self._remember_active_phase()
             self._state.updated_at = datetime.now()
@@ -624,15 +762,23 @@ class LeanOJCoordinator:
             if self._fatal_stop_reason:
                 stopped_payload = {
                     **self.get_status(),
+                    **self._fatal_stop_payload,
                     "reason": self._fatal_stop_reason,
                     "message": self._fatal_stop_message or CONTEXT_OVERFLOW_STOP_MESSAGE,
                 }
             await self._persist_and_broadcast("leanoj_stopped", stopped_payload)
+            if self.top_level_terminal_callback is not None:
+                try:
+                    self.top_level_terminal_callback()
+                except Exception:
+                    logger.exception("LeanOJ top-level terminal callback failed")
 
     async def stop(self) -> None:
         if not self.is_active and not self._state.session_id:
             return
         self._stop_event.set()
+        if self.solution_path_manager is not None:
+            await self.solution_path_manager.stop()
         task = self._main_task
         if task and not task.done():
             try:
@@ -650,6 +796,18 @@ class LeanOJCoordinator:
         """Clear Proof Solver progress. This is the explicit reset path."""
         if self.is_active:
             await self.stop()
+        if self.solution_path_manager is not None:
+            from backend.shared.solution_path import solution_path_registry
+            await solution_path_registry.clear_manager(self.solution_path_manager)
+            self.solution_path_manager = None
+        else:
+            from backend.shared.config import system_config
+            from backend.shared.solution_path import solution_path_registry
+            if self._state.session_id:
+                await solution_path_registry.clear_run(
+                    Path(system_config.data_dir) / "solution_paths",
+                    self._state.session_id,
+                )
         base = self._sessions_base_dir()
         if base.exists():
             shutil.rmtree(base)
@@ -682,15 +840,31 @@ class LeanOJCoordinator:
         self._last_master_proof_edit_signature = ""
         self._fatal_stop_reason = None
         self._fatal_stop_message = ""
+        self._fatal_stop_payload = {}
         await self._broadcast("leanoj_cleared", self.get_status())
 
     async def skip_brainstorm(self) -> None:
-        self._state.skip_brainstorm_requested = True
-        await self._persist_and_broadcast("leanoj_skip_brainstorm_requested")
+        self._control_generation += 1
+        generation = self._control_generation
+        async with self._control_lock:
+            if not self._owns_control_generation(generation):
+                return
+            self._state.skip_brainstorm_requested = True
+            self._state.force_brainstorm_requested = False
+            await self._persist_and_broadcast("leanoj_skip_brainstorm_requested")
 
     async def force_brainstorm(self) -> None:
-        self._state.force_brainstorm_requested = True
-        await self._persist_and_broadcast("leanoj_force_brainstorm_requested")
+        self._control_generation += 1
+        generation = self._control_generation
+        async with self._control_lock:
+            if not self._owns_control_generation(generation):
+                return
+            self._state.force_brainstorm_requested = True
+            self._state.skip_brainstorm_requested = False
+            await self._persist_and_broadcast("leanoj_force_brainstorm_requested")
+
+    def _owns_control_generation(self, generation: int) -> bool:
+        return generation == self._control_generation
 
     async def _consume_skip_brainstorm(self) -> bool:
         if not self._state.skip_brainstorm_requested:
@@ -1296,7 +1470,10 @@ class LeanOJCoordinator:
                         "submitters": [submitter_index for submitter_index, _, _ in batch],
                     },
                 )
+                validation_generation = self._control_generation
                 decisions = await self._validate_brainstorm_batch(request, submissions)
+                if not self._owns_control_generation(validation_generation):
+                    return
                 validation_decisions = list(self._last_brainstorm_validation_decisions)
                 for batch_index, ((submitter_index, submission, metadata), accepted) in enumerate(
                     zip(batch, decisions)
@@ -1311,7 +1488,14 @@ class LeanOJCoordinator:
                     )
                     accepted = accepted or lean_verified_proof
                     if accepted:
-                        await self._record_accepted_brainstorm_proof(request, submitter_index, metadata)
+                        await self._record_accepted_brainstorm_proof(
+                            request,
+                            submitter_index,
+                            metadata,
+                            control_generation=validation_generation,
+                        )
+                        if not self._owns_control_generation(validation_generation):
+                            return
                         validation_feedback = (
                             validation_decisions[batch_index]
                             if batch_index < len(validation_decisions)
@@ -1325,6 +1509,11 @@ class LeanOJCoordinator:
                             metadata,
                         )
                         self._state.accepted_brainstorm_count = len(self._accepted_ideas)
+                        from backend.shared.solution_path.integration import note_acceptances
+                        await note_acceptances(
+                            self.solution_path_manager,
+                            self._state.brainstorm_acceptance_events,
+                        )
                         submission_preview = self._summarize_error(submission, limit=220)
                         logger.info(
                             "LeanOJ brainstorm ACCEPTED: Submitter %s [%s] (phase=%s, total_acceptances=%s, event=%s) - %s",
@@ -1543,8 +1732,9 @@ class LeanOJCoordinator:
         queued_count = 0
         while not self._should_stop():
             try:
+                submission_generation = self._control_generation
                 await self._wait_for_brainstorm_queue_turn(submission_queue, submitter_index)
-                if self._should_stop():
+                if self._should_stop() or not self._owns_control_generation(submission_generation):
                     break
                 creativity_emphasized = (
                     request.creativity_emphasis_boost_enabled
@@ -1618,6 +1808,8 @@ class LeanOJCoordinator:
                     prompt,
                     temperature=api_client_manager.parallel_brainstorm_submitter_temperature(submitter_index),
                 )
+                if not self._owns_control_generation(submission_generation):
+                    return
                 metadata: dict[str, Any] = {"creativity_emphasized": creativity_emphasized}
                 if is_lean_proof_submission(raw):
                     source_context = "\n\n".join(
@@ -1645,6 +1837,8 @@ class LeanOJCoordinator:
                         allowed_baseline=request.lean_template,
                         max_attempts=5,
                     )
+                    if not self._owns_control_generation(submission_generation):
+                        return
                     if not gate_result.accepted:
                         feedback = {
                             "request": str(raw.get("theorem_statement") or raw.get("submission") or active_topic),
@@ -1689,7 +1883,7 @@ class LeanOJCoordinator:
                 submission = str(raw.get("submission") or "").strip()
                 if submission:
                     await self._wait_for_brainstorm_queue_turn(submission_queue, submitter_index)
-                    if self._should_stop():
+                    if self._should_stop() or not self._owns_control_generation(submission_generation):
                         break
                     queued_count += 1
                     await submission_queue.put((submitter_index, submission, metadata))
@@ -1785,6 +1979,8 @@ class LeanOJCoordinator:
         request: LeanOJStartRequest,
         submitter_index: int,
         metadata: dict[str, Any],
+        *,
+        control_generation: Optional[int] = None,
     ) -> None:
         proof_payload = (metadata or {}).get("brainstorm_lean_proof")
         if not isinstance(proof_payload, dict):
@@ -1818,6 +2014,7 @@ class LeanOJCoordinator:
                     or "Proof Solver verified this brainstorm subproof with Lean 4 and template/device checks."
                 ),
                 attempts=proof_attempts,
+                control_generation=control_generation,
             )
         except Exception as exc:
             logger.warning("LeanOJ accepted brainstorm proof registration failed: %s", exc, exc_info=True)
@@ -1830,6 +2027,8 @@ class LeanOJCoordinator:
                 },
             )
 
+        if control_generation is not None and not self._owns_control_generation(control_generation):
+            return
         record = LeanOJSubproofRecord(
             subproof_id=subproof_id,
             request=theorem_statement,
@@ -2198,6 +2397,7 @@ class LeanOJCoordinator:
         if not self._accepted_ideas:
             return
         self._state.brainstorm_prune_reviews_performed += 1
+        review_generation = self._control_generation
         reviewer, reviewer_index = self._select_brainstorm_prune_reviewer(request, phase_key)
         active_topic = self._active_brainstorm_topic(phase_key)
         try:
@@ -2208,6 +2408,8 @@ class LeanOJCoordinator:
                 task_request=f"Review LeanOJ brainstorm memory for one conservative prune operation: {reason}.",
                 include_current_final_cycle_packet=True,
             )
+            if not self._owns_control_generation(review_generation):
+                return
             raw = await self._call_json(
                 reviewer,
                 "leanoj_brainstorm_prune",
@@ -2220,6 +2422,8 @@ class LeanOJCoordinator:
                     context_blocks=context_blocks,
                 ),
             )
+            if not self._owns_control_generation(review_generation):
+                return
             operation = self._normalize_brainstorm_prune_operation(raw)
             if operation["action"] == "none":
                 await self._persist_and_broadcast(
@@ -2235,6 +2439,8 @@ class LeanOJCoordinator:
                 task_request="Validate one proposed LeanOJ brainstorm prune operation.",
                 include_current_final_cycle_packet=True,
             )
+            if not self._owns_control_generation(review_generation):
+                return
             validation = await self._call_json(
                 request.brainstorm_validator,
                 "leanoj_brainstorm_prune_val",
@@ -2248,6 +2454,8 @@ class LeanOJCoordinator:
                     context_blocks=validator_context,
                 ),
             )
+            if not self._owns_control_generation(review_generation):
+                return
             if str(validation.get("decision") or "").strip().lower() != "accept":
                 await self._persist_and_broadcast(
                     "leanoj_brainstorm_prune_rejected",
@@ -2465,10 +2673,14 @@ class LeanOJCoordinator:
         source_title: str = "",
         verification_notes: str = "",
         attempts: Optional[list[ProofAttemptFeedback]] = None,
+        control_generation: Optional[int] = None,
     ) -> Optional[ProofRecord]:
         """Register a Proof Solver verified proof in the shared proof database."""
         if not request.topic_validator.model_id:
-            raise LeanOJConfigurationError("Proof Solver proof novelty validator model is unavailable")
+            raise LeanOJConfigurationError(
+                "Proof Solver proof novelty validator model is unavailable",
+                role_id="leanoj_topic_validator",
+            )
 
         source_type = "leanoj_final" if proof_kind == "final" else "leanoj_subproof"
         task_id = self._next_task_id(f"leanoj_{proof_kind}_novelty")
@@ -2502,6 +2714,7 @@ class LeanOJCoordinator:
                 ),
                 attempt_count=attempt_count,
                 attempts=attempts,
+                run_id=self._state.session_id,
                 broadcast_fn=self._broadcast,
                 base_event={
                     "source_type": source_type,
@@ -2509,6 +2722,11 @@ class LeanOJCoordinator:
                     "source_title": source_title or self._state.selected_topic or request.user_prompt,
                     "trigger": "leanoj_verified",
                 },
+                ownership_predicate=(
+                    (lambda: self._owns_control_generation(control_generation))
+                    if control_generation is not None
+                    else None
+                ),
             )
             self.completed_task_ids.add(task_id)
             return registration.record
@@ -2804,6 +3022,7 @@ class LeanOJCoordinator:
             source_title="LeanOJ final proof solver",
             source_type="leanoj",
             source_id=self._state.session_id,
+            run_id=self._state.session_id,
             imports=["Mathlib"],
         )
         target_hash = assistant_proof_search_coordinator.submit_target(snapshot)
@@ -3514,7 +3733,8 @@ class LeanOJCoordinator:
                 f"user prompt, Lean template, proof memory, schema, and output reserve: {proof_token_budget}. "
                 f"Configured final-solver context window: {request.final_solver.context_window}. "
                 f"Configured final-solver max output tokens: {request.final_solver.max_output_tokens}. "
-                "Increase the final solver context window or reduce other mandatory prompt context before resuming."
+                "Increase the final solver context window or reduce other mandatory prompt context before resuming.",
+                role_id="leanoj_final_solver",
             )
 
         return proof, {
@@ -3650,6 +3870,7 @@ class LeanOJCoordinator:
         attempt_number: int,
         reasoning: str,
         final_solver_metadata: dict[str, Any],
+        control_generation: int,
     ) -> tuple[Lean4Result, str]:
         if needs_more_time:
             lean_result = await get_lean4_client().check_proof(
@@ -3657,6 +3878,8 @@ class LeanOJCoordinator:
                 timeout=system_config.lean4_proof_timeout,
                 allow_placeholders=True,
             )
+            if not self._owns_control_generation(control_generation):
+                return lean_result, ""
             lean_pass_feedback = self._format_lean_success_feedback(lean_result) if lean_result.success else ""
             if lean_result.success:
                 template_error = self._validate_final_solution_integrity(
@@ -3676,6 +3899,8 @@ class LeanOJCoordinator:
             proof_request="final Proof Solver solution",
             reasoning=reasoning,
         )
+        if not self._owns_control_generation(control_generation):
+            return lean_result, ""
         lean_pass_feedback = self._format_lean_success_feedback(lean_result) if lean_result.success else ""
         if lean_result.success:
             template_error = self._validate_final_solution_integrity(
@@ -3719,6 +3944,8 @@ class LeanOJCoordinator:
                     final_solver_reasoning=reasoning,
                     lean_result=lean_result,
                 )
+                if not self._owns_control_generation(control_generation):
+                    return lean_result, lean_pass_feedback
                 if not review_solved:
                     await self._record_partial_proof(
                         {
@@ -3783,7 +4010,10 @@ class LeanOJCoordinator:
             if await self._consume_force_brainstorm():
                 return
 
+            attempt_generation = self._control_generation
             current_master_proof = await self._read_master_proof()
+            if not self._owns_control_generation(attempt_generation):
+                return
             self._set_master_proof_metadata(current_master_proof)
             final_prompt_feedback = self._final_solver_failure_window()
             await self._broadcast(
@@ -3838,6 +4068,8 @@ class LeanOJCoordinator:
                         context_blocks=context_blocks,
                     ),
                 )
+                if not self._owns_control_generation(attempt_generation):
+                    return
             except asyncio.CancelledError:
                 raise
             except LeanOJConfigurationError:
@@ -3933,6 +4165,8 @@ class LeanOJCoordinator:
                     updated_master_proof,
                     shortening_metrics,
                 )
+                if not self._owns_control_generation(attempt_generation):
+                    return
                 if not edit_valid:
                     attempt_number = self._state.final_attempt_count + 1
                     self._state.final_attempt_count = attempt_number
@@ -4015,7 +4249,10 @@ class LeanOJCoordinator:
                 attempt_number=attempt_number,
                 reasoning=reasoning,
                 final_solver_metadata=final_solver_metadata,
+                control_generation=attempt_generation,
             )
+            if not self._owns_control_generation(attempt_generation):
+                return
             if not lean_result.success:
                 self._state.final_attempt_count = attempt_number
                 failed_attempts_this_cycle += 1
@@ -4266,15 +4503,23 @@ class LeanOJCoordinator:
                     formal_sketch="Final Proof Solver solution for the user's template.",
                     theorem_id=f"{self._state.session_id}_final",
                     source_title=self._state.selected_topic or request.user_prompt,
+                    control_generation=attempt_generation,
                 )
             except Exception as exc:
                 if self._is_non_retryable_model_error(exc):
-                    raise LeanOJConfigurationError(str(exc)) from exc
+                    route = getattr(exc, "route", None)
+                    raise LeanOJConfigurationError(
+                        str(exc),
+                        role_id=(route.role_id if route else ""),
+                        route=route,
+                    ) from exc
                 lean_result.success = False
                 lean_result.error_output = f"PROOF SOLVER PROOF REGISTRATION FAILED: {exc}"
                 attempt.success = False
                 attempt.error_output = lean_result.error_output
 
+            if not self._owns_control_generation(attempt_generation):
+                return
             if lean_result.success:
                 self._state.phase = "verified"
                 self._state.user_forced_final_cycle = False
@@ -4799,8 +5044,27 @@ class LeanOJCoordinator:
         temperature: float = 0.0,
     ) -> dict[str, Any]:
         if not config.model_id:
-            raise LeanOJConfigurationError(f"Proof Solver role {role_id} has no configured model")
-        current_prompt = prompt
+            raise LeanOJConfigurationError(
+                f"Proof Solver role {role_id} has no configured model",
+                role_id=role_id,
+            )
+        from backend.shared.solution_path.integration import (
+            enqueue_optional_update,
+            with_budgeted_solver_plan,
+            with_validator_hook,
+        )
+        call_kind = _solution_path_call_kind(task_prefix, role_id)
+        semantic_validator = call_kind == "validator"
+        if semantic_validator:
+            current_prompt = with_validator_hook(prompt, self.solution_path_manager)
+        elif call_kind == "solver":
+            current_prompt = with_budgeted_solver_plan(
+                prompt,
+                self.solution_path_manager,
+                max(0, config.context_window - config.max_output_tokens),
+            )
+        else:
+            current_prompt = prompt
         attempt_index = 0
         while not self._should_stop():
             attempt_index += 1
@@ -4850,7 +5114,8 @@ class LeanOJCoordinator:
                         "PROOF SOLVER PROMPT CONTEXT OVERFLOW: assembled prompt exceeds the configured "
                         f"input budget for role {role_id}. Prompt tokens: {prompt_tokens}. "
                         f"Available input tokens: {max_input_tokens}. Context window: {config.context_window}. "
-                        f"Max output tokens: {config.max_output_tokens}."
+                        f"Max output tokens: {config.max_output_tokens}.",
+                        role_id=role_id,
                     )
                 response = await api_client_manager.generate_completion(
                     task_id=task_id,
@@ -4878,6 +5143,25 @@ class LeanOJCoordinator:
                 if isinstance(parsed, list):
                     parsed = parsed[0] if parsed else {}
                 if isinstance(parsed, dict):
+                    if semantic_validator:
+                        raw_decision = str(
+                            parsed.get("decision", parsed.get("validated", ""))
+                        ).lower()
+                        source_decision = (
+                            "accept"
+                            if raw_decision in {"accept", "approved", "true"}
+                            else "reject"
+                            if raw_decision in {"reject", "rejected", "false"}
+                            else None
+                        )
+                        await enqueue_optional_update(
+                            parsed,
+                            self.solution_path_manager,
+                            proposer_role=role_id,
+                            source_task_id=task_id,
+                            source_phase=str(call_payload["phase"]),
+                            source_decision=source_decision,
+                        )
                     duration_ms = round((time.monotonic() - started) * 1000)
                     result_summary = self._summarize_model_call_result(role_id, task_id, parsed)
                     logger.info(
@@ -4930,7 +5214,11 @@ class LeanOJCoordinator:
                     role_id=exc.role_id or role_id,
                     should_stop=lambda: not self._running or self._stop_event.is_set(),
                 )
-                current_prompt = prompt
+                current_prompt = (
+                    with_validator_hook(prompt, self.solution_path_manager)
+                    if semantic_validator
+                    else prompt
+                )
                 continue
             except Exception as exc:
                 duration_ms = round((time.monotonic() - started) * 1000)
@@ -4960,7 +5248,11 @@ class LeanOJCoordinator:
                         message=message,
                         duration_ms=duration_ms,
                     )
-                    current_prompt = prompt
+                    current_prompt = (
+                        with_validator_hook(prompt, self.solution_path_manager)
+                        if semantic_validator
+                        else prompt
+                    )
                     continue
                 if self._is_non_retryable_model_error(exc):
                     logger.error(
@@ -4980,7 +5272,11 @@ class LeanOJCoordinator:
                             "message": self._summarize_error(str(exc), limit=700),
                         },
                     )
-                    raise LeanOJConfigurationError(str(exc)) from exc
+                    raise LeanOJConfigurationError(
+                        str(exc),
+                        role_id=role_id,
+                        route=getattr(exc, "route", None),
+                    ) from exc
                 logger.warning(
                     "Proof Solver role %s task %s failed to produce valid JSON on retryable attempt %s: %s",
                     role_id,
@@ -5020,8 +5316,13 @@ class LeanOJCoordinator:
                         "message": error_summary,
                     },
                 )
+                retry_base_prompt = (
+                    with_validator_hook(prompt, self.solution_path_manager)
+                    if semantic_validator
+                    else prompt
+                )
                 current_prompt = (
-                    f"{prompt}\n\n"
+                    f"{retry_base_prompt}\n\n"
                     "IMPORTANT - YOUR PREVIOUS RESPONSE WAS REJECTED BY THE JSON PARSER:\n"
                     "REJECTION REASON: INVALID_OR_TRUNCATED_JSON\n"
                     f"ISSUE: {type(exc).__name__}: {self._summarize_error(str(exc), limit=700)}\n"
@@ -5030,6 +5331,8 @@ class LeanOJCoordinator:
                     "- Start with `{` and end with `}`.\n"
                     "- Keep every string field concise enough to finish before max_tokens.\n"
                     "- Preserve the requested schema exactly.\n"
+                    "- If present, retain the one valid optional top-level "
+                    "`solution_path_update`; omission remains valid.\n"
                     "- Escape Lean/LaTeX backslashes so the result is valid JSON.\n\n"
                     f"{self._json_retry_schema_hint(role_id)}"
                 )

@@ -80,6 +80,10 @@ class PaperRedundancyChecker:
                 user_research_prompt=user_research_prompt,
                 papers_summary=papers_summary
             )
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(
+                prompt, getattr(self, "solution_path_manager", None)
+            )
             
             # Generate task ID for tracking
             task_id = self.get_current_task_id()
@@ -114,7 +118,7 @@ class PaperRedundancyChecker:
             # Parse JSON using central utility
             try:
                 data = parse_json(content)
-                
+                from backend.shared.solution_path.integration import enqueue_optional_update
                 should_remove = data.get("should_remove", False)
                 paper_id = data.get("paper_id")
                 reasoning = data.get("reasoning", "No reasoning provided")
@@ -130,6 +134,15 @@ class PaperRedundancyChecker:
                     if paper_id not in valid_ids:
                         logger.warning(f"PaperRedundancyChecker: Invalid paper_id: {paper_id}")
                         return self._create_no_removal(f"Invalid paper_id: {paper_id}")
+
+                await enqueue_optional_update(
+                    data,
+                    getattr(self, "solution_path_manager", None),
+                    proposer_role=self.role_id,
+                    source_task_id=task_id,
+                    source_phase="paper_redundancy_review",
+                    source_decision="reject" if should_remove else "accept",
+                )
                 
                 result = PaperRedundancyReviewResult(
                     should_remove=should_remove,

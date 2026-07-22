@@ -1,0 +1,53 @@
+{
+  "action_ids": [
+    "start_autonomous_no_outputs",
+    "start_autonomous_papers_only",
+    "complete_topic_exploration",
+    "complete_brainstorm"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "autonomous",
+    "final_phase": "paper_title_selection"
+  },
+  "evidence": [
+    "no_outputs_rejected",
+    "papers_only"
+  ],
+  "exercised_invariants": [
+    "outputs.at_least_one_output_enabled",
+    "outputs.papers_only_skips_proof_work",
+    "proof_runtime.no_lean_when_disabled",
+    "proof_runtime.no_smt_when_disabled"
+  ],
+  "fields": [
+    "proof_runtime_gating",
+    "allowed_outputs"
+  ],
+  "invariants": [
+    "outputs.at_least_one_output_enabled",
+    "outputs.papers_only_skips_proof_work",
+    "proof_runtime.no_lean_when_disabled",
+    "proof_runtime.no_smt_when_disabled"
+  ],
+  "observed_fields": [
+    "allowed_outputs",
+    "proof_runtime_gating",
+    "provider_pause_resume",
+    "workflow_filesystem_state"
+  ],
+  "replay": [
+    "start_autonomous_with_no_outputs()",
+    "start_autonomous(lean_enabled=False, papers=False, proofs=False)",
+    "start_autonomous(lean_enabled=False, papers=True, proofs=False)",
+    "complete_topic_exploration()",
+    "complete_brainstorm()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_output_and_proof_runtime_gating_seed_7",
+  "schema_version": 1,
+  "seed": 7,
+  "target_artifact": "targets/generated_output_and_proof_runtime_gating.json",
+  "target_id": "generated_output_and_proof_runtime_gating"
+}

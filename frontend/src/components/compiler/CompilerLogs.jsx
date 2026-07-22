@@ -5,15 +5,20 @@ import LiveActivityFeed from '../LiveActivityFeed';
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  formatSolutionPathEventMessage,
   getActivityClass,
   getActivityIcon,
   hasRecentAssistantProofPackDuplicate,
 } from '../../utils/activityStyles';
 import {
-  MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
   MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
 } from '../../hooks/useProofCheckRuntime';
+import { getNamespacedStorageKey } from '../../utils/runtimeConfig';
 import '../autonomous/AutonomousResearch.css';
+
+const MAX_COMPILER_ACTIVITY_EVENTS = 2000;
+const MAX_PERSISTED_TEXT_LENGTH = 1200;
+export const COMPILER_ACTIVITY_STORAGE_KEY = getNamespacedStorageKey('compiler_events_log');
 
 const MANUAL_PROOF_EVENTS = [
   'proof_check_started',
@@ -31,6 +36,57 @@ const MANUAL_PROOF_EVENTS = [
   'proof_dependency_added',
   'proof_check_complete',
 ];
+
+export const shouldIncludeCompilerContextOverflow = (data = {}) => {
+  const roleId = String(data.role_id || '').toLowerCase();
+  const workflowMode = String(data.workflow_mode || '').toLowerCase();
+  return !(
+    (workflowMode && workflowMode !== 'compiler')
+    || (!workflowMode && !roleId.startsWith('compiler_'))
+  );
+};
+
+export const shouldIncludeCompilerProofContextOverflow = (data = {}) => (
+  data.source_type === 'paper'
+  && (
+    data.source_id === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID
+    || String(data.source_id || '').startsWith('manual_compiler_')
+    || String(data.source_id || '').startsWith('compiler_manual_')
+  )
+);
+
+export const shouldIncludeCompilerSolutionPathEvent = (data = {}) => {
+  const workflowMode = String(data.workflow_mode || data.mode || '').toLowerCase();
+  return !workflowMode || workflowMode === 'compiler';
+};
+
+const compactPersistedValue = (value) => {
+  if (typeof value === 'string') {
+    return value.length > MAX_PERSISTED_TEXT_LENGTH
+      ? `${value.slice(0, MAX_PERSISTED_TEXT_LENGTH)}...`
+      : value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map(compactPersistedValue);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, 40)
+        .map(([key, nested]) => [key, compactPersistedValue(nested)])
+    );
+  }
+  return value;
+};
+
+export const compactCompilerActivityEvents = (events = []) => (
+  events.slice(0, MAX_COMPILER_ACTIVITY_EVENTS).map((event) => ({
+    type: event.type,
+    timestamp: event.timestamp,
+    fullTimestamp: event.fullTimestamp,
+    data: compactPersistedValue(event.data || {}),
+  }))
+);
 
 const compactProofText = (value, maxLength = 1800) => {
   const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
@@ -129,12 +185,18 @@ function CompilerLogs() {
     };
 
     const handleContextOverflow = (data) => {
-      const roleId = String(data?.role_id || '').toLowerCase();
-      if (roleId && !roleId.startsWith('compiler_')) {
+      if (!shouldIncludeCompilerContextOverflow(data)) {
         return;
       }
       addEvent({ type: 'context_overflow_error', data });
       loadStatus();
+    };
+
+    const handleProofContextOverflow = (data = {}) => {
+      if (!shouldIncludeCompilerProofContextOverflow(data)) {
+        return;
+      }
+      addEvent({ type: 'proof_context_overflow', data });
     };
 
     const handleCorruptionDetected = (data) => {
@@ -161,9 +223,7 @@ function CompilerLogs() {
     const handleManualProofEvent = (eventName, data = {}) => {
       const isCurrentPaperProof = data.source_type === 'paper'
         && data.source_id === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID;
-      const isAggregatorProofOnly = data.source_type === 'brainstorm'
-        && data.source_id === MANUAL_AGGREGATOR_PROOF_SOURCE_ID;
-      if (!isCurrentPaperProof && !isAggregatorProofOnly) {
+      if (!isCurrentPaperProof) {
         return;
       }
       addEvent({ type: eventName, data });
@@ -220,6 +280,7 @@ function CompilerLogs() {
     websocket.on('compiler_error', handleCompilerError);
     websocket.on('compiler_warning', handleCompilerWarning);
     websocket.on('context_overflow_error', handleContextOverflow);
+    websocket.on('proof_context_overflow', handleProofContextOverflow);
     websocket.on('model_corruption_detected', handleCorruptionDetected);
     websocket.on('model_recovery_initiated', handleRecoveryInitiated);
     websocket.on('model_recovery_success', handleRecoverySuccess);
@@ -227,6 +288,22 @@ function CompilerLogs() {
     websocket.on('hung_connection_alert', handleHungConnectionAlert);
     websocket.on('assistant_proof_pack_updated', handleAssistantProofPackUpdated);
     websocket.on('assistant_proof_pack_failed', handleAssistantProofPackFailed);
+    const solutionPathEvents = [
+      'solution_path_activated',
+      'solution_path_proposal_queued',
+      'solution_path_proposal_reviewing',
+      'solution_path_updated',
+      'solution_path_proposal_rejected',
+      'solution_path_proposal_retry_queued',
+      'solution_path_proposal_user_repair_required',
+      'solution_path_proposal_resumed',
+    ];
+    const solutionPathUnsubscribers = solutionPathEvents.map((eventName) => (
+      websocket.on(eventName, (data = {}) => {
+        if (!shouldIncludeCompilerSolutionPathEvent(data)) return;
+        addEvent({ type: eventName, data });
+      })
+    ));
 
     // Critique phase events
     websocket.on('critique_phase_started', handleCritiquePhaseStarted);
@@ -262,6 +339,7 @@ function CompilerLogs() {
       websocket.off('compiler_error', handleCompilerError);
       websocket.off('compiler_warning', handleCompilerWarning);
       websocket.off('context_overflow_error', handleContextOverflow);
+      websocket.off('proof_context_overflow', handleProofContextOverflow);
       websocket.off('model_corruption_detected', handleCorruptionDetected);
       websocket.off('model_recovery_initiated', handleRecoveryInitiated);
       websocket.off('model_recovery_success', handleRecoverySuccess);
@@ -289,6 +367,7 @@ function CompilerLogs() {
       websocket.off('compiler_wolfram_call', handleCompilerEvent);
 
       manualProofUnsubscribers.forEach((unsubscribe) => unsubscribe());
+      solutionPathUnsubscribers.forEach((unsubscribe) => unsubscribe());
     };
   }, []);
 
@@ -335,11 +414,14 @@ function CompilerLogs() {
       if (hasRecentAssistantProofPackDuplicate(prev, newEvent.type, newEvent.data || {}, fullTimestamp)) {
         return prev;
       }
-      const updated = [newEvent, ...prev].slice(0, 10000); // Keep last 10k events
+      const updated = [newEvent, ...prev].slice(0, MAX_COMPILER_ACTIVITY_EVENTS);
       
       // Save to localStorage for persistence
       try {
-        localStorage.setItem('compiler_events_log', JSON.stringify(updated));
+        localStorage.setItem(
+          COMPILER_ACTIVITY_STORAGE_KEY,
+          JSON.stringify(compactCompilerActivityEvents(updated))
+        );
       } catch (e) {
         console.error('Failed to save events to localStorage:', e);
       }
@@ -359,9 +441,10 @@ function CompilerLogs() {
   // Load events from localStorage on mount
   useEffect(() => {
     try {
-      const savedEvents = localStorage.getItem('compiler_events_log');
+      const savedEvents = localStorage.getItem(COMPILER_ACTIVITY_STORAGE_KEY);
       if (savedEvents) {
-        setEvents(JSON.parse(savedEvents));
+        const parsed = JSON.parse(savedEvents);
+        setEvents(Array.isArray(parsed) ? parsed.slice(0, MAX_COMPILER_ACTIVITY_EVENTS) : []);
       }
     } catch (e) {
       console.error('Failed to load events from localStorage:', e);
@@ -374,7 +457,7 @@ function CompilerLogs() {
 
   const clearEventsLog = () => {
     setEvents([]);
-    localStorage.removeItem('compiler_events_log');
+    localStorage.removeItem(COMPILER_ACTIVITY_STORAGE_KEY);
   };
 
   // Format event data for user-friendly display
@@ -413,6 +496,9 @@ function CompilerLogs() {
     if (type === 'assistant_proof_pack_updated' || type === 'assistant_proof_pack_failed') {
       return formatAssistantProofPackEventMessage(type, data);
     }
+    if (type.startsWith('solution_path_')) {
+      return formatSolutionPathEventMessage(type, data);
+    }
 
     // Phase transitions
     if (type === 'phase_transition') {
@@ -435,7 +521,7 @@ function CompilerLogs() {
     if (type === 'compiler_decline') {
       return `Declined: ${data.mode || 'unknown'} - ${(data.reasoning || '').substring(0, 60)}...`;
     }
-    if (type === 'context_overflow_error') {
+    if (type === 'context_overflow_error' || type === 'proof_context_overflow') {
       return formatContextOverflowActivityMessage(data);
     }
     if (type === 'paper_updated') {
@@ -458,10 +544,22 @@ function CompilerLogs() {
       return 'Proof check started for the current manual Compiler paper';
     }
     if (type === 'proof_check_no_candidates') {
-      return 'No formal theorem candidates found in the current manual Compiler paper';
+      const round = Number(data.proof_round_index || 0);
+      const maxRounds = Number(data.proof_max_rounds || 0);
+      const prefix = round > 0 && maxRounds > 1
+        ? `Proof round ${round}/${maxRounds} discovery`
+        : 'Proof discovery';
+      return `${prefix} found 0 proof candidates; no proofs will be attempted`;
     }
     if (type === 'proof_check_candidates_found') {
-      return `Proof candidates found: ${data.count || 0}`;
+      const count = Number(data.count || 0);
+      const round = Number(data.proof_round_index || 0);
+      const maxRounds = Number(data.proof_max_rounds || 0);
+      const prefix = round > 0 && maxRounds > 1
+        ? `Proof round ${round}/${maxRounds} discovery`
+        : 'Proof discovery';
+      const subject = count === 1 ? 'proof candidate' : 'proof candidates';
+      return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
     }
     if (type === 'proof_attempt_started') {
       return `Lean proof attempt started: ${proofTargetLabel(data)}`;

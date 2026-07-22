@@ -1,12 +1,20 @@
 {
   "name": "moto-math-variant",
-  "version": "1.1.02",
-  "description": "MOTO S.T.E.M. Mathematics Variant - Autonomous ASI Research System for Novel S.T.E.M. Mathematical Paper Generation",
+  "version": "1.1.03",
+  "description": "MOTO Autonomous ASI - multi-agent autonomous research and rigorous solution generation with optional Lean 4 proof verification",
   "scripts": {
     "dev:backend": "python -c \"import os, uvicorn; uvicorn.run('backend.api.main:app', host=os.getenv('MOTO_BACKEND_HOST', os.getenv('HOST', '0.0.0.0')), port=int(os.getenv('MOTO_BACKEND_PORT', os.getenv('PORT', '8000'))), reload=True, access_log=False)\"",
     "dev:frontend": "npm --prefix frontend run dev",
     "install:frontend": "npm --prefix frontend install",
-    "build:frontend": "npm --prefix frontend run build"
+    "build:frontend": "npm --prefix frontend run build",
+    "test": "npm run test:all",
+    "test:backend": "python -m pytest",
+    "test:frontend": "npm --prefix frontend run test",
+    "test:browser": "npm --prefix frontend run test:browser",
+    "test:workflows": "python -m pytest tests/workflow_scenarios tests/workflow_recombinatory tests/workflow_real_adapters tests/workflow_cross_field",
+    "test:context-overflow": "python -m pytest tests/regressions/test_context_overflow_metadata.py tests/regressions/test_context_overflow_emitters.py tests/regressions/test_provider_routing_errors.py tests/regressions/test_proof_context_overflow_metadata.py && npm --prefix frontend run test -- src/utils/activityStyles.test.js src/components/contextOverflowBehavior.test.jsx",
+    "test:deep": "python tests/run_deep_workflows.py",
+    "test:all": "npm run test:backend && npm run test:frontend"
   },
   "keywords": [
     "ai",

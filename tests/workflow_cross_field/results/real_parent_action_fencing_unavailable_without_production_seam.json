@@ -1,0 +1,23 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {
+    "reason": "The invariant catalog declares model-only support and no existing isolated production seam exposes stale child output acceptance after parent takeover."
+  },
+  "evidence": [],
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "runtime.parent_action_fences_child_outputs"
+  ],
+  "replay": [],
+  "result": "blocked",
+  "scenario_id": "real_parent_action_fencing_unavailable_without_production_seam",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
+}

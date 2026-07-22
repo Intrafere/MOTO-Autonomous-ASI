@@ -16,7 +16,7 @@ DEFAULT_CRITIQUE_PROMPT = """You are an expert academic reviewer providing an ho
 
 Evaluate this paper and provide:
 1. NOVELTY (1-10): How original and innovative is this work?
-2. CORRECTNESS (1-10): How mathematically/logically sound is the content?
+2. CORRECTNESS (1-10): How factually, logically, mathematically, technically, or methodologically sound is the content, as appropriate to its claims and field?
 3. IMPACT ON RELATED FIELD (1-10): How significant could this contribution be?
 
 For each category, provide the numeric rating (1-10) and detailed feedback explaining your assessment.

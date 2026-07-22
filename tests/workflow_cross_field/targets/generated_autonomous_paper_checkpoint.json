@@ -1,0 +1,22 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "max_steps": 7,
+  "must_exercise": [
+    "paper_checkpoint",
+    "start_blocked"
+  ],
+  "result_ids": [
+    "generated_autonomous_paper_checkpoint_seed_7",
+    "generated_autonomous_paper_checkpoint_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_autonomous_paper_checkpoint"
+}

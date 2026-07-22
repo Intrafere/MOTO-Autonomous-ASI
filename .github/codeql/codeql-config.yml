@@ -1,0 +1,6 @@
+name: MOTO CodeQL configuration
+
+paths-ignore:
+  - backend/data/**
+  - frontend/dist/**
+  - frontend/node_modules/**

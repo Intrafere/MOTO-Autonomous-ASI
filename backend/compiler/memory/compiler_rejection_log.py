@@ -155,7 +155,7 @@ class CompilerRejectionLog:
             elif not result.coherence_check:
                 what_to_fix = "\n\nWHAT TO FIX:\nEnsure the content flows naturally with existing document sections. Check for grammatical errors and maintain holistic coherence."
             elif not result.rigor_check:
-                what_to_fix = "\n\nWHAT TO FIX:\nEnsure all mathematical claims are based on established principles. Avoid unfounded claims or logical fallacies."
+                what_to_fix = "\n\nWHAT TO FIX:\nEnsure all claims meet the correctness standard appropriate to their domain and claim type. Mathematical claims require sound derivation, proof, or explicit assumptions; factual, logical, technical, empirical, and methodological claims require appropriate support and must avoid unfounded claims or logical fallacies."
             
             entry_text = f"""========================================
 🚫 REJECTED BECAUSE: {failure_reason}

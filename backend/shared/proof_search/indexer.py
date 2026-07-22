@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import uuid
 from collections import Counter
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable
 
+from backend.shared.proof_identity import CANONICAL_PROOF_IDENTITY_VERSION
 from backend.shared.proof_search.models import (
     CorpusOverview,
     ProofSearchRequest,
@@ -17,6 +20,7 @@ from backend.shared.proof_search.models import (
 )
 
 RESULT_CAP = 7
+PROOF_SEARCH_INDEX_SCHEMA_VERSION = 3
 
 
 class ProofSearchIndexer:
@@ -26,21 +30,70 @@ class ProofSearchIndexer:
         self.db_path = Path(db_path)
 
     def rebuild(self, records: Iterable[UnifiedProofSearchRecord]) -> None:
+        """Build a complete sibling index and atomically publish it."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         unique_records = {record.search_id: record for record in records}
+        temporary_path = self.db_path.with_name(
+            f".{self.db_path.name}.rebuild-{uuid.uuid4().hex}"
+        )
+        temporary_indexer = ProofSearchIndexer(temporary_path)
+        try:
+            temporary_indexer._populate_new_index(unique_records.values())
+            if not temporary_indexer.is_compatible():
+                raise RuntimeError("Rebuilt proof-search index failed compatibility validation")
+            os.replace(temporary_path, self.db_path)
+        finally:
+            for candidate in (
+                temporary_path,
+                Path(f"{temporary_path}-wal"),
+                Path(f"{temporary_path}-shm"),
+            ):
+                try:
+                    candidate.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _populate_new_index(
+        self,
+        records: Iterable[UnifiedProofSearchRecord],
+    ) -> None:
+        """Populate a newly created derived index before publication."""
+        records = tuple(records)
         with closing(self._connect()) as conn:
             self._create_schema(conn)
-            conn.execute("DELETE FROM proof_fts")
-            conn.execute("DELETE FROM proof_records")
             conn.executemany(
                 _PROOF_RECORD_INSERT_SQL,
-                (self._record_payload(record) for record in unique_records.values()),
+                (self._record_payload(record) for record in records),
             )
             conn.executemany(
                 _PROOF_FTS_INSERT_SQL,
-                (self._fts_payload(record) for record in unique_records.values()),
+                (self._fts_payload(record) for record in records),
+            )
+            conn.execute(f"PRAGMA user_version = {PROOF_SEARCH_INDEX_SCHEMA_VERSION}")
+            conn.execute(
+                "INSERT OR REPLACE INTO proof_index_metadata(key, value) VALUES (?, ?)",
+                ("canonical_identity_version", CANONICAL_PROOF_IDENTITY_VERSION),
             )
             conn.commit()
+
+    def is_compatible(self) -> bool:
+        """Return whether this derived index matches current schema/identity versions."""
+        if not self.db_path.exists():
+            return False
+        try:
+            with closing(self._connect()) as conn:
+                schema_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+                row = conn.execute(
+                    "SELECT value FROM proof_index_metadata WHERE key = ?",
+                    ("canonical_identity_version",),
+                ).fetchone()
+            return (
+                schema_version == PROOF_SEARCH_INDEX_SCHEMA_VERSION
+                and row is not None
+                and str(row["value"]) == CANONICAL_PROOF_IDENTITY_VERSION
+            )
+        except (sqlite3.Error, TypeError, ValueError):
+            return False
 
     def search(self, request: ProofSearchRequest) -> ProofSearchResponse:
         if not self.db_path.exists():
@@ -86,6 +139,7 @@ class ProofSearchIndexer:
         pool_limit: int,
         exclude_corpus_scopes: Iterable[str] | None = None,
         exclude_session_ids: Iterable[str] | None = None,
+        exclude_run_ids: Iterable[str] | None = None,
     ) -> list[UnifiedProofSearchRecord]:
         """Return a wider internal candidate pool without changing public route caps."""
         if not self.db_path.exists():
@@ -99,6 +153,7 @@ class ProofSearchIndexer:
                 candidate_limit=pool_limit * 4,
                 exclude_corpus_scopes=exclude_corpus_scopes,
                 exclude_session_ids=exclude_session_ids,
+                exclude_run_ids=exclude_run_ids,
             )
             records = self._dedupe_and_limit(candidates, request, result_cap=pool_limit)
 
@@ -106,12 +161,158 @@ class ProofSearchIndexer:
             records = [record.model_copy(update={"lean_code": ""}) for record in records]
         return records
 
+    def exact_identity_neighborhood(
+        self,
+        *,
+        theorem_statement_hashes: Iterable[str],
+        lean_code_hashes: Iterable[str],
+        corpora: Iterable[str],
+        exclude_run_ids: Iterable[str] | None = None,
+        exclude_session_ids: Iterable[str] | None = None,
+        identity_version: str = CANONICAL_PROOF_IDENTITY_VERSION,
+        limit: int = 256,
+    ) -> list[UnifiedProofSearchRecord]:
+        """Resolve exact artifacts to their exact occurrence neighborhoods.
+
+        Occurrence identity is composite.  Never independently union run,
+        session, and source columns: values can be reused by unrelated records.
+        """
+        if not self.db_path.exists():
+            return []
+        statement_hashes = sorted({value for value in theorem_statement_hashes if value})
+        code_hashes = sorted({value for value in lean_code_hashes if value})
+        corpus_values = sorted({value for value in corpora if value})
+        if not (statement_hashes or code_hashes) or not corpus_values:
+            return []
+        excluded_runs = sorted({value for value in (exclude_run_ids or []) if value})
+        excluded_sessions = sorted({value for value in (exclude_session_ids or []) if value})
+        identity_predicates: list[str] = []
+        if statement_hashes:
+            identity_predicates.append(
+                "EXISTS (SELECT 1 FROM requested_statement_hashes requested "
+                "WHERE requested.value = records.canonical_theorem_statement_hash)"
+            )
+        if code_hashes:
+            identity_predicates.append(
+                "EXISTS (SELECT 1 FROM requested_code_hashes requested "
+                "WHERE requested.value = records.canonical_lean_code_hash)"
+            )
+        exact_identity_sql = " AND ".join(identity_predicates)
+        with closing(self._connect()) as conn:
+            self._create_schema(conn)
+            conn.executescript(
+                """
+                CREATE TEMP TABLE requested_statement_hashes (
+                    value TEXT PRIMARY KEY
+                ) WITHOUT ROWID;
+                CREATE TEMP TABLE requested_code_hashes (
+                    value TEXT PRIMARY KEY
+                ) WITHOUT ROWID;
+                CREATE TEMP TABLE requested_corpora (
+                    value TEXT PRIMARY KEY
+                ) WITHOUT ROWID;
+                CREATE TEMP TABLE excluded_neighborhood_runs (
+                    value TEXT PRIMARY KEY
+                ) WITHOUT ROWID;
+                CREATE TEMP TABLE excluded_neighborhood_sessions (
+                    value TEXT PRIMARY KEY
+                ) WITHOUT ROWID;
+                CREATE TEMP TABLE exact_occurrence_keys (
+                    corpus TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    PRIMARY KEY (corpus, run_id, session_id, source_type, source_id)
+                ) WITHOUT ROWID;
+                """
+            )
+            conn.executemany(
+                "INSERT INTO requested_statement_hashes(value) VALUES (?)",
+                ((value,) for value in statement_hashes),
+            )
+            conn.executemany(
+                "INSERT INTO requested_code_hashes(value) VALUES (?)",
+                ((value,) for value in code_hashes),
+            )
+            conn.executemany(
+                "INSERT INTO requested_corpora(value) VALUES (?)",
+                ((value,) for value in corpus_values),
+            )
+            conn.executemany(
+                "INSERT INTO excluded_neighborhood_runs(value) VALUES (?)",
+                ((value,) for value in excluded_runs),
+            )
+            conn.executemany(
+                "INSERT INTO excluded_neighborhood_sessions(value) VALUES (?)",
+                ((value,) for value in excluded_sessions),
+            )
+            conn.execute(
+                f"""
+                INSERT INTO exact_occurrence_keys (
+                    corpus, run_id, session_id, source_type, source_id
+                )
+                SELECT DISTINCT
+                    records.corpus,
+                    COALESCE(records.run_id, ''),
+                    COALESCE(records.session_id, ''),
+                    COALESCE(records.source_type, ''),
+                    COALESCE(records.source_id, '')
+                FROM proof_records AS records
+                INNER JOIN requested_corpora AS requested_corpus
+                    ON requested_corpus.value = records.corpus
+                WHERE {exact_identity_sql}
+                  AND records.canonical_identity_version = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM excluded_neighborhood_runs excluded
+                      WHERE excluded.value = COALESCE(records.run_id, '')
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM excluded_neighborhood_sessions excluded
+                      WHERE excluded.value = COALESCE(records.session_id, '')
+                  )
+                """,
+                (identity_version,),
+            )
+            if conn.execute("SELECT 1 FROM exact_occurrence_keys LIMIT 1").fetchone() is None:
+                return []
+            rows = conn.execute(
+                f"""
+                SELECT records.*
+                FROM proof_records AS records
+                INNER JOIN exact_occurrence_keys AS occurrence
+                    ON occurrence.corpus = records.corpus
+                   AND occurrence.run_id = COALESCE(records.run_id, '')
+                   AND occurrence.session_id = COALESCE(records.session_id, '')
+                   AND occurrence.source_type = COALESCE(records.source_type, '')
+                   AND occurrence.source_id = COALESCE(records.source_id, '')
+                WHERE NOT EXISTS (
+                          SELECT 1 FROM excluded_neighborhood_runs excluded
+                          WHERE excluded.value = COALESCE(records.run_id, '')
+                      )
+                  AND NOT EXISTS (
+                          SELECT 1 FROM excluded_neighborhood_sessions excluded
+                          WHERE excluded.value = COALESCE(records.session_id, '')
+                      )
+                ORDER BY
+                    CASE WHEN {exact_identity_sql}
+                              AND records.canonical_identity_version = ? THEN 0 ELSE 1 END,
+                    records.created_at DESC,
+                    records.search_id ASC
+                LIMIT ?
+                """,
+                (identity_version, max(1, limit)),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
     def get_record(
         self,
         *,
         corpus: str,
         proof_id: str,
         session_id: str | None = None,
+        search_id: str | None = None,
+        run_id: str | None = None,
     ) -> UnifiedProofSearchRecord | None:
         """Fetch one indexed record for detail/hydration flows."""
         if not self.db_path.exists():
@@ -119,11 +320,20 @@ class ProofSearchIndexer:
 
         with closing(self._connect()) as conn:
             self._create_schema(conn)
-            clauses = ["corpus = ?", "(proof_id = ? OR search_id = ?)"]
-            params: list[Any] = [corpus, proof_id, proof_id]
+            clauses = ["corpus = ?"]
+            params: list[Any] = [corpus]
+            if search_id:
+                clauses.append("search_id = ?")
+                params.append(search_id)
+            else:
+                clauses.append("(proof_id = ? OR search_id = ?)")
+                params.extend([proof_id, proof_id])
             if session_id:
                 clauses.append("session_id = ?")
                 params.append(session_id)
+            if run_id:
+                clauses.append("run_id = ?")
+                params.append(run_id)
             row = conn.execute(
                 f"""
                 SELECT *
@@ -142,6 +352,51 @@ class ProofSearchIndexer:
             ).fetchone()
 
         return self._row_to_record(row) if row else None
+
+    def support_lineage(
+        self,
+        *,
+        theorem_statement_hash: str,
+        lean_code_hash: str,
+        corpora: Iterable[str],
+        exclude_run_ids: Iterable[str] | None,
+        exclude_session_ids: Iterable[str] | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[int, list[dict[str, str]]]:
+        """Return an authoritative metadata-only page for an exact artifact."""
+        corpus_values = sorted({value for value in corpora if value})
+        identities = [
+            ("theorem_statement_hash = ?", theorem_statement_hash),
+            ("lean_code_hash = ?", lean_code_hash),
+        ]
+        identities = [(clause, value) for clause, value in identities if value]
+        if not self.db_path.exists() or not corpus_values or not identities:
+            return 0, []
+        clauses = [
+            f"({' AND '.join(clause for clause, _ in identities)})",
+            f"corpus IN ({','.join('?' for _ in corpus_values)})",
+        ]
+        params: list[Any] = [value for _, value in identities] + corpus_values
+        for column, values in (
+            ("run_id", sorted({v for v in (exclude_run_ids or []) if v})),
+            ("session_id", sorted({v for v in (exclude_session_ids or []) if v})),
+        ):
+            if values:
+                clauses.append(f"COALESCE({column}, '') NOT IN ({','.join('?' for _ in values)})")
+                params.extend(values)
+        where = " AND ".join(clauses)
+        with closing(self._connect()) as conn:
+            self._create_schema(conn)
+            total = int(conn.execute(f"SELECT COUNT(*) FROM proof_records WHERE {where}", params).fetchone()[0])
+            rows = conn.execute(
+                f"""SELECT search_id, corpus, corpus_scope, session_id, run_id,
+                           source_type, source_id, source_title
+                    FROM proof_records WHERE {where}
+                    ORDER BY created_at DESC, search_id ASC LIMIT ? OFFSET ?""",
+                [*params, limit, offset],
+            ).fetchall()
+        return total, [{key: str(row[key] or "") for key in row.keys()} for row in rows]
 
     def overview(self, corpora: Iterable[str] | None = None) -> CorpusOverview:
         if not self.db_path.exists():
@@ -231,6 +486,7 @@ class ProofSearchIndexer:
                 external_fingerprint TEXT NOT NULL,
                 release_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
+                run_id TEXT NOT NULL DEFAULT '',
                 source_type TEXT NOT NULL,
                 source_id TEXT NOT NULL,
                 source_title TEXT NOT NULL,
@@ -243,6 +499,9 @@ class ProofSearchIndexer:
                 lean_code TEXT NOT NULL,
                 lean_code_hash TEXT NOT NULL,
                 theorem_statement_hash TEXT NOT NULL,
+                canonical_identity_version TEXT NOT NULL DEFAULT '',
+                canonical_lean_code_hash TEXT NOT NULL DEFAULT '',
+                canonical_theorem_statement_hash TEXT NOT NULL DEFAULT '',
                 imports_json TEXT NOT NULL,
                 dependency_names_json TEXT NOT NULL,
                 topic_tags_json TEXT NOT NULL,
@@ -257,6 +516,25 @@ class ProofSearchIndexer:
                 metadata_json TEXT NOT NULL
             )
             """
+        )
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(proof_records)")}
+        if "run_id" not in columns:
+            conn.execute("ALTER TABLE proof_records ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
+        if "canonical_identity_version" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN canonical_identity_version TEXT NOT NULL DEFAULT ''"
+            )
+        if "canonical_lean_code_hash" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN canonical_lean_code_hash TEXT NOT NULL DEFAULT ''"
+            )
+        if "canonical_theorem_statement_hash" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN canonical_theorem_statement_hash TEXT NOT NULL DEFAULT ''"
+            )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS proof_index_metadata "
+            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
         conn.execute(
             """
@@ -328,6 +606,7 @@ class ProofSearchIndexer:
         candidate_limit: int | None = None,
         exclude_corpus_scopes: Iterable[str] | None = None,
         exclude_session_ids: Iterable[str] | None = None,
+        exclude_run_ids: Iterable[str] | None = None,
     ) -> list[tuple[UnifiedProofSearchRecord, float]]:
         clauses = []
         params: list[Any] = []
@@ -370,6 +649,11 @@ class ProofSearchIndexer:
             placeholders = ",".join("?" for _ in excluded_sessions)
             clauses.append(f"r.session_id NOT IN ({placeholders})")
             params.extend(excluded_sessions)
+        excluded_runs = [run_id for run_id in (exclude_run_ids or []) if run_id]
+        if excluded_runs:
+            placeholders = ",".join("?" for _ in excluded_runs)
+            clauses.append(f"r.run_id NOT IN ({placeholders})")
+            params.extend(excluded_runs)
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         fts_query = _build_fts_query(
@@ -390,12 +674,12 @@ class ProofSearchIndexer:
                 FROM proof_fts
                 JOIN proof_records r ON r.search_id = proof_fts.search_id
                 {where_sql} {'AND' if where_sql else 'WHERE'} proof_fts MATCH ?
-                ORDER BY rank ASC
+                ORDER BY rank ASC, r.search_id ASC
                 LIMIT ?
             """
             rows = conn.execute(sql, [*params, fts_query, limit]).fetchall()
         else:
-            sql = f"SELECT r.*, 0.0 AS rank FROM proof_records r {where_sql} LIMIT ?"
+            sql = f"SELECT r.*, 0.0 AS rank FROM proof_records r {where_sql} ORDER BY r.search_id ASC LIMIT ?"
             rows = conn.execute(sql, [*params, limit]).fetchall()
 
         candidates: list[tuple[UnifiedProofSearchRecord, float]] = []
@@ -405,7 +689,7 @@ class ProofSearchIndexer:
             score += self._exact_boost(record, request)
             candidates.append((record, score))
 
-        candidates.sort(key=lambda item: item[1], reverse=True)
+        candidates.sort(key=lambda item: (-item[1], item[0].search_id))
         return candidates
 
     def _dedupe_and_limit(
@@ -467,6 +751,7 @@ class ProofSearchIndexer:
             external_fingerprint=row["external_fingerprint"],
             release_id=row["release_id"],
             session_id=row["session_id"],
+            run_id=row["run_id"],
             source_type=row["source_type"],
             source_id=row["source_id"],
             source_title=row["source_title"],
@@ -479,6 +764,15 @@ class ProofSearchIndexer:
             lean_code=row["lean_code"],
             lean_code_hash=row["lean_code_hash"],
             theorem_statement_hash=row["theorem_statement_hash"],
+            canonical_identity_version=str(
+                row["canonical_identity_version"] or ""
+            ),
+            canonical_lean_code_hash=str(
+                row["canonical_lean_code_hash"] or ""
+            ),
+            canonical_theorem_statement_hash=str(
+                row["canonical_theorem_statement_hash"] or ""
+            ),
             imports=_json_list("imports_json"),
             dependency_names=_json_list("dependency_names_json"),
             topic_tags=_json_list("topic_tags_json"),
@@ -542,19 +836,21 @@ def _top_counts(counter: Counter[str], limit: int = 10) -> list[dict[str, Any]]:
 _PROOF_RECORD_INSERT_SQL = """
     INSERT OR REPLACE INTO proof_records (
         search_id, corpus, corpus_scope, source_kind, proof_id,
-        external_fingerprint, release_id, session_id, source_type, source_id,
+        external_fingerprint, release_id, session_id, run_id, source_type, source_id,
         source_title, display_title, theorem_name, theorem_statement,
         informal_statement, proof_description, formal_sketch, lean_code,
-        lean_code_hash, theorem_statement_hash, imports_json,
+        lean_code_hash, theorem_statement_hash, canonical_identity_version,
+        canonical_lean_code_hash, canonical_theorem_statement_hash, imports_json,
         dependency_names_json, topic_tags_json, domain_tags_json, module,
         source_path, novelty_tier, novelty_reasoning, verified, created_at,
         canonical_uri, metadata_json
     ) VALUES (
         :search_id, :corpus, :corpus_scope, :source_kind, :proof_id,
-        :external_fingerprint, :release_id, :session_id, :source_type, :source_id,
+        :external_fingerprint, :release_id, :session_id, :run_id, :source_type, :source_id,
         :source_title, :display_title, :theorem_name, :theorem_statement,
         :informal_statement, :proof_description, :formal_sketch, :lean_code,
-        :lean_code_hash, :theorem_statement_hash, :imports_json,
+        :lean_code_hash, :theorem_statement_hash, :canonical_identity_version,
+        :canonical_lean_code_hash, :canonical_theorem_statement_hash, :imports_json,
         :dependency_names_json, :topic_tags_json, :domain_tags_json, :module,
         :source_path, :novelty_tier, :novelty_reasoning, :verified, :created_at,
         :canonical_uri, :metadata_json

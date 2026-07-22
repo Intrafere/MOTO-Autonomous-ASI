@@ -31,15 +31,40 @@ class OutlineMemory:
     """
     
     def __init__(self):
-        self.file_path = Path(system_config.compiler_outline_file)
         self.version = 0
         self.rechunk_callback: Optional[Callable] = None
         self._lock = asyncio.Lock()
         self._initialized = False
+        self._root_generation = system_config.runtime_root_generation
+        self._file_path_override: Optional[Path] = None
+
+    @property
+    def file_path(self) -> Path:
+        if self._file_path_override is not None:
+            return self._file_path_override
+        return Path(system_config.compiler_outline_file)
+
+    @file_path.setter
+    def file_path(self, value: str | Path) -> None:
+        path = Path(value)
+        default_path = Path(system_config.compiler_outline_file)
+        self._file_path_override = (
+            None
+            if path.resolve(strict=False) == default_path.resolve(strict=False)
+            else path
+        )
+
+    def _refresh_root(self) -> None:
+        if self._root_generation != system_config.runtime_root_generation:
+            self.version = 0
+            self._initialized = False
+            self._file_path_override = None
+            self._root_generation = system_config.runtime_root_generation
     
     async def initialize(self) -> None:
         """Initialize outline memory."""
         async with self._lock:
+            self._refresh_root()
             if self._initialized:
                 return
             

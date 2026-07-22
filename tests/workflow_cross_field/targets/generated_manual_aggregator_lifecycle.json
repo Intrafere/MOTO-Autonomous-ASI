@@ -1,0 +1,22 @@
+{
+  "artifact_type": "generation_target",
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "max_steps": 6,
+  "must_exercise": [
+    "manual_aggregator_accept",
+    "manual_aggregator_clear",
+    "start_blocked"
+  ],
+  "result_ids": [
+    "generated_manual_aggregator_lifecycle_seed_7",
+    "generated_manual_aggregator_lifecycle_seed_29"
+  ],
+  "schema_version": 1,
+  "target_id": "generated_manual_aggregator_lifecycle"
+}

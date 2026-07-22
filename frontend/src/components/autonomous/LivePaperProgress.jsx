@@ -198,7 +198,7 @@ const LivePaperProgress = ({ api, isCompiling, capabilities }) => {
                       : prependDisclaimer(paperData.content, 'paper')
                   }
                   className="live-paper-latex-renderer"
-                  defaultRaw={true}
+                  defaultRaw={false}
                   showToggle={true}
                 />
               </div>

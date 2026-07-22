@@ -292,6 +292,7 @@ class PaperLibrary:
             "mathematical_discovery": "Mathematical Discovery",
             "novel_variant": "Novel Reformulation",
             "novel_formulation": "Novel Formalization",
+            "duplicate_novel": "Duplicate Novel",
         }
         novelty_label = tier_labels.get(novelty_tier, "Novel" if novel else "Known")
         context_suffix = f"; carried in from {source_context}" if source_context else ""

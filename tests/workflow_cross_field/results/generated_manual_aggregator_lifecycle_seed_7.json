@@ -1,0 +1,47 @@
+{
+  "action_ids": [
+    "start_manual_aggregator",
+    "attempt_conflicting_start",
+    "accept_manual_aggregator_submission",
+    "clear_manual_aggregator_state"
+  ],
+  "adapter": "model",
+  "artifact_type": "result",
+  "diagnostics": {
+    "final_mode": "none",
+    "final_phase": "idle"
+  },
+  "evidence": [
+    "manual_aggregator_accept",
+    "manual_aggregator_clear",
+    "start_blocked"
+  ],
+  "exercised_invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "fields": [
+    "runtime_exclusivity",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "runtime.single_active_workflow"
+  ],
+  "observed_fields": [
+    "prompt_context",
+    "runtime_exclusivity",
+    "websocket_api_contracts",
+    "workflow_filesystem_state"
+  ],
+  "replay": [
+    "start_manual_aggregator()",
+    "start_manual_compiler()",
+    "accept_manual_aggregator_submission()",
+    "clear()"
+  ],
+  "result": "passed",
+  "scenario_id": "generated_manual_aggregator_lifecycle_seed_7",
+  "schema_version": 1,
+  "seed": 7,
+  "target_artifact": "targets/generated_manual_aggregator_lifecycle.json",
+  "target_id": "generated_manual_aggregator_lifecycle"
+}

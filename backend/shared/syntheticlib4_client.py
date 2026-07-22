@@ -1,8 +1,9 @@
 """SyntheticLib4 corpus client used by the proof-search build slice.
 
-The production SyntheticLib.com service is still under construction, so this
-client implements the MOTO-side contract against offline/mock data while keeping
-the same public methods that the live adapter will use later.
+The production SyntheticLib.com service is still under construction. Normal
+runtime clients therefore expose no corpus records until an authorized local
+snapshot is explicitly activated. Tests may still construct a client with an
+explicit fixture directory to exercise the future contract.
 """
 from __future__ import annotations
 
@@ -22,15 +23,6 @@ SYNTHETICLIB4_CONTRACT_VERSION = "moto-syntheticlib4-v1"
 SYNTHETICLIB4_SCHEMA_VERSION = "syntheticlib4.mock_client.v1"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FIXTURE_DIR = _REPO_ROOT / "tests" / "fixtures" / "syntheticlib4"
-_BUILTIN_RELEASE_ID = "stable-2026-06-11"
-_MOCK_SCOPES = [
-    "proofs:read",
-    "releases:read",
-    "deltas:read",
-    "usage:write",
-    "account:status",
-    "user_proofs:read",
-]
 
 
 class SyntheticLib4ClientError(RuntimeError):
@@ -64,7 +56,7 @@ class SyntheticLib4Client:
             auth_mode = "local_snapshot" if source_kind == "data_root_snapshot" else "offline_fixture"
         else:
             status = self._builtin_account_status()
-            auth_mode = "built_in_offline_fixture"
+            auth_mode = "inactive"
 
         credential_configured = self.has_configured_credentials()
         return {
@@ -115,7 +107,7 @@ class SyntheticLib4Client:
         requested_channel = (channel or manifest.get("channel") or "stable").strip()
         release_channel = str(manifest.get("channel") or "stable")
         releases = []
-        if requested_channel == release_channel:
+        if manifest.get("release_id") and requested_channel == release_channel:
             releases.append(
                 {
                     "release_id": manifest.get("release_id", ""),
@@ -139,19 +131,19 @@ class SyntheticLib4Client:
         }
 
     def get_release_manifest(self) -> dict[str, Any]:
-        """Load the local mock release manifest."""
+        """Load the active local release manifest, or an empty pending manifest."""
         source_dir, _source_kind = self._current_source_dir()
         manifest_path = source_dir / "release_manifest.json" if source_dir else None
         if manifest_path and manifest_path.exists():
             return self._load_json(manifest_path)
-        return self._builtin_release_manifest()
+        return self._pending_release_manifest()
 
     def load_proof_metadata(self) -> list[dict[str, Any]]:
-        """Load SyntheticLib4 proof metadata JSONL fixture records."""
+        """Load active SyntheticLib4 proof metadata, returning none when inactive."""
         source_dir, _source_kind = self._current_source_dir()
         metadata_path = source_dir / "proof_metadata.jsonl" if source_dir else None
         if not metadata_path or not metadata_path.exists():
-            return self._builtin_proof_metadata()
+            return []
 
         records: list[dict[str, Any]] = []
         for line_number, raw_line in enumerate(metadata_path.read_text(encoding="utf-8").splitlines(), 1):
@@ -179,6 +171,18 @@ class SyntheticLib4Client:
         source_dir, source_kind = self._current_source_dir()
         manifest = self.get_release_manifest()
         records = self.load_proof_metadata()
+        if source_dir is None:
+            return {
+                "valid": False,
+                "contract_version": SYNTHETICLIB4_CONTRACT_VERSION,
+                "release_id": "",
+                "channel": manifest.get("channel", "stable"),
+                "proof_count": 0,
+                "fixture_source": source_kind,
+                "snapshot_dir": "",
+                "file_checks": [],
+                "reason": "SyntheticLib4 is not active; no local snapshot is installed.",
+            }
         required_manifest_fields = [
             "contract_version",
             "schema_version",
@@ -418,9 +422,12 @@ class SyntheticLib4Client:
             data_snapshot = self._active_data_snapshot_dir()
             if data_snapshot is not None:
                 return data_snapshot, "data_root_snapshot"
-        if (self.fixture_dir / "release_manifest.json").exists() or (self.fixture_dir / "proof_metadata.jsonl").exists():
+        if self._fixture_dir_explicit and (
+            (self.fixture_dir / "release_manifest.json").exists()
+            or (self.fixture_dir / "proof_metadata.jsonl").exists()
+        ):
             return self.fixture_dir, "filesystem"
-        return None, "built_in"
+        return None, "inactive"
 
     def _active_data_snapshot_dir(self, channel: str = "stable") -> Path | None:
         candidate = self.snapshot_root / "releases" / validate_single_path_component(channel, "SyntheticLib4 channel")
@@ -434,7 +441,7 @@ class SyntheticLib4Client:
             return f"file://{source_dir / 'release_manifest.json'}"
         if source_kind == "filesystem":
             return "fixture://syntheticlib4/release_manifest.json"
-        return "builtin://syntheticlib4/release_manifest.json"
+        return ""
 
     def _validate_snapshot_source_tree(self, source_path: Path) -> None:
         required = {"release_manifest.json", "proof_metadata.jsonl"}
@@ -561,80 +568,34 @@ class SyntheticLib4Client:
         return {
             "contract_version": SYNTHETICLIB4_CONTRACT_VERSION,
             "schema_version": "syntheticlib4.account_status.v1",
-            "authenticated": True,
-            "membership_active": True,
-            "membership_tier": "offline_mock",
+            "authenticated": False,
+            "membership_active": False,
+            "membership_tier": "",
             "access_expires_at": "",
-            "scopes": list(_MOCK_SCOPES),
+            "scopes": [],
             "quota": {
-                "api_requests_remaining_day": 2000,
-                "text_searches_remaining_month": 2000,
-                "semantic_searches_remaining_month": 200,
+                "api_requests_remaining_day": 0,
+                "text_searches_remaining_month": 0,
+                "semantic_searches_remaining_month": 0,
             },
         }
 
-    def _builtin_release_manifest(self) -> dict[str, Any]:
+    def _pending_release_manifest(self) -> dict[str, Any]:
         return {
             "contract_version": SYNTHETICLIB4_CONTRACT_VERSION,
             "schema_version": "syntheticlib4.release_manifest.v1",
-            "release_id": _BUILTIN_RELEASE_ID,
+            "release_id": "",
             "channel": "stable",
-            "generated_at": "2026-06-11T00:00:00Z",
-            "lean_toolchain": "leanprover/lean4:v4.18.0",
-            "mathlib_revision": "mock-mathlib-rev",
-            "syntheticlib4_revision": "built-in-mock",
-            "license_terms_id": "syntheticlib4-member-license-v1",
-            "proof_count": 30,
-            "novelty_distribution": {
-                "novel_formalization": 20,
-                "novel_reformulation": 7,
-                "minor_mathematical_discovery": 3,
-            },
+            "generated_at": "",
+            "lean_toolchain": "",
+            "mathlib_revision": "",
+            "syntheticlib4_revision": "",
+            "license_terms_id": "",
+            "proof_count": 0,
+            "novelty_distribution": {},
             "compatible_moto_contract_versions": [SYNTHETICLIB4_CONTRACT_VERSION],
             "files": [],
         }
-
-    def _builtin_proof_metadata(self) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
-        for index in range(1, 31):
-            theorem_name = f"SyntheticLib4.Mock.builtin_helper_{index:03d}"
-            theorem_statement = f"theorem builtin_helper_{index:03d} : True"
-            lean_code = (
-                "import Mathlib\n\n"
-                f"theorem builtin_helper_{index:03d} : True := by\n"
-                "  trivial\n"
-            )
-            fingerprint = f"sl4_builtin_fp_{index:03d}"
-            statement_hash = hashlib.sha256(theorem_statement.encode("utf-8")).hexdigest()
-            code_hash = hashlib.sha256(lean_code.encode("utf-8")).hexdigest()
-            metadata_only = index > 20
-            records.append(
-                {
-                    "fingerprint": fingerprint,
-                    "display_title": f"Built-in SyntheticLib4 fixture proof {index}",
-                    "theorem_name": theorem_name,
-                    "theorem_statement": theorem_statement,
-                    "informal_statement": "A built-in offline fixture proof for MOTO proof-search smoke tests.",
-                    "proof_description": "Uses `trivial` to close a True goal.",
-                    "theorem_statement_hash": statement_hash,
-                    "lean_code": "" if metadata_only else lean_code,
-                    "lean_code_hash": code_hash,
-                    "imports": ["Mathlib"],
-                    "dependency_names": ["True.intro"],
-                    "topic_tags": ["fixture"],
-                    "domain_tags": ["logic"],
-                    "module": "SyntheticLib4.Mock",
-                    "source_path": "SyntheticLib4/Mock.lean",
-                    "line_range": {"start": index, "end": index + 2},
-                    "novelty_rank": "novel_formalization",
-                    "novelty_confidence": 0.5,
-                    "validation_record_id": f"builtin_val_{index:03d}",
-                    "release_membership": "stable",
-                    "license_terms_id": "syntheticlib4-member-license-v1",
-                    "hydration_url": None,
-                }
-            )
-        return records
 
 
 syntheticlib4_client = SyntheticLib4Client()

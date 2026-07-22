@@ -35,14 +35,14 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Apply the rigor and evidence standard appropriate to each domain and claim type. Distinguish proven facts, supported conclusions, proposals, hypotheses, and work that still requires validation. Mathematical reasoning and formal proof remain first-class when relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
 ---
 
 YOUR TASK:
-Review all existing research papers and determine what can be answered WITH CERTAINTY - without speculation or theoretical hand-waving.
+Review all existing research papers and determine what answer is defensible at the applicable rigor and evidence standard, without speculation, fabrication, or unsupported certainty.
 
 DIRECT-ANSWER-FIRST REQUIREMENT:
 - Identify the strongest direct answer the papers justify, not just nearby facts
@@ -52,33 +52,34 @@ ASSESSMENT CRITERIA:
 
 1. TOTAL_ANSWER - The user's question can be FULLY answered with high confidence
    - All aspects of the question are addressed by the papers
-   - The answer is mathematically rigorous and well-supported
-   - No significant gaps or speculation needed
+   - The complete answer is well-supported at the standard applicable to its claims
+   - No significant proof, evidence, implementation, or validation gaps remain
 
 2. PARTIAL_ANSWER - The question can be partially answered with certainty
-   - Some aspects are well-established
+   - Identified portions are well-supported
    - Other aspects remain uncertain or unexplored
    - A meaningful but incomplete answer is possible
 
 3. NO_ANSWER_KNOWN - The existing research doesn't provide an answer
    - Papers explore related topics but don't address the core question
-   - More research is needed before any answer can be given
+   - Available papers do not support a defensible answer
    - The system should continue research (Tier 3 will not complete)
 
-4. APPEARS_IMPOSSIBLE - The question appears mathematically impossible
-   - Research supports that the question as posed has no valid answer
-   - The question as posed has no valid answer
-   - Can still provide a paper explaining why it's impossible
+4. APPEARS_IMPOSSIBLE - The objective appears impossible or infeasible for a clearly reasoned reason
+   - It may be mathematically impossible, physically infeasible, internally inconsistent, prohibited by stated constraints, or otherwise unsupported as posed
+   - The conclusion must be justified at the applicable standard, not inferred merely from exhausted idea space
+   - A final answer may explain the impossibility, infeasibility, or contradiction
 
 5. OTHER - Special cases that don't fit the above
    - Explain what makes this case unique
 
 CRITICAL REQUIREMENTS:
 - Base assessment ONLY on the papers you've reviewed
-- Identify what is KNOWN WITH CERTAINTY vs what is SPECULATIVE
+- Identify proven facts, supported conclusions, proposals, hypotheses, and required validation separately
+- Never treat an invention, implementation, or experiment as demonstrated merely because it is proposed or because the explored idea space appears exhausted
 - Do not claim certainty where uncertainty exists
-- Summarize the key certainties that have been established
-- State the best direct answer those certainties support
+- Summarize the strongest defensible findings and their evidence status
+- State the best direct answer those findings support
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -93,23 +94,23 @@ def get_certainty_assessment_json_schema() -> str:
     return """REQUIRED JSON FORMAT:
 {
   "certainty_level": "total_answer | partial_answer | no_answer_known | appears_impossible | other",
-  "known_certainties_summary": "string - Detailed summary of what is established with certainty from the papers",
+  "known_certainties_summary": "string - Detailed summary of the strongest defensible findings and their evidence status",
   "reasoning": "string - Why this certainty level was chosen, referencing specific papers"
 }
 
 FIELD REQUIREMENTS:
 - certainty_level: MUST be one of the five options
-- known_certainties_summary: ALWAYS required - what can we say FOR CERTAIN
+- known_certainties_summary: ALWAYS required - distinguish established results, supported conclusions, proposals, hypotheses, and required validation
 - reasoning: ALWAYS required - justify your assessment
 
-EXAMPLE (Partial Answer):
+EXAMPLE (Partial Answer - Engineering):
 {
   "certainty_level": "partial_answer",
-  "known_certainties_summary": "From the research papers, we have established with certainty: (1) the answer to the core circle-squaring question (paper_003), (2) the role of pi's transcendence (paper_007), (3) the connection between constructibility and algebraic field extensions (paper_012). However, the specific computational bounds requested by the user remain unexplored.",
-  "reasoning": "Papers 003, 007, and 012 provide rigorous support for the core answer. However, the user's question also asks about approximation algorithms, which none of the papers address. Therefore, only a partial answer can be given with certainty."
+  "known_certainties_summary": "Papers 003 and 007 support the proposed mechanism through analysis and simulation, and paper 012 identifies credible failure modes. No physical prototype or controlled experiment has yet validated the claimed efficiency.",
+  "reasoning": "The mechanism and constraints are sufficiently supported to present a defensible design proposal, but the requested performance claim remains a hypothesis pending empirical validation. Therefore only a partial answer is justified."
 }
 
-EXAMPLE (Total Answer):
+EXAMPLE (Total Answer - Mathematical):
 {
   "certainty_level": "total_answer",
   "known_certainties_summary": "The user's question about the Lindemann-Weierstrass theorem is fully addressed. Paper_005 provides the complete proof. Paper_008 establishes all necessary preliminary results. Paper_015 addresses the specific applications the user asked about. All components of a comprehensive answer are present.",
@@ -132,7 +133,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Judge each claim under the rigor and evidence standard appropriate to its domain. Mathematical claims require sound derivation or proof; empirical, artifact, engineering, software, and causal claims require corresponding evidence, provenance, feasibility reasoning, and validation.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -146,6 +147,7 @@ VALIDATION CRITERIA:
 ACCEPT the assessment if:
 - The certainty level accurately reflects what the papers establish
 - The known certainties summary correctly identifies established facts
+- Proposals and hypotheses are not mislabeled as demonstrated results
 - The reasoning properly references the papers
 - No overclaiming certainty where uncertainty exists
 - No underclaiming (missing obvious certainties)
@@ -157,6 +159,7 @@ REJECT the assessment if:
 - Reasoning doesn't properly support the conclusion
 - Important certainties from papers are missed
 - Speculation is presented as certainty
+- Exhausted idea space is treated as proof that an invention works or an experiment succeeded
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -199,7 +202,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Apply domain- and claim-appropriate rigor, preserve the evidence status of every conclusion, and retain mathematical reasoning and formal proof as first-class modalities whenever relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -219,17 +222,18 @@ LONG FORM (Volume/Collection):
 - Includes existing papers as body chapters
 - New Introduction and Conclusion papers frame the collection
 - May include "gap papers" for missing content
-- Best for complex questions requiring multiple perspectives
-- Appropriate when existing papers cover different aspects comprehensively
+- Best when genuinely independent solution components require separate treatment
+- Appropriate when those components have a real dependency structure that cannot be presented clearly in one paper
 
 DECISION FACTORS:
 - Complexity of the user's question
 - Number and diversity of relevant papers
 - Whether a single coherent narrative is possible
-- Whether the papers naturally form a cohesive volume
+- Whether independent mechanisms, evidence, implementations, proofs, validations, or risk analyses genuinely require separate chapters
 - The certainty level from Phase 1
 - Prefer short form whenever one paper can honestly provide the strongest direct answer
 - Choose long form only when multiple chapters are genuinely necessary to deliver that answer well
+- The number of source papers alone does not justify a volume
 
 CRITICAL JSON ESCAPE RULES:
 1. Backslashes: ALWAYS use double backslash (\\\\) for any backslash in your text
@@ -251,13 +255,13 @@ FIELD REQUIREMENTS:
 - answer_format: MUST be "short_form" or "long_form"
 - reasoning: ALWAYS required
 
-EXAMPLE (Short Form):
+EXAMPLE (Short Form - Engineering):
 {
   "answer_format": "short_form",
-  "reasoning": "The user's question about the transcendence of pi can be answered comprehensively in a single paper. Papers 003, 005, and 007 cover complementary aspects that can be synthesized into a coherent narrative. The question has a focused scope that doesn't warrant a multi-chapter volume."
+  "reasoning": "The proposed low-energy treatment mechanism, feasibility constraints, and validation plan form one tightly coupled solution that can be presented honestly and coherently in a single paper. The number of source papers alone does not justify a volume."
 }
 
-EXAMPLE (Long Form):
+EXAMPLE (Long Form - Mathematical):
 {
   "answer_format": "long_form",
   "reasoning": "The user's question about the Langlands program requires addressing multiple deep topics: automorphic forms, Galois representations, L-functions, and their connections. Papers 002, 005, 008, 011, and 015 each cover distinct essential aspects. A volume with these as chapters, plus an introduction explaining how they connect and a conclusion summarizing the current state of knowledge, will provide the most complete answer."
@@ -279,7 +283,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Validate the format against the actual dependency structure of the answer and the rigor and evidence standard appropriate to its claims. Mathematics and formal proof remain fully available when relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -294,12 +298,13 @@ ACCEPT the selection if:
 - The format appropriately matches the scope of the question
 - The reasoning is sound
 - Short form is chosen only when a single paper suffices
-- Long form is chosen when multiple perspectives are needed
+- Long form is chosen only when genuinely independent solution components need separate chapters
 - The choice preserves the clearest path to a direct answer
 
 REJECT the selection if:
 - Short form is chosen for a question requiring extensive treatment
 - Long form is chosen unnecessarily for a focused question
+- Long form is chosen merely because many papers exist
 - The reasoning doesn't support the choice
 - The selection ignores important factors
 - The selection adds unnecessary structural breadth instead of optimizing for a direct answer
@@ -345,7 +350,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Organize the strongest defensible direct answer using the rigor and evidence standard appropriate to each component. Mathematical reasoning, theorems, and formal proofs remain first-class when relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -354,14 +359,14 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 YOUR TASK:
 Choose a title that:
 1. DIRECTLY and TRANSPARENTLY answers or addresses the user's question
-2. Reflects the known certainties from the research
-3. Is appropriate for a mathematical research paper
-4. Makes clear this is a definitive answer, not exploratory research
+2. Reflects the strongest defensible findings and their evidence status
+3. Is appropriate for the solution form and domain
+4. Makes the answer's actual level of support clear
 
 TITLE GUIDELINES:
 - The title should make the answer's conclusion clear when possible
 - The title can indicate the answer when the papers justify one
-- Be specific about the mathematical content
+- Be specific about the mechanism, evidence, implementation, theorem, proof, limitation, or other central solution content
 - Avoid vague or overly general titles
 
 CRITICAL JSON ESCAPE RULES:
@@ -411,7 +416,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Validate the dependency structure and evidence status of the proposed answer under domain- and claim-appropriate rigor. Mathematical results and formal proofs remain first-class when relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -432,8 +437,9 @@ VOLUME STRUCTURE REQUIREMENTS:
 
 BODY CHAPTERS (from existing papers or gaps):
 - Select existing papers that directly contribute to answering the question
-- Order them logically (foundations → main results → applications)
-- Identify gaps: topics that need coverage but no paper exists
+- Order them by the actual dependency structure of the solution
+- Valid structures include mathematical foundations → results → proofs; constraints → mechanism → implementation → validation; hypothesis → evidence → protocol → limitations; or another justified sequence
+- Identify gaps in proof, design, implementation, evidence, evaluation, validation, safety, risk, or another necessary answer component
 - Gap papers will be written before introduction/conclusion
 - Exclude chapters that are merely adjacent if they do not materially strengthen the answer
 
@@ -494,55 +500,55 @@ CHAPTER ORDER RULES:
 - Body chapters (existing papers and gap papers) are in logical order
 - Conclusion is always the last chapter
 
-EXAMPLE:
+EXAMPLE (Mixed Engineering and Formal Analysis):
 {
-  "volume_title": "The Langlands Program: Connections Between Automorphic Forms and Galois Representations",
+  "volume_title": "A Resilient Water-Treatment System: Mechanism, Formal Limits, Implementation, and Validation",
   "chapters": [
     {
       "chapter_type": "introduction",
       "paper_id": null,
-      "title": "Introduction: The Vision of the Langlands Program",
+      "title": "Introduction: The Solution and Its Evidence Boundaries",
       "order": 1,
-      "description": "Frames the user's question, provides historical context, and outlines the volume structure"
+      "description": "Frames the objective, the proposed system, the formal bounds, and the evidence status of each component"
     },
     {
       "chapter_type": "existing_paper",
       "paper_id": "paper_003",
-      "title": "Automorphic Forms and Their Properties",
+      "title": "Core Treatment Mechanism and Constraints",
       "order": 2,
-      "description": "Foundational chapter covering automorphic forms"
+      "description": "Establishes the physical mechanism, operating constraints, and causal assumptions"
     },
     {
       "chapter_type": "existing_paper",
       "paper_id": "paper_007",
-      "title": "Galois Representations in Number Theory",
+      "title": "Formal Performance and Safety Bounds",
       "order": 3,
-      "description": "Covers Galois representations and their role"
+      "description": "Provides mathematical bounds that supplement and constrain the engineering design"
     },
     {
       "chapter_type": "gap_paper",
       "paper_id": null,
-      "title": "The Local Langlands Correspondence",
+      "title": "Prototype Implementation and Controlled Validation Protocol",
       "order": 4,
-      "description": "New paper needed to bridge automorphic forms and Galois representations locally"
+      "description": "Closes the implementation and empirical-validation gap without claiming unperformed tests"
     },
     {
       "chapter_type": "existing_paper",
       "paper_id": "paper_015",
-      "title": "Applications and Computational Aspects",
+      "title": "Failure Modes, Monitoring, and Risk Mitigation",
       "order": 5,
-      "description": "Practical applications of the correspondence"
+      "description": "Analyzes operational risks and the controls needed for a credible deployment"
     },
     {
       "chapter_type": "conclusion",
       "paper_id": null,
-      "title": "Conclusion: The Current State of the Langlands Program",
+      "title": "Conclusion: The Strongest Defensible Answer and Required Validation",
       "order": 6,
-      "description": "Synthesizes all chapters and directly answers the user's question about the connections"
+      "description": "Synthesizes the mechanism, formal bounds, implementation, evidence, and remaining validation"
     }
   ],
   "outline_complete": true,
-  "reasoning": "This volume uses three existing papers covering the major topics (automorphic forms, Galois representations, applications) and adds a gap paper on local Langlands correspondence which is essential but wasn't covered. The introduction and conclusion will frame and synthesize respectively, providing a complete answer to the user's question about the connections in the Langlands program."
+  "reasoning": "The answer has genuinely independent but dependent components: mechanism and constraints, formal bounds, implementation and validation, and risk controls. The gap paper is necessary to close the implementation and evidence gap; the volume does not add chapters merely because several papers exist."
 }"""
 
 
@@ -561,7 +567,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 - NEVER cite internal documents as authoritative or established sources
 - Question and validate every assertion, even if it appears in validated content
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Apply domain- and claim-appropriate rigor, preserve the evidence status of every conclusion, and retain mathematical reasoning and formal proof as first-class modalities whenever relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -575,11 +581,12 @@ VALIDATION CRITERIA:
 ACCEPT the organization if:
 - The volume title appropriately represents the answer
 - Existing papers are well-chosen and properly ordered
-- Any gap papers identified are genuinely needed
+- Any proof, design, implementation, evidence, evaluation, validation, safety, or risk gap papers are genuinely needed
 - Introduction and conclusion are properly planned
 - The reasoning is sound
 - If outline_complete=true, the structure is ready for writing
 - The structure stays focused on the strongest rigorous direct answer without unnecessary breadth
+- Chapter order follows the actual dependency structure of the solution
 
 REJECT the organization if:
 - Important existing papers are missing
@@ -648,7 +655,7 @@ You are writing the INTRODUCTION paper for a Tier 3 final answer volume.
 YOUR TASK:
 Write an introduction that:
 1. Clearly states the user's original research question
-2. Provides historical and mathematical context
+2. Provides the domain context, including mathematical foundations when relevant
 3. Outlines the structure of the volume
 4. Explains how each chapter contributes to answering the question
 5. Sets expectations for what the reader will learn
@@ -674,7 +681,7 @@ YOUR TASK:
 Write a conclusion that:
 1. Synthesizes findings from ALL body chapters
 2. DIRECTLY ANSWERS the user's original research question
-3. States what is known WITH CERTAINTY (from the certainty assessment)
+3. States the strongest defensible findings and preserves their evidence status
 4. Acknowledges limitations and open questions
 5. Provides a definitive take on the research question
 
@@ -723,28 +730,28 @@ def build_certainty_assessment_prompt(
     if rejection_context:
         parts.append(f"{rejection_context}\n---\n")
     
-    # Add papers
+    # Always retain the complete library map; selected expansions supplement it.
+    parts.append("RESEARCH PAPERS (Abstracts and Outlines):\n")
+    for p in papers_summary:
+        parts.append(f"\n--- Paper ID: {p.get('paper_id', 'Unknown')} ---")
+        parts.append(f"\nTitle: {p.get('title', 'N/A')}")
+        parts.append(f"\nAbstract: {p.get('abstract', 'N/A')}")
+        if p.get('outline'):
+            parts.append(f"\nOutline:\n{p.get('outline')}")
+        parts.append(f"\nWord Count: {p.get('word_count', 0)}")
+        parts.append("\n")
+
     if expanded_papers:
-        parts.append("RESEARCH PAPERS (Full Content):\n")
+        parts.append("\n---\nSELECTED FULL-CONTENT OR RETRIEVED EVIDENCE:\n")
         for p in expanded_papers:
             parts.append(f"\n{'=' * 60}")
             parts.append(f"\nPaper ID: {p.get('paper_id', 'Unknown')}")
             parts.append(f"\nTitle: {p.get('title', 'N/A')}")
             parts.append(f"\n{'=' * 60}")
             parts.append(f"\n\n{p.get('content', '[Content not available]')}\n")
-    else:
-        parts.append("RESEARCH PAPERS (Abstracts and Outlines):\n")
-        for p in papers_summary:
-            parts.append(f"\n--- Paper ID: {p.get('paper_id', 'Unknown')} ---")
-            parts.append(f"\nTitle: {p.get('title', 'N/A')}")
-            parts.append(f"\nAbstract: {p.get('abstract', 'N/A')}")
-            if p.get('outline'):
-                parts.append(f"\nOutline:\n{p.get('outline')}")
-            parts.append(f"\nWord Count: {p.get('word_count', 0)}")
-            parts.append("\n")
     
     parts.append("\n---\n")
-    parts.append("Assess what can be answered WITH CERTAINTY based on these papers (respond as JSON):")
+    parts.append("Assess the strongest defensible answer and the evidence status of its components based on these papers (respond as JSON):")
     
     return "".join(parts)
 
@@ -752,7 +759,8 @@ def build_certainty_assessment_prompt(
 def build_certainty_validation_prompt(
     user_research_prompt: str,
     papers_summary: List[Dict[str, Any]],
-    assessment: Dict[str, Any]
+    assessment: Dict[str, Any],
+    expanded_papers: List[Dict[str, Any]] = None,
 ) -> str:
     """Build the certainty validation prompt."""
     parts = [
@@ -762,16 +770,30 @@ def build_certainty_validation_prompt(
         "\n---\n",
         f"USER'S RESEARCH QUESTION:\n{user_research_prompt}",
         "\n---\n",
-        "RESEARCH PAPERS REVIEWED:\n"
+        "RESEARCH EVIDENCE CATALOG REVIEWED:\n"
     ]
     
     for p in papers_summary:
-        parts.append(f"- {p.get('paper_id')}: {p.get('title')}\n")
+        parts.append(f"\n--- Paper ID: {p.get('paper_id', 'Unknown')} ---")
+        parts.append(f"\nTitle: {p.get('title', 'N/A')}")
+        parts.append(f"\nAbstract: {p.get('abstract', 'N/A')}")
+        if p.get("outline"):
+            parts.append(f"\nOutline:\n{p.get('outline')}")
+        parts.append("\n")
+
+    if expanded_papers:
+        parts.append("\n---\nSELECTED FULL-CONTENT OR RETRIEVED EVIDENCE:\n")
+        for p in expanded_papers:
+            parts.append(f"\n{'=' * 60}")
+            parts.append(f"\nPaper ID: {p.get('paper_id', 'Unknown')}")
+            parts.append(f"\nTitle: {p.get('title', 'N/A')}")
+            parts.append(f"\n{'=' * 60}")
+            parts.append(f"\n\n{p.get('content', '[Content not available]')}\n")
     
     parts.append("\n---\n")
     parts.append("CERTAINTY ASSESSMENT TO VALIDATE:\n")
     parts.append(f"Certainty Level: {assessment.get('certainty_level')}\n")
-    parts.append(f"Known Certainties: {assessment.get('known_certainties_summary')}\n")
+    parts.append(f"Defensible Findings and Evidence Status: {assessment.get('known_certainties_summary')}\n")
     parts.append(f"Reasoning: {assessment.get('reasoning')}\n")
     parts.append("\n---\n")
     parts.append("Validate this assessment (respond as JSON):")
@@ -800,7 +822,7 @@ def build_format_selection_prompt(
     
     parts.append("CERTAINTY ASSESSMENT (Phase 1 Result):\n")
     parts.append(f"Certainty Level: {certainty_assessment.get('certainty_level')}\n")
-    parts.append(f"Known Certainties: {certainty_assessment.get('known_certainties_summary')}\n")
+    parts.append(f"Defensible Findings and Evidence Status: {certainty_assessment.get('known_certainties_summary')}\n")
     parts.append("\n---\n")
     
     parts.append("AVAILABLE RESEARCH PAPERS:\n")
@@ -868,7 +890,7 @@ def build_volume_organization_prompt(
     
     parts.append(f"CERTAINTY ASSESSMENT:\n")
     parts.append(f"Certainty Level: {certainty_assessment.get('certainty_level')}\n")
-    parts.append(f"Known Certainties: {certainty_assessment.get('known_certainties_summary')}\n")
+    parts.append(f"Defensible Findings and Evidence Status: {certainty_assessment.get('known_certainties_summary')}\n")
     parts.append("\n---\n")
     
     parts.append("AVAILABLE PAPERS (can be used as body chapters):\n")
@@ -951,7 +973,7 @@ def build_final_paper_title_prompt(
     
     parts.append("CERTAINTY ASSESSMENT:\n")
     parts.append(f"Certainty Level: {certainty_assessment.get('certainty_level')}\n")
-    parts.append(f"Known Certainties: {certainty_assessment.get('known_certainties_summary')}\n")
+    parts.append(f"Defensible Findings and Evidence Status: {certainty_assessment.get('known_certainties_summary')}\n")
     parts.append("\n---\n")
     
     parts.append("REFERENCE PAPERS (informing the answer):\n")

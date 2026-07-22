@@ -73,11 +73,13 @@ class ReferenceSelectorAgent:
         self,
         model_id: str,
         context_window: int = 0,
-        max_output_tokens: int = 0
+        max_output_tokens: int = 0,
+        solution_path_manager: Optional[Any] = None,
     ):
         self.model_id = model_id
         self.context_window = context_window
         self.max_output_tokens = max_output_tokens
+        self.solution_path_manager = solution_path_manager
         
         # Task tracking for workflow panel and boost integration
         self.task_sequence: int = 0
@@ -244,6 +246,10 @@ class ReferenceSelectorAgent:
                     already_selected_papers=already_selected_papers,
                     max_total_papers=max_total_papers,
                 )
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt, self.solution_path_manager, self._calculate_max_input_tokens()
+            )
             
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -291,15 +297,33 @@ class ReferenceSelectorAgent:
             
             # Parse JSON using central utility
             data = parse_json(content)
+            expand_papers = data.get("expand_papers")
+            proceed_without_references = data.get("proceed_without_references")
+            reasoning = data.get("reasoning")
+            if not isinstance(expand_papers, list) or not all(
+                isinstance(paper_id, str) and paper_id.strip()
+                for paper_id in expand_papers
+            ):
+                raise ValueError("Reference expansion requires expand_papers to be a string list")
+            if type(proceed_without_references) is not bool:
+                raise ValueError(
+                    "Reference expansion requires proceed_without_references to be a boolean"
+                )
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                raise ValueError("Reference expansion requires non-empty reasoning")
+            if proceed_without_references and expand_papers:
+                raise ValueError(
+                    "Reference expansion cannot request papers while proceeding without references"
+                )
             
             # Notify task completed successfully
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
             
             return ReferenceExpansionRequest(
-                expand_papers=data.get("expand_papers", []),
-                proceed_without_references=data.get("proceed_without_references", False),
-                reasoning=data.get("reasoning", "")
+                expand_papers=[paper_id.strip() for paper_id in expand_papers],
+                proceed_without_references=proceed_without_references,
+                reasoning=reasoning.strip(),
             )
             
         except FreeModelExhaustedError:
@@ -425,6 +449,10 @@ class ReferenceSelectorAgent:
                 max_papers=max_papers,
                 retrieved_context=retrieved_context,
             )
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+            prompt = with_budgeted_solver_plan(
+                prompt, self.solution_path_manager, max_input
+            )
             
             task_id = self.get_current_task_id()
             await api_client_manager.prewarm_assistant_memory_context(
@@ -454,6 +482,9 @@ class ReferenceSelectorAgent:
                     expanded_papers=metadata_only_papers,
                     mode=mode,
                     max_papers=max_papers,
+                )
+                prompt = with_budgeted_solver_plan(
+                    prompt, self.solution_path_manager, max_input
                 )
                 prompt_tokens = count_tokens(prompt)
                 if prompt_tokens > max_input:
@@ -501,7 +532,18 @@ class ReferenceSelectorAgent:
             # Parse JSON using central utility
             data = parse_json(content)
             
-            selected = data.get("selected_papers", [])
+            selected = data.get("selected_papers")
+            reasoning = data.get("reasoning")
+            if not isinstance(selected, list) or not all(
+                isinstance(paper_id, str) and paper_id.strip()
+                for paper_id in selected
+            ):
+                raise ValueError(
+                    "Final reference selection requires selected_papers to be a string list"
+                )
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                raise ValueError("Final reference selection requires non-empty reasoning")
+            selected = [paper_id.strip() for paper_id in selected]
             
             # Enforce max papers limit
             if len(selected) > max_papers:

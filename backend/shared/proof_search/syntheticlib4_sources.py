@@ -5,6 +5,7 @@ import hashlib
 from typing import Any
 
 from backend.shared.proof_search.models import UnifiedProofSearchRecord
+from backend.shared.proof_identity import canonical_proof_identity
 from backend.shared.syntheticlib4_client import SyntheticLib4Client, syntheticlib4_client
 
 
@@ -26,6 +27,7 @@ def normalize_syntheticlib4_record(
     )
     module = str(record.get("module", "") or "")
     source_path = str(record.get("source_path", "") or "")
+    internal_identity = canonical_proof_identity(theorem_statement, lean_code)
 
     return UnifiedProofSearchRecord(
         search_id=f"syntheticlib4:{fingerprint}",
@@ -47,6 +49,9 @@ def normalize_syntheticlib4_record(
         lean_code=lean_code,
         lean_code_hash=lean_hash,
         theorem_statement_hash=statement_hash,
+        canonical_identity_version=internal_identity.version,
+        canonical_lean_code_hash=internal_identity.lean_code_hash if lean_code else "",
+        canonical_theorem_statement_hash=internal_identity.theorem_statement_hash,
         imports=_string_list(record.get("imports")),
         dependency_names=_string_list(record.get("dependency_names")),
         topic_tags=_string_list(record.get("topic_tags")),
@@ -66,6 +71,9 @@ def normalize_syntheticlib4_record(
             "license_terms_id": record.get("license_terms_id", ""),
             "release_membership": record.get("release_membership", ""),
             "hydration_url": record.get("hydration_url"),
+            "canonical_identity_version": internal_identity.version,
+            "canonical_theorem_statement_hash": internal_identity.theorem_statement_hash,
+            "canonical_lean_code_hash": internal_identity.lean_code_hash if lean_code else "",
         },
     )
 

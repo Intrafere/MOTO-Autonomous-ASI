@@ -5,14 +5,21 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from backend.shared.config import system_config
 from backend.shared.json_parser import parse_json
+from backend.shared.proof_identity import canonical_proof_identity
 from backend.shared.proof_search.assistant_cache import AssistantCooldownState, AssistantRankCache, goal_hash_for_snapshot
-from backend.shared.proof_search.assistant_models import AssistantProofPack, AssistantProofSupport, AssistantTargetSnapshot
+from backend.shared.proof_search.assistant_models import (
+    ASSISTANT_PROOF_PACK_SCHEMA_VERSION,
+    AssistantProofPack,
+    AssistantProofSupport,
+    AssistantTargetSnapshot,
+)
 from backend.shared.proof_search.assistant_ranker import ranked_candidates_to_cache_rows, score_assistant_proof_candidates, select_assistant_proof_supports
 from backend.shared.proof_search.models import ProofSearchRequest, UnifiedProofSearchRecord, default_proof_search_corpora
 from backend.shared.proof_search.search_service import ProofSearchService, proof_search_service
@@ -23,6 +30,7 @@ logger = logging.getLogger(__name__)
 _ASSISTANT_CANDIDATE_POOL_TARGET = 64
 _ASSISTANT_SHORTLIST_TARGET = 21
 _ASSISTANT_FINAL_PACK_LIMIT = 7
+_ASSISTANT_EXACT_LINEAGE_LIMIT = 100_000
 _ASSISTANT_SELECTION_MAX_OUTPUT_TOKENS = 4096
 _ASSISTANT_SELECTION_CODE_PREVIEW_CHARS = 1200
 _CURRENT_RUN_CORPUS_SCOPES = {"active", "current"}
@@ -34,6 +42,9 @@ _ZERO_STEADY_81_BATCHES_BEFORE_SHUTDOWN = 3
 _NO_EXTERNAL_HISTORY_REASON = (
     "Assistant memory skipped because no external proof-memory records were available; "
     "the Assistant only performs proof-memory retrieval for now."
+)
+_ASSISTANT_EXCLUDE_EXACT_DUPLICATE_EMPHASIS = (
+    "assistant_exclude_standalone_exact_duplicate_emphasis"
 )
 
 AssistantSelector = Callable[
@@ -77,6 +88,14 @@ class AssistantProofSearchCoordinator:
             return None
         return _drop_current_run_supports_from_pack(next(reversed(self._packs.values())))
 
+    def get_latest_reusable_pack(self) -> AssistantProofPack | None:
+        """Return the latest in-memory pack without scheduling an Assistant refresh."""
+        if self._latest_pack_target_hash:
+            latest = self.get_latest_pack(self._latest_pack_target_hash)
+            if latest is not None:
+                return latest
+        return self.get_latest_pack()
+
     def get_status(self) -> dict[str, Any]:
         latest_pack = self.get_latest_pack()
         enabled_corpora = default_proof_search_corpora() if self.enabled else []
@@ -99,6 +118,64 @@ class AssistantProofSearchCoordinator:
             "disabled_reason": disabled_reason,
         }
 
+    def get_latest_pack_payload(self) -> dict[str, Any]:
+        """Return the latest Assistant pack in the same metadata-only shape used by the UI event."""
+        if not self.enabled:
+            return {
+                "enabled": False,
+                "has_pack": False,
+                "results": [],
+                "disabled_reason": "Session History Memory is disabled.",
+            }
+        latest_pack = self.get_latest_pack() or _read_latest_assistant_pack()
+        if latest_pack is None:
+            return {
+                "enabled": self.enabled,
+                "has_pack": False,
+                "results": [],
+                "disabled_reason": "" if self.enabled else "Session History Memory is disabled.",
+            }
+        return {
+            "enabled": self.enabled,
+            "has_pack": True,
+            **_pack_event_payload(latest_pack, max_result_count=_ASSISTANT_FINAL_PACK_LIMIT),
+        }
+
+    def get_support_lineage(
+        self,
+        *,
+        target_hash: str,
+        support_search_id: str,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any] | None:
+        """Return one bounded metadata-only occurrence page for a target support."""
+        pack = self.get_latest_pack(target_hash)
+        if pack is None:
+            persisted = _read_latest_assistant_pack()
+            pack = persisted if persisted and persisted.target_hash == target_hash else None
+        if pack is None:
+            return None
+        support = next(
+            (item for item in pack.results if item.search_id == support_search_id),
+            None,
+        )
+        if support is None:
+            return None
+        occurrences = list(support.occurrence_provenance)
+        total = max(support.occurrence_total, len(occurrences))
+        page = occurrences[offset:offset + limit]
+        next_offset = offset + len(page)
+        return {
+            "target_hash": target_hash,
+            "support_search_id": support_search_id,
+            "occurrence_total": total,
+            "offset": offset,
+            "limit": limit,
+            "next_offset": next_offset if next_offset < total else None,
+            "occurrences": page,
+        }
+
     def submit_target(self, snapshot: AssistantTargetSnapshot) -> str:
         target_hash = snapshot.stable_hash()
         snapshot = snapshot.model_copy(update={"target_hash": target_hash})
@@ -111,7 +188,7 @@ class AssistantProofSearchCoordinator:
             )
             return target_hash
         cached_pack = self._load_cached_pack(snapshot)
-        if cached_pack is not None:
+        if cached_pack is not None and cached_pack.results:
             self._packs[target_hash] = cached_pack
             logger.info(
                 "Assistant memory loaded cached pack for %s/%s (target=%s, results=%s, freshness=%s)",
@@ -145,25 +222,37 @@ class AssistantProofSearchCoordinator:
             )
             return target_hash
         if self._latest_pack_target_hash and not self._latest_pack_has_enough_receiver_reads():
-            if cached_pack is None:
-                latest_pack = self.get_latest_pack(self._latest_pack_target_hash) or self.get_latest_pack()
-                if latest_pack is not None:
-                    self._packs[target_hash] = latest_pack.model_copy(
+            reusable_pack = cached_pack if cached_pack and cached_pack.results else None
+            if reusable_pack is None:
+                latest_pack = self._packs.get(self._latest_pack_target_hash)
+                reusable_pack = _filter_pack_for_snapshot(latest_pack, snapshot)
+                if reusable_pack is None or not reusable_pack.results:
+                    fallback_latest = next(reversed(self._packs.values()), None)
+                    reusable_pack = _filter_pack_for_snapshot(fallback_latest, snapshot)
+            if reusable_pack is not None and reusable_pack.results:
+                if cached_pack is None:
+                    self._packs[target_hash] = reusable_pack.model_copy(
                         update={
                             "target_hash": target_hash,
                             "freshness": "stale-but-best-known",
                             "selection_mode": "stale-but-best-known",
                         }
                     )
+                    self._latest_pack_target_hash = target_hash
+                logger.info(
+                    "Assistant memory refresh deferred for %s/%s (latest_target=%s receiver_reads=%s/%s)",
+                    snapshot.workflow_mode,
+                    snapshot.target_kind,
+                    self._latest_pack_target_hash[:12],
+                    self._latest_pack_consumption_count,
+                    _ASSISTANT_PACK_REFRESH_RECEIVER_READS,
+                )
+                return target_hash
             logger.info(
-                "Assistant memory refresh deferred for %s/%s (latest_target=%s receiver_reads=%s/%s)",
+                "Assistant memory pack reuse skipped for %s/%s because requesting-run filtering removed all supports",
                 snapshot.workflow_mode,
                 snapshot.target_kind,
-                self._latest_pack_target_hash[:12],
-                self._latest_pack_consumption_count,
-                _ASSISTANT_PACK_REFRESH_RECEIVER_READS,
             )
-            return target_hash
         existing = self._tasks.get(target_hash)
         if existing and not existing.done():
             logger.info(
@@ -310,44 +399,31 @@ class AssistantProofSearchCoordinator:
             if await self._maybe_skip_for_cooldown(snapshot):
                 return
             warnings: list[str] = []
-            corpora = default_proof_search_corpora()
-            if not corpora:
-                corpora = ["moto", "manual", "leanoj"]
-
-            records: list[UnifiedProofSearchRecord] = []
-            seen_ids: set[str] = set()
+            enabled_corpora = default_proof_search_corpora()
             excluded_session_ids = [session_id for session_id in [_active_autonomous_session_id()] if session_id]
-            for query in _build_query_variants(snapshot):
-                if len(records) >= _ASSISTANT_CANDIDATE_POOL_TARGET:
-                    break
-                try:
-                    query_records = await self._service.search_candidate_pool(
-                        ProofSearchRequest(
-                            query=query,
-                            goal_statement=snapshot.target_statement or snapshot.lean_template,
-                            imports=snapshot.imports or ["Mathlib"],
-                            dependency_names=snapshot.dependency_names,
-                            corpora=corpora,
-                            verified_only=True,
-                            include_partial=False,
-                            include_failed=False,
-                            limit=_ASSISTANT_CANDIDATE_POOL_TARGET,
-                            hydrate_lean_code=True,
-                        ),
-                        pool_limit=_ASSISTANT_CANDIDATE_POOL_TARGET - len(records),
-                        exclude_corpus_scopes=sorted(_CURRENT_RUN_CORPUS_SCOPES),
-                        exclude_session_ids=excluded_session_ids,
-                    )
-                    query_records = _filter_current_run_records(query_records)
-                except Exception as exc:
-                    logger.debug("Assistant proof search query failed: %s", exc)
-                    warnings.append(f"Search query failed: {exc}")
-                    continue
-                for record in query_records:
-                    if record.search_id in seen_ids:
-                        continue
-                    seen_ids.add(record.search_id)
-                    records.append(record)
+            excluded_run_ids = _current_run_ids(snapshot)
+            lanes = _assistant_retrieval_lane_specs(snapshot, enabled_corpora)
+            lane_results = await asyncio.gather(*[
+                self._retrieve_lane(
+                    snapshot=snapshot,
+                    lane_name=lane_name,
+                    corpora=corpora,
+                    queries=queries,
+                    excluded_session_ids=excluded_session_ids,
+                    excluded_run_ids=excluded_run_ids,
+                    warnings=warnings,
+                )
+                for lane_name, corpora, queries in lanes
+            ])
+            lane_records = {
+                lane_name: _filter_assistant_lane_records(records)
+                for (lane_name, _corpora, _queries), records in zip(lanes, lane_results)
+            }
+            records, retrieval_observability = _fuse_assistant_retrieval_lanes(
+                lane_records,
+                snapshot,
+                limit=_ASSISTANT_CANDIDATE_POOL_TARGET,
+            )
 
             if not records:
                 if warnings:
@@ -397,20 +473,92 @@ class AssistantProofSearchCoordinator:
             candidate_stats = await asyncio.to_thread(self._cache.load_candidate_stats, snapshot.target_hash)
             shortlist = select_assistant_proof_supports(ranked_candidates, limit=_ASSISTANT_SHORTLIST_TARGET, candidate_stats=candidate_stats)
             if not shortlist:
-                await self._publish_pack(snapshot, [], warnings=warnings, selection_mode="no_candidates", candidate_count=len(records), shortlist_count=0, selection_reasoning="No verified candidate supports were found.")
+                retrieval_observability["shortlist_21"] = _stage_counts([])
+                await self._publish_pack(snapshot, [], warnings=warnings, selection_mode="no_candidates", candidate_count=len(records), shortlist_count=0, selection_reasoning="No verified candidate supports were found.", retrieval_observability=retrieval_observability)
                 return
-            await self._select_and_publish_assistant_pack(snapshot=snapshot, shortlist=shortlist, warnings=warnings, candidate_count=len(records))
+            retrieval_observability["shortlist_21"] = _stage_counts_from_supports(shortlist)
+            await self._select_and_publish_assistant_pack(snapshot=snapshot, shortlist=shortlist, warnings=warnings, candidate_count=len(records), retrieval_observability=retrieval_observability)
 
-    async def _select_and_publish_assistant_pack(self, *, snapshot: AssistantTargetSnapshot, shortlist: list[AssistantProofSupport], warnings: list[str], candidate_count: int) -> None:
+    async def _retrieve_lane(self, *, snapshot: AssistantTargetSnapshot, lane_name: str, corpora: list[str], queries: list[str], excluded_session_ids: list[str], excluded_run_ids: list[str], warnings: list[str]) -> list[UnifiedProofSearchRecord]:
+        records: list[UnifiedProofSearchRecord] = []
+        seen_ids: set[str] = set()
+        if lane_name == "exact_cross_prompt":
+            target_identity = canonical_proof_identity(
+                snapshot.target_statement,
+                snapshot.lean_template,
+            )
+            statement_hashes = (
+                [target_identity.theorem_statement_hash]
+                if snapshot.target_statement.strip()
+                else []
+            )
+            code_hashes = (
+                [target_identity.lean_code_hash]
+                if snapshot.lean_template.strip()
+                else []
+            )
+            try:
+                exact_search = getattr(self._service, "exact_identity_neighborhood", None)
+                if exact_search is not None:
+                    found = await exact_search(
+                        theorem_statement_hashes=statement_hashes,
+                        lean_code_hashes=code_hashes,
+                        corpora=corpora,
+                        exclude_run_ids=excluded_run_ids,
+                        exclude_session_ids=excluded_session_ids,
+                        limit=_ASSISTANT_EXACT_LINEAGE_LIMIT,
+                    )
+                    return _filter_current_run_records(found, excluded_run_ids=excluded_run_ids)
+            except Exception:
+                logger.debug("Assistant exact neighborhood lane failed", exc_info=True)
+                warnings.append("exact_cross_prompt lane query failed.")
+                return []
+        for query in queries:
+            if len(records) >= _ASSISTANT_CANDIDATE_POOL_TARGET:
+                break
+            try:
+                request = ProofSearchRequest(query=query, goal_statement=snapshot.target_statement or snapshot.lean_template, imports=snapshot.imports, dependency_names=snapshot.dependency_names, corpora=corpora, verified_only=True, include_partial=False, include_failed=False, limit=_ASSISTANT_CANDIDATE_POOL_TARGET, hydrate_lean_code=False)
+                try:
+                    found = await self._service.search_candidate_pool(
+                        request,
+                        pool_limit=_ASSISTANT_CANDIDATE_POOL_TARGET - len(records),
+                        exclude_corpus_scopes=sorted(_CURRENT_RUN_CORPUS_SCOPES),
+                        exclude_session_ids=excluded_session_ids,
+                        exclude_run_ids=excluded_run_ids,
+                    )
+                except TypeError as exc:
+                    if "exclude_run_ids" not in str(exc):
+                        raise
+                    found = await self._service.search_candidate_pool(
+                        request,
+                        pool_limit=_ASSISTANT_CANDIDATE_POOL_TARGET - len(records),
+                        exclude_corpus_scopes=sorted(_CURRENT_RUN_CORPUS_SCOPES),
+                        exclude_session_ids=excluded_session_ids,
+                    )
+                found = _filter_current_run_records(found, excluded_run_ids=excluded_run_ids)
+            except Exception as exc:
+                logger.debug("Assistant %s lane query failed: %s", lane_name, exc)
+                warnings.append(f"{lane_name} lane query failed.")
+                continue
+            for record in found:
+                if record.search_id not in seen_ids:
+                    seen_ids.add(record.search_id)
+                    records.append(record)
+        return records
+
+    async def _select_and_publish_assistant_pack(self, *, snapshot: AssistantTargetSnapshot, shortlist: list[AssistantProofSupport], warnings: list[str], candidate_count: int, retrieval_observability: dict[str, Any]) -> None:
         assistant_role_id = _assistant_role_id_for_snapshot(snapshot)
         assistant_model_id = "injected-assistant" if self._assistant_selector is not None else _assistant_model_id(assistant_role_id)
         if not assistant_model_id:
             warnings.append(f"Assistant role '{assistant_role_id}' is not configured.")
-            await self._publish_pack(snapshot, [], warnings=warnings, selection_mode="unavailable", assistant_role_id=assistant_role_id, assistant_model_id="", candidate_count=candidate_count, shortlist_count=len(shortlist), selection_reasoning="Configured Assistant role was unavailable.")
+            await self._publish_pack(snapshot, [], warnings=warnings, selection_mode="unavailable", assistant_role_id=assistant_role_id, assistant_model_id="", candidate_count=candidate_count, shortlist_count=len(shortlist), selection_reasoning="Configured Assistant role was unavailable.", retrieval_observability=retrieval_observability)
             return
 
         if _assistant_oauth_provider_is_cooling_down(assistant_role_id):
-            latest_pack = self.get_latest_pack()
+            latest_pack = _filter_pack_for_snapshot(
+                next(reversed(self._packs.values()), None),
+                snapshot,
+            )
             if latest_pack and latest_pack.results:
                 supports = latest_pack.results[:_ASSISTANT_FINAL_PACK_LIMIT]
                 await self._publish_pack(
@@ -426,6 +574,7 @@ class AssistantProofSearchCoordinator:
                     candidate_count=candidate_count,
                     shortlist_count=len(shortlist),
                     selection_reasoning="Reused latest cached Assistant pack while OAuth provider cooldown is active.",
+                    retrieval_observability=retrieval_observability,
                 )
                 return
             if shortlist:
@@ -443,6 +592,7 @@ class AssistantProofSearchCoordinator:
                     candidate_count=candidate_count,
                     shortlist_count=len(shortlist),
                     selection_reasoning="Used deterministic proof-support shortlist while OAuth provider cooldown is active.",
+                    retrieval_observability=retrieval_observability,
                 )
                 return
 
@@ -484,11 +634,13 @@ class AssistantProofSearchCoordinator:
                 shortlist_count=len(shortlist),
                 selection_reasoning="Assistant LLM selection failed; no proof supports were published.",
                 broadcast_update=False,
+                retrieval_observability=retrieval_observability,
             )
             return
 
         selected_supports = _supports_for_selected_ids(shortlist, selected_search_ids)
-        await self._publish_pack(snapshot, selected_supports, warnings=warnings, selection_mode="assistant_llm", assistant_role_id=assistant_role_id, assistant_model_id=assistant_model_id, candidate_count=candidate_count, shortlist_count=len(shortlist), selection_reasoning=selection_reasoning)
+        retrieval_observability["final_selected"] = _stage_counts_from_supports(selected_supports)
+        await self._publish_pack(snapshot, selected_supports, warnings=warnings, selection_mode="assistant_llm", assistant_role_id=assistant_role_id, assistant_model_id=assistant_model_id, candidate_count=candidate_count, shortlist_count=len(shortlist), selection_reasoning=selection_reasoning, retrieval_observability=retrieval_observability)
 
     def _next_assistant_task_id(self, workflow_mode: str) -> str:
         self._task_sequence += 1
@@ -504,41 +656,21 @@ class AssistantProofSearchCoordinator:
             raise RuntimeError(f"Assistant role '{assistant_role_id}' is not configured")
         max_tokens = _assistant_selection_max_tokens(role_config.max_output_tokens)
         prompt = _build_assistant_selection_prompt(snapshot, shortlist)
-        try:
-            payload = await _generate_assistant_selection_payload(
-                prompt=prompt,
-                task_id=task_id,
-                assistant_role_id=assistant_role_id,
-                assistant_model_id=assistant_model_id,
-                max_tokens=max_tokens,
-            )
-            selected_ids = _extract_valid_selected_search_ids(payload, shortlist)
-        except _AssistantSelectionOutputError as first_error:
-            repair_prompt = _build_assistant_selection_repair_prompt(
-                snapshot,
-                shortlist,
-                error=str(first_error),
-            )
-            try:
-                payload = await _generate_assistant_selection_payload(
-                    prompt=repair_prompt,
-                    task_id=f"{task_id}_retry",
-                    assistant_role_id=assistant_role_id,
-                    assistant_model_id=assistant_model_id,
-                    max_tokens=max_tokens,
-                )
-                selected_ids = _extract_valid_selected_search_ids(payload, shortlist)
-            except _AssistantSelectionOutputError as retry_error:
-                raise _AssistantSelectionOutputError(
-                    f"{first_error}; retry failed: {retry_error}"
-                ) from retry_error
+        payload = await _generate_assistant_selection_payload(
+            prompt=prompt,
+            task_id=task_id,
+            assistant_role_id=assistant_role_id,
+            assistant_model_id=assistant_model_id,
+            max_tokens=max_tokens,
+        )
+        selected_ids = _extract_valid_selected_search_ids(payload, shortlist)
         clean_ids = [str(item).strip() for item in selected_ids if str(item).strip()]
         reasoning = str(payload.get("reasoning") or payload.get("selection_reasoning") or "").strip() or "Assistant selected proof supports for the current target."
         reasoning = _compact_for_assistant_selection(reasoning, 300)
         return clean_ids[:_ASSISTANT_FINAL_PACK_LIMIT], reasoning
 
-    async def _publish_pack(self, snapshot: AssistantTargetSnapshot, supports: list[AssistantProofSupport], *, warnings: list[str], selection_mode: str, assistant_role_id: str = "", assistant_model_id: str = "", candidate_count: int, shortlist_count: int, selection_reasoning: str = "", broadcast_update: bool = True) -> None:
-        pack = AssistantProofPack(workflow_mode=snapshot.workflow_mode, target_kind=snapshot.target_kind, target_hash=snapshot.target_hash, query_summary=_compact_query_summary(snapshot), results=supports[:_ASSISTANT_FINAL_PACK_LIMIT], warnings=warnings, selection_mode=selection_mode, assistant_role_id=assistant_role_id, assistant_model_id=assistant_model_id, candidate_count=candidate_count, shortlist_count=shortlist_count, selection_reasoning=selection_reasoning)
+    async def _publish_pack(self, snapshot: AssistantTargetSnapshot, supports: list[AssistantProofSupport], *, warnings: list[str], selection_mode: str, assistant_role_id: str = "", assistant_model_id: str = "", candidate_count: int, shortlist_count: int, selection_reasoning: str = "", broadcast_update: bool = True, retrieval_observability: dict[str, Any] | None = None) -> None:
+        pack = AssistantProofPack(workflow_mode=snapshot.workflow_mode, target_kind=snapshot.target_kind, target_hash=snapshot.target_hash, query_summary=_compact_query_summary(snapshot), results=supports[:_ASSISTANT_FINAL_PACK_LIMIT], warnings=warnings, selection_mode=selection_mode, assistant_role_id=assistant_role_id, assistant_model_id=assistant_model_id, candidate_count=candidate_count, shortlist_count=shortlist_count, selection_reasoning=selection_reasoning, retrieval_observability=retrieval_observability or {})
         source_counts: dict[str, int] = {}
         for support in pack.results:
             source_counts[support.corpus] = source_counts.get(support.corpus, 0) + 1
@@ -564,7 +696,16 @@ class AssistantProofSearchCoordinator:
         await asyncio.to_thread(self._cache.record_pack, snapshot=snapshot, pack=pack, selected_search_ids=[support.search_id for support in pack.results])
         await self._persist_pack(pack)
         if broadcast_update:
-            await self._broadcast_event("assistant_proof_pack_updated", {"target_hash": pack.target_hash, "workflow_mode": pack.workflow_mode, "target_kind": pack.target_kind, "result_count": len(pack.results), "local_result_count": sum(count for corpus, count in source_counts.items() if corpus != "syntheticlib4"), "syntheticlib4_result_count": source_counts.get("syntheticlib4", 0), "source_counts": source_counts, "max_result_count": _ASSISTANT_FINAL_PACK_LIMIT, "workflow_phase": snapshot.workflow_phase, "source_type": snapshot.source_type, "source_id": snapshot.source_id, "warnings": pack.warnings[:3], "selection_mode": pack.selection_mode, "assistant_role_id": pack.assistant_role_id, "assistant_model_id": pack.assistant_model_id, "candidate_count": pack.candidate_count, "shortlist_count": pack.shortlist_count})
+            await self._broadcast_event(
+                "assistant_proof_pack_updated",
+                _pack_event_payload(
+                    pack,
+                    max_result_count=_ASSISTANT_FINAL_PACK_LIMIT,
+                    workflow_phase=snapshot.workflow_phase,
+                    source_type=snapshot.source_type,
+                    source_id=snapshot.source_id,
+                ),
+            )
         await self._record_cooldown_outcome(snapshot, pack)
 
     def _on_task_done(self, target_hash: str, task: asyncio.Task) -> None:
@@ -601,11 +742,14 @@ class AssistantProofSearchCoordinator:
                 in_memory_pack = self._packs.get(previous_target_hash)
                 if in_memory_pack is not None:
                     freshness = "cached" if previous_target_hash == snapshot.target_hash else "stale-but-best-known"
-                    return _drop_current_run_supports_from_pack(in_memory_pack.model_copy(update={"target_hash": snapshot.target_hash, "freshness": freshness, "selection_mode": freshness}))
+                    return _filter_pack_for_snapshot(
+                        in_memory_pack.model_copy(update={"target_hash": snapshot.target_hash, "freshness": freshness, "selection_mode": freshness}),
+                        snapshot,
+                    )
             cached = self._cache.load_cached_pack(target_hash=snapshot.target_hash, goal_hash=goal_hash)
             if cached is not None:
                 cached = cached.model_copy(update={"selection_mode": cached.freshness})
-            return _drop_current_run_supports_from_pack(cached)
+            return _filter_pack_for_snapshot(cached, snapshot)
         except Exception:
             logger.debug("Assistant proof-search cache lookup failed", exc_info=True)
             return None
@@ -613,6 +757,46 @@ class AssistantProofSearchCoordinator:
 
 def _cached_pack_is_reusable(pack: AssistantProofPack) -> bool:
     return pack.freshness == "cached" and bool(pack.results)
+
+
+def _pack_event_payload(
+    pack: AssistantProofPack,
+    *,
+    max_result_count: int,
+    workflow_phase: str = "",
+    source_type: str = "",
+    source_id: str = "",
+) -> dict[str, Any]:
+    source_counts: dict[str, int] = {}
+    for support in pack.results:
+        source_counts[support.corpus] = source_counts.get(support.corpus, 0) + 1
+    return {
+        "target_hash": pack.target_hash,
+        "workflow_mode": pack.workflow_mode,
+        "target_kind": pack.target_kind,
+        "result_count": len(pack.results),
+        "local_result_count": sum(
+            count for corpus, count in source_counts.items() if corpus != "syntheticlib4"
+        ),
+        "syntheticlib4_result_count": source_counts.get("syntheticlib4", 0),
+        "source_counts": source_counts,
+        "max_result_count": max_result_count,
+        "workflow_phase": workflow_phase,
+        "source_type": source_type,
+        "source_id": source_id,
+        "warnings": pack.warnings[:3],
+        "selection_mode": pack.selection_mode,
+        "assistant_role_id": pack.assistant_role_id,
+        "assistant_model_id": pack.assistant_model_id,
+        "candidate_count": pack.candidate_count,
+        "shortlist_count": pack.shortlist_count,
+        "selection_reasoning": pack.selection_reasoning,
+        "query_summary": pack.query_summary,
+        "freshness": pack.freshness,
+        "retrieval_observability": pack.retrieval_observability,
+        "created_at": pack.created_at,
+        "results": [support.event_preview_dump() for support in pack.results],
+    }
 
 
 def _build_query_variants(snapshot: AssistantTargetSnapshot) -> list[str]:
@@ -626,6 +810,153 @@ def _build_query_variants(snapshot: AssistantTargetSnapshot) -> list[str]:
         seen.add(text)
         cleaned.append(text)
     return cleaned or [snapshot.target_statement or snapshot.user_prompt or snapshot.lean_template]
+
+
+def _assistant_retrieval_lane_specs(
+    snapshot: AssistantTargetSnapshot,
+    enabled_corpora: list[str],
+) -> list[tuple[str, list[str], list[str]]]:
+    lanes: list[tuple[str, list[str], list[str]]] = []
+    local = [corpus for corpus in ("moto", "manual", "leanoj") if corpus in enabled_corpora]
+    if local:
+        lanes.append(("local_history", local, _build_query_variants(snapshot)))
+        exact_queries = [
+            value
+            for value in (
+                snapshot.target_statement,
+                snapshot.lean_template,
+                " ".join(snapshot.dependency_names),
+                "\n".join((snapshot.user_prompt, snapshot.target_statement)),
+            )
+            if value and value.strip()
+        ]
+        lanes.append(("exact_cross_prompt", local, exact_queries or _build_query_variants(snapshot)[:1]))
+    if "syntheticlib4" in enabled_corpora:
+        lanes.append(("syntheticlib4", ["syntheticlib4"], _build_query_variants(snapshot)))
+    return lanes
+
+
+def _artifact_key(record: UnifiedProofSearchRecord) -> str:
+    if record.theorem_statement_hash and record.lean_code_hash:
+        return f"hash:{record.theorem_statement_hash}:{record.lean_code_hash}"
+    if record.external_fingerprint:
+        return f"fingerprint:{record.external_fingerprint}"
+    return f"search:{record.search_id}"
+
+
+def _occurrence(record: UnifiedProofSearchRecord) -> dict[str, str]:
+    occurrence = {
+        "search_id": record.search_id,
+        "corpus": record.corpus,
+        "corpus_scope": record.corpus_scope or record.release_id,
+        "session_id": record.session_id,
+        "run_id": record.run_id,
+        "source_type": record.source_type,
+        "source_id": record.source_id,
+        "source_title": record.source_title,
+    }
+    if _is_standalone_exact_duplicate_emphasis_record(record):
+        occurrence[_ASSISTANT_EXCLUDE_EXACT_DUPLICATE_EMPHASIS] = "true"
+    return occurrence
+
+
+def _fuse_assistant_retrieval_lanes(
+    lane_records: dict[str, list[UnifiedProofSearchRecord]],
+    snapshot: AssistantTargetSnapshot,
+    *,
+    limit: int,
+) -> tuple[list[UnifiedProofSearchRecord], dict[str, Any]]:
+    scored_by_lane = {
+        lane: score_assistant_proof_candidates(records, snapshot)
+        for lane, records in lane_records.items()
+    }
+    # Reciprocal-rank fusion aggregates every lane contribution for an exact
+    # artifact.  Content scores choose the best representative; they do not
+    # masquerade as an additional fusion vote.
+    contributions: dict[str, float] = {}
+    appearances: list[tuple[str, str, int, float, UnifiedProofSearchRecord]] = []
+    for lane, ranked in scored_by_lane.items():
+        best_lane_rank_by_key: dict[str, int] = {}
+        for rank, candidate in enumerate(ranked):
+            key = _artifact_key(candidate.record)
+            best_lane_rank_by_key.setdefault(key, rank)
+            appearances.append((key, lane, rank, candidate.score, candidate.record))
+        for key, rank in best_lane_rank_by_key.items():
+            contributions[key] = contributions.get(key, 0.0) + 1.0 / (rank + 1)
+    appearances.sort(key=lambda item: (-item[3], item[1], item[2], item[4].search_id))
+    representatives: dict[str, UnifiedProofSearchRecord] = {}
+    lanes_by_key: dict[str, set[str]] = {}
+    occurrences_by_key: dict[str, list[dict[str, str]]] = {}
+    for key, lane, _, _, record in appearances:
+        representatives.setdefault(key, record)
+        lanes_by_key.setdefault(key, set()).add(lane)
+        occurrence = _occurrence(record)
+        if occurrence not in occurrences_by_key.setdefault(key, []):
+            occurrences_by_key[key].append(occurrence)
+    ordered_keys = sorted(
+        representatives,
+        key=lambda key: (
+            -contributions[key],
+            -max(item[3] for item in appearances if item[0] == key),
+            representatives[key].search_id,
+        ),
+    )
+    selected: list[UnifiedProofSearchRecord] = []
+    for key in ordered_keys:
+        representative = representatives[key]
+        metadata = dict(representative.metadata)
+        metadata["assistant_retrieval_lanes"] = sorted(lanes_by_key[key])
+        occurrences = sorted(
+            occurrences_by_key[key],
+            key=lambda item: (
+                item.get("corpus", ""),
+                item.get("run_id", ""),
+                item.get("session_id", ""),
+                item.get("source_id", ""),
+                item.get("search_id", ""),
+            ),
+        )
+        metadata["assistant_occurrences"] = occurrences
+        metadata["assistant_occurrence_total"] = len(occurrences)
+        metadata["assistant_occurrence_omitted"] = 0
+        metadata["assistant_reciprocal_rank_score"] = contributions[key]
+        selected.append(representative.model_copy(update={"metadata": metadata}))
+        if len(selected) >= limit:
+            break
+    observability = {
+        "raw_by_lane": {lane: _stage_counts(records) for lane, records in lane_records.items()},
+        "raw_total": _stage_counts([record for records in lane_records.values() for record in records]),
+        "fused_before_dedupe": _stage_counts([item[4] for item in appearances]),
+        "unique_records": _stage_counts(list({record.search_id: record for records in lane_records.values() for record in records}.values())),
+        "deduped_artifacts": _stage_counts(list(representatives.values())),
+        "deduped_distinct": _stage_counts(list(representatives.values())),
+        "fused_cap_64": _stage_counts(selected),
+        "matching_runs_examined": len({
+            (record.corpus, record.session_id or record.corpus_scope, record.source_id)
+            for records in lane_records.values() for record in records
+        }),
+        "matching_occurrences_examined": sum(len(records) for records in lane_records.values()),
+        "matching_runs": len({
+            record.run_id or record.session_id or record.source_id
+            for records in lane_records.values() for record in records
+            if record.run_id or record.session_id or record.source_id
+        }),
+    }
+    return selected, observability
+
+
+def _stage_counts(records: list[UnifiedProofSearchRecord]) -> dict[str, Any]:
+    return {
+        "total": len(records),
+        "by_corpus": dict(sorted(Counter(record.corpus for record in records).items())),
+    }
+
+
+def _stage_counts_from_supports(supports: list[AssistantProofSupport]) -> dict[str, Any]:
+    return {
+        "total": len(supports),
+        "by_corpus": dict(sorted(Counter(support.corpus for support in supports).items())),
+    }
 
 
 def _assistant_role_id_for_snapshot(snapshot: AssistantTargetSnapshot) -> str:
@@ -730,15 +1061,28 @@ def _extract_valid_selected_search_ids(payload: dict[str, Any], shortlist: list[
         return []
     valid_ids = {support.search_id for support in shortlist}
     proof_id_to_search_ids: dict[str, list[str]] = {}
+    occurrence_id_to_search_ids: dict[str, list[str]] = {}
     for support in shortlist:
         proof_id = str(support.proof_id or "").strip()
         if proof_id:
             proof_id_to_search_ids.setdefault(proof_id, []).append(support.search_id)
+        for occurrence in support.occurrence_provenance:
+            occurrence_search_id = str(occurrence.get("search_id") or "").strip()
+            if occurrence_search_id:
+                occurrence_id_to_search_ids.setdefault(
+                    occurrence_search_id, []
+                ).append(support.search_id)
     normalized_ids: list[str] = []
     invalid_ids: list[str] = []
     for search_id in clean_ids:
         if search_id in valid_ids:
             normalized_ids.append(search_id)
+            continue
+        occurrence_matches = list(dict.fromkeys(
+            occurrence_id_to_search_ids.get(search_id, [])
+        ))
+        if len(occurrence_matches) == 1:
+            normalized_ids.append(occurrence_matches[0])
             continue
         proof_id_matches = proof_id_to_search_ids.get(search_id, [])
         if len(proof_id_matches) == 1:
@@ -799,7 +1143,14 @@ def _assistant_selection_prompt(
     return (
         f"{prefix}\n"
         'Required schema: {"selected_search_ids":["<exact SELECT_ID>"],"reasoning":"<=160 chars"}\n'
-        f"Rules: select at most {_ASSISTANT_FINAL_PACK_LIMIT}; copy only exact SELECT_ID values; do not return proof_id/display IDs; use [] if no listed proof support is genuinely useful for the target; no markdown.\n\n"
+        f"Rules: select at most {_ASSISTANT_FINAL_PACK_LIMIT}; copy only exact SELECT_ID values; do not return proof_id/display IDs; no markdown. "
+        "Select a Lean-verified theorem record only when its exact statement or proof structure has "
+        "a concrete transfer path to the unchanged user objective/current task. Shared keywords and "
+        "loose analogies are insufficient. Never reinterpret or narrow the target to make a proof "
+        "appear relevant, and do not require mathematics or formal proof. For a non-mathematical "
+        "target, use [] unless an explicit bound, invariant, impossibility result, optimization or "
+        "algorithmic structure, correctness argument, safety argument, or similarly concrete "
+        "mathematical result materially helps. Use [] whenever no listed support genuinely helps.\n\n"
         f"TARGET:\n{target}\n\n"
         f"CANDIDATES:\n{ids}\n"
     )
@@ -815,6 +1166,22 @@ def _format_assistant_candidate(support: AssistantProofSupport) -> str:
     ]
     if statement:
         parts.append(f"  statement: {_compact_for_assistant_selection(statement, 220)}")
+    if support.proof_description:
+        parts.append(
+            f"  description: {_compact_for_assistant_selection(support.proof_description, 220)}"
+        )
+    if support.source_title:
+        parts.append(
+            f"  source: {_compact_for_assistant_selection(support.source_title, 140)}"
+        )
+    if support.dependency_names:
+        dependencies = ", ".join(support.dependency_names)
+        parts.append(
+            f"  dependencies: {_compact_for_assistant_selection(dependencies, 180)}"
+        )
+    if support.imports:
+        imports = ", ".join(support.imports)
+        parts.append(f"  imports: {_compact_for_assistant_selection(imports, 140)}")
     return "\n".join(parts)
 
 
@@ -848,17 +1215,140 @@ def _compact_query_summary(snapshot: AssistantTargetSnapshot) -> str:
     return summary[:600] + ("..." if len(summary) > 600 else "")
 
 
-def _filter_current_run_records(records: list[UnifiedProofSearchRecord]) -> list[UnifiedProofSearchRecord]:
-    return [record for record in records if not _is_current_run_record(record)]
+def _filter_current_run_records(
+    records: list[UnifiedProofSearchRecord],
+    *,
+    excluded_run_ids: list[str] | None = None,
+) -> list[UnifiedProofSearchRecord]:
+    excluded = set(excluded_run_ids or [])
+    return [
+        record for record in records
+        if not _is_current_run_record(record) and (not record.run_id or record.run_id not in excluded)
+    ]
 
 
-def _drop_current_run_supports_from_pack(pack: AssistantProofPack | None) -> AssistantProofPack | None:
+def _is_standalone_exact_duplicate_emphasis_record(
+    record: UnifiedProofSearchRecord,
+) -> bool:
+    """Exclude only records explicitly marked as duplicate-emphasis artifacts."""
+    return record.metadata.get(_ASSISTANT_EXCLUDE_EXACT_DUPLICATE_EMPHASIS) is True
+
+
+def _filter_assistant_lane_records(
+    records: list[UnifiedProofSearchRecord],
+) -> list[UnifiedProofSearchRecord]:
+    return [
+        record
+        for record in records
+        if not _is_standalone_exact_duplicate_emphasis_record(record)
+    ]
+
+
+def _sanitize_duplicate_emphasis_support(
+    support: AssistantProofSupport,
+    *,
+    excluded_run_ids: set[str] | None = None,
+    excluded_session_ids: set[str] | None = None,
+) -> AssistantProofSupport | None:
+    """Remove ineligible occurrences while retaining any eligible fused occurrence."""
+    excluded_runs = excluded_run_ids or set()
+    excluded_sessions = excluded_session_ids or set()
+    occurrences = list(support.occurrence_provenance)
+    eligible = [
+        occurrence
+        for occurrence in occurrences
+        if occurrence.get(_ASSISTANT_EXCLUDE_EXACT_DUPLICATE_EMPHASIS) != "true"
+        and (
+            occurrence.get("corpus_scope", "").strip().lower()
+            not in _CURRENT_RUN_CORPUS_SCOPES
+        )
+        and (
+            not occurrence.get("run_id")
+            or occurrence.get("run_id") not in excluded_runs
+        )
+        and (
+            not occurrence.get("session_id")
+            or occurrence.get("session_id") not in excluded_sessions
+        )
+    ]
+    if occurrences and not eligible:
+        return None
+    if len(eligible) == len(occurrences):
+        return support
+
+    representative = eligible[0]
+    prior_total = max(support.occurrence_total, len(occurrences))
+    removed = len(occurrences) - len(eligible)
+    updates: dict[str, Any] = {
+        "occurrence_provenance": eligible,
+        "occurrence_total": max(len(eligible), prior_total - removed),
+        "occurrence_omitted": max(0, support.occurrence_omitted),
+    }
+    for field in (
+        "search_id",
+        "corpus",
+        "corpus_scope",
+        "session_id",
+        "run_id",
+        "source_type",
+        "source_id",
+        "source_title",
+    ):
+        value = representative.get(field)
+        if value:
+            updates[field] = value
+    return support.model_copy(update=updates)
+
+
+def _drop_current_run_supports_from_pack(
+    pack: AssistantProofPack | None,
+    *,
+    excluded_run_ids: list[str] | None = None,
+    excluded_session_ids: list[str] | None = None,
+) -> AssistantProofPack | None:
     if pack is None or not pack.results:
         return pack
-    filtered_results = [support for support in pack.results if not _is_current_run_support(support)]
-    if len(filtered_results) == len(pack.results):
+    if pack.schema_version != ASSISTANT_PROOF_PACK_SCHEMA_VERSION:
+        return None
+    excluded_runs = set(excluded_run_ids or [])
+    excluded_sessions = set(excluded_session_ids or [])
+    filtered_results: list[AssistantProofSupport] = []
+    changed = False
+    for support in pack.results:
+        sanitized = _sanitize_duplicate_emphasis_support(
+            support,
+            excluded_run_ids=excluded_runs,
+            excluded_session_ids=excluded_sessions,
+        )
+        if sanitized is None:
+            changed = True
+            continue
+        if not support.occurrence_provenance and (
+            _is_current_run_support(support)
+            or (support.run_id and support.run_id in excluded_runs)
+            or (support.session_id and support.session_id in excluded_sessions)
+        ):
+            changed = True
+            continue
+        if sanitized is not support:
+            changed = True
+        filtered_results.append(sanitized)
+    if not changed:
         return pack
     return pack.model_copy(update={"results": filtered_results})
+
+
+def _filter_pack_for_snapshot(
+    pack: AssistantProofPack | None,
+    snapshot: AssistantTargetSnapshot,
+) -> AssistantProofPack | None:
+    """Apply the requesting workflow's stable run/session exclusions to reused packs."""
+    excluded_ids = _current_run_ids(snapshot)
+    return _drop_current_run_supports_from_pack(
+        pack,
+        excluded_run_ids=excluded_ids,
+        excluded_session_ids=excluded_ids,
+    )
 
 
 def _is_current_run_record(record: UnifiedProofSearchRecord) -> bool:
@@ -882,6 +1372,14 @@ def _is_current_run_support(support: AssistantProofSupport) -> bool:
         return support.session_id == active_session_id
     parts = support.search_id.split(":")
     return len(parts) >= 3 and parts[1] == active_session_id
+
+
+def _current_run_ids(snapshot: AssistantTargetSnapshot) -> list[str]:
+    return sorted({
+        value.strip()
+        for value in (snapshot.run_id, _active_autonomous_session_id())
+        if value and value.strip()
+    })
 
 
 def _cooldown_delay_for_stage(stage: int) -> int:
@@ -1138,6 +1636,19 @@ def _assistant_pack_path() -> Path:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def _read_latest_assistant_pack() -> AssistantProofPack | None:
+    path = _assistant_pack_path()
+    if not path.exists():
+        return None
+    try:
+        return _drop_current_run_supports_from_pack(
+            AssistantProofPack.model_validate_json(path.read_text(encoding="utf-8"))
+        )
+    except Exception:
+        logger.debug("Assistant latest-pack file could not be read", exc_info=True)
+        return None
 
 
 def _delete_if_exists(path: Path) -> None:

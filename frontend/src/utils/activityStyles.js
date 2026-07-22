@@ -2,9 +2,36 @@ export const CONTEXT_OVERFLOW_STOP_MESSAGE = 'Research stopped. Some required so
 
 export const REJECTION_FEEDBACK_NOTICE = 'Rejections are normal and provide feedback to the model. Extended rejection streaks can be expected on difficult problems. Above is 10 submissions your validator thought were not worth your time!';
 
-export const formatContextOverflowActivityMessage = (data = {}) => (
-  data.message || CONTEXT_OVERFLOW_STOP_MESSAGE
-);
+export const formatContextOverflowActivityMessage = (data = {}) => {
+  const message = data.message || CONTEXT_OVERFLOW_STOP_MESSAGE;
+  const configuredModel = data.configured_model || '';
+  const configuredProvider = data.configured_provider || '';
+  const effectiveModel = data.effective_model || data.model || '';
+  const effectiveProvider = data.effective_provider || data.provider || '';
+  const effectiveHost = data.effective_host_provider || data.host_provider || '';
+  const configuredIdentity = [configuredModel, configuredProvider].filter(Boolean).join(' via ');
+  const effectiveRoute = [
+    [effectiveModel, effectiveProvider].filter(Boolean).join(' via '),
+    effectiveHost ? `host ${effectiveHost}` : '',
+  ].filter(Boolean).join(', ');
+  const hasConfigured = Boolean(configuredIdentity);
+  const hasEffective = Boolean(effectiveRoute);
+  const routeChanged = hasConfigured && hasEffective && (
+    (configuredModel && effectiveModel && configuredModel !== effectiveModel)
+    || (configuredProvider && effectiveProvider && configuredProvider !== effectiveProvider)
+  );
+  let identity = '';
+  if (routeChanged) {
+    identity = `Effective route: ${effectiveRoute}. Configured route: ${configuredIdentity}.`;
+  } else if (hasEffective) {
+    identity = `Route: ${effectiveRoute}.`;
+  } else if (hasConfigured) {
+    identity = `Configured route: ${configuredIdentity}.`;
+  }
+  if (!identity) return message;
+  const separator = /[.!?]$/.test(message.trim()) ? ' ' : '. ';
+  return `${message}${separator}${identity}`;
+};
 
 export const shouldAddRejectionFeedbackNotice = (data = {}, observedConsecutiveRejections = null, shown = {}) => {
   const total = Number(data.total_rejections ?? data.total_rejection_count ?? data.rejection_count);
@@ -31,8 +58,49 @@ export const buildRejectionFeedbackNoticeActivity = (timestamp, data = {}) => ({
   },
 });
 
+export const formatSolutionPathEventMessage = (event = '', data = {}) => {
+  if (data.message) return data.message;
+  const queued = Number(data.queued_proposals || 0);
+  switch (event) {
+    case 'solution_path_activated':
+      return 'Progressive solution-path tracking is now active.';
+    case 'solution_path_proposal_queued':
+      return `A solution-path update was queued for Main Submitter 1 review${queued ? ` (${queued} queued)` : ''}.`;
+    case 'solution_path_proposal_reviewing':
+      return 'Main Submitter 1 is reviewing a proposed solution-path update.';
+    case 'solution_path_updated':
+      return `Main Submitter 1 approved solution path revision ${Number(data.revision || 0)}.`;
+    case 'solution_path_proposal_rejected':
+      return 'Main Submitter 1 rejected a proposed solution-path update.';
+    case 'solution_path_proposal_retry_queued':
+      return `A solution-path update remains queued for retry${queued ? ` (${queued} queued)` : ''}.`;
+    case 'solution_path_proposal_user_repair_required':
+      return 'A solution-path update needs a provider, model, key, privacy, or context setting repaired before review can continue.';
+    case 'solution_path_proposal_resumed':
+      return 'The repaired solution-path update was explicitly returned to the Main Submitter 1 review queue.';
+    default:
+      return 'Solution path changed.';
+  }
+};
+
 export const getActivityIcon = (event = '') => {
   switch (event) {
+    case 'solution_path_activated':
+      return '◇';
+    case 'solution_path_proposal_queued':
+      return '+';
+    case 'solution_path_proposal_reviewing':
+      return '◎';
+    case 'solution_path_updated':
+      return '✓';
+    case 'solution_path_proposal_rejected':
+      return '✗';
+    case 'solution_path_proposal_retry_queued':
+      return '↺';
+    case 'solution_path_proposal_user_repair_required':
+      return '⚠';
+    case 'solution_path_proposal_resumed':
+      return '▶';
     case 'assistant_proof_pack_updated':
       return 'A';
     case 'assistant_proof_pack_failed':
@@ -176,6 +244,7 @@ export const getActivityIcon = (event = '') => {
     case 'proof_attempts_exhausted':
       return '⚠';
     case 'context_overflow_error':
+    case 'proof_context_overflow':
       return '!';
     case 'proof_verified':
     case 'known_proof_verified':
@@ -278,8 +347,30 @@ export const getActivityClass = (event = '', item = {}) => {
   }
 
   if (
-    event === 'assistant_proof_pack_updated'
+    event === 'assistant_proof_pack_updated' ||
+    event === 'solution_path_activated' ||
+    event === 'solution_path_proposal_queued' ||
+    event === 'solution_path_proposal_reviewing'
   ) {
+    return 'activity-info';
+  }
+
+  if (event === 'solution_path_updated') {
+    return 'activity-success';
+  }
+
+  if (event === 'solution_path_proposal_rejected') {
+    return 'activity-reject';
+  }
+
+  if (
+    event === 'solution_path_proposal_retry_queued'
+    || event === 'solution_path_proposal_user_repair_required'
+  ) {
+    return 'activity-warning';
+  }
+
+  if (event === 'solution_path_proposal_resumed') {
     return 'activity-info';
   }
 
@@ -323,6 +414,7 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'proof_integrity_rejected' ||
     event === 'smt_check_error' ||
     event === 'context_overflow_error' ||
+    event === 'proof_context_overflow' ||
     event === 'leanoj_brainstorm_rejected' ||
     event === 'leanoj_brainstorm_submitter_failed' ||
     event === 'leanoj_brainstorm_prune_rejected' ||
@@ -422,14 +514,20 @@ export const formatAssistantProofPackMessage = (data = {}) => {
   const selectorText = assistantSelected
     ? ` via Assistant${assistantModel ? ` (${assistantModel})` : ''}`
     : (selectionMode ? ` via ${selectionMode}` : '');
-  const candidateCount = Number.isFinite(Number(data.candidate_count)) ? Number(data.candidate_count) : null;
-  const candidateText = candidateCount !== null ? ` from ${candidateCount} candidates` : '';
+  const reviewedByCorpus = data.retrieval_observability?.deduped_distinct?.by_corpus || {};
+  const reviewedSynthetic = Number(reviewedByCorpus.syntheticlib4 || 0);
+  const reviewedLocal = Object.entries(reviewedByCorpus)
+    .filter(([corpus]) => corpus !== 'syntheticlib4')
+    .reduce((sum, [, count]) => sum + Number(count || 0), 0);
+  const countsText = Object.keys(reviewedByCorpus).length
+    ? `: reviewed ${reviewedLocal} local and ${reviewedSynthetic} SyntheticLib4; used ${local} local and ${synthetic} SyntheticLib4`
+    : `: used ${local} local and ${synthetic} SyntheticLib4`;
 
   if (total === 0 && warningCount === 0) {
-    return `Assistant memory found no useful proofs${candidateText} for ${target}${phaseText}${selectorText}: ${local} local, ${synthetic} SyntheticLib4`;
+    return `Assistant memory found no useful proofs for ${target}${phaseText}${selectorText}${countsText}`;
   }
 
-  return `Assistant memory returned ${total}/${max} proofs${candidateText} for ${target}${phaseText}${selectorText}: ${local} local, ${synthetic} SyntheticLib4${warningText}`;
+  return `Assistant memory returned ${total}/${max} proofs for ${target}${phaseText}${selectorText}${countsText}${warningText}`;
 };
 
 export const ASSISTANT_PROOF_PACK_EVENTS = new Set([
@@ -522,16 +620,17 @@ export const formatAssistantProofPackEventMessage = (event = '', data = {}) => {
   const assistantModel = String(data.assistant_model_id || '').trim();
   const assistantSelected = Boolean(String(data.assistant_role_id || assistantModel || '').trim());
   const modelText = assistantSelected ? ` via Assistant${assistantModel ? ` (${assistantModel})` : ''}` : '';
-  const candidateCount = Number.isFinite(Number(data.candidate_count)) ? Number(data.candidate_count) : null;
-  const shortlistCount = Number.isFinite(Number(data.shortlist_count)) ? Number(data.shortlist_count) : null;
-  const candidateText = candidateCount !== null
-    ? ` from ${candidateCount} candidates${shortlistCount !== null ? ` (${shortlistCount} shortlisted)` : ''}`
+  const observability = data.retrieval_observability || {};
+  const reviewedByCorpus = observability.deduped_distinct?.by_corpus || {};
+  const usedByCorpus = observability.final_selected?.by_corpus || {};
+  const sumLocal = (counts) => Object.entries(counts)
+    .filter(([corpus]) => corpus !== 'syntheticlib4')
+    .reduce((sum, [, count]) => sum + Number(count || 0), 0);
+  const counterText = Object.keys(reviewedByCorpus).length
+    ? `: reviewed ${sumLocal(reviewedByCorpus)} local and ${Number(reviewedByCorpus.syntheticlib4 || 0)} SyntheticLib4; used ${sumLocal(usedByCorpus)} local and ${Number(usedByCorpus.syntheticlib4 || 0)} SyntheticLib4`
     : '';
   if (event === 'assistant_proof_pack_refresh_started') {
-    if (candidateCount !== null && shortlistCount !== null && assistantSelected) {
-      return `Assistant memory refresh started for ${target}${phaseText}: local proof-search ranking shortlisted ${shortlistCount} of ${candidateCount} candidates for Assistant review`;
-    }
-    return `Assistant memory refresh started${candidateText} for ${target}${phaseText}${modelText}`;
+    return `Assistant memory refresh started for ${target}${phaseText}${modelText}`;
   }
   if (event === 'assistant_proof_pack_warning') {
     const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean).join('; ') : '';
@@ -540,7 +639,7 @@ export const formatAssistantProofPackEventMessage = (event = '', data = {}) => {
   if (event === 'assistant_proof_pack_failed') {
     const detail = String(data.error_message || data.reason || '').trim();
     const failureText = detail ? `: ${detail}` : '';
-    return `Assistant memory model call failed for ${target}${phaseText}${modelText}${candidateText}${failureText}`;
+    return `Assistant memory model call failed for ${target}${phaseText}${modelText}${failureText}${counterText}`;
   }
   if (event === 'assistant_proof_pack_stopped') {
     return `Assistant memory stopped (${data.reason || 'parent stopped'})`;

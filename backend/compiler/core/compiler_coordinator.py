@@ -7,7 +7,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
-from typing import Optional, Dict, Callable, List, Tuple
+from typing import Any, Optional, Dict, Callable, List, Tuple
 from datetime import datetime
 
 from backend.shared.config import system_config, rag_config
@@ -16,7 +16,7 @@ from backend.shared.api_client_manager import RetryableProviderError, api_client
 from backend.shared.openrouter_client import FreeModelExhaustedError, OpenRouterInvalidResponseError
 from backend.shared.brainstorm_proof_gate import BRAINSTORM_LEAN_PROOF_MARKER
 from backend.shared.free_model_manager import free_model_manager
-from backend.shared.json_parser import parse_json
+from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
@@ -27,6 +27,7 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_RESOLUTION,
     CONTEXT_OVERFLOW_STOP_MESSAGE,
     CONTEXT_OVERFLOW_STOP_REASON,
+    context_overflow_model_payload,
 )
 from backend.compiler.agents.writer_submitter import WritingSubmitter
 from backend.compiler.agents.high_param_submitter import HighParamSubmitter
@@ -141,12 +142,15 @@ class CompilerCoordinator:
         self.writer_submitter: Optional[WritingSubmitter] = None
         self.high_param_submitter: Optional[HighParamSubmitter] = None
         self.validator: Optional[CompilerValidator] = None
+        self.solution_path_manager = None
         
         self.is_running = False
         self.current_mode = "idle"
         self.outline_accepted = False
         self.fatal_error_type: Optional[str] = None
         self.fatal_error_message: str = ""
+        self.fatal_error_payload: Optional[Dict[str, Any]] = None
+        self.top_level_terminal_callback: Optional[Callable[[], Any]] = None
         
         # Stats
         self.total_submissions = 0
@@ -204,6 +208,14 @@ class CompilerCoordinator:
         self.completed_task_ids: set = set()
         self.current_task_sequence: int = 0
         self.current_task_id: Optional[str] = None  # Currently executing task
+
+    def _notify_top_level_terminal(self) -> None:
+        """Notify a route-owned top-level lifecycle without affecting child compilers."""
+        if self.top_level_terminal_callback:
+            try:
+                self.top_level_terminal_callback()
+            except Exception:
+                logger.exception("Compiler top-level terminal callback failed")
     
     async def initialize(
         self,
@@ -349,7 +361,7 @@ class CompilerCoordinator:
             # from autonomous brainstorm content that may have been loaded in a prior session
             from backend.aggregator.core.rag_manager import rag_manager
             logger.info("Clearing RAG for fresh Part 2 compiler session...")
-            await asyncio.to_thread(rag_manager.clear_all_documents)
+            await rag_manager.clear_all_documents_async()
             logger.info("RAG cleared successfully for Part 2 compiler")
             
             # Now load the Part 1 aggregator database into clean RAG
@@ -388,6 +400,7 @@ class CompilerCoordinator:
             websocket_broadcaster=self.websocket_broadcaster,
             proof_database_store=proof_database if self.autonomous_mode else None,
         )
+        self.writer_submitter.solution_path_manager = self.solution_path_manager
         await self.writer_submitter.initialize()
         # Set up task tracking callback for workflow panel integration
         self.writer_submitter.set_task_tracking_callback(self._handle_task_event)
@@ -415,6 +428,7 @@ class CompilerCoordinator:
             validator_max_tokens=self.validator_max_tokens,
             proof_database_store=proof_database if self.autonomous_mode else manual_proof_database,
         )
+        self.high_param_submitter.solution_path_manager = self.solution_path_manager
         self.high_param_submitter.set_rigor_proof_source(
             self._current_paper_id or "",
             self._current_rigor_proof_source_title or compiler_prompt,
@@ -474,6 +488,7 @@ class CompilerCoordinator:
             compiler_prompt,
             websocket_broadcaster=self.websocket_broadcaster,
             proof_database_store=proof_database if self.autonomous_mode else None,
+            solution_path_manager=self.solution_path_manager,
         )
         await self.validator.initialize()
         # Set up task tracking callback for workflow panel integration
@@ -733,26 +748,29 @@ class CompilerCoordinator:
         self.is_running = True
         self.fatal_error_type = None
         self.fatal_error_message = ""
+        self.fatal_error_payload = None
         logger.info("Starting compiler...")
         
-        # Reset free model manager state for fresh start
-        free_model_manager.reset()
-        
-        # Refresh workflow predictions at start
-        await self.refresh_workflow_predictions()
-        
-        # Start main workflow loop
-        self._main_task = asyncio.create_task(self._main_workflow())
-        
-        # Manual Part 2 can watch Part 1 for incremental context. Autonomous/Tier 3
-        # paper writing owns its brainstorm context and must not spawn child monitors.
-        if not self.autonomous_mode:
-            self._aggregator_monitor_task = asyncio.create_task(self._monitor_aggregator_for_rerag())
-        else:
+        try:
+            free_model_manager.reset()
+            await self.refresh_workflow_predictions()
+            self._main_task = asyncio.create_task(self._main_workflow())
+
+            if not self.autonomous_mode:
+                self._aggregator_monitor_task = asyncio.create_task(self._monitor_aggregator_for_rerag())
+            else:
+                self._aggregator_monitor_task = None
+
+            await self._broadcast("compiler_started", {"message": "Compiler started"})
+            logger.info("Compiler started successfully")
+        except BaseException:
+            self.is_running = False
+            for task in (self._main_task, self._aggregator_monitor_task):
+                if task and not task.done():
+                    await _cancel_and_drain_task(task)
+            self._main_task = None
             self._aggregator_monitor_task = None
-        
-        await self._broadcast("compiler_started", {"message": "Compiler started"})
-        logger.info("Compiler started successfully")
+            raise
 
     async def _load_rigor_source_material_context(self) -> tuple[str, str]:
         """Load direct brainstorm/aggregator context for paper-writing proof mode."""
@@ -784,7 +802,12 @@ class CompilerCoordinator:
     
     async def stop(self) -> None:
         """Stop the compiler system."""
-        if not self.is_running:
+        tasks_alive = any(
+            task is not None and not task.done()
+            for task in (self._main_task, self._aggregator_monitor_task)
+        )
+        if not self.is_running and not tasks_alive:
+            self._notify_top_level_terminal()
             return
         
         self.is_running = False
@@ -798,26 +821,49 @@ class CompilerCoordinator:
         
         if self._main_task:
             await _cancel_and_drain_task(self._main_task)
+        self._main_task = None
         
         if self._aggregator_monitor_task:
             await _cancel_and_drain_task(self._aggregator_monitor_task)
+        self._aggregator_monitor_task = None
         
         await self._broadcast("compiler_stopped", {"message": "Compiler stopped"})
         logger.info("Compiler stopped")
+        self._notify_top_level_terminal()
 
     async def _handle_context_overflow(self, error: BaseException, *, role_id: str, mode: Optional[str] = None) -> None:
         """Stop the compiler when mandatory direct context cannot fit."""
         self.fatal_error_type = CONTEXT_OVERFLOW_STOP_REASON
         self.fatal_error_message = str(error)
         self.is_running = False
+        config_role_id = {
+            "compiler_rigor": "compiler_high_param",
+        }.get(role_id, role_id)
+        feedback = getattr(error, "feedback", None)
+        feedback_route_payload = {
+            key: value
+            for key, value in {
+                "configured_model": getattr(feedback, "configured_model", None),
+                "configured_provider": getattr(feedback, "configured_provider", None),
+                "effective_model": getattr(feedback, "effective_model", None),
+                "effective_provider": getattr(feedback, "effective_provider", None),
+            }.items()
+            if value
+        }
         payload = {
+            "workflow_mode": "autonomous" if self.autonomous_mode else "compiler",
             "role_id": role_id,
+            **context_overflow_model_payload(
+                api_client_manager.get_role_config(config_role_id)
+            ),
+            **feedback_route_payload,
             "mode": mode or self.current_mode,
             "reason": CONTEXT_OVERFLOW_STOP_REASON,
             "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
             "error_detail": str(error),
             "resolution": CONTEXT_OVERFLOW_RESOLUTION,
         }
+        self.fatal_error_payload = dict(payload)
         logger.error("Compiler context overflow in %s: %s", role_id, error)
         await self._broadcast("context_overflow_error", payload)
     
@@ -913,6 +959,9 @@ class CompilerCoordinator:
                 "mode": self.current_mode,
                 "total_submissions": self.total_submissions
             })
+        finally:
+            if not self.is_running:
+                self._notify_top_level_terminal()
     
     def _pre_validate_outline_structure(self, content: str) -> Optional[str]:
         """
@@ -922,10 +971,36 @@ class CompilerCoordinator:
         This provides IMMEDIATE, CONSISTENT feedback on structural issues
         without relying on LLM validator interpretation.
         """
-        # Abstract is OPTIONAL - if included, it must be properly formatted
-        # Valid formats: "Abstract", "I. Abstract", "0. Abstract" (case-insensitive)
-        # If Abstract is not present, that's also fine - outline can start with Introduction
-        # We don't enforce Abstract presence here - let validator handle acceptance logic
+        # Abstract is OPTIONAL. If included, it must be the unnumbered first
+        # section. Introduction, at least one body section, and Conclusion are
+        # required in that order.
+        heading_pattern = re.compile(
+            r"^\s*(?P<number>(?:[IVXLCDM]+|\d+)\.\s*)?"
+            r"(?P<title>Abstract|Introduction|Conclusion)\s*$",
+            re.MULTILINE | re.IGNORECASE,
+        )
+        headings = list(heading_pattern.finditer(content))
+        abstract_headings = [
+            match for match in headings
+            if match.group("title").lower() == "abstract"
+        ]
+        if abstract_headings:
+            abstract = abstract_headings[0]
+            if abstract.group("number"):
+                return (
+                    "PRE-VALIDATION FAILED: INCORRECT_SECTION_NAME - Abstract\n\n"
+                    "If included, Abstract must use the unnumbered heading 'Abstract'. "
+                    "Numbered forms such as 'I. Abstract' and '0. Abstract' are invalid."
+                )
+            first_nonempty_line = next(
+                (line.strip() for line in content.splitlines() if line.strip()),
+                "",
+            )
+            if first_nonempty_line.lower() != "abstract":
+                return (
+                    "PRE-VALIDATION FAILED: INCORRECT_SECTION_ORDER - Abstract\n\n"
+                    "If included, the unnumbered Abstract must be the first section."
+                )
         
         # Check for "Introduction" header
         intro_pattern = r'^\s*(?:I\.\s*)?Introduction\s*$'
@@ -960,6 +1035,34 @@ INVALID:
 ❌ Summary
 ❌ Final Remarks
 ❌ Closing"""
+
+        intro_match = re.search(
+            intro_pattern, content, re.MULTILINE | re.IGNORECASE
+        )
+        conclusion_match = re.search(
+            concl_pattern, content, re.MULTILINE | re.IGNORECASE
+        )
+        if intro_match and conclusion_match and intro_match.start() >= conclusion_match.start():
+            return (
+                "PRE-VALIDATION FAILED: INCORRECT_SECTION_ORDER\n\n"
+                "Introduction must appear before the body sections and Conclusion."
+            )
+        body_between = (
+            content[intro_match.end():conclusion_match.start()].strip()
+            if intro_match and conclusion_match
+            else ""
+        )
+        body_heading_pattern = r"^\s*(?:[IVXLCDM]+|\d+)\.\s+\S.*$"
+        if not re.search(
+            body_heading_pattern,
+            body_between,
+            re.MULTILINE | re.IGNORECASE,
+        ):
+            return (
+                "PRE-VALIDATION FAILED: MISSING_REQUIRED_SECTION - Body\n\n"
+                "Your outline must include at least one numbered body section "
+                "between Introduction and Conclusion."
+            )
         
         return None  # All critical checks passed
     
@@ -2552,7 +2655,32 @@ INVALID:
                     placement_outcome="inline",
                 )
                 try:
-                    await paper_memory.append_to_theorems_appendix(appendix_stub)
+                    stub_appended = await paper_memory.append_to_theorems_appendix(
+                        appendix_stub
+                    )
+                    if not stub_appended:
+                        await paper_memory.ensure_markers_intact()
+                        stub_appended = await paper_memory.append_to_theorems_appendix(
+                            appendix_stub
+                        )
+                    if not stub_appended:
+                        logger.error(
+                            "Inline theorem persisted, but appendix stub could not "
+                            "be written after marker repair"
+                        )
+                        await self._broadcast(
+                            "compiler_rejection",
+                            {
+                                "mode": "rigor",
+                                "submission_id": submission.submission_id,
+                                "reasoning": (
+                                    "The theorem was placed inline, but its Lean "
+                                    "appendix entry could not be persisted."
+                                ),
+                                "placement_outcome": "inline_appendix_persistence_failed",
+                                "lean_proof_id": lean_result.proof_id,
+                            },
+                        )
                 except Exception as exc:
                     logger.warning(
                         "Inline-placed theorem appendix stub append failed (non-fatal): %s",
@@ -2618,8 +2746,8 @@ INVALID:
 
         # Appendix storage: either explicitly requested by discovery or used
         # as fallback when inline placement failed / was impossible. The math
-        # is already Lean-verified, so the theorem is preserved and counted as
-        # a rigor_acceptance.
+        # is already Lean-verified, but paper-placement success is reported only
+        # after the appendix entry is durably written.
         appendix_entry = format_theorem_appendix_entry(
             proof_id=lean_result.proof_id,
             theorem_statement=lean_result.theorem_statement,
@@ -2638,19 +2766,46 @@ INVALID:
             await paper_memory.ensure_markers_intact()
             appended = await paper_memory.append_to_theorems_appendix(appendix_entry)
             if not appended:
-                logger.warning("Appendix append still failed after marker repair; preserving proof record without paper appendix entry")
+                logger.error(
+                    "Appendix append still failed after marker repair; preserving "
+                    "the canonical proof record without claiming paper persistence"
+                )
+                await self._broadcast(
+                    "compiler_rejection",
+                    {
+                        "mode": "rigor",
+                        "submission_id": (
+                            lean_result.initial_placement_submission.submission_id
+                            if lean_result.initial_placement_submission
+                            else f"rigor_{appendix_outcome}_{lean_result.proof_id}"
+                        ),
+                        "reasoning": (
+                            "Lean verification succeeded, but the theorem could not "
+                            "be persisted to the paper appendix after marker repair."
+                        ),
+                        "placement_outcome": "appendix_persistence_failed",
+                        "lean_proof_id": lean_result.proof_id,
+                    },
+                )
+                return False
 
         self.rigor_acceptances += 1
+        acceptance_submission_id = (
+            lean_result.initial_placement_submission.submission_id
+            if lean_result.initial_placement_submission
+            else f"rigor_{appendix_outcome}_{lean_result.proof_id}"
+        )
+        await compiler_rejection_log.add_acceptance(
+            acceptance_submission_id,
+            "rigor",
+            appendix_entry[:500],
+        )
         word_count = await paper_memory.get_word_count()
         await self._broadcast(
             "compiler_acceptance",
             {
                 "mode": "rigor",
-                "submission_id": (
-                    lean_result.initial_placement_submission.submission_id
-                    if lean_result.initial_placement_submission
-                    else f"rigor_{appendix_outcome}_{lean_result.proof_id}"
-                ),
+                "submission_id": acceptance_submission_id,
                 "placement_outcome": appendix_outcome,
                 "lean_proof_id": lean_result.proof_id,
                 "is_novel": lean_result.is_novel,
@@ -3310,6 +3465,8 @@ INVALID:
             ]
             
             prompt = ''.join(parts)
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(prompt, self.solution_path_manager)
             
             # Generate task ID
             task_id = self.critique_submitter.next_critique_task_id("critique_val")
@@ -3328,8 +3485,34 @@ INVALID:
             message = response.get("choices", [{}])[0].get("message", {})
             response_text = extract_message_text(message)
             
-            # Parse response
-            data = parse_json(response_text)
+            # Parse response, with one bounded same-role JSON repair.
+            try:
+                data = parse_json(response_text)
+            except Exception as parse_error:
+                safe = sanitize_model_output_for_retry_context(
+                    response_text, max_chars=2000
+                )
+                repair = (
+                    "Your previous critique validation response was invalid JSON. "
+                    f"Validation error: {parse_error}. Return the exact same primary "
+                    "decision as one corrected JSON object. Retain the one valid "
+                    "optional top-level `solution_path_update` if present; omission "
+                    "remains valid."
+                )
+                retry = await api_client_manager.generate_completion(
+                    task_id=f"{task_id}_retry",
+                    role_id="critique_validator",
+                    model=self.validator_model,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": safe},
+                        {"role": "user", "content": repair},
+                    ],
+                    temperature=0.0,
+                    max_tokens=self.validator_max_tokens,
+                )
+                retry_message = retry.get("choices", [{}])[0].get("message", {})
+                data = parse_json(extract_message_text(retry_message))
             
             if data is None:
                 logger.error("Failed to parse critique validation response")
@@ -3341,6 +3524,25 @@ INVALID:
                 if not data:
                     return None
                 data = data[0]
+            from backend.shared.solution_path.integration import enqueue_optional_update
+            critique_decision = str(data.get("decision", "reject")).lower()
+            reasoning = data.get("reasoning")
+            if critique_decision not in {"accept", "reject"}:
+                logger.error("Critique validator returned invalid decision")
+                return None
+            if not isinstance(reasoning, str) or not reasoning.strip():
+                logger.error("Critique validator returned empty reasoning")
+                return None
+            await enqueue_optional_update(
+                data,
+                self.solution_path_manager,
+                proposer_role="compiler_validator",
+                source_task_id=task_id,
+                source_phase="critique_validation",
+                source_decision=(
+                    critique_decision
+                ),
+            )
             
             # Create ValidationResult
             result = ValidationResult(
@@ -3389,6 +3591,8 @@ INVALID:
             ]
             
             prompt = ''.join(parts)
+            from backend.shared.solution_path.integration import with_validator_hook
+            prompt = with_validator_hook(prompt, self.solution_path_manager)
             
             # Call validator
             task_id = self.critique_submitter.next_critique_task_id("critique_cleanup")
@@ -3406,15 +3610,58 @@ INVALID:
             message = response.get("choices", [{}])[0].get("message", {})
             response_text = extract_message_text(message)
             
-            # Parse response
-            data = parse_json(response_text)
-            
-            if data is None or not data.get("should_remove", False):
+            # Parse response, with one bounded same-role JSON repair.
+            try:
+                data = parse_json(response_text)
+            except Exception as parse_error:
+                safe = sanitize_model_output_for_retry_context(
+                    response_text, max_chars=2000
+                )
+                repair = (
+                    "Your previous critique cleanup response was invalid JSON. "
+                    f"Validation error: {parse_error}. Return the exact same primary "
+                    "decision as one corrected JSON object. Retain the one valid "
+                    "optional top-level `solution_path_update` if present; omission "
+                    "remains valid."
+                )
+                retry = await api_client_manager.generate_completion(
+                    task_id=f"{task_id}_retry",
+                    role_id="critique_cleanup",
+                    model=self.validator_model,
+                    messages=[
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": safe},
+                        {"role": "user", "content": repair},
+                    ],
+                    temperature=0.0,
+                    max_tokens=self.validator_max_tokens,
+                )
+                retry_message = retry.get("choices", [{}])[0].get("message", {})
+                data = parse_json(extract_message_text(retry_message))
+            if data is None:
+                logger.info("Critique cleanup: No removal needed")
+                return
+            should_remove = data.get("should_remove", False)
+            critique_number = data.get("submission_number")
+            if should_remove and not critique_number:
+                logger.warning(
+                    "Critique cleanup requested removal without submission_number"
+                )
+                return
+            from backend.shared.solution_path.integration import enqueue_optional_update
+            await enqueue_optional_update(
+                data,
+                self.solution_path_manager,
+                proposer_role="compiler_validator",
+                source_task_id=task_id,
+                source_phase="critique_cleanup_validation",
+                source_decision="accept" if should_remove else "reject",
+            )
+            if not should_remove:
                 logger.info("Critique cleanup: No removal needed")
                 return
             
             # Remove the critique
-            critique_number = data.get("submission_number")
             if critique_number:
                 success = await critique_memory.remove_critique(critique_number)
                 if success:

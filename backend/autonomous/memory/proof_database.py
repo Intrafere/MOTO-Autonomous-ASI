@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -18,10 +19,63 @@ import aiofiles
 from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.models import FailedProofCandidate, ProofCandidate, ProofRecord
-from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
+from backend.shared.path_safety import resolve_filename_within_root, validate_single_path_component
+from backend.shared.proof_identity import canonical_proof_identity
 from backend.autonomous.prompts.proof_prompts import format_failure_hints_for_injection
 
 logger = logging.getLogger(__name__)
+
+DUPLICATE_NOVEL_TIER = "duplicate_novel"
+NOT_NOVEL_TIER = "not_novel"
+PROOF_LIBRARY_CATEGORIES = frozenset({"novel", "duplicate_novel", "not_novel", "all"})
+PROMPT_INJECTION_NOVEL_TIERS = frozenset(
+    {
+        "novel_formulation",
+        "novel_variant",
+        "mathematical_discovery",
+        "major_mathematical_discovery",
+    }
+)
+
+
+def is_duplicate_novel_tier(novelty_tier: str) -> bool:
+    return str(novelty_tier or "").strip().lower() == DUPLICATE_NOVEL_TIER
+
+
+def is_not_novel_tier(novelty_tier: str) -> bool:
+    return str(novelty_tier or "").strip().lower() == NOT_NOVEL_TIER
+
+
+def is_syntheticlib_novel_tier(novelty_tier: str) -> bool:
+    return not is_not_novel_tier(novelty_tier)
+
+
+def is_prompt_injection_novel_tier(novelty_tier: str) -> bool:
+    return str(novelty_tier or "").strip().lower() in PROMPT_INJECTION_NOVEL_TIERS
+
+
+def normalize_proof_library_category(category: Optional[str] = None, novel_only: Optional[bool] = None) -> str:
+    normalized = str(category or "").strip().lower()
+    if normalized in PROOF_LIBRARY_CATEGORIES:
+        return normalized
+    if novel_only is None:
+        return "novel"
+    return "novel" if novel_only else "all"
+
+
+def proof_matches_library_category(proof_data: Dict[str, Any], category: str) -> bool:
+    normalized_category = normalize_proof_library_category(category, None)
+    if normalized_category == "all":
+        return True
+    novelty_tier = str(proof_data.get("novelty_tier") or "").strip().lower()
+    if normalized_category == "duplicate_novel":
+        return novelty_tier == DUPLICATE_NOVEL_TIER
+    if normalized_category == "not_novel":
+        return novelty_tier == NOT_NOVEL_TIER or (not novelty_tier and not bool(proof_data.get("novel")))
+    return (
+        bool(proof_data.get("novel"))
+        and (is_prompt_injection_novel_tier(novelty_tier) or not novelty_tier)
+    )
 
 
 class ProofDatabase:
@@ -37,6 +91,8 @@ class ProofDatabase:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._base_dir = Path(system_config.data_dir) / "proofs"
+        self._root_relative_default: Optional[str] = "proofs"
+        self._root_generation = system_config.runtime_root_generation
         self._session_manager = None
         self._index_data: Optional[Dict[str, Any]] = None
         self._mathlib_reverse_index: Dict[str, List[str]] = {}
@@ -47,8 +103,11 @@ class ProofDatabase:
         self._session_manager = session_manager
         if session_manager and session_manager.is_session_active:
             self._base_dir = session_manager.get_proofs_dir()
+            self._root_relative_default = None
         else:
             self._base_dir = Path(system_config.data_dir) / "proofs"
+            self._root_relative_default = "proofs"
+            self._root_generation = system_config.runtime_root_generation
         self._index_data = None
         logger.info("Proof database using path: %s", self._base_dir)
 
@@ -56,33 +115,82 @@ class ProofDatabase:
         """Use a fixed proof-storage directory independent of autonomous sessions."""
         self._session_manager = None
         self._base_dir = Path(base_dir)
+        data_root = Path(system_config.data_dir).resolve(strict=False)
+        resolved = self._base_dir.resolve(strict=False)
+        try:
+            relative = resolved.relative_to(data_root)
+        except ValueError:
+            self._root_relative_default = None
+        else:
+            self._root_relative_default = str(relative)
+            self._root_generation = system_config.runtime_root_generation
         self._index_data = None
         logger.info("Proof database using fixed path: %s", self._base_dir)
 
     def _safe_proof_id(self, proof_id: str) -> str:
         return validate_single_path_component(proof_id, "proof ID")
 
+    def _resolve_storage_path(self, filename: str) -> Path:
+        """Resolve one generated filename beneath the active proof-store root."""
+        self._refresh_runtime_root()
+        return resolve_filename_within_root(
+            self._base_dir,
+            filename,
+            "proof storage filename",
+        )
+
+    def _refresh_runtime_root(self) -> None:
+        if (
+            self._session_manager is None
+            and self._root_relative_default is not None
+            and self._root_generation != system_config.runtime_root_generation
+        ):
+            self._base_dir = Path(system_config.data_dir) / self._root_relative_default
+            self._root_generation = system_config.runtime_root_generation
+            self._index_data = None
+
     def _get_index_path(self) -> Path:
+        self._refresh_runtime_root()
         return self._base_dir / "proofs_index.json"
 
     def _get_record_path(self, proof_id: str) -> Path:
-        return self._base_dir / f"proof_{self._safe_proof_id(proof_id)}.json"
+        safe_id = self._safe_proof_id(proof_id)
+        return self._resolve_storage_path(f"proof_{safe_id}.json")
 
     def _get_lean_path(self, proof_id: str) -> Path:
-        return self._base_dir / f"proof_{self._safe_proof_id(proof_id)}_lean.lean"
+        safe_id = self._safe_proof_id(proof_id)
+        return self._resolve_storage_path(f"proof_{safe_id}_lean.lean")
 
     def _get_failed_dir(self) -> Path:
+        self._refresh_runtime_root()
         return self._base_dir / "failed"
 
     def _get_failed_candidates_path(self, source_brainstorm_id: str) -> Path:
         safe_id = validate_single_path_component(source_brainstorm_id, "brainstorm ID")
-        return self._get_failed_dir() / f"{safe_id}.json"
+        failed_dir = self._get_failed_dir()
+        return resolve_filename_within_root(
+            failed_dir,
+            f"{safe_id}.json",
+            "failed candidate filename",
+        )
 
     def _default_index(self) -> Dict[str, Any]:
         return {
             "next_proof_id": 1,
             "proofs": [],
         }
+
+    async def get_or_create_active_run_id(self) -> str:
+        """Return the durable explicit run ID owned by this proof database."""
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            run_id = str(self._index_data.get("active_run_id") or "").strip()
+            if not run_id:
+                run_id = f"manual-{uuid.uuid4().hex}"
+                self._index_data["active_run_id"] = run_id
+                await self._save_index()
+            return run_id
 
     def _rebuild_reverse_indexes(self) -> None:
         self._mathlib_reverse_index = {}
@@ -110,6 +218,7 @@ class ProofDatabase:
                     self._mathlib_reverse_short_index[short_name].append(proof_id)
 
     def _rebuild_index_from_record_files_sync(self) -> Dict[str, Any]:
+        self._refresh_runtime_root()
         proofs: List[Dict[str, Any]] = []
         for record_path in self._base_dir.glob("proof_*.json"):
             if record_path.name.endswith("_metadata.json"):
@@ -138,6 +247,8 @@ class ProofDatabase:
         """Ensure storage exists and load the index."""
         if self._session_manager and self._session_manager.is_session_active:
             self._base_dir = self._session_manager.get_proofs_dir()
+        else:
+            self._refresh_runtime_root()
 
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._get_failed_dir().mkdir(parents=True, exist_ok=True)
@@ -241,10 +352,56 @@ class ProofDatabase:
         async with aiofiles.open(failed_path, "w", encoding="utf-8") as handle:
             await handle.write(json.dumps(payload, indent=2))
 
+    async def clear_failed_candidates(self) -> None:
+        """Remove active failed proof retry hints without touching verified proofs."""
+        async with self._lock:
+            failed_dir = self._get_failed_dir()
+            if failed_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, failed_dir, True)
+            failed_dir.mkdir(parents=True, exist_ok=True)
+
     async def add_proof(self, record: ProofRecord) -> ProofRecord:
         """Persist a proof record and return the stored copy."""
         stored_record, _duplicate = await self.add_proof_if_absent(record)
         return stored_record
+
+    async def _persist_record_files(
+        self,
+        stored_record: ProofRecord,
+        serialized: Dict[str, Any],
+    ) -> None:
+        """Persist one proof's metadata and Lean source through validated paths."""
+        record_path = self._get_record_path(stored_record.proof_id)
+        lean_path = self._get_lean_path(stored_record.proof_id)
+        async with aiofiles.open(record_path, "w", encoding="utf-8") as handle:
+            await handle.write(json.dumps(serialized, indent=2))
+        async with aiofiles.open(lean_path, "w", encoding="utf-8") as handle:
+            await handle.write(stored_record.lean_code)
+
+    async def add_proof_occurrence(self, record: ProofRecord) -> ProofRecord:
+        """Persist a full record for each newly verified current-run occurrence."""
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+
+            proof_id = record.proof_id or f"proof_{self._index_data['next_proof_id']:03d}"
+            stored_record = record.model_copy(update={"proof_id": proof_id})
+            serialized = self._serialize_record(stored_record)
+            await self._persist_record_files(stored_record, serialized)
+
+            proofs = [
+                proof
+                for proof in self._index_data.get("proofs", [])
+                if proof.get("proof_id") != proof_id
+            ]
+            proofs.append(serialized)
+            proofs.sort(key=lambda proof: proof.get("created_at", ""), reverse=True)
+            self._index_data["proofs"] = proofs
+            current_number = self._index_data.get("next_proof_id", 1)
+            self._index_data["next_proof_id"] = max(current_number + 1, len(proofs) + 1)
+            self._rebuild_reverse_indexes()
+            await self._save_index()
+            return stored_record
 
     async def add_proof_if_absent(self, record: ProofRecord) -> tuple[ProofRecord, bool]:
         """Persist a proof record unless an identical source/theorem/code exists."""
@@ -252,25 +409,22 @@ class ProofDatabase:
             if self._index_data is None:
                 await self._load_index()
 
-            normalized_statement = " ".join((record.theorem_statement or "").split())
-            normalized_code = "\n".join((record.lean_code or "").strip().splitlines())
+            identity = canonical_proof_identity(record.theorem_statement, record.lean_code)
             for existing in self._index_data.get("proofs", []):
                 if existing.get("source_type") != record.source_type or existing.get("source_id") != record.source_id:
                     continue
-                if " ".join(str(existing.get("theorem_statement") or "").split()) != normalized_statement:
-                    continue
-                if "\n".join(str(existing.get("lean_code") or "").strip().splitlines()) != normalized_code:
+                existing_identity = canonical_proof_identity(
+                    str(existing.get("theorem_statement") or ""),
+                    str(existing.get("lean_code") or ""),
+                )
+                if existing_identity.key != identity.key:
                     continue
                 return self._deserialize_record(existing), True
 
             proof_id = record.proof_id or f"proof_{self._index_data['next_proof_id']:03d}"
             stored_record = record.model_copy(update={"proof_id": proof_id})
             serialized = self._serialize_record(stored_record)
-
-            async with aiofiles.open(self._get_record_path(proof_id), "w", encoding="utf-8") as handle:
-                await handle.write(json.dumps(serialized, indent=2))
-            async with aiofiles.open(self._get_lean_path(proof_id), "w", encoding="utf-8") as handle:
-                await handle.write(stored_record.lean_code)
+            await self._persist_record_files(stored_record, serialized)
 
             proofs = [
                 proof
@@ -459,7 +613,21 @@ class ProofDatabase:
             ]
             if novel_only is None:
                 return proofs
-            return [proof for proof in proofs if proof.novel is novel_only]
+            if novel_only:
+                return [
+                    proof for proof in proofs
+                    if proof.novel and (
+                        is_prompt_injection_novel_tier(proof.novelty_tier)
+                        or not str(proof.novelty_tier or "").strip()
+                    )
+                ]
+            return [
+                proof for proof in proofs
+                if not proof.novel or (
+                    bool(str(proof.novelty_tier or "").strip())
+                    and not is_prompt_injection_novel_tier(proof.novelty_tier)
+                )
+            ]
 
     async def update_proof_dependencies(self, proof_id: str, dependencies) -> Optional[ProofRecord]:
         """Persist a new dependency list for an existing proof record."""
@@ -623,11 +791,23 @@ class ProofDatabase:
         """Return proof counts for display and prompt gating."""
         self._ensure_index_loaded_sync()
         proofs = self._index_data.get("proofs", []) if self._index_data else []
-        novel_count = sum(1 for proof in proofs if proof.get("novel"))
+        duplicate_novel_count = sum(
+            1 for proof in proofs if is_duplicate_novel_tier(proof.get("novelty_tier", ""))
+        )
+        prompt_novel_count = sum(
+            1 for proof in proofs if proof.get("novel") and not is_duplicate_novel_tier(proof.get("novelty_tier", ""))
+        )
+        syntheticlib_novel_count = prompt_novel_count + duplicate_novel_count
+        not_novel_count = sum(
+            1 for proof in proofs if is_not_novel_tier(proof.get("novelty_tier", NOT_NOVEL_TIER))
+        )
         return {
             "total": len(proofs),
-            "novel": novel_count,
-            "known": len(proofs) - novel_count,
+            "novel": prompt_novel_count,
+            "syntheticlib_novel": syntheticlib_novel_count,
+            "duplicate_novel": duplicate_novel_count,
+            "not_novel": not_novel_count,
+            "known": len(proofs) - syntheticlib_novel_count,
         }
 
     def get_known_proofs_summary_for_browsing(
@@ -654,7 +834,10 @@ class ProofDatabase:
         """
         self._ensure_index_loaded_sync()
         proofs = self._index_data.get("proofs", []) if self._index_data else []
-        known_proofs = [p for p in proofs if not p.get("novel")]
+        known_proofs = [
+            p for p in proofs
+            if not p.get("novel") or is_duplicate_novel_tier(p.get("novelty_tier", ""))
+        ]
 
         if source_id:
             known_proofs = [p for p in known_proofs if p.get("source_id") == source_id]
@@ -688,7 +871,13 @@ class ProofDatabase:
         """Format the novel proofs block for highest-priority prompt injection."""
         self._ensure_index_loaded_sync()
         proofs = self._index_data.get("proofs", []) if self._index_data else []
-        novel_proofs = [proof for proof in proofs if proof.get("novel")]
+        novel_proofs = [
+            proof for proof in proofs
+            if proof.get("novel") and (
+                is_prompt_injection_novel_tier(proof.get("novelty_tier", ""))
+                or not str(proof.get("novelty_tier") or "").strip()
+            )
+        ]
 
         if not novel_proofs:
             return ""
@@ -751,17 +940,22 @@ class ProofDatabase:
             return hints_block
         return f"{hints_block}\n\n{prompt}"
 
-    async def list_proof_library(self, novel_only: bool = True) -> List[Dict[str, Any]]:
+    async def list_proof_library(
+        self,
+        novel_only: Optional[bool] = True,
+        category: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """List all proofs across all sessions (legacy + session-based) for the proof library.
 
         Mirrors the cross-session listing pattern used by PaperLibrary.list_history_papers().
         """
+        normalized_category = normalize_proof_library_category(category, novel_only)
         all_proofs: List[Dict[str, Any]] = []
 
         legacy_proofs_dir = Path(system_config.data_dir) / "proofs"
         if legacy_proofs_dir.exists():
             all_proofs.extend(
-                await self._list_proofs_from_directory(legacy_proofs_dir, "legacy", novel_only)
+                await self._list_proofs_from_directory(legacy_proofs_dir, "legacy", normalized_category)
             )
 
         sessions_dir = Path(system_config.auto_sessions_base_dir)
@@ -773,7 +967,7 @@ class ProofDatabase:
                 if not proofs_dir.exists():
                     continue
                 all_proofs.extend(
-                    await self._list_proofs_from_directory(proofs_dir, session_dir.name, novel_only)
+                    await self._list_proofs_from_directory(proofs_dir, session_dir.name, normalized_category)
                 )
 
         all_proofs.sort(key=lambda p: p.get("created_at") or "", reverse=True)
@@ -796,7 +990,9 @@ class ProofDatabase:
             self._ensure_index_loaded_sync()
             proof_count = len(self._index_data.get("proofs", []) if self._index_data else [])
             has_files = self._base_dir.exists() and any(self._base_dir.iterdir())
-            if not has_files or proof_count == 0:
+            failed_dir = self._get_failed_dir()
+            has_failed_state = failed_dir.exists() and any(failed_dir.iterdir())
+            if not has_files or (proof_count == 0 and not has_failed_state):
                 if self._base_dir.exists():
                     await asyncio.to_thread(shutil.rmtree, self._base_dir, True)
                 self._index_data = self._default_index()
@@ -810,7 +1006,8 @@ class ProofDatabase:
             history_root = Path(history_root)
             history_root.mkdir(parents=True, exist_ok=True)
 
-            base_run_id = f"manual_proofs_{timestamp}"
+            active_run_id = str(self._index_data.get("active_run_id") or "").strip()
+            base_run_id = active_run_id or f"manual-{uuid.uuid4().hex}"
             run_id = base_run_id
             suffix = 2
             while (history_root / run_id).exists():
@@ -823,6 +1020,8 @@ class ProofDatabase:
             def _copy_active_run() -> None:
                 run_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(self._base_dir, target_proofs_dir)
+                if proof_count:
+                    shutil.rmtree(target_proofs_dir / "failed", ignore_errors=True)
 
             await asyncio.to_thread(_copy_active_run)
 
@@ -835,6 +1034,7 @@ class ProofDatabase:
                 "created_at": timestamp,
                 "archived_at": datetime.utcnow().isoformat(),
                 "proof_count": proof_count,
+                "has_failed_state": has_failed_state,
             }
             metadata_path = run_dir / "session_metadata.json"
             await asyncio.to_thread(
@@ -854,9 +1054,11 @@ class ProofDatabase:
     async def list_proof_library_from_history(
         self,
         history_root: Path,
-        novel_only: bool = True,
+        novel_only: Optional[bool] = True,
+        category: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """List archived manual proof runs without including the active DB."""
+        normalized_category = normalize_proof_library_category(category, novel_only)
         history_root = Path(history_root)
         all_proofs: List[Dict[str, Any]] = []
         if history_root.exists():
@@ -865,13 +1067,13 @@ class ProofDatabase:
                 if not proofs_dir.exists():
                     continue
                 all_proofs.extend(
-                    await self._list_proofs_from_directory(proofs_dir, run_dir.name, novel_only)
+                    await self._list_proofs_from_directory(proofs_dir, run_dir.name, normalized_category)
                 )
         all_proofs.sort(key=lambda p: p.get("created_at") or "", reverse=True)
         return all_proofs
 
     async def _list_proofs_from_directory(
-        self, proofs_dir: Path, session_id: str, novel_only: bool
+        self, proofs_dir: Path, session_id: str, category: str
     ) -> List[Dict[str, Any]]:
         """Read the proofs index from a specific directory and return library entries."""
         index_path = proofs_dir / "proofs_index.json"
@@ -886,20 +1088,28 @@ class ProofDatabase:
             return []
 
         session_metadata_path = proofs_dir.parent / "session_metadata.json"
-        user_prompt = ""
+        session_user_prompt = ""
+        session_run_id = session_id
         if session_metadata_path.exists():
             try:
                 async with aiofiles.open(session_metadata_path, "r", encoding="utf-8") as handle:
                     meta = json.loads(await handle.read())
-                    user_prompt = meta.get("user_prompt", "")
+                    session_user_prompt = str(meta.get("user_prompt", "") or "").strip()
+                    session_run_id = str(
+                        meta.get("run_id") or meta.get("session_id") or session_id
+                    ).strip()
             except Exception as exc:
                 logger.debug("Failed to read proof library session metadata at %s: %s", session_metadata_path, exc)
 
         results: List[Dict[str, Any]] = []
         for proof_data in index_data.get("proofs", []):
             is_novel = proof_data.get("novel", False)
-            if novel_only and not is_novel:
+            if not proof_matches_library_category(proof_data, category):
                 continue
+            run_id = str(proof_data.get("run_id") or session_run_id or session_id).strip()
+            user_prompt = str(
+                proof_data.get("user_prompt") or session_user_prompt or proof_data.get("source_title") or ""
+            ).strip()
 
             results.append({
                 "library_id": f"{session_id}:{proof_data.get('proof_id', '')}",
@@ -911,10 +1121,14 @@ class ProofDatabase:
                 "source_type": proof_data.get("source_type", ""),
                 "source_id": proof_data.get("source_id", ""),
                 "source_title": proof_data.get("source_title", ""),
+                "run_id": run_id,
                 "solver": proof_data.get("solver", "Lean 4"),
                 "novel": is_novel,
                 "novelty_tier": proof_data.get("novelty_tier", "not_novel"),
                 "novelty_reasoning": proof_data.get("novelty_reasoning", ""),
+                "artifact_purpose": proof_data.get(
+                    "artifact_purpose", "verified_occurrence"
+                ),
                 "verification_notes": proof_data.get("verification_notes", ""),
                 "attempt_count": proof_data.get("attempt_count", 0),
                 "created_at": proof_data.get("created_at", ""),
@@ -989,10 +1203,31 @@ class ProofDatabase:
         else:
             lean_code = str(proof_data.get("lean_code", "") or "")
 
+        session_user_prompt = ""
+        session_run_id = session_id
+        metadata_path = proofs_dir.parent / "session_metadata.json"
+        if metadata_path.exists():
+            try:
+                async with aiofiles.open(str(metadata_path), "r", encoding="utf-8") as handle:
+                    metadata = json.loads(await handle.read())
+                session_user_prompt = str(metadata.get("user_prompt", "") or "").strip()
+                session_run_id = str(
+                    metadata.get("run_id") or metadata.get("session_id") or session_id
+                ).strip()
+            except Exception as exc:
+                logger.debug("Failed to read proof detail session metadata at %s: %s", metadata_path, exc)
+
         return {
             "library_id": f"{session_id}:{proof_id}",
             "session_id": session_id,
             **proof_data,
+            "run_id": str(proof_data.get("run_id") or session_run_id or session_id).strip(),
+            "user_prompt": str(
+                proof_data.get("user_prompt")
+                or session_user_prompt
+                or proof_data.get("source_title")
+                or ""
+            ).strip(),
             "lean_code": lean_code,
         }
 

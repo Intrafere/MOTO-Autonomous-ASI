@@ -421,6 +421,23 @@
   gap: 0.5rem;
 }
 
+.prompt-composer-section {
+  gap: 0.65rem;
+}
+
+.prompt-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.9rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    var(--bg-secondary, #1e1e1e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 18px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.24);
+}
+
 .research-prompt-section label {
   font-weight: 600;
   color: var(--text-primary, #e0e0e0);
@@ -438,15 +455,85 @@
   font-family: inherit;
 }
 
+.prompt-composer textarea {
+  min-height: 140px;
+  border: none;
+  border-radius: 12px;
+  padding: 0.85rem 0.9rem;
+  background: rgba(8, 8, 12, 0.48);
+  resize: vertical;
+}
+
 .research-prompt-section textarea:focus {
   outline: none;
   border-color: #18cc17;
   box-shadow: 0 0 0 2px rgba(24, 204, 23, 0.2);
 }
 
+.prompt-composer textarea:focus {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(24, 204, 23, 0.72), 0 0 0 3px rgba(24, 204, 23, 0.16);
+}
+
 .research-prompt-section textarea:disabled {
   opacity: 0.7;
   cursor: not-allowed;
+}
+
+.prompt-composer-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.prompt-composer-actions .text-file-uploader {
+  flex: 1 1 240px;
+  min-width: 180px;
+  margin: 0;
+}
+
+.prompt-composer-actions .text-upload-btn {
+  min-height: 42px;
+  border-radius: 999px;
+}
+
+.prompt-composer-primary {
+  flex: 0 0 auto;
+  min-height: 42px;
+  border-radius: 999px;
+  padding-inline: 1.35rem;
+  white-space: nowrap;
+}
+
+.prompt-composer-running-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.prompt-composer-options {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.prompt-composer-option {
+  margin-bottom: 0;
+  width: auto;
+}
+
+.prompt-composer-options .btn-clear,
+.prompt-composer-options .btn-cancel {
+  min-height: 34px;
+  padding: 0.42rem 0.85rem;
+  border-radius: 999px;
 }
 
 /* Status Section */
@@ -1141,19 +1228,18 @@
 }
 
 /* Settings - Layout with Left Sidebar */
-.autonomous-settings-layout {
-  display: flex;
-  gap: 0;
-  height: 100%;
-  width: 100%;
-  min-height: 100vh;
-}
-
+.autonomous-settings-layout,
 .settings-with-model-sidebar {
   display: flex;
   gap: 0;
   width: 100%;
   min-height: 100vh;
+  padding-right: var(--workflow-panel-safe-area);
+  box-sizing: border-box;
+}
+
+.autonomous-settings-layout {
+  height: 100%;
 }
 
 .settings-with-model-sidebar__main {
@@ -1161,21 +1247,11 @@
   min-width: 0;
   padding: 1.5rem;
   overflow-y: auto;
-  width: 100%;
-  max-width: calc(100vw - 322px - 3rem);
+  width: auto;
+  max-width: none;
   box-sizing: border-box;
   position: relative;
   z-index: 10;
-}
-
-.app.workflow-panel-expanded .settings-with-model-sidebar__main {
-  max-width: calc(100vw - 322px - 3rem - 320px);
-  padding-right: 1.5rem;
-}
-
-.app.workflow-panel-collapsed .settings-with-model-sidebar__main {
-  max-width: calc(100vw - 322px - 3rem - 50px);
-  padding-right: 1.5rem;
 }
 
 .settings-left-sidebar {
@@ -1439,30 +1515,17 @@
 /* Main settings content area */
 .autonomous-settings {
   flex: 1;
+  min-width: 0;
   padding: 1.5rem;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
   overflow-y: auto;
-  width: 100%;
-  /* Default: accounts for left sidebar (322px) + horizontal padding (3rem). */
-  max-width: calc(100vw - 322px - 3rem);
+  width: auto;
+  max-width: none;
   box-sizing: border-box;
   position: relative;
   z-index: 1;
-}
-
-/* When the WorkflowPanel sidebar is expanded (320px) or collapsed (50px),
-   slide settings content leftward so dropdowns/arrows don't get clipped
-   by the fixed-position panel overlay. */
-.app.workflow-panel-expanded .autonomous-settings {
-  max-width: calc(100vw - 322px - 3rem - 320px);
-  padding-right: 1.5rem;
-}
-
-.app.workflow-panel-collapsed .autonomous-settings {
-  max-width: calc(100vw - 322px - 3rem - 50px);
-  padding-right: 1.5rem;
 }
 
 .settings-group {
@@ -3092,22 +3155,44 @@
 /* Responsive */
 /* ============================================================ */
 
-@media (max-width: 768px) {
-  .autonomous-settings-layout,
-  .settings-with-model-sidebar {
+@media (min-width: 769px) and (max-width: 1119px) {
+  .app.workflow-panel-expanded .autonomous-settings-layout,
+  .app.workflow-panel-expanded .settings-with-model-sidebar {
     flex-direction: column;
   }
-  
-  .settings-left-sidebar {
+
+  .app.workflow-panel-expanded .settings-left-sidebar {
     width: 100%;
     border-right: none;
     border-bottom: 2px solid rgba(76, 175, 80, 0.16);
     max-height: 300px;
   }
-  
+}
+
+@media (min-width: 769px) and (max-width: 829px) {
+  .app.workflow-panel-collapsed .autonomous-settings-layout,
+  .app.workflow-panel-collapsed .settings-with-model-sidebar {
+    flex-direction: column;
+  }
+
+  .app.workflow-panel-collapsed .settings-left-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 2px solid rgba(76, 175, 80, 0.16);
+    max-height: 300px;
+  }
+}
+
+@media (max-width: 768px) {
+  .autonomous-settings-layout,
+  .settings-with-model-sidebar {
+    padding-right: 0;
+  }
+
   .autonomous-settings,
   .settings-with-model-sidebar__main {
     padding: 1rem;
+    width: 100%;
     max-width: 100%;
   }
   
@@ -3140,6 +3225,37 @@
   
   .delete-confirm-inline {
     flex-wrap: wrap;
+  }
+
+  .prompt-composer {
+    padding: 0.75rem;
+    border-radius: 14px;
+  }
+
+  .prompt-composer-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .prompt-composer-actions .text-file-uploader,
+  .prompt-composer-primary,
+  .prompt-composer-running-actions,
+  .prompt-composer-running-actions .btn-stop {
+    width: 100%;
+  }
+
+  .prompt-composer-running-actions {
+    justify-content: stretch;
+  }
+
+  .prompt-composer-options {
+    justify-content: flex-start;
+  }
+
+  .prompt-composer-options .allowed-outputs-row {
+    width: 100%;
+    justify-content: flex-start;
+    overflow-x: auto;
   }
   
   .tier3-dialog {

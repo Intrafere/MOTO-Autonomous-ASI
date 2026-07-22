@@ -39,3 +39,16 @@ def resolve_path_within_root(root: Path, *unsafe_parts: str) -> Path:
         raise ValueError("Resolved path escapes trusted root")
 
     return Path(candidate_real)
+
+
+def resolve_filename_within_root(
+    root: Path,
+    filename: str,
+    label: str = "filename",
+) -> Path:
+    """Resolve exactly one validated basename beneath a trusted root."""
+    safe_filename = validate_single_path_component(filename, label)
+    basename = Path(safe_filename).name
+    if basename != safe_filename:
+        raise ValueError(f"Invalid {label}: {filename}")
+    return resolve_path_within_root(root, basename)

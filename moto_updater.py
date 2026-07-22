@@ -32,7 +32,7 @@ _DEFAULT_MANIFEST = {
     "version": "0.0.0-dev",
     "build_commit": "dev",
     "update_channel": "main",
-    "api_contract_version": "build5-v54",
+    "api_contract_version": "build5-v73",
 }
 
 _DEFAULT_PRESERVED_ROOTS = {
@@ -156,7 +156,35 @@ def _read_json(path: Path) -> dict | None:
         return None
 
 
-def _write_json(path: Path, payload: dict) -> None:
+_FORBIDDEN_METADATA_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "authorization",
+        "client_secret",
+        "id_token",
+        "password",
+        "refresh_token",
+        "token",
+    }
+)
+
+
+def _assert_nonsecret_metadata(value: object) -> None:
+    """Reject credential-bearing fields from launcher/update metadata files."""
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            if str(key).strip().lower() in _FORBIDDEN_METADATA_KEYS:
+                raise ValueError(f"Credential field {key!r} is not valid updater metadata")
+            _assert_nonsecret_metadata(nested_value)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_nonsecret_metadata(item)
+
+
+def _write_nonsecret_json_metadata(path: Path, payload: dict) -> None:
+    """Write public build or launcher metadata; credential fields are forbidden."""
+    _assert_nonsecret_metadata(payload)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -232,7 +260,7 @@ def _archived_git_head() -> str | None:
 
 
 def _write_installed_manifest(manifest: BuildManifest) -> None:
-    _write_json(
+    _write_nonsecret_json_metadata(
         LOCAL_MANIFEST_PATH,
         {
             "manifest_version": manifest.manifest_version,
@@ -462,10 +490,30 @@ def _load_launcher_state() -> dict:
 
 
 def _save_launcher_state(payload: dict) -> None:
-    if not payload.get("instances"):
+    public_instances = []
+    allowed_fields = (
+        "instance_id",
+        "backend_window_pid",
+        "frontend_window_pid",
+        "backend_port",
+        "frontend_port",
+        "data_root",
+        "log_root",
+        "storage_prefix",
+    )
+    for instance in payload.get("instances", []):
+        if isinstance(instance, dict):
+            public_instances.append({
+                field: instance.get(field)
+                for field in allowed_fields
+            })
+    if not public_instances:
         cleanup_path(LAUNCHER_STATE_PATH)
         return
-    _write_json(LAUNCHER_STATE_PATH, payload)
+    _write_nonsecret_json_metadata(
+        LAUNCHER_STATE_PATH,
+        {"instances": public_instances},
+    )
 
 
 def cleanup_launcher_state(exclude_instance_id: str | None = None) -> list[dict]:
@@ -477,11 +525,7 @@ def cleanup_launcher_state(exclude_instance_id: str | None = None) -> list[dict]
         backend_pid = _coerce_int(instance.get("backend_window_pid"))
         frontend_pid = _coerce_int(instance.get("frontend_window_pid"))
         if _is_pid_running(backend_pid) or _is_pid_running(frontend_pid):
-            normalized = dict(instance)
-            keyring_namespace = _record_keyring_namespace(normalized)
-            normalized.pop("secret_namespace", None)
-            normalized["keyring_namespace"] = keyring_namespace
-            active_instances.append(normalized)
+            active_instances.append(dict(instance))
 
     _save_launcher_state({"instances": active_instances})
     if not exclude_instance_id:
@@ -502,7 +546,6 @@ def register_active_instance(
     frontend_port: int,
     data_root: str,
     log_root: str,
-    keyring_namespace: str | None,
     storage_prefix: str | None,
 ) -> None:
     active_instances = cleanup_launcher_state()
@@ -549,11 +592,10 @@ def save_last_instance_record(
     instance_id: str,
     data_root: str,
     log_root: str,
-    keyring_namespace: str | None,
     storage_prefix: str | None,
 ) -> None:
     """Persist the last launched non-default instance so it can be reused on relaunch."""
-    _write_json(
+    _write_nonsecret_json_metadata(
         LAUNCHER_LAST_INSTANCE_PATH,
         {
             "instance_id": instance_id,
@@ -760,7 +802,7 @@ def write_update_notice(result: UpdateCheckResult) -> None:
         "can_auto_apply": result.can_apply_update,
         "message": build_warning_message(result) if not result.can_apply_update else build_update_prompt(result),
     }
-    _write_json(UPDATE_NOTICE_PATH, payload)
+    _write_nonsecret_json_metadata(UPDATE_NOTICE_PATH, payload)
 
 
 def build_update_prompt(result: UpdateCheckResult) -> str:

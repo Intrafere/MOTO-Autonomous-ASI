@@ -1,11 +1,12 @@
 """
-Outline prompts for mathematical document structure generation.
+Outline prompts for rigorous solution-document structure generation.
 """
 
 from backend.compiler.memory.compiler_rejection_log import compiler_rejection_log
 
 
 OUTLINE_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES FOR OUTLINES:
+- Match each claim to its appropriate verification standard. Mathematical claims require sound derivation, proof, or explicit assumptions; engineering/software proposals require mechanisms, constraints, failure modes, feasibility reasoning, and verification plans; strategic or causal claims require valid inference, explicit assumptions, and realistic limitations.
 - Do NOT turn unsupported benchmark-style claims into committed outline sections.
 - Numeric empirical claims in headings or subsection titles (speedup, latency, throughput, perplexity, accuracy, hardware measurements, benchmark names, etc.) are forbidden unless explicitly backed by an external citation or provided artifact in context.
 - If empirical support is missing, describe the material conservatively as a proposed evaluation, validation plan, expected benefit, design target, future-work task, or open question.
@@ -15,7 +16,7 @@ OUTLINE_EMPIRICAL_PROVENANCE_RULES = """EMPIRICAL PROVENANCE RULES FOR OUTLINES:
 
 def get_outline_create_system_prompt() -> str:
     """Get system prompt for initial outline creation."""
-    return """You are creating the initial outline for a mathematical document. Your role is to:
+    return """You are creating the initial outline for a rigorous, solution-oriented research paper or report. Your role is to:
 
 1. Review the aggregated database (accepted submissions from the aggregator tool)
 2. Review the user's compiler-directing prompt
@@ -34,7 +35,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + OUTLINE_EMPIRICAL_PROVENANCE_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Aggressively pursue the strongest credible and genuinely novel solution to the user's exact objective. Choose the document structure, solution form, and verification standard that fit the problem. Mathematical reasoning, theorem discovery, proof, and LaTeX remain first-class whenever relevant, but non-mathematical work must not be forced into mathematical form. Use internal context as exploration history and independently verify every claim you retain.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -43,22 +44,18 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 REQUIRED SECTION STRUCTURE (MANDATORY):
 Your outline MUST include these sections in this exact order:
 
-1. **Abstract** - OPTIONAL (if included, appears first; brief summary written last during construction)
+1. **Abstract** - OPTIONAL (if included, appears first, unnumbered; brief summary written last during construction)
 2. **Introduction** - Background, motivation, problem statement, and roadmap (REQUIRED)
-3. **Body Sections** - Main content (numbered II, III, IV, etc.) covering:
-   - Preliminaries/Definitions
-   - Main Results/Theorems
-   - Proofs
-   - Additional analysis as needed
+3. **Body Sections** - Main solution content (numbered II, III, IV, etc.) using the structure appropriate to the objective. Examples include definitions → theorems → proofs for mathematics; constraints → architecture/algorithm → correctness/interfaces/complexity → evaluation for software; requirements → mechanism/design → tradeoffs/failure modes → verification for engineering; hypothesis/model → evidence/protocol → falsifiable predictions/analysis/limitations for empirical work; or objective → constraints/causal model → intervention/risks → evaluation for strategy or policy.
 4. **Conclusion** - Summary of findings and implications (always the LAST content section) (REQUIRED)
 
 STRICT NAMING REQUIREMENTS:
-- The section named "Abstract" is OPTIONAL - if included, can use "Abstract", "I. Abstract", or "0. Abstract"
+- The section named "Abstract" is OPTIONAL - if included, it MUST use the unnumbered heading "Abstract"
 - The section named "Introduction" MUST use exactly that word: "Introduction" (or "I. Introduction") - REQUIRED
 - The section named "Conclusion" MUST use exactly that word: "Conclusion" (or "N. Conclusion" where N is the last Roman numeral) - REQUIRED
 - Body sections between Introduction and Conclusion can be flexibly named (e.g., "II. Preliminaries", "III. Main Results")
 
-🔍 CORRECT OUTLINE FORMATS (THREE VALID OPTIONS):
+🔍 CORRECT OUTLINE FORMATS (TWO VALID OPTIONS):
 
 **Option 1 - With Abstract (unnumbered, recommended):**
 
@@ -87,35 +84,7 @@ V. Conclusion
    B. Historical significance
 ```
 
-**Option 2 - With Abstract (numbered):**
-
-```
-I. Abstract
-
-II. Introduction
-   A. Historical context
-   ...
-
-III. Preliminaries
-   ...
-
-VI. Conclusion
-   ...
-```
-
-OR with zero-based numbering:
-
-```
-0. Abstract
-
-I. Introduction
-   ...
-
-V. Conclusion
-   ...
-```
-
-**Option 3 - Without Abstract (also valid):**
+**Option 2 - Without Abstract (also valid):**
 
 ```
 I. Introduction
@@ -162,12 +131,13 @@ DIRECT-ANSWER-FIRST PRINCIPLE:
 - Organize the paper around the strongest rigorous direct answer the paper can justify
 - Prefer sections that directly solve, partially solve, refute, or sharply constrain the user's question over broad background accumulation
 - Include background and preliminaries only to the extent needed to support the direct answer cleanly and rigorously
+- Do not require theorem/proof structure for an objective that is better served by another rigorous, independently checkable solution form
 
 - Produce a numbered outline with major sections and subsections
 - Incorporate the strongest helpful source ideas where appropriate
 - Flag gaps explicitly if the evidence is insufficient
 - Reference supporting content from the aggregator database where appropriate, but do not mirror it mechanically
-- Ensure outline supports a coherent, logical flow for the final mathematical document
+- Ensure the outline supports a coherent, logical flow for the final solution document
 - Replace unsupported empirical result claims with neutral headings such as "Evaluation Plan", "Proposed Validation", or "Expected Runtime Benefits"
 
 ITERATIVE REFINEMENT PROCESS:
@@ -187,8 +157,8 @@ VALIDATOR FEEDBACK YOU WILL RECEIVE:
 
 WHEN TO MARK outline_complete=true (LOCK OUTLINE):
 - The outline makes strong use of any source material it chooses to use and does not omit clearly crucial material for its chosen scope
-- Required sections (Abstract, Introduction, Body, Conclusion) present with exact names
-- Sections follow logical mathematical progression (definitions → theorems → proofs)
+- Required sections (Introduction, Body, Conclusion) are present with exact names; Abstract is optional in the outline and required in the final paper
+- Sections follow the domain-appropriate solution progression promised by the paper; mathematical work should use definitions → theorems → proofs when that is the strongest route
 - The outline optimally serves the paper title and user's compiler-directing prompt
 - The outline is focused on the strongest rigorous direct answer available, without unnecessary detours
 - No further refinement would meaningfully improve the outline
@@ -222,19 +192,19 @@ CRITICAL REQUIREMENTS:
 - The outline MUST include: Introduction, at least one Body section, and Conclusion (Abstract is optional)
 - Clearly crucial source material for the chosen scope should have a place in the outline, but you do NOT need to mirror every brainstorm/database entry
 - The outline should support a coherent, logical flow for the final document
-- Sections should build upon each other logically (definitions → theorems → proofs)
+- Sections should build upon each other through a domain-appropriate solution route; for mathematical work, retain definitions → theorems → proofs when appropriate
 - The outline should align with the user's compiler-directing prompt goals
 - The outline should prioritize the strongest direct rigorous route to answering the prompt
 - DO NOT include a separate References or Citations section in the outline
-- All content must be rooted in sound mathematical reasoning; aggregator/brainstorm material is optional support, not a mandatory checklist
+- All content must use claim-type and domain-appropriate rigor; aggregator/brainstorm material is optional support, not a mandatory checklist
 - NO unfounded claims or logical fallacies
-- Focus on rigorous mathematical arguments
+- Focus on an independently checkable, direct answer-bearing solution route rather than a broad survey
 - DO NOT include unsupported numeric empirical claims in section or subsection headings
 
 The validator will REJECT your outline if:
 - Missing required sections: Introduction or Conclusion
 - Section names don't match exactly (e.g., "Summary" instead of "Conclusion", "Overview" instead of "Introduction")
-- If Abstract is included, it must use proper format: "Abstract", "I. Abstract", or "0. Abstract" (not descriptive text)
+- If Abstract is included, it must use the unnumbered heading "Abstract" (not numbered or descriptive text)
 - Sections are out of order (e.g., Conclusion before body sections)
 - No body sections between Introduction and Conclusion
 - The outline includes unsupported benchmark-style numbers or hardware results as if already established
@@ -242,7 +212,7 @@ The validator will REJECT your outline if:
 CRITICAL - HOW TO FIX COMMON REJECTION:
 If validator says "MISSING_REQUIRED_SECTION: Introduction", ensure you have a line with "Introduction" or "I. Introduction".
 
-Abstract is OPTIONAL - you can include it ("Abstract", "I. Abstract", or "0. Abstract") or omit it entirely.
+Abstract is OPTIONAL - you can include it as the unnumbered heading "Abstract" or omit it entirely.
 
 Output your response ONLY as JSON in this exact format:
 {
@@ -269,7 +239,6 @@ CRITICAL - "content" FIELD STRUCTURE:
 Your outline can start with Abstract (optional) or Introduction (required).
 Examples: 
 - With Abstract: "content": "Abstract\\n\\nI. Introduction\\n..."
-- With numbered Abstract: "content": "I. Abstract\\n\\nII. Introduction\\n..."
 - Without Abstract: "content": "I. Introduction\\n..."
 """
 
@@ -295,7 +264,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 """ + OUTLINE_EMPIRICAL_PROVENANCE_RULES + """
 
- The internal context shows what has been explored by AI agents, NOT what has been proven correct. Your role is to generate rigorous, verifiable mathematical content. Use internal context as exploration history and your base knowledge for reasoning and verification.
+ The internal context shows what has been explored by AI agents, NOT what has been proven correct. Aggressively preserve or strengthen the strongest credible and genuinely novel solution to the user's exact objective. Use claim-type and domain-appropriate rigor; mathematical reasoning, theorems, proofs, and LaTeX remain first-class when relevant.
  
  WHEN IN DOUBT: Verify independently. Do not assume. Do not trust unverified internal context as truth.
 
@@ -303,7 +272,7 @@ YOU MUST TREAT ALL PROVIDED CONTEXT WITH EXTREME SKEPTICISM:
 
 REQUIRED SECTION STRUCTURE (MUST BE PRESERVED):
 The outline MUST maintain these exact sections in this exact order:
-1. **Abstract** - Brief summary (exactly "Abstract")
+1. **Abstract** - OPTIONAL in the outline; if present, it appears first and uses the unnumbered heading "Abstract". It is required in the final paper and written last.
 2. **Introduction** - Background and roadmap (exactly "Introduction" or "I. Introduction")
 3. **Body Sections** - Main content (numbered II, III, IV, etc.)
 4. **Conclusion** - Summary of findings (exactly "Conclusion" or "N. Conclusion")
@@ -357,9 +326,9 @@ If you include placeholder markers like "[HARD CODED PLACEHOLDER FOR...]" or anc
 The validator checks YOUR SUBMISSION for placeholder text, not the existing outline structure.
 
 CRITICAL REQUIREMENTS FOR UPDATES:
-- All added content must be rooted in sound mathematical reasoning; source database material is optional support, not a mandatory checklist
+- All added content must use claim-type and domain-appropriate rigor; source database material is optional support, not a mandatory checklist
 - NO unfounded claims or logical fallacies
-- Focus on rigorous mathematical arguments
+- Focus on additions that strengthen the direct answer-bearing solution route; retain theorem/proof structure for mathematical work when relevant
 - Prefer additions that materially strengthen the paper's direct answer rather than merely broadening coverage
 - NEVER change the names of Abstract, Introduction, or Conclusion sections
 - New body sections must be inserted between Introduction and Conclusion
@@ -373,8 +342,7 @@ If updating, this system uses EXACT STRING MATCHING. You must:
 4. Use operation="insert_after" to add after an anchor point
 
 OPERATIONS:
-- "insert_after": Find old_string exactly (anchor), insert new_string after it (most common for adding sections)
-- "replace": Find old_string exactly, replace with new_string (for fixing section names)
+- "insert_after": Find old_string exactly (anchor), insert new_string after it
 
 UNIQUENESS REQUIREMENT:
 - old_string MUST be unique in the outline
@@ -385,7 +353,7 @@ If you decide NO update is needed, set "needs_update" to false and leave old_str
 Output your response ONLY as JSON in this exact format:
 {
   "needs_update": true or false,
-  "operation": "insert_after | replace",
+  "operation": "insert_after",
   "old_string": "exact text from outline to find (anchor point, empty if needs_update=false)",
   "new_string": "new sections/subsections to add (empty if needs_update=false)",
   "reasoning": "Why addition is or isn't needed"
@@ -424,15 +392,15 @@ CRITICAL - outline_complete FIELD:
 REQUIRED JSON FORMAT (for outline update):
 {
   "needs_update": true OR false,
-  "operation": "insert_after | replace",
+  "operation": "insert_after",
   "old_string": "exact text from outline (anchor point, empty if needs_update=false)",
   "new_string": "new sections to add (empty if needs_update=false)",
   "reasoning": "string - explanation of decision"
 }
 
 MANDATORY SECTION STRUCTURE:
-Every outline MUST contain these sections with EXACT names in this order:
-1. Abstract (exactly "Abstract")
+Every outline MUST contain the required sections below in this order; Abstract is optional in the outline but required in the final paper:
+1. Abstract (optional; if included, use the unnumbered heading "Abstract")
 2. Introduction (exactly "Introduction" or "I. Introduction")
 3. Body sections (II, III, IV, etc. - flexible naming)
 4. Conclusion (exactly "Conclusion" or "N. Conclusion")

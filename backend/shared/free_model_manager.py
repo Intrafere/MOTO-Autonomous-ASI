@@ -18,6 +18,58 @@ logger = logging.getLogger(__name__)
 FAILED_MODEL_EXPIRY = 300  # 5 minutes
 
 
+def _coerce_modalities(value: Any) -> Set[str]:
+    """Normalize OpenRouter modality metadata to lowercase tokens."""
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {
+            token.strip().lower()
+            for token in value.replace(",", "+").split("+")
+            if token.strip()
+        }
+    if isinstance(value, list):
+        return {str(token).strip().lower() for token in value if str(token).strip()}
+    return set()
+
+
+def supports_text_chat_model(model: Dict[str, Any]) -> bool:
+    """
+    Return True when model metadata says it can accept text and return text.
+
+    OpenRouter exposes modality data either as architecture.input/output_modalities
+    or a compact architecture.modality string such as "text->text" or
+    "text->image". If modality metadata is absent, keep the model out of
+    automatic rotation and free-only role lists because a non-chat model is worse
+    than no rotation.
+    """
+    architecture = model.get("architecture")
+    if not isinstance(architecture, dict):
+        architecture = {}
+
+    input_modalities = _coerce_modalities(
+        architecture.get("input_modalities") or model.get("input_modalities")
+    )
+    output_modalities = _coerce_modalities(
+        architecture.get("output_modalities") or model.get("output_modalities")
+    )
+
+    modality = architecture.get("modality") or model.get("modality")
+    if isinstance(modality, str) and "->" in modality:
+        input_text, output_text = modality.split("->", 1)
+        input_modalities = input_modalities or _coerce_modalities(input_text)
+        output_modalities = output_modalities or _coerce_modalities(output_text)
+
+    if not input_modalities or not output_modalities:
+        return False
+    if "text" not in input_modalities:
+        return False
+    if "text" not in output_modalities:
+        return False
+
+    return True
+
+
 class FreeModelManager:
     """Singleton managing free model rotation and account exhaustion state."""
 
@@ -25,8 +77,8 @@ class FreeModelManager:
     AUTO_SELECTOR_CONTEXT = 0
 
     def __init__(self):
-        self.looping_enabled: bool = True
-        self.auto_selector_enabled: bool = True
+        self.looping_enabled: bool = False
+        self.auto_selector_enabled: bool = False
 
         self._cached_free_models: List[Dict[str, Any]] = []
         self._cache_timestamp: float = 0.0
@@ -54,10 +106,11 @@ class FreeModelManager:
 
     def update_cached_models(self, models: List[Dict[str, Any]]) -> None:
         """
-        Cache free models sorted by context_length descending.
+        Cache free text-chat models sorted by context_length descending.
         Called when /api/openrouter/models is fetched.
         """
         free_models = []
+        skipped_non_text = 0
         for m in models:
             pricing = m.get("pricing", {})
             try:
@@ -68,14 +121,21 @@ class FreeModelManager:
             except (ValueError, TypeError):
                 continue
             if is_free:
-                free_models.append(m)
+                if supports_text_chat_model(m):
+                    free_models.append(m)
+                else:
+                    skipped_non_text += 1
 
         free_models.sort(
             key=lambda m: m.get("context_length", 0), reverse=True
         )
         self._cached_free_models = free_models
         self._cache_timestamp = time.time()
-        logger.info(f"Cached {len(free_models)} free models for rotation")
+        logger.info(
+            "Cached %s free text models for rotation%s",
+            len(free_models),
+            f" (skipped {skipped_non_text} non-text free models)" if skipped_non_text else "",
+        )
 
     def _cleanup_expired_failures(self) -> None:
         """Remove models from failed list if their expiry has passed."""
