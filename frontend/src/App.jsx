@@ -109,8 +109,10 @@ const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'
 const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'assistant', 'writer', 'high_param'];
 const HIGH_SCORE_CRITIQUE_THRESHOLD = 6.25;
 const SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY = 'seenHighScoreCritiqueNotifications';
-// This legacy storage key contains SHA-256 notification fingerprints only.
+// Read-only compatibility key. Older releases stored opaque notification IDs
+// here, while an intermediate release stored SHA-256 fingerprints.
 const DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY = 'dismissedOAuthProviderNotifications';
+const DISMISSED_PROVIDER_NOTIFICATION_FINGERPRINT_PREFIX = 'dismissedOAuthProviderNotificationFingerprint:';
 const MAX_SEEN_HIGH_SCORE_CRITIQUES = 500;
 const MAX_DISMISSED_PROVIDER_NOTIFICATION_IDS = 500;
 const MAX_LIVE_ACTIVITY_EVENTS = 5000;
@@ -208,7 +210,7 @@ async function fingerprintProviderNotificationId(value) {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function readDismissedProviderNotificationIds() {
+function readLegacyDismissedProviderNotificationIds() {
   if (typeof window === 'undefined') {
     return new Set();
   }
@@ -216,26 +218,61 @@ async function readDismissedProviderNotificationIds() {
   try {
     const raw = window.localStorage.getItem(DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY);
     const values = raw ? JSON.parse(raw) : [];
-    return new Set(Array.isArray(values) ? values.filter(value => /^[0-9a-f]{64}$/i.test(value)) : []);
+    return new Set(Array.isArray(values) ? values.filter(value => typeof value === 'string') : []);
   } catch (error) {
-    console.warn('Could not read dismissed provider notification IDs:', error);
+    console.warn('Could not read legacy dismissed provider notification IDs:', error);
     return new Set();
   }
 }
 
-async function persistDismissedProviderNotificationId(notificationId) {
+function dismissedProviderNotificationFingerprintKey(fingerprint) {
+  return `${DISMISSED_PROVIDER_NOTIFICATION_FINGERPRINT_PREFIX}${fingerprint}`;
+}
+
+function trimDismissedProviderNotificationMarkers() {
+  const markers = [];
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (key?.startsWith(DISMISSED_PROVIDER_NOTIFICATION_FINGERPRINT_PREFIX)) {
+      markers.push({
+        key,
+        createdAt: Number(window.localStorage.getItem(key)) || 0,
+      });
+    }
+  }
+  markers
+    .sort((left, right) => left.createdAt - right.createdAt)
+    .slice(0, Math.max(0, markers.length - MAX_DISMISSED_PROVIDER_NOTIFICATION_IDS))
+    .forEach(({ key }) => window.localStorage.removeItem(key));
+}
+
+export async function isProviderNotificationDismissed(notificationId) {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const normalizedId = String(notificationId || '');
+  const fingerprint = await fingerprintProviderNotificationId(normalizedId);
+  if (window.localStorage.getItem(dismissedProviderNotificationFingerprintKey(fingerprint)) !== null) {
+    return true;
+  }
+
+  const legacyIds = readLegacyDismissedProviderNotificationIds();
+  return legacyIds.has(normalizedId) || legacyIds.has(fingerprint);
+}
+
+export async function persistDismissedProviderNotificationId(notificationId) {
   if (typeof window === 'undefined') {
     return;
   }
 
   try {
     const fingerprint = await fingerprintProviderNotificationId(notificationId);
-    const dismissedFingerprints = await readDismissedProviderNotificationIds();
-    dismissedFingerprints.add(fingerprint);
     window.localStorage.setItem(
-      DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY,
-      JSON.stringify(Array.from(dismissedFingerprints).slice(-MAX_DISMISSED_PROVIDER_NOTIFICATION_IDS)),
+      dismissedProviderNotificationFingerprintKey(fingerprint),
+      String(Date.now()),
     );
+    trimDismissedProviderNotificationMarkers();
   } catch (error) {
     console.warn('Could not save dismissed provider notification IDs:', error);
   }
@@ -275,14 +312,10 @@ function buildOAuthProviderNotification(data = {}, fallbackProvider = 'oauth') {
 
 async function addOAuthProviderNotification(setNotifications, data = {}, fallbackProvider = 'oauth') {
   const notification = buildOAuthProviderNotification(data, fallbackProvider);
-  const dismissedNotifications = await readDismissedProviderNotificationIds();
-  const notificationFingerprint = await fingerprintProviderNotificationId(notification.notification_key);
-  if (
-    dismissedNotifications.has(notificationFingerprint)
-  ) {
+  if (await isProviderNotificationDismissed(notification.notification_key)) {
     return;
   }
-      setNotifications(prev => {
+  setNotifications(prev => {
     if (prev.some(item => item.notification_key === notification.notification_key)) {
       return prev;
     }
@@ -604,22 +637,21 @@ function compactPersistedActivityValue(value, depth = 0) {
   return String(value);
 }
 
-function compactLiveActivityEvent(event) {
+export function compactLiveActivityEvent(event) {
   if (!event || typeof event !== 'object') {
     return null;
   }
   const sanitizedEvent = sanitizePersistedActivityValue(event);
-  const persistedMessage = typeof sanitizedEvent.event === 'string'
-    ? sanitizedEvent.event
-    : '';
   return {
     event: sanitizedEvent.event || sanitizedEvent.type || '',
     type: sanitizedEvent.type,
     timestamp: sanitizedEvent.timestamp || sanitizedEvent.fullTimestamp || '',
     fullTimestamp: sanitizedEvent.fullTimestamp,
-    // Persist only the event discriminator here. Raw/generated provider
-    // messages are rendered live and are intentionally not durable browser data.
-    message: persistedMessage,
+    // Persist the user-visible message after recursive credential redaction so
+    // live activity remains useful across reloads without storing secrets.
+    message: typeof sanitizedEvent.message === 'string'
+      ? compactPersistedActivityValue(sanitizedEvent.message)
+      : '',
     data: compactPersistedActivityValue(sanitizedEvent.data || {}),
   };
 }

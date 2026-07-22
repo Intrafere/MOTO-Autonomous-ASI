@@ -2,6 +2,9 @@ import React from 'react';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  compactLiveActivityEvent,
+  isProviderNotificationDismissed,
+  persistDismissedProviderNotificationId,
   readPersistedLiveActivity,
   shouldRecordWorkflowStoppedActivity,
 } from '../App';
@@ -124,6 +127,60 @@ describe('context overflow activity behavior', () => {
     expect(restored.data.error_summary).not.toContain('legacy-code');
     expect(restored.data.error_summary).toContain('state=keep');
     expect(restored.data.provider).toBe('openai_codex_oauth');
+  });
+
+  test('App compacts durable activity without discarding sanitized messages', () => {
+    const compacted = compactLiveActivityEvent({
+      event: 'proof_context_overflow',
+      message: 'Proof candidate exceeded its direct-context budget; Authorization: Bearer activity-secret',
+      data: {
+        workflow_mode: 'autonomous',
+        access_token: 'nested-secret',
+        error_summary: 'callback https://example.test/?code=oauth-code&state=keep',
+      },
+    });
+
+    expect(compacted.message).toContain('Proof candidate exceeded its direct-context budget');
+    expect(compacted.message).not.toContain('activity-secret');
+    expect(compacted.data.access_token).toBe('[redacted]');
+    expect(compacted.data.error_summary).not.toContain('oauth-code');
+    expect(compacted.data.error_summary).toContain('state=keep');
+  });
+
+  test('provider notification dismissals preserve legacy IDs and intermediate fingerprints', async () => {
+    localStorage.setItem(
+      'dismissedOAuthProviderNotifications',
+      JSON.stringify(['legacy-notification']),
+    );
+    expect(await isProviderNotificationDismissed('legacy-notification')).toBe(true);
+
+    const fingerprint = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode('fingerprinted-notification'),
+    );
+    const fingerprintHex = Array.from(new Uint8Array(fingerprint), byte => (
+      byte.toString(16).padStart(2, '0')
+    )).join('');
+    localStorage.setItem(
+      'dismissedOAuthProviderNotifications',
+      JSON.stringify([fingerprintHex]),
+    );
+    expect(await isProviderNotificationDismissed('fingerprinted-notification')).toBe(true);
+  });
+
+  test('provider notification dismissals use independent markers without lost updates', async () => {
+    await Promise.all([
+      persistDismissedProviderNotificationId('notification-one'),
+      persistDismissedProviderNotificationId('notification-two'),
+    ]);
+
+    expect(await isProviderNotificationDismissed('notification-one')).toBe(true);
+    expect(await isProviderNotificationDismissed('notification-two')).toBe(true);
+    expect(
+      Object.keys(localStorage).filter(key => (
+        key.startsWith('dismissedOAuthProviderNotificationFingerprint:')
+      )),
+    ).toHaveLength(2);
   });
 
   test('Aggregator persisted overflow display includes stored model and provider', () => {
