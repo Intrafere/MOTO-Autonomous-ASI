@@ -18,7 +18,11 @@ from backend.shared.openai_codex_client import (
     OpenAICodexRequestError,
 )
 from backend.shared.provider_notification_store import list_provider_notifications, record_provider_notification
-from backend.shared.xai_grok_client import XAIGrokClient, XAIGrokRequestError
+from backend.shared.xai_grok_client import (
+    XAIGrokClient,
+    XAIGrokRequestError,
+    XAIGrokSpendingLimitError,
+)
 
 
 def _jwt(payload: dict) -> str:
@@ -27,6 +31,37 @@ def _jwt(payload: dict) -> str:
 
 
 class ProviderNotificationStoreTests(IsolatedAsyncioTestCase):
+    async def test_model_error_notification_round_trips_explicit_run_scoped_fields(self) -> None:
+        old_data_dir = system_config.data_dir
+        with tempfile.TemporaryDirectory() as temp_dir:
+            system_config.data_dir = temp_dir
+            try:
+                stored = record_provider_notification(
+                    "auto_research_stopped",
+                    {
+                        "notification_key": "proof-truncation:session-a",
+                        "notification_kind": "model_error",
+                        "provider": "proof_model",
+                        "role_id": "autonomous_proof_formalization",
+                        "reason": "proof_output_truncation_recovery_exhausted",
+                        "run_id": "session-a",
+                        "title": "Proof model output repeatedly truncated",
+                        "terminal_guidance": "Increase output allowance and restart.",
+                    },
+                )
+                route_payload = await cloud_access_route.get_provider_notifications()
+
+                self.assertEqual(stored["notification_key"], "proof-truncation:session-a")
+                self.assertEqual(stored["notification_kind"], "model_error")
+                self.assertEqual(stored["run_id"], "session-a")
+                self.assertEqual(route_payload["notifications"][0]["title"], stored["title"])
+                self.assertEqual(
+                    route_payload["notifications"][0]["terminal_guidance"],
+                    stored["terminal_guidance"],
+                )
+            finally:
+                system_config.data_dir = old_data_dir
+
     async def test_provider_notifications_persist_for_route_hydration(self) -> None:
         old_data_dir = system_config.data_dir
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -720,6 +755,42 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
 
 
 class XAIGrokClientTests(IsolatedAsyncioTestCase):
+    async def test_spending_limit_bypasses_transient_retries(self) -> None:
+        client = XAIGrokClient()
+
+        class FakeResponse:
+            status_code = 429
+            text = json.dumps({
+                "code": "personal-team-blocked:spending-limit",
+                "error": "You have run out of credits or need a Grok subscription.",
+            })
+
+            def json(self):
+                return json.loads(self.text)
+
+        class FakeHttp:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, *args, **kwargs):
+                self.calls += 1
+                return FakeResponse()
+
+        fake_http = FakeHttp()
+        client.client = fake_http
+        with mock.patch.object(
+            client,
+            "get_valid_tokens",
+            return_value={"access_token": "access"},
+        ):
+            with self.assertRaises(XAIGrokSpendingLimitError):
+                await client.generate_completion(
+                    model="grok-4.3",
+                    messages=[{"role": "user", "content": "user"}],
+                )
+
+        self.assertEqual(fake_http.calls, 1)
+
     def test_authorization_url_uses_pkce_and_loopback_callback(self) -> None:
         verifier, challenge = XAIGrokClient.generate_pkce_pair()
         url = XAIGrokClient.build_authorization_url(

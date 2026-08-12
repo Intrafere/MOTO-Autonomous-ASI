@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import LatexRenderer from '../LatexRenderer';
 import PaperCritiqueModal from '../PaperCritiqueModal';
+import ProofCheckModeModal from './ProofCheckModeModal';
+import ProofRunStatusControls from './ProofRunStatusControls';
 import { autonomousAPI } from '../../services/api';
 import {
   PDF_UNAVAILABLE_MESSAGE,
@@ -10,7 +12,7 @@ import {
   sanitizeFilename,
 } from '../../utils/downloadHelpers';
 import { buildResearchRunGroups, formatRunPromptPreview } from '../../utils/researchRunHistory';
-import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import { isProofRunBusy, useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
 import { websocket } from '../../services/websocket';
 import './FinalAnswerLibrary.css';
 import './AutonomousResearch.css';
@@ -53,12 +55,15 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
   const [critiquePaper, setCritiquePaper] = useState(null);
   const [proofActionMessage, setProofActionMessage] = useState('');
+  const [proofCheckTarget, setProofCheckTarget] = useState(null);
+  const [proofCheckStarting, setProofCheckStarting] = useState(false);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   const {
     getSourceState,
     manualCheckEnabled,
     manualCheckReason,
     queueManualProofCheck,
+    stopProofRun,
   } = useProofCheckRuntime();
 
   useEffect(() => {
@@ -148,17 +153,30 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
     }
   };
 
-  const handleProofCheck = async (event, paper) => {
+  const handleProofCheck = (event, paper) => {
     event.stopPropagation();
+    if (paper.is_pruned || paper.status !== 'complete') return;
+    setProofActionMessage('');
+    setProofCheckTarget(paper);
+  };
+
+  const startProofCheck = async (runMode) => {
+    const paper = proofCheckTarget;
+    if (!paper) return;
     try {
-      setProofActionMessage('');
+      setProofCheckStarting(true);
       await queueManualProofCheck({
         sourceType: 'paper',
         sourceId: paper.history_id,
+        scope: 'autonomous',
+        runMode,
       });
-      setProofActionMessage(`Queued proof check for paper ${paper.paper_id}.`);
+      setProofActionMessage(`Queued ${runMode === 'loop_with_pruning' ? 'continuous' : 'one-round'} proof check for paper ${paper.paper_id}.`);
+      setProofCheckTarget(null);
     } catch (error) {
       setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    } finally {
+      setProofCheckStarting(false);
     }
   };
 
@@ -397,6 +415,15 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
           {proofActionMessage}
         </div>
       )}
+      {proofCheckTarget && (
+        <ProofCheckModeModal
+          sourceTitle={proofCheckTarget.title || proofCheckTarget.paper_id}
+          busy={proofCheckStarting}
+          error={proofActionMessage.startsWith('Failed') ? proofActionMessage : ''}
+          onClose={() => setProofCheckTarget(null)}
+          onConfirm={startProofCheck}
+        />
+      )}
 
       <div className="library-controls">
         <input
@@ -550,7 +577,7 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
                         <>
                           <div className="paper-actions">
                             {!paper.is_pruned && (() => {
-                              const proofCheckState = getSourceState('paper', paper.history_id);
+                              const proofCheckState = getSourceState('paper', paper.history_id, 'autonomous');
                               const proofCheckLabel = proofCheckState?.status === 'queued'
                                 ? 'Queueing Proof Check...'
                                 : proofCheckState?.status === 'running'
@@ -560,14 +587,21 @@ export default function Stage2PaperHistory({ onCurrentSessionDataChanged, capabi
                                 ? 'A proof verification is already running for this paper.'
                                 : manualCheckReason || 'Queue a manual proof check for this paper.';
                               return (
-                                <button
-                                  className="btn-download"
-                                  onClick={(e) => handleProofCheck(e, paper)}
-                                  disabled={!manualCheckEnabled || Boolean(proofCheckState)}
-                                  title={proofCheckTitle}
-                                >
-                                  {proofCheckLabel}
-                                </button>
+                                <>
+                                  <button
+                                    className="btn-download"
+                                    onClick={(e) => handleProofCheck(e, paper)}
+                                    disabled={!manualCheckEnabled || isProofRunBusy(proofCheckState)}
+                                    title={proofCheckTitle}
+                                  >
+                                    {proofCheckLabel}
+                                  </button>
+                                  <ProofRunStatusControls
+                                    run={proofCheckState}
+                                    sourceLabel={paper.title || paper.paper_id}
+                                    onStop={stopProofRun}
+                                  />
+                                </>
                               );
                             })()}
 

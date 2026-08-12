@@ -350,6 +350,31 @@
   font-style: italic;
 }
 
+.proof-library-live-context-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 9px;
+  border: 1px solid rgba(148, 163, 184, 0.38);
+  background: rgba(100, 116, 139, 0.18);
+  color: #d5dbe5;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.proof-library-live-context-note {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(148, 163, 184, 0.32);
+  border-radius: 8px;
+  background: rgba(100, 116, 139, 0.08);
+  color: #b9c0cc;
+  display: grid;
+  gap: 4px;
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
 /* Expanded proof details */
 .proof-expanded-content {
   display: flex;

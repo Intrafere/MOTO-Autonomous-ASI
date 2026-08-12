@@ -1,0 +1,24 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "immediate_notification",
+    "held_review"
+  ],
+  "fields": [
+    "proof_pruning",
+    "proof_runtime_gating",
+    "provider_pause_resume"
+  ],
+  "invariants": [
+    "proof_pruning.review_non_blocking"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_pruning_review_pending_does_not_block_registration",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/unit/test_proof_pruning_coordinator.py"
+}

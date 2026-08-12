@@ -4,11 +4,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from backend.autonomous.core.autonomous_coordinator import (
+    _AUTOMATIC_PROOF_NOVELTY_ROLE_IDS,
     _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF,
     _brainstorm_rejection_handoff_allowed,
+    _proof_recovery_config_fingerprint,
     AutonomousCoordinator,
 )
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
+from backend.autonomous.core.proof_verification_stage import (
+    _candidate_fingerprint,
+    _truncation_chain_exhausted,
+)
 from backend.autonomous.prompts.proof_prompts import (
     PROOF_FRAMING_CONTEXT,
     build_proof_identification_prompt,
@@ -17,7 +23,182 @@ from backend.autonomous.prompts.topic_exploration_prompts import (
     build_exploration_user_prompt,
 )
 from backend.shared.config import system_config
-from backend.shared.models import ProofAttemptFeedback, ProofCandidate, ProofStageResult
+from backend.shared.models import (
+    ProofAttemptFeedback,
+    ProofAttemptResult,
+    ProofCandidate,
+    ProofStageResult,
+)
+
+
+class AutonomousProofRoleRoutingTests(unittest.TestCase):
+    def test_automatic_novelty_roles_cover_stage_source_scopes(self):
+        stage = ProofVerificationStage()
+
+        self.assertEqual(
+            set(_AUTOMATIC_PROOF_NOVELTY_ROLE_IDS),
+            {
+                "autonomous_proof_novelty",
+                f"autonomous_proof_novelty_{stage._role_suffix('brainstorm', None, None)}",
+                f"autonomous_proof_novelty_{stage._role_suffix('paper', None, None)}",
+            },
+        )
+
+
+class ProofTruncationStopPolicyTests(unittest.TestCase):
+    def test_checkpoint_deserialization_restores_cumulative_stage_result(self):
+        coordinator = AutonomousCoordinator()
+        checkpoint = {
+            "source_type": "brainstorm",
+            "source_id": "topic-1",
+            "total_candidates": 2,
+            "verified_count": 1,
+            "novel_count": 1,
+            "processed_candidate_ids": ["done"],
+            "candidates": [
+                {
+                    "index": 1,
+                    "candidate": ProofCandidate(
+                        theorem_id="done",
+                        statement="True",
+                    ).model_dump(mode="json"),
+                },
+                {
+                    "index": 2,
+                    "candidate": ProofCandidate(
+                        theorem_id="remaining",
+                        statement="False",
+                    ).model_dump(mode="json"),
+                },
+            ],
+            "results": [
+                ProofAttemptResult(
+                    theorem_id="done",
+                    theorem_statement="True",
+                    lean_code="theorem done : True := by trivial",
+                    success=True,
+                    novel=True,
+                    proof_id="proof-1",
+                ).model_dump(mode="json")
+            ],
+        }
+
+        (
+            candidates,
+            indexes,
+            _attempts,
+            _names,
+            _truncation,
+            result,
+        ) = coordinator._deserialize_proof_checkpoint(checkpoint)
+
+        self.assertEqual([candidate.theorem_id for candidate in candidates], ["remaining"])
+        self.assertEqual(indexes["remaining"], 2)
+        self.assertEqual(result.total_candidates, 2)
+        self.assertEqual(result.verified_count, 1)
+        self.assertEqual(result.novel_count, 1)
+        self.assertEqual([item.proof_id for item in result.results], ["proof-1"])
+
+    def test_recovery_fingerprint_tracks_every_effective_route_setting(self):
+        base = {
+            "provider": "openrouter",
+            "model": "proof-model",
+            "openrouter_provider": "Provider A",
+            "openrouter_reasoning_effort": "auto",
+            "lm_studio_fallback": "fallback-model",
+            "context": 12000,
+            "max_output": 3000,
+            "supercharge_enabled": False,
+            "recovery_policy_version": "proof-truncation-v1",
+        }
+        fingerprint = _proof_recovery_config_fingerprint(base)
+        for field, changed in {
+            "provider": "lm_studio",
+            "model": "other-model",
+            "openrouter_provider": "Provider B",
+            "openrouter_reasoning_effort": "low",
+            "lm_studio_fallback": "other-fallback",
+            "context": 16000,
+            "max_output": 4000,
+            "supercharge_enabled": True,
+            "recovery_policy_version": "proof-truncation-v2",
+        }.items():
+            self.assertNotEqual(
+                fingerprint,
+                _proof_recovery_config_fingerprint({**base, field: changed}),
+                field,
+            )
+
+    def test_proof_labels_use_excel_style_sequence(self):
+        stage = ProofVerificationStage()
+        self.assertEqual(stage._proof_label_for_index(1), "A")
+        self.assertEqual(stage._proof_label_for_index(26), "Z")
+        self.assertEqual(stage._proof_label_for_index(27), "AA")
+        self.assertEqual(stage._proof_label_for_index(28), "AB")
+        self.assertEqual(stage._proof_label_for_index(52), "AZ")
+        self.assertEqual(stage._proof_label_for_index(53), "BA")
+
+    def test_complete_five_attempt_truncation_chain_qualifies(self):
+        attempts = [
+            ProofAttemptFeedback(
+                attempt=index,
+                theorem_id="candidate-a",
+                failure_kind="output_truncated",
+                recovery_mode=f"step-{index}",
+            )
+            for index in range(1, 6)
+        ]
+
+        self.assertTrue(_truncation_chain_exhausted(attempts))
+
+    def test_non_truncation_or_usable_lean_does_not_qualify(self):
+        attempts = [
+            ProofAttemptFeedback(
+                attempt=index,
+                theorem_id="candidate-a",
+                failure_kind="output_truncated",
+            )
+            for index in range(1, 6)
+        ]
+        attempts[-1] = attempts[-1].model_copy(
+            update={"failure_kind": "lean_rejected", "lean_code": "theorem candidateA : True := by trivial"}
+        )
+
+        self.assertFalse(_truncation_chain_exhausted(attempts))
+
+    def test_candidate_fingerprint_uses_prompt_content_not_generated_id(self):
+        first = ProofCandidate(
+            theorem_id="generated-a",
+            statement="  The same   theorem statement ",
+            formal_sketch="Proof by construction.",
+        )
+        second = first.model_copy(update={"theorem_id": "generated-b"})
+        different = first.model_copy(update={"statement": "A different theorem statement"})
+
+        self.assertEqual(
+            _candidate_fingerprint(first, "brainstorm", "source-1"),
+            _candidate_fingerprint(second, "brainstorm", "source-1"),
+        )
+        self.assertNotEqual(
+            _candidate_fingerprint(first, "brainstorm", "source-1"),
+            _candidate_fingerprint(different, "brainstorm", "source-1"),
+        )
+
+    def test_manual_stage_explicitly_disables_terminal_truncation_stop(self):
+        import inspect
+
+        source = inspect.getsource(ProofVerificationStage.run_manual)
+        self.assertIn("terminal_truncation_stop_enabled=False", source)
+
+    def test_stage_checkpoint_persistence_remains_inside_snapshot_lock(self):
+        import inspect
+
+        source = inspect.getsource(ProofVerificationStage.run)
+        lock_index = source.index("async with checkpoint_state_lock:")
+        callback_index = source.index("await checkpoint_callback(payload)")
+        stop_helper_index = source.index("def _stop_requested")
+        self.assertLess(lock_index, callback_index)
+        self.assertLess(callback_index, stop_helper_index)
 
 coordinator_module = import_module("backend.autonomous.core.autonomous_coordinator")
 
@@ -31,6 +212,11 @@ class _FakeResearchMetadata:
         self.proof_framing_states = []
         self.interrupted_workflow = False
         self.base_user_prompt = ""
+        self.lifecycle_generation = 0
+
+    async def begin_lifecycle(self, run_id):
+        self.lifecycle_generation += 1
+        return self.lifecycle_generation
 
     async def save_proof_checkpoint(self, checkpoint):
         self.checkpoint = dict(checkpoint)
@@ -93,7 +279,7 @@ class _FakeProofDatabase:
         self.inject_count = 0
         self.pending_retry_calls = []
 
-    def inject_into_prompt(self, prompt):
+    def inject_into_prompt(self, prompt, requesting_run_id=""):
         self.inject_count += 1
         return f"proof_context_{self.inject_count}::{prompt}"
 
@@ -469,7 +655,7 @@ class AutonomousProofFramingBoundaryTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.received = None
 
-            def inject_into_prompt(self, prompt):
+            def inject_into_prompt(self, prompt, requesting_run_id=""):
                 self.received = prompt
                 return f"LIBRARY::{prompt}"
 
@@ -594,6 +780,20 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("Return TRUE only if the answer is yes.", prompt)
         self.assertIn("Round 1: 1/1 candidates verified, 1 novel.", prompt)
+
+    def test_follow_up_prompt_describes_unbounded_continuous_round(self):
+        prompt = build_proof_identification_prompt(
+            user_prompt="Solve the problem.",
+            source_type="paper",
+            source_id="paper_001",
+            source_content="Source content.",
+            proof_round_index=7,
+            proof_max_rounds=0,
+            prior_round_results="Round 6 found no candidates.",
+        )
+
+        self.assertIn("proof round 7 in an unbounded continuous run", prompt)
+        self.assertNotIn("proof round 7 of 7", prompt)
 
     async def test_explicit_lean_prompt_uses_standard_discovery(self):
         class FakeIdentificationAgent:

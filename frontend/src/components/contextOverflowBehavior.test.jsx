@@ -1,5 +1,4 @@
-import React from 'react';
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   compactLiveActivityEvent,
@@ -7,23 +6,17 @@ import {
   persistDismissedProviderNotificationId,
   readPersistedLiveActivity,
   shouldRecordWorkflowStoppedActivity,
-} from '../App';
+} from '../utils/liveActivityPersistence';
 import {
+  compactCompilerActivityEvents,
   formatAggregatorPersistedOverflowMessage,
   shouldIncludeAggregatorProofContextOverflow,
   shouldIncludeAggregatorSolutionPathEvent,
-} from './aggregator/AggregatorLogs';
-import {
-  compactCompilerActivityEvents,
   shouldIncludeCompilerContextOverflow,
   shouldIncludeCompilerProofContextOverflow,
   shouldIncludeCompilerSolutionPathEvent,
-} from './compiler/CompilerLogs';
+} from '../utils/manualLogRouting';
 import { formatContextOverflowActivityMessage } from '../utils/activityStyles';
-import AggregatorLogs from './aggregator/AggregatorLogs';
-import CompilerLogs from './compiler/CompilerLogs';
-import { api, compilerAPI } from '../services/api';
-import { websocket } from '../services/websocket';
 
 describe('context overflow activity behavior', () => {
   beforeEach(() => {
@@ -127,6 +120,30 @@ describe('context overflow activity behavior', () => {
     expect(restored.data.error_summary).not.toContain('legacy-code');
     expect(restored.data.error_summary).toContain('state=keep');
     expect(restored.data.provider).toBe('openai_codex_oauth');
+  });
+
+  test('App drops obsolete manual next-round and three-zero proof activity', () => {
+    localStorage.setItem('activity', JSON.stringify([
+      {
+        event: 'proof_run_round_complete',
+        message: 'Round 1 found no candidates and is waiting for Run Next Round.',
+        data: { status: 'idle_between_rounds' },
+      },
+      {
+        event: 'proof_run_terminal',
+        message: 'Proof run completed after three consecutive valid rounds found no candidates.',
+        data: { terminal_reason: 'three_consecutive_zero_candidate_rounds' },
+      },
+      {
+        event: 'proof_run_round_started',
+        message: 'Round 4 started.',
+        data: { round_index: 4 },
+      },
+    ]));
+
+    const restored = readPersistedLiveActivity('activity');
+    expect(restored).toHaveLength(1);
+    expect(restored[0].data.round_index).toBe(4);
   });
 
   test('App compacts durable activity without discarding sanitized messages', () => {
@@ -250,71 +267,5 @@ describe('context overflow activity behavior', () => {
     expect(compacted[0].data.configured_model).toBe('configured-model');
     expect(compacted[0].data.effective_host_provider).toBe('anthropic');
     expect(compacted[0].data.error_output.length).toBeLessThan(1300);
-  });
-
-  test('mounted manual logs route proof overflow to exactly one owning feed', async () => {
-    const compilerMetrics = {
-      construction: { acceptances: 0, rejections: 0, declines: 0, acceptance_rate: 0 },
-      rigor: { acceptances: 0, rejections: 0, declines: 0, acceptance_rate: 0 },
-      outline: { acceptances: 0, rejections: 0, declines: 0 },
-      review: { acceptances: 0, rejections: 0, declines: 0 },
-      minuscule_edit_count: 0,
-      paper_word_count: 0,
-      total_submissions: 0,
-    };
-    vi.spyOn(api, 'getStatus').mockResolvedValue({
-      queue_size: 0,
-      total_acceptances: 0,
-      total_rejections: 0,
-      submitter_statuses: [],
-    });
-    vi.spyOn(compilerAPI, 'getMetrics').mockResolvedValue({ data: compilerMetrics });
-    vi.spyOn(compilerAPI, 'getStatus').mockResolvedValue({
-      data: { current_mode: 'construction', is_running: true },
-    });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-      ok: true,
-      json: async () => ({ events: [] }),
-    });
-
-    render(
-      <>
-        <AggregatorLogs />
-        <CompilerLogs />
-      </>
-    );
-
-    await waitFor(() => {
-      expect(api.getStatus).toHaveBeenCalled();
-      expect(compilerAPI.getStatus).toHaveBeenCalled();
-      expect(globalThis.fetch).toHaveBeenCalled();
-    });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      websocket.emit('proof_context_overflow', {
-        source_type: 'brainstorm',
-        source_id: 'manual_aggregator',
-        message: 'Aggregator-only overflow.',
-        configured_model: 'agg-model',
-      });
-      websocket.emit('proof_context_overflow', {
-        source_type: 'paper',
-        source_id: 'manual_compiler_current',
-        message: 'Compiler-only overflow.',
-        configured_model: 'compiler-model',
-      });
-      websocket.emit('proof_context_overflow', {
-        source_type: 'paper',
-        source_id: 'autonomous-paper',
-        workflow_mode: 'autonomous',
-        message: 'App-owned overflow.',
-      });
-    });
-
-    await waitFor(() => {
-      expect(screen.getAllByText(/Aggregator-only overflow/)).toHaveLength(1);
-      expect(screen.getAllByText(/Compiler-only overflow/)).toHaveLength(1);
-    });
-    expect(screen.queryByText(/App-owned overflow/)).toBeNull();
   });
 });

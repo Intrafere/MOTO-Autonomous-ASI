@@ -6,10 +6,19 @@ import {
   formatAssistantProofPackEventMessage,
   formatAssistantProofPackMessage,
   formatContextOverflowActivityMessage,
+  formatEmptyProofDiscoveryMessage,
+  formatProofRunEventMessage,
+  formatProviderUsageLimitActivityMessage,
+  formatProviderUsageLimitResumedMessage,
   formatSolutionPathEventMessage,
   getActivityClass,
   getActivityIcon,
   getAssistantProofPackDuplicateKey,
+  getProofActivityIdentity,
+  getProofActivityScope,
+  hasRecentProofActivityDuplicate,
+  isProviderUsageLimitActive,
+  shouldShowProviderUsageLimitPopup,
   shouldAddRejectionFeedbackNotice,
 } from './activityStyles';
 
@@ -39,6 +48,134 @@ test('context overflow activity identifies the effective or configured model', (
 
 test('proof context overflow uses fatal activity styling without implying workflow stop', () => {
   expect(getActivityClass('proof_context_overflow')).toBe('activity-reject');
+});
+
+test('proof truncation recovery exhaustion uses its dedicated warning activity style', () => {
+  expect(getActivityIcon('proof_truncation_recovery_exhausted')).toBe('⚠');
+  expect(getActivityClass('proof_truncation_recovery_exhausted')).toBe('activity-reject');
+});
+
+test('formats durable provider cooldown and confirmed resume activity', () => {
+  const resetAt = 1_800_000_000;
+  const fallbackMessage = formatProviderUsageLimitActivityMessage({
+    provider_label: 'Sakana Fugu',
+    role_id: 'proof_formalization',
+    reason: 'usage_limit_reached',
+    cooldown_until: resetAt,
+    fallback_model: 'local-proof-model',
+  });
+  expect(fallbackMessage).toContain('Using LM Studio fallback (local-proof-model)');
+  expect(fallbackMessage).toContain('Reset time:');
+
+  const waitingMessage = formatProviderUsageLimitActivityMessage({
+    provider_label: 'Sakana Fugu',
+    role_id: 'proof_formalization',
+    reason: 'usage_limit_reached',
+    cooldown_until: resetAt,
+  });
+  expect(waitingMessage).toContain('waiting for the provider cooldown to end');
+  expect(formatProviderUsageLimitResumedMessage({
+    provider_label: 'Sakana Fugu',
+    role_id: 'proof_formalization',
+  })).toBe(
+    'Sakana Fugu usage limit ended for proof_formalization; provider work resumed.'
+  );
+  expect(getActivityIcon('provider_usage_limit_resumed')).toBe('▶');
+  expect(getActivityClass('provider_usage_limit_resumed')).toBe('activity-success');
+});
+
+test('shows usage-limit popup only for an active waiting cooldown', () => {
+  const now = 1_700_000_000_000;
+  const active = {
+    reason: 'usage_limit_reached',
+    cooldown_until: (now + 60_000) / 1000,
+  };
+  expect(isProviderUsageLimitActive(active, now)).toBe(true);
+  expect(shouldShowProviderUsageLimitPopup(active, now)).toBe(true);
+  expect(shouldShowProviderUsageLimitPopup({
+    ...active,
+    fallback_model: 'local-model',
+  }, now)).toBe(false);
+  expect(isProviderUsageLimitActive({
+    ...active,
+    cooldown_until: (now - 1) / 1000,
+  }, now)).toBe(false);
+  expect(shouldShowProviderUsageLimitPopup({
+    ...active,
+    cooldown_until: (now - 1) / 1000,
+  }, now)).toBe(false);
+});
+
+test('formats proof-run lifecycle activity and source-specific state', () => {
+  expect(formatProofRunEventMessage('proof_run_repair_required', {}))
+    .toContain('start a new proof loop');
+  expect(formatProofRunEventMessage('proof_run_provider_paused', {}))
+    .toBe('Proof run paused for provider credits.');
+  expect(getActivityClass('proof_run_repair_required')).toBe('activity-warning');
+});
+
+test('formats detailed continuous round activity without no-candidate exhaustion', () => {
+  expect(formatEmptyProofDiscoveryMessage()).toBe(
+    'Proof discovery: the model searched for useful novel proof candidates and found none, '
+    + 'so no Lean proof attempts were needed.'
+  );
+  expect(formatProofRunEventMessage('proof_run_round_started', {
+    run_mode: 'loop_with_pruning',
+    current_round: 1,
+  })).toContain('Proof discovery will identify prompt-relevant candidates');
+  expect(formatProofRunEventMessage('proof_run_round_complete', {
+    run_mode: 'loop_with_pruning',
+    current_round: 1,
+    candidate_count: 0,
+    next_round_automatic: true,
+  })).toBe(
+    'Round 1 complete. Discovery: the model searched for useful novel proof candidates and found none, '
+    + 'so no Lean proof attempts were needed. '
+    + 'The next round will start automatically; the loop continues until you press Stop.'
+  );
+  expect(formatProofRunEventMessage('proof_run_round_complete', {
+    run_mode: 'loop_with_pruning',
+    current_round: 2,
+    candidate_count: 2,
+    next_round_automatic: true,
+  })).toContain('Discovery found 2 candidates for this round');
+});
+
+test('dedupes proof activity by notification or run identity while preserving scope', () => {
+  const autonomous = {
+    run_id: 'run-1',
+    proof_scope: 'autonomous',
+    lifecycle_generation: 2,
+  };
+  const manual = {
+    ...autonomous,
+    proof_scope: 'manual',
+  };
+  expect(getProofActivityScope(autonomous)).toBe('autonomous');
+  expect(getProofActivityScope(manual)).toBe('manual');
+  expect(getProofActivityIdentity('proof_run_round_started', autonomous))
+    .not.toBe(getProofActivityIdentity('proof_run_round_started', manual));
+  expect(hasRecentProofActivityDuplicate([
+    { event: 'proof_run_round_started', data: autonomous },
+  ], 'proof_run_round_started', autonomous)).toBe(true);
+  expect(hasRecentProofActivityDuplicate([
+    { event: 'proof_run_round_started', data: autonomous },
+  ], 'proof_run_round_started', manual)).toBe(false);
+  expect(hasRecentProofActivityDuplicate([
+    {
+      event: 'proof_run_round_started',
+      data: { ...autonomous, round_index: 1 },
+    },
+  ], 'proof_run_round_started', { ...autonomous, round_index: 2 })).toBe(false);
+  expect(hasRecentProofActivityDuplicate([
+    {
+      event: 'proof_run_round_started',
+      data: { ...autonomous, round_index: 2 },
+    },
+  ], 'proof_run_round_started', { ...autonomous, round_index: 2 })).toBe(true);
+  expect(getProofActivityIdentity('proof_run_failed', {
+    notification_key: 'proof-run:failed:1',
+  })).toBe('proof-notification:proof-run:failed:1');
 });
 
 test('styles and formats every solution-path lifecycle event', () => {

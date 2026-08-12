@@ -208,3 +208,7 @@ def emit_context_overflow_contract_events(model: WorkflowModel) -> None:
 def emit_registered_proof_verified(model: WorkflowModel) -> None:
     model.emit_registered_proof_verified()
 
+
+def exercise_proof_pruning_and_continuous_contracts(model: WorkflowModel) -> None:
+    model.exercise_proof_pruning_and_continuous_contracts()
+

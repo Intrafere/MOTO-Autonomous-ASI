@@ -191,6 +191,12 @@ CRITICAL REQUIREMENTS:
 - Mathematical claims require sound derivation, proof, or explicit assumptions; other claims require the verification standard appropriate to their type
 - Unsupported empirical or artifact claims must be rewritten as hypotheses, validation plans, limitations, or future work instead of being asserted as completed results
 
+STANDARD-LENGTH DISCIPLINE:
+- Write the section at the standard length appropriate for its role in the paper
+- Be rigorous where rigor changes the answer, but do not repeat assumptions, caveats, validation posture, or governance language already established elsewhere
+- Prefer concise, non-redundant exposition over exhaustive coverage of every possible edge case unless the user prompt specifically requires that depth
+- If the outline is broad, satisfy each section by covering its necessary contribution rather than expanding it to the maximum possible detail
+
 EXACT STRING MATCHING FOR EDITS:
 This system uses EXACT STRING MATCHING. To insert or modify content, you must:
 1. Identify the exact text in the current document where you want to make changes

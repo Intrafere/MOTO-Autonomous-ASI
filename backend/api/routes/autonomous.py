@@ -7,9 +7,14 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any, Dict, List
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
-from backend.shared.models import AutonomousResearchStartRequest, CritiqueRequest
+from backend.shared.models import (
+    AutonomousResearchStartRequest,
+    AutonomousResearchStatusResponse,
+    AutonomousTerminalEvent,
+    CritiqueRequest,
+)
 from backend.shared.path_safety import (
     resolve_path_within_root,
     validate_single_path_component,
@@ -878,6 +883,9 @@ async def start_autonomous_research(request: AutonomousResearchStartRequest):
                 raise
             if not autonomous_coordinator.is_active:
                 _release_autonomous_workflow_lease()
+            elif effective_allow_mathematical_proofs:
+                from backend.shared.lean4_client import start_lean4_workspace_bootstrap
+                start_lean4_workspace_bootstrap()
 
             return {
                 "success": True,
@@ -1038,12 +1046,20 @@ async def get_prompt():
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.get("/status")
-async def get_autonomous_status():
+@router.get("/status", response_model=AutonomousResearchStatusResponse)
+async def get_autonomous_status(response: Response):
     """Get current status and metrics."""
     try:
+        response.headers["Cache-Control"] = "no-store"
         state = autonomous_coordinator.get_state()
         stats = await research_metadata.get_stats()
+        workflow_state = await research_metadata.get_workflow_state()
+        terminal_payload = workflow_state.get("terminal_event")
+        terminal_event = (
+            AutonomousTerminalEvent.model_validate(terminal_payload)
+            if isinstance(terminal_payload, dict)
+            else None
+        )
         
         # Get current brainstorm info if available
         current_brainstorm = None
@@ -1115,11 +1131,21 @@ async def get_autonomous_status():
         
         return {
             "is_running": state.is_running,
+            "run_id": str(
+                workflow_state.get("run_id")
+                or getattr(session_manager, "session_id", "")
+                or "legacy"
+            ),
+            "lifecycle_generation": int(
+                workflow_state.get("lifecycle_generation") or 0
+            ),
+            "resume_available": research_metadata.has_interrupted_workflow(),
             "current_tier": state.current_tier,
             "current_brainstorm": current_brainstorm,
             "current_paper": current_paper,
             "tier3_status": tier3_status,
-            "stats": stats
+            "stats": stats,
+            "terminal_event": terminal_event,
         }
         
     except Exception as e:

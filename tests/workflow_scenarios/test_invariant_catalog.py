@@ -14,6 +14,7 @@ from tests.workflow_harness.actions import (
     emit_context_overflow_contract_events,
     emit_frontend_scoped_event,
     emit_registered_proof_verified,
+    exercise_proof_pruning_and_continuous_contracts,
     force_paper_writing,
     prepare_prompt_context,
     prepare_validator_prompt_with_live_assistant,
@@ -98,6 +99,16 @@ PLAN2_INVARIANT_IDS = {
     "prompt.direct_sources_excluded_from_rag",
     "prompt.mandatory_source_overflow_fails_visible",
     "prompt.generated_appendices_stripped",
+    "proof_pruning.artifacts_and_future_memory_preserved",
+    "proof_pruning.owning_run_context_excludes_pruned",
+    "proof_pruning.validator_gates_automatic_mutation",
+    "proof_pruning.no_prune_is_valid",
+    "proof_pruning.review_non_blocking",
+    "proof_pruning.commit_lifecycle_fenced",
+    "proof_pruning.context_overflow_truthful",
+    "proof_loop.continuous_explicit_ownership",
+    "proof_loop.automatic_round_policy_preserved",
+    "proof_pruning.occurrence_scope_isolated",
 }
 
 
@@ -216,6 +227,32 @@ SCENARIOS_BY_INVARIANT = {
     "prompt.direct_sources_excluded_from_rag": [verify_rag_source_exclusion],
     "prompt.mandatory_source_overflow_fails_visible": [reject_mandatory_source_overflow],
     "prompt.generated_appendices_stripped": [prepare_prompt_context],
+    "proof_pruning.artifacts_and_future_memory_preserved": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
+    "proof_pruning.owning_run_context_excludes_pruned": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
+    "proof_pruning.validator_gates_automatic_mutation": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
+    "proof_pruning.no_prune_is_valid": [exercise_proof_pruning_and_continuous_contracts],
+    "proof_pruning.review_non_blocking": [exercise_proof_pruning_and_continuous_contracts],
+    "proof_pruning.commit_lifecycle_fenced": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
+    "proof_pruning.context_overflow_truthful": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
+    "proof_loop.continuous_explicit_ownership": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
+    "proof_loop.automatic_round_policy_preserved": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
+    "proof_pruning.occurrence_scope_isolated": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
 }
 
 
@@ -309,6 +346,29 @@ def _make_invariant_violation(model: WorkflowModel, invariant_id: str) -> None:
         model.direct_sources_excluded_from_rag = False
     elif invariant_id == "prompt.mandatory_source_overflow_fails_visible":
         model.mandatory_source_overflow_visible = False
+    elif invariant_id == "proof_pruning.artifacts_and_future_memory_preserved":
+        model.pruned_proof_occurrences = {"proof-1"}
+        model.proof_artifacts = {"proof-1"}
+    elif invariant_id == "proof_pruning.owning_run_context_excludes_pruned":
+        model.pruned_proof_occurrences = model.owning_run_context_proofs = {"proof-1"}
+    elif invariant_id == "proof_pruning.validator_gates_automatic_mutation":
+        model.automatic_prune_mutations = 1
+    elif invariant_id == "proof_pruning.no_prune_is_valid":
+        model.no_prune_responses = model.no_prune_errors = 1
+    elif invariant_id == "proof_pruning.review_non_blocking":
+        model.pruning_review_pending = True
+    elif invariant_id == "proof_pruning.commit_lifecycle_fenced":
+        model.stale_prune_commit_attempts = model.stale_prune_mutations = 1
+    elif invariant_id == "proof_pruning.context_overflow_truthful":
+        model.pruning_success_from_context_overflow = 1
+    elif invariant_id == "proof_loop.continuous_explicit_ownership":
+        model.continuous_loop_active = True
+        model.continuous_restart_resumable = True
+    elif invariant_id == "proof_loop.automatic_round_policy_preserved":
+        model.automatic_round_maximum = 5
+    elif invariant_id == "proof_pruning.occurrence_scope_isolated":
+        model.canonical_occurrences = {"canonical": {"proof-1", "proof-2"}}
+        model.pruned_proof_occurrences = {"proof-1", "proof-2"}
     else:
         raise AssertionError(f"No negative fixture for {invariant_id}")
 

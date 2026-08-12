@@ -81,6 +81,14 @@ def _clean_notifications(notifications: list[Any]) -> list[dict[str, Any]]:
             continue
         if _notification_age_seconds(item, now) > PROVIDER_NOTIFICATION_TTL_SECONDS:
             continue
+        if item.get("reason") == "usage_limit_reached":
+            raw_cooldown_until = item.get("cooldown_until") or item.get("resets_at")
+            try:
+                cooldown_until = int(raw_cooldown_until)
+            except (TypeError, ValueError):
+                cooldown_until = 0
+            if cooldown_until and cooldown_until <= int(now):
+                continue
         cleaned.append(item)
     return cleaned[-MAX_PROVIDER_NOTIFICATIONS:]
 
@@ -109,7 +117,8 @@ def record_provider_notification(event_type: str, payload: Dict[str, Any]) -> di
     key_model = model
     if reason == "usage_limit_reached" and payload.get("cooldown_until") is not None:
         key_model = f"{model or '*'}@{payload.get('cooldown_until')}"
-    notification_key = _stable_notification_key(provider, role_id, reason, key_model)
+    explicit_key = _safe_string(payload.get("notification_key"), 240)
+    notification_key = explicit_key or _stable_notification_key(provider, role_id, reason, key_model)
     notification_id = _safe_string(payload.get("id"), 240) or notification_key
 
     notification = {
@@ -126,6 +135,16 @@ def record_provider_notification(event_type: str, payload: Dict[str, Any]) -> di
         "message": _safe_string(payload.get("message"), 700),
         "error_summary": _safe_string(payload.get("error_summary"), 700),
         "oauth_error_message": _safe_string(payload.get("oauth_error_message"), 1800),
+        "notification_kind": _safe_string(payload.get("notification_kind"), 80) or "oauth",
+        "workflow_mode": (
+            _safe_string(payload.get("workflow_mode"), 40)
+            if _safe_string(payload.get("workflow_mode"), 40)
+            in {"autonomous", "aggregator", "compiler", "leanoj", "manual_proof_check"}
+            else ""
+        ),
+        "run_id": _safe_string(payload.get("run_id"), 160),
+        "title": _safe_string(payload.get("title"), 240),
+        "terminal_guidance": _safe_string(payload.get("terminal_guidance"), 1800),
     }
     for numeric_key in ("resets_at", "resets_in_seconds", "cooldown_until"):
         raw_value = payload.get(numeric_key)

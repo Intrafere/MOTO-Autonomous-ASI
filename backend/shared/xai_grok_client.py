@@ -44,6 +44,15 @@ class XAIGrokRequestError(XAIGrokError):
     """Raised when xAI rejects a request after authentication."""
 
 
+class XAIGrokSpendingLimitError(XAIGrokError):
+    """Raised when xAI reports a definitive untimed spending/subscription limit."""
+
+    def __init__(self, message: str, *, code: str = "", status_code: int = 0) -> None:
+        self.code = str(code or "")
+        self.status_code = int(status_code or 0)
+        super().__init__(message)
+
+
 class XAIGrokClient:
     """Client for xAI Grok OAuth and the xAI OpenAI-compatible API surface."""
 
@@ -222,6 +231,39 @@ class XAIGrokClient:
             or "premium" in lowered
             or "supergrok" in lowered
             or "quota" in lowered
+        )
+
+    @staticmethod
+    def _provider_error_fields(response: httpx.Response) -> tuple[str, str]:
+        code = ""
+        message = sanitize_provider_error_text(response.text)
+        try:
+            payload = response.json()
+        except (AttributeError, ValueError, json.JSONDecodeError):
+            return code, message
+        if not isinstance(payload, dict):
+            return code, message
+        error = payload.get("error")
+        if isinstance(error, dict):
+            code = str(error.get("code") or payload.get("code") or "")
+            raw_message = error.get("message") or error.get("error")
+        else:
+            code = str(payload.get("code") or "")
+            raw_message = error or payload.get("message")
+        if raw_message:
+            message = sanitize_provider_error_text(str(raw_message))
+        return code, message
+
+    @classmethod
+    def _is_hard_spending_limit(cls, code: str, message: str) -> bool:
+        normalized_code = str(code or "").strip().lower()
+        lowered = str(message or "").lower()
+        return (
+            normalized_code == "personal-team-blocked:spending-limit"
+            or "spending-limit" in normalized_code
+            or "spending limit" in lowered
+            or "run out of credits" in lowered
+            or "need a grok subscription" in lowered
         )
 
     @classmethod
@@ -504,11 +546,17 @@ class XAIGrokClient:
         for attempt in range(max_attempts):
             try:
                 response = await self.client.post(url, **kwargs)
+                code, error_detail = self._provider_error_fields(response)
+                if response.status_code >= 400 and self._is_hard_spending_limit(code, error_detail):
+                    raise XAIGrokSpendingLimitError(
+                        f"xAI Grok spending limit reached: {error_detail}",
+                        code=code,
+                        status_code=response.status_code,
+                    )
                 if response.status_code >= 400 and (
                     response.status_code in self.TRANSIENT_STATUS_CODES
                     or self._is_transient_text(response.text)
                 ):
-                    error_detail = sanitize_provider_error_text(response.text)
                     delay = self._retry_delay(attempt)
                     logger.warning(
                         "xAI Grok transient completion response (attempt %s/%s): status=%s error=%s%s",
@@ -611,7 +659,13 @@ class XAIGrokClient:
                 headers=self._headers(tokens),
             )
             if response.status_code >= 400:
-                message = sanitize_provider_error_text(response.text)
+                code, message = self._provider_error_fields(response)
+                if self._is_hard_spending_limit(code, message):
+                    raise XAIGrokSpendingLimitError(
+                        f"xAI Grok spending limit reached: {message}",
+                        code=code,
+                        status_code=response.status_code,
+                    )
                 if response.status_code == 401:
                     if not auth_retry_used:
                         tokens = await self._recover_tokens_after_auth_failure(tokens, context="completion")

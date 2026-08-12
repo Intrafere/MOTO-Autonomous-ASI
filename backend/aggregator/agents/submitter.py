@@ -18,7 +18,10 @@ from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
 from backend.shared.response_extraction import extract_message_text
 from backend.aggregator.core.context_allocator import ContextAllocationError, context_allocator
-from backend.shared.provider_errors import ProviderContextLengthError
+from backend.shared.provider_errors import (
+    ProviderContextLengthError,
+    ProviderRepairRequiredError,
+)
 from backend.aggregator.core.queue_manager import queue_manager
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.memory.local_training import LocalTrainingMemory
@@ -49,6 +52,16 @@ class SubmitterAgent:
     Runs in parallel with other submitters.
     Each submitter can use its own model and context window configuration.
     """
+
+    @property
+    def user_prompt(self) -> str:
+        """Build the current model-visible prompt from canonical proof state."""
+        if self._proof_database_store is None:
+            return self._base_user_prompt
+        return self._proof_database_store.inject_into_prompt(
+            self._base_user_prompt,
+            requesting_run_id=self._proof_context_requesting_run_id,
+        )
     
     def __init__(
         self,
@@ -67,14 +80,13 @@ class SubmitterAgent:
         reset_local_rejection_log_on_initialize: bool = False,
         assistant_workflow_mode_override: Optional[str] = None,
         solution_path_manager: Optional[Any] = None,
+        proof_context_requesting_run_id: str = "",
     ):
         self.submitter_id = submitter_id
         self.model_name = model_name
-        self.user_prompt = (
-            proof_database_store.inject_into_prompt(user_prompt)
-            if proof_database_store is not None
-            else user_prompt
-        )
+        self._base_user_prompt = user_prompt
+        self._proof_database_store = proof_database_store
+        self._proof_context_requesting_run_id = proof_context_requesting_run_id
         self.user_files_content = user_files_content
         self.websocket_broadcaster = websocket_broadcaster
         self.coordinator = coordinator
@@ -218,6 +230,19 @@ class SubmitterAgent:
                     role_id=self.role_id,
                     should_stop=lambda: not self.is_running,
                 )
+            except ProviderRepairRequiredError as e:
+                if self.coordinator and hasattr(
+                    self.coordinator,
+                    "_handle_submitter_provider_repair_required",
+                ):
+                    await self.coordinator._handle_submitter_provider_repair_required(
+                        self,
+                        e,
+                    )
+                else:
+                    self.is_running = False
+                    self.state.is_active = False
+                break
             except ContextAllocationError as e:
                 logger.error("Submitter %s context overflow: %s", self.submitter_id, e)
                 if self.coordinator and hasattr(self.coordinator, "_handle_context_overflow"):
@@ -441,6 +466,8 @@ class SubmitterAgent:
                 except FreeModelExhaustedError:
                     raise
                 except RetryableProviderError:
+                    raise
+                except ProviderRepairRequiredError:
                     raise
                 except RuntimeError as e:
                     if "credits exhausted" in str(e).lower():

@@ -24,6 +24,9 @@ class _ProofStore:
     async def get_all_proofs(self):
         return list(self._proofs)
 
+    async def get_all_proofs_for_live_context(self, _requesting_run_id):
+        return list(self._proofs)
+
     async def get_recent_failure_hints(self, *_args, **_kwargs):
         return []
 

@@ -208,9 +208,11 @@ class HighParamSubmitter:
         validator_context_window: Optional[int] = None,
         validator_max_tokens: Optional[int] = None,
         proof_database_store=None,
+        proof_context_requesting_run_id: str = "",
     ):
         self.model_name = model_name
         self.proof_database = proof_database_store or autonomous_proof_database
+        self.proof_context_requesting_run_id = proof_context_requesting_run_id
         # Rigor discovery receives compact existing-proof summaries separately.
         # Avoid injecting full Lean proof library text into the user prompt,
         # which would duplicate the paper appendix/proof-list context.
@@ -784,7 +786,9 @@ class HighParamSubmitter:
         # can recognize duplicates without blowing the token budget.
         existing_proofs: List[dict] = []
         try:
-            for record in await self.proof_database.get_all_proofs():
+            for record in await self.proof_database.get_all_proofs_for_live_context(
+                self.proof_context_requesting_run_id or self._resolve_session_id()
+            ):
                 existing_proofs.append(
                     {
                         "proof_id": record.proof_id,

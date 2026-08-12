@@ -166,6 +166,37 @@ class WorkflowModel:
     exercise_observations: set[str] = field(default_factory=set)
     persisted_events: list[WorkflowEvent] = field(default_factory=list)
     terminal_stop_events: int = 0
+    proof_artifacts: set[str] = field(default_factory=set)
+    visible_proofs: set[str] = field(default_factory=set)
+    exportable_proofs: set[str] = field(default_factory=set)
+    graph_proofs: set[str] = field(default_factory=set)
+    future_memory_proofs: set[str] = field(default_factory=set)
+    syntheticlib_eligible_proofs: set[str] = field(default_factory=set)
+    owning_run_context_proofs: set[str] = field(default_factory=set)
+    future_run_context_proofs: set[str] = field(default_factory=set)
+    pruned_proof_occurrences: set[str] = field(default_factory=set)
+    canonical_occurrences: dict[str, set[str]] = field(default_factory=dict)
+    automatic_prune_proposals: int = 0
+    validator_prune_acceptances: int = 0
+    automatic_prune_mutations: int = 0
+    no_prune_responses: int = 0
+    no_prune_errors: int = 0
+    pruning_review_pending: bool = False
+    proof_progress_while_pruning_pending: int = 0
+    stale_prune_commit_attempts: int = 0
+    stale_prune_mutations: int = 0
+    pruning_success_from_context_overflow: int = 0
+    continuous_loop_active: bool = False
+    continuous_loop_hidden_cap: int | None = None
+    continuous_source_reservations: int = 0
+    continuous_stop_available: bool = False
+    continuous_restart_resumable: bool = False
+    continuous_stops_on_no_candidates: bool = False
+    continuous_round_activity_detailed: bool = False
+    continuous_cleanup_leaks: int = 0
+    automatic_round_callers: int = 3
+    automatic_round_maximum: int = 4
+    automatic_round_stops_on_first_zero: bool = True
     checkpoint: dict[str, object] = field(default_factory=dict)
     events: list[WorkflowEvent] = field(default_factory=list)
     replay: list[str] = field(default_factory=list)
@@ -492,6 +523,68 @@ class WorkflowModel:
         self.record("emit_registered_proof_verified", proof_id=proof_id)
         self.autonomous_proofs.add(proof_id)
         self.emit("proof_verified", proof_id=proof_id, scope="autonomous", phase=self.phase.value)
+
+    def exercise_proof_pruning_and_continuous_contracts(self) -> None:
+        self.record("exercise_proof_pruning_and_continuous_contracts")
+        pruned = "proof-occurrence-owning"
+        sibling = "proof-occurrence-other-run"
+        self.proof_artifacts.update({pruned, sibling})
+        self.visible_proofs.update({pruned, sibling})
+        self.exportable_proofs.update({pruned, sibling})
+        self.graph_proofs.update({pruned, sibling})
+        self.future_memory_proofs.update({pruned, sibling})
+        self.syntheticlib_eligible_proofs.update({pruned, sibling})
+        self.pruned_proof_occurrences.add(pruned)
+        self.canonical_occurrences["canonical-proof"] = {pruned, sibling}
+        self.owning_run_context_proofs.discard(pruned)
+        self.future_run_context_proofs.update({pruned, sibling})
+
+        self.automatic_prune_proposals += 1
+        self.validator_prune_acceptances += 1
+        self.automatic_prune_mutations += 1
+        self.no_prune_responses += 1
+        self.pruning_review_pending = True
+        self.proof_progress_while_pruning_pending += 2
+        self.stale_prune_commit_attempts += 1
+
+        self.emit(
+            "proof_context_overflow",
+            scope="manual",
+            phase="manual_proof_check",
+            workflow_mode="manual",
+            role_id="proof_formalization",
+            configured_model="configured-model",
+            configured_provider="openrouter",
+            fatal=False,
+        )
+
+        self.continuous_loop_active = True
+        self.continuous_source_reservations = 1
+        self.continuous_stop_available = True
+        self.continuous_restart_resumable = False
+        self.continuous_stops_on_no_candidates = False
+        self.continuous_round_activity_detailed = True
+        self.checkpoint.update(
+            {
+                "run_mode": "loop_with_pruning",
+                "proof_run_id": "proof-run-overlay",
+                "lifecycle_generation": 1,
+            }
+        )
+        self.exercise_observations.update(
+            {
+                "pruned_artifact_preserved",
+                "owning_context_excluded",
+                "validator_gate",
+                "no_prune",
+                "non_blocking_pruning",
+                "stale_commit_fenced",
+                "overflow_truthful",
+                "continuous_ownership",
+                "automatic_round_policy",
+                "occurrence_scope",
+            }
+        )
 
     def force_paper_writing(self) -> None:
         self.record("force_paper_writing")

@@ -71,6 +71,8 @@ _BLOCKED_IDS = {
     "real_parent_action_fencing_unavailable_without_production_seam",
     "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
     "real_leanoj_full_final_loop_not_safely_bounded",
+    "real_pruning_overflow_commit_interleaving_unobservable",
+    "real_continuous_loop_stop_terminal_zero_policy",
 }
 
 _DEEP_CLEANUP = CleanupContract(
@@ -214,8 +216,9 @@ def validate_maturity_registry(
         assert record.test_selectors
         assert len(record.test_selectors) == len(set(record.test_selectors))
         for selector in record.test_selectors:
-            assert selector.count("::") == 1, selector
-            assert selector.split("::", 1)[1].startswith("test_"), selector
+            parts = selector.split("::")
+            assert len(parts) in {2, 3}, selector
+            assert parts[-1].startswith("test_"), selector
         if workspace_root is not None:
             for selector in record.test_selectors:
                 selector_path = selector.split("::", 1)[0]

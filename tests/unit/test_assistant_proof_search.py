@@ -373,6 +373,74 @@ class AssistantProofPackPayloadTests(unittest.IsolatedAsyncioTestCase):
             ["eligible-run"],
         )
 
+    async def test_cached_pack_fails_closed_for_malformed_live_context_state(self) -> None:
+        support = AssistantProofSupport.from_record(_record(1)).model_copy(
+            update={
+                "occurrence_provenance": [
+                    {
+                        "search_id": "moto:malformed",
+                        "corpus": "moto",
+                        "run_id": "history-run",
+                        "live_context_status": "unexpected",
+                    }
+                ],
+                "occurrence_total": 1,
+            }
+        )
+        pack = AssistantProofPack(
+            workflow_mode="autonomous",
+            target_kind="proof_candidate",
+            target_hash="malformed-live-context",
+            results=[support],
+        )
+
+        sanitized = _drop_current_run_supports_from_pack(
+            pack,
+            requesting_run_id="current-run",
+        )
+
+        self.assertEqual(sanitized.results, [])
+
+    async def test_cached_pack_keeps_other_run_prune_but_drops_owner_run_prune(self) -> None:
+        support = AssistantProofSupport.from_record(_record(1)).model_copy(
+            update={
+                "occurrence_provenance": [
+                    {
+                        "search_id": "moto:owner-pruned",
+                        "corpus": "moto",
+                        "run_id": "owner-run",
+                        "live_context_status": "pruned",
+                        "live_context_owner_run_id": "owner-run",
+                    },
+                    {
+                        "search_id": "manual:future-eligible",
+                        "corpus": "manual",
+                        "run_id": "history-run",
+                        "live_context_status": "pruned",
+                        "live_context_owner_run_id": "prior-run",
+                    },
+                ],
+                "occurrence_total": 2,
+            }
+        )
+        pack = AssistantProofPack(
+            workflow_mode="autonomous",
+            target_kind="proof_candidate",
+            target_hash="owning-run-prune",
+            results=[support],
+        )
+
+        sanitized = _drop_current_run_supports_from_pack(
+            pack,
+            requesting_run_id="owner-run",
+        )
+
+        self.assertEqual(len(sanitized.results), 1)
+        self.assertEqual(
+            [item["search_id"] for item in sanitized.results[0].occurrence_provenance],
+            ["manual:future-eligible"],
+        )
+
     async def test_current_run_excluded_for_autonomous_manual_and_leanoj(self) -> None:
         with _assistant_test_environment():
             for mode, run_id in (

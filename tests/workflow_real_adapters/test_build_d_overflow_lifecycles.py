@@ -115,9 +115,13 @@ async def test_manual_aggregator_fatal_overflow_preserves_route_and_reloads(
 @pytest.mark.asyncio
 async def test_autonomous_fatal_overflow_terminal_stop_emits_exactly_once(monkeypatch):
     coordinator = AutonomousCoordinator()
+    coordinator._run_id = "session-1"
+    coordinator._lifecycle_generation = 4
     collector = EventCollector()
     coordinator.set_broadcast_callback(collector.broadcast)
     monkeypatch.setattr(research_metadata, "get_stats", AsyncMock(return_value={}))
+    save_terminal_event = AsyncMock(return_value=True)
+    monkeypatch.setattr(research_metadata, "save_terminal_event", save_terminal_event)
     payload = {
         "workflow_mode": "autonomous",
         "role_id": "compiler_writer",
@@ -151,6 +155,10 @@ async def test_autonomous_fatal_overflow_terminal_stop_emits_exactly_once(monkey
         effective_model="fallback-model:2",
         effective_provider="lm_studio",
     )
+    assert terminal["terminal_event_id"]
+    assert terminal["run_id"] == "session-1"
+    assert terminal["lifecycle_generation"] == 4
+    save_terminal_event.assert_awaited_once()
 
 
 @pytest.mark.asyncio

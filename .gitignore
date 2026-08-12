@@ -82,6 +82,7 @@ backend/data/proofs/*
 backend/data/manual_proofs/*
 !backend/data/manual_proofs/.gitkeep
 backend/data/manual_proof_runs/
+backend/data/proof_runs/
 backend/data/lean4_workspace/
 backend/data/z3/
 

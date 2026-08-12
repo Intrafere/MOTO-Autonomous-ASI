@@ -19,7 +19,10 @@ from backend.shared.solution_path.integration import (
     with_validator_hook,
 )
 from backend.aggregator.core.context_allocator import ContextAllocationError, context_allocator
-from backend.shared.provider_errors import ProviderContextLengthError
+from backend.shared.provider_errors import (
+    ProviderContextLengthError,
+    ProviderRepairRequiredError,
+)
 from backend.aggregator.memory.shared_training import shared_training_memory
 from backend.aggregator.prompts.validator_prompts import (
     build_validator_prompt,
@@ -48,6 +51,16 @@ class ValidatorAgent:
     Validator agent that validates submissions sequentially.
     Always uses constant 512-char chunks.
     """
+
+    @property
+    def user_prompt(self) -> str:
+        """Build the current model-visible prompt from canonical proof state."""
+        if self._proof_database_store is None:
+            return self._base_user_prompt
+        return self._proof_database_store.inject_into_prompt(
+            self._base_user_prompt,
+            requesting_run_id=self._proof_context_requesting_run_id,
+        )
     
     def __init__(
         self,
@@ -57,13 +70,12 @@ class ValidatorAgent:
         websocket_broadcaster: Optional[Callable] = None,
         proof_database_store: Optional[Any] = None,
         solution_path_manager: Optional[Any] = None,
+        proof_context_requesting_run_id: str = "",
     ):
         self.model_name = model_name
-        self.user_prompt = (
-            proof_database_store.inject_into_prompt(user_prompt)
-            if proof_database_store is not None
-            else user_prompt
-        )
+        self._base_user_prompt = user_prompt
+        self._proof_database_store = proof_database_store
+        self._proof_context_requesting_run_id = proof_context_requesting_run_id
         self.user_files_content = user_files_content
         self.chunk_size = rag_config.validator_chunk_size  # Always 512
         self.websocket_broadcaster = websocket_broadcaster
@@ -118,9 +130,16 @@ class ValidatorAgent:
             
             return quality_result
             
-        except (FreeModelExhaustedError, ContextAllocationError, RetryableProviderError):
+        except (
+            FreeModelExhaustedError,
+            ContextAllocationError,
+            RetryableProviderError,
+            ProviderRepairRequiredError,
+        ):
             raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"Validation failed: {e}")
             return ValidationResult(
                 submission_id=submission.submission_id,
@@ -239,6 +258,8 @@ class ValidatorAgent:
                         output_reserve=rag_config.validator_max_output_tokens,
                     ) from e
                 except (httpx.HTTPStatusError, ValueError) as e:
+                    if api_client_manager.is_provider_failure(e):
+                        raise
                     error_msg = str(e)
                     is_400_or_context = "400" in error_msg or "context" in error_msg.lower()
                     
@@ -306,7 +327,11 @@ class ValidatorAgent:
                     ) from e
                 except RetryableProviderError:
                     raise
+                except ProviderRepairRequiredError:
+                    raise
                 except Exception as e:
+                    if api_client_manager.is_provider_failure(e):
+                        raise
                     logger.error(f"Validator: Unexpected error during validation: {e}")
                     # Notify task completed (failed but still completed)
                     if self.task_tracking_callback:
@@ -435,7 +460,11 @@ class ValidatorAgent:
                         logger.warning("Validator: Retry request returned no choices")
                 except RetryableProviderError:
                     raise
+                except ProviderRepairRequiredError:
+                    raise
                 except Exception as e:
+                    if api_client_manager.is_provider_failure(e):
+                        raise
                     logger.error(f"Validator: Retry request failed - {e}")
                 
                 # If STILL invalid after retry, return error ValidationResult
@@ -494,6 +523,8 @@ class ValidatorAgent:
         except ContextAllocationError:
             raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"Quality assessment failed: {e}")
             return ValidationResult(
                 submission_id=submission.submission_id,
@@ -846,9 +877,16 @@ class ValidatorAgent:
                 context_window=context_allocator.validator_context_window,
                 output_reserve=rag_config.validator_max_output_tokens,
             ) from e
-        except (FreeModelExhaustedError, ContextAllocationError, RetryableProviderError):
+        except (
+            FreeModelExhaustedError,
+            ContextAllocationError,
+            RetryableProviderError,
+            ProviderRepairRequiredError,
+        ):
             raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             error_text = str(e)
             if "context" in error_text.lower():
                 raise ContextAllocationError(
@@ -987,7 +1025,11 @@ class ValidatorAgent:
             ) from e
         except RetryableProviderError:
             raise
+        except ProviderRepairRequiredError:
+            raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.warning(f"Batch validator: Retry failed - {e}")
         
         return None, {}
@@ -1270,7 +1312,11 @@ class ValidatorAgent:
             raise
         except RetryableProviderError:
             raise
+        except ProviderRepairRequiredError:
+            raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"CLEANUP DEBUG: EXCEPTION in perform_cleanup_review: {e}", exc_info=True)
             logger.error(f"Cleanup review failed: {e}", exc_info=True)
             return None
@@ -1483,7 +1529,11 @@ class ValidatorAgent:
             raise
         except RetryableProviderError:
             raise
+        except ProviderRepairRequiredError:
+            raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"CLEANUP DEBUG: EXCEPTION in validate_removal: {e}", exc_info=True)
             logger.error(f"Removal validation failed: {e}", exc_info=True)
             return False

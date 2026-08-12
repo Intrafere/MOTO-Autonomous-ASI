@@ -365,6 +365,15 @@ class CompilerValidator:
     - Checks placement context validity
     - Checks non-redundancy
     """
+
+    @property
+    def user_prompt(self) -> str:
+        if self._proof_database_store is None:
+            return self._base_user_prompt
+        return self._proof_database_store.inject_into_prompt(
+            self._base_user_prompt,
+            requesting_run_id=self._proof_context_requesting_run_id,
+        )
     
     def __init__(
         self,
@@ -373,13 +382,12 @@ class CompilerValidator:
         websocket_broadcaster: Optional[Callable] = None,
         proof_database_store=None,
         solution_path_manager=None,
+        proof_context_requesting_run_id: str = "",
     ):
         self.model_name = model_name
-        self.user_prompt = (
-            proof_database_store.inject_into_prompt(user_prompt)
-            if proof_database_store is not None
-            else user_prompt
-        )
+        self._base_user_prompt = user_prompt
+        self._proof_database_store = proof_database_store
+        self._proof_context_requesting_run_id = proof_context_requesting_run_id
         self.websocket_broadcaster = websocket_broadcaster
         self.solution_path_manager = solution_path_manager
         self._initialized = False
@@ -1278,6 +1286,8 @@ class CompilerValidator:
         except RetryableProviderError:
             raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"Validation failed: {e}")
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)
@@ -1418,6 +1428,8 @@ class CompilerValidator:
         except RetryableProviderError:
             raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"Brainstorm operation validation failed: {e}")
             if self.task_tracking_callback:
                 self.task_tracking_callback("completed", task_id)

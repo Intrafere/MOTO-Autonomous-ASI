@@ -30,27 +30,40 @@ Include in your report:
 ### API Key Protection
 
 **NEVER commit API keys to the repository:**
-- OpenRouter API keys should be entered through the UI only
-- Keys are stored in browser localStorage, not in code
+- Enter desktop provider credentials through MOTO's credential UI. Hosted operators should inject credentials through the platform's secret environment or authenticated API path.
+- In desktop/default mode, OpenRouter and Wolfram API keys, OAuth tokens, and supported subscription-provider keys are persisted through the operating system's credential store. MOTO delegates protection to that OS keyring; it does not encrypt the credentials itself.
+- In hosted/generic mode, provider keys are injected through environment variables or authenticated API requests and are kept in backend process memory rather than persisted to the desktop keyring.
+- Credentials necessarily exist in backend process memory while they are in use. Do not put provider keys in prompts, uploaded files, source code, browser storage, or runtime settings.
 - Use `.gitignore` to exclude sensitive data files
 - Check `.gitignore` includes `backend/data/` subdirectories
 
-### LM Studio Security
+### Privacy and External Data Flow
 
-**Local model hosting:**
-- LM Studio runs on localhost (127.0.0.1:1234)
-- No external network access required for local models
-- Models execute on your machine only
-- No data leaves your system when using LM Studio exclusively
+MOTO can operate close to offline during normal research, but this depends on the selected providers and configuration. The closest-to-offline setup uses LM Studio at its default loopback address for both model inference and embeddings, with OpenRouter, desktop cloud providers, Wolfram|Alpha, and other optional network integrations disabled. This is not an air-gap guarantee: installation, updates, package or model downloads, and optional Lean/Mathlib setup can still require internet access. Operators may also override the LM Studio address to a non-local server.
 
-### OpenRouter Usage
+| Provider path | What may leave the machine | Credential handling | Processing and retention expectation |
+|---|---|---|---|
+| **LM Studio at the default loopback address** | Model prompts and embedding text stay between MOTO and the LM Studio server on `127.0.0.1`. | LM Studio does not require a MOTO API key. | Inference is local when the configured server is genuinely local. If LM Studio embeddings fail and OpenRouter fallback is available, text selected for embedding may be sent to OpenRouter. |
+| **OpenRouter** | The complete request assembled for a role is sent to OpenRouter and may be forwarded to the selected upstream model provider. It can include the user prompt, system instructions, uploaded or retrieved text, accepted research, drafts, proof material, feedback, and tool results when included in that role's context. Embedding fallback can also send text selected for embedding. | Desktop keys use the OS keyring; hosted keys come from environment/authenticated API input and remain in process memory. The key is transmitted to OpenRouter for authentication. | OpenRouter and the upstream provider control processing and retention. OpenRouter offers privacy, data-collection, and Zero Data Retention controls, but compatibility varies by endpoint. Verify the selected endpoint and current account settings before use. |
+| **Wolfram\|Alpha** | When the optional tool is enabled and invoked, MOTO sends the model-generated computational query and the Wolfram App ID to Wolfram. Wolfram's result is returned to the active writing model, so it is also sent to that model's cloud provider when the role is cloud-hosted. The full MOTO research prompt is not automatically sent to Wolfram. | Desktop App IDs use the OS keyring; hosted App IDs remain in process memory. | Wolfram's policies allow collection of query information and govern its retention and use. Do not assume that a query has zero retention. |
+| **Desktop OAuth/subscription providers** | When selected for a role, MOTO sends that role's complete assembled model request directly to the provider, such as OpenAI Codex/ChatGPT, xAI Grok/SuperGrok, or Sakana Fugu. These are separate paths, not OpenRouter relays. | OAuth tokens and supported subscription API keys use the desktop OS keyring and also exist in process memory while active. These providers are unavailable in hosted/generic mode. | The selected provider's current privacy, training, and retention terms apply. MOTO cannot impose a provider-side retention guarantee. |
+| **Hosted/generic MOTO** | Browser requests first enter the private hosted MOTO sandbox. Embeddings use in-process FastEmbed, but assembled LLM requests are sent from the sandbox to OpenRouter. | Provider keys are environment-injected or supplied through authenticated API routes and are held in sandbox process memory. | Hosted transport controls protect access to the sandbox but do not prevent intentional cloud-model processing. Hosted mode is not a near-offline deployment. |
 
-**When using OpenRouter:**
-- Your API key is sent only to OpenRouter API endpoints
-- Research content may be sent to OpenRouter for model inference
-- Review OpenRouter's privacy policy: https://openrouter.ai/privacy
-- Free models may require data sharing consent (check privacy settings)
-- Paid models typically have stricter privacy protections
+Exact transmitted content depends on the workflow role, phase, enabled integrations, and context allocation. Some sources are injected in full, some contribute retrieved excerpts, and others may be excluded. Do not submit secrets, regulated data, or confidential source material to a cloud provider unless the provider's current terms and your organization's policies permit it.
+
+Third-party policies can change. Review the current sources before handling sensitive workloads:
+- [OpenRouter data collection and prompt logging](https://openrouter.ai/docs/guides/privacy/data-collection)
+- [OpenRouter Zero Data Retention controls](https://openrouter.ai/docs/guides/features/zdr)
+- [Wolfram Privacy Policy](https://www.wolfram.com/legal/privacy/wolfram/index.html)
+- [Wolfram|Alpha API Terms of Use](https://products.wolframalpha.com/api/termsofuse)
+- The privacy and data-use terms published by the selected upstream model or OAuth/subscription provider
+
+### Local MOTO Logging
+
+- MOTO's default API-call logs do not persist full prompt and response bodies, but they do persist bounded, credential-redacted content previews, payload sizes, and hashes under the active data root.
+- Pattern-based credential redaction is not a general personal-data or confidential-information classifier. Ordinary sensitive research text may still appear in a bounded preview.
+- Desktop operators can explicitly enable full-payload debug logging with `MOTO_API_LOG_STORE_FULL_PAYLOADS` / `API_LOG_STORE_FULL_PAYLOADS`; do not enable it for sensitive workloads. Generic/hosted mode keeps full-payload logging disabled.
+- Wolfram activity logs record redacted metadata and lengths rather than raw query/result text.
 
 ### Generated Content
 

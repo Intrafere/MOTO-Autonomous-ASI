@@ -41,6 +41,19 @@ class OpenAICodexAuthError(OpenAICodexError):
 class OpenAICodexRequestError(OpenAICodexError):
     """Raised when Codex rejects a completion request after authentication."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        error_code: str = "",
+        failure_kind: str = "request_rejected",
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = str(error_code or "").strip().lower()
+        self.failure_kind = str(failure_kind or "request_rejected").strip().lower()
+
 
 class OAuthUsageLimitError(OpenAICodexError):
     """Raised when an OAuth-backed provider reports a timed usage limit."""
@@ -683,6 +696,33 @@ class OpenAICodexClient:
             )
         return None
 
+    @staticmethod
+    def _error_code_from_value(value: Any) -> str:
+        if not isinstance(value, dict):
+            return ""
+        for key in ("code", "type"):
+            code = value.get(key)
+            if code not in (None, ""):
+                return str(code).strip().lower()
+        for key in ("error", "response"):
+            nested = value.get(key)
+            code = OpenAICodexClient._error_code_from_value(nested)
+            if code:
+                return code
+        return ""
+
+    @classmethod
+    def _error_code_from_text(cls, text: str) -> str:
+        raw = str(text or "")
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if 0 <= start < end:
+            try:
+                return cls._error_code_from_value(json.loads(raw[start : end + 1]))
+            except json.JSONDecodeError:
+                return ""
+        return ""
+
     @classmethod
     def _max_attempts(cls) -> int:
         return cls.MAX_RETRIES + 1
@@ -730,7 +770,10 @@ class OpenAICodexClient:
     def _decode_response_body(cls, raw_body: str) -> Dict[str, Any]:
         body = raw_body.strip()
         if not body:
-            raise OpenAICodexRequestError("OpenAI Codex completion failed: empty response body")
+            raise OpenAICodexRequestError(
+                "OpenAI Codex completion failed: empty response body",
+                failure_kind="empty_response",
+            )
 
         try:
             data = json.loads(body)
@@ -764,7 +807,9 @@ class OpenAICodexClient:
                 if usage_error is not None:
                     raise usage_error
                 raise OpenAICodexRequestError(
-                    f"OpenAI Codex completion failed: {sanitize_provider_error_text(json.dumps(error or event))}"
+                    f"OpenAI Codex completion failed: {sanitize_provider_error_text(json.dumps(error or event))}",
+                    error_code=cls._error_code_from_value(error or event),
+                    failure_kind="stream_rejected",
                 )
             if event_type == "response.output_text.delta":
                 output_text_parts.append(str(event.get("delta") or ""))
@@ -785,7 +830,10 @@ class OpenAICodexClient:
         if output_text_parts:
             return {"id": "", "output_text": "".join(output_text_parts)}
 
-        raise OpenAICodexRequestError("OpenAI Codex streamed response contained no completion output.")
+        raise OpenAICodexRequestError(
+            "OpenAI Codex streamed response contained no completion output.",
+            failure_kind="empty_stream",
+        )
 
     @staticmethod
     def _extract_output(response: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
@@ -834,7 +882,10 @@ class OpenAICodexClient:
                         continue
                     raise OpenAICodexRequestError(
                         f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries: "
-                        f"HTTP {response.status_code}: {error_detail}"
+                        f"HTTP {response.status_code}: {error_detail}",
+                        status_code=response.status_code,
+                        error_code=self._error_code_from_text(response.text),
+                        failure_kind="transient_http_exhausted",
                     )
                 return response
             except httpx.TransportError as e:
@@ -854,7 +905,8 @@ class OpenAICodexClient:
                     continue
                 raise OpenAICodexRequestError(
                     f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries: "
-                    f"[{error_type}] {error_detail}"
+                    f"[{error_type}] {error_detail}",
+                    failure_kind="transport_exhausted",
                 )
 
     async def generate_completion(
@@ -914,7 +966,12 @@ class OpenAICodexClient:
                         auth_retry_used = True
                         continue
                     raise OpenAICodexAuthError(message)
-                raise OpenAICodexRequestError(message)
+                raise OpenAICodexRequestError(
+                    message,
+                    status_code=response.status_code,
+                    error_code=self._error_code_from_text(response.text),
+                    failure_kind="http_rejected",
+                )
             try:
                 data = self._decode_response_body(response.text)
                 break
@@ -941,7 +998,9 @@ class OpenAICodexClient:
                         continue
                     raise OpenAICodexRequestError(
                         f"OpenAI Codex connection failed after {self.MAX_RETRIES} retries "
-                        f"while reading streamed response: {exc}"
+                        f"while reading streamed response: {exc}",
+                        error_code=exc.error_code,
+                        failure_kind="transient_stream_exhausted",
                     ) from exc
                 raise
             except OAuthUsageLimitError:

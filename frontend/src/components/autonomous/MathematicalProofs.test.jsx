@@ -25,6 +25,16 @@ function buildApi() {
   };
 }
 
+const userPrunedProof = {
+  ...proof,
+  proof_id: 'proof-pruned',
+  proof_set_revision: 4,
+  live_context_status: 'pruned',
+  live_context_owner_run_id: 'run-1',
+  live_context_pruned_by: 'user',
+  live_context_prune_reason: 'Not useful to this route',
+};
+
 test('shows active proofs directly without a prompt-level collapse', async () => {
   const user = userEvent.setup();
   render(<MathematicalProofs api={buildApi()} />);
@@ -41,4 +51,43 @@ test('opens a selected active proof directly', async () => {
 
   expect(await screen.findByText(proof.theorem_statement)).toBeInTheDocument();
   expect(screen.getByText(proof.lean_code)).toBeInTheDocument();
+});
+
+test('shows independent prune provenance and user-only undo without hiding downloads', async () => {
+  const api = buildApi();
+  api.getProofs.mockResolvedValue({ proofs: [userPrunedProof], proof_set_revision: 4 });
+  api.updateProofLiveContext = vi.fn().mockResolvedValue({
+    proof_set_revision: 5,
+    live_context_status: 'active',
+  });
+  const user = userEvent.setup();
+  render(<MathematicalProofs api={api} />);
+
+  expect(await screen.findByText('Pruned from live context')).toBeInTheDocument();
+  expect(screen.getByText('Pruned by: User')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Download .lean' })).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'View Details' }));
+  await user.click(screen.getByRole('button', { name: 'Undo user prune' }));
+  expect(api.updateProofLiveContext).toHaveBeenCalledWith(
+    expect.objectContaining({
+      proofId: 'proof-pruned',
+      scope: 'autonomous',
+      status: 'active',
+      runId: 'run-1',
+      proofSetRevision: 4,
+    })
+  );
+});
+
+test('does not offer undo for automatic pruning', async () => {
+  const api = buildApi();
+  api.getProofs.mockResolvedValue({
+    proofs: [{ ...userPrunedProof, live_context_pruned_by: 'automatic_proof_pruning' }],
+    proof_set_revision: 4,
+  });
+  const user = userEvent.setup();
+  render(<MathematicalProofs api={api} />);
+  await screen.findByText('Pruned from live context');
+  await user.click(screen.getByRole('button', { name: 'View Details' }));
+  expect(screen.queryByRole('button', { name: 'Undo user prune' })).not.toBeInTheDocument();
 });

@@ -1,0 +1,24 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "target_rechecked",
+    "stale_target_rejected"
+  ],
+  "fields": [
+    "proof_pruning",
+    "runtime_exclusivity",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "proof_pruning.commit_lifecycle_fenced"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_prune_commit_rechecks_lifecycle_and_revision",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/unit/test_proof_pruning_snapshot.py"
+}

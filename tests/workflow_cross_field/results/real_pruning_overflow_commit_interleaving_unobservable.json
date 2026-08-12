@@ -1,0 +1,23 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {
+    "reason": "Existing isolated tests observe nonfatal proof overflow and pruning triggers separately; no bounded seam observes an overflow arriving during a prune commit without synthesizing the transition owner."
+  },
+  "evidence": [],
+  "fields": [
+    "proof_pruning",
+    "websocket_api_contracts",
+    "proof_runtime_gating"
+  ],
+  "invariants": [
+    "proof_pruning.context_overflow_truthful"
+  ],
+  "replay": [],
+  "result": "blocked",
+  "scenario_id": "real_pruning_overflow_commit_interleaving_unobservable",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
+}

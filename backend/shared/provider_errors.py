@@ -98,6 +98,30 @@ class ProviderRouteError(RuntimeError):
         )
 
 
+class ProviderRepairRequiredError(RuntimeError):
+    """A definitive provider condition that requires operator configuration repair."""
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        provider_label: str,
+        role_id: str,
+        model: str,
+        reason: str,
+        message: str,
+        terminal_guidance: str = "",
+    ) -> None:
+        self.provider = redact_log_text(provider or "unknown", 80)
+        self.provider_label = redact_log_text(provider_label or provider or "Provider", 120)
+        self.role_id = redact_log_text(role_id or "unknown", 160)
+        self.model = redact_log_text(model or "", 240)
+        self.reason = redact_log_text(reason or "provider_repair_required", 160)
+        self.safe_message = redact_log_text(message, 1000)
+        self.terminal_guidance = redact_log_text(terminal_guidance, 1800)
+        super().__init__(self.safe_message)
+
+
 class ProviderContextLengthError(ValueError):
     """A provider rejected mandatory input because it exceeded context capacity."""
 

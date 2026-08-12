@@ -10,6 +10,7 @@ from backend.shared.config import system_config
 
 ProofSearchCorpus = Literal["moto", "manual", "leanoj", "syntheticlib4"]
 ProofSearchSourceKind = Literal["verified_proof", "partial_proof", "failed_attempt"]
+ProofSearchUseCase = Literal["human_browse", "model_context"]
 
 
 def default_proof_search_corpora() -> list[ProofSearchCorpus]:
@@ -59,6 +60,10 @@ class UnifiedProofSearchRecord(BaseModel):
     novelty_reasoning: str = ""
     verified: bool = True
     created_at: str = ""
+    live_context_status: str = "active"
+    live_context_owner_run_id: str = ""
+    live_context_pruned_at: str = ""
+    live_context_pruned_by: str = ""
     canonical_uri: str
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -102,6 +107,17 @@ class PublicProofSearchRequest(ProofSearchRequest):
     """Public REST proof-search request capped by the web contract."""
 
     limit: int = Field(default=7, ge=1, le=7)
+
+
+class ProofSearchAccessContext(BaseModel):
+    """Trusted service-side context; never supplied by model tool arguments."""
+
+    use_case: ProofSearchUseCase = "human_browse"
+    requesting_run_id: str = ""
+
+    @property
+    def filters_live_context(self) -> bool:
+        return self.use_case == "model_context"
 
 
 class ProofSearchResponse(BaseModel):

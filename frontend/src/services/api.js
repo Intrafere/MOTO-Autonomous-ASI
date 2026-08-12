@@ -14,6 +14,9 @@ export const API_ERROR_KINDS = Object.freeze({
   BACKEND_UNAVAILABLE: 'backend_unavailable',
   STALE_TOKEN: 'stale_token',
   BACKEND_VALIDATION: 'backend_validation',
+  CONFLICT: 'conflict',
+  AMBIGUOUS_RUN: 'ambiguous_run',
+  OLD_CONTRACT: 'old_contract',
   AMBIGUOUS_TRANSPORT: 'ambiguous_transport',
   BACKEND_RESPONSE: 'backend_response',
 });
@@ -131,12 +134,21 @@ async function extractErrorMessage(response, fallbackMessage) {
  * synthesize from a non-ok Response. Attaches `.status` and `.body` so callers
  * can inspect them programmatically.
  */
-async function throwFromResponse(response, fallbackMessage) {
+async function throwFromResponse(response, fallbackMessage, options = {}) {
   const message = await extractErrorMessage(response, fallbackMessage);
   let kind = API_ERROR_KINDS.BACKEND_RESPONSE;
   if (response.status === 401) {
     kind = API_ERROR_KINDS.STALE_TOKEN;
-  } else if (response.status === 400 || response.status === 409 || response.status === 422) {
+  } else if (response.status === 409) {
+    kind = /ambiguous|multiple (?:matching )?(?:proof )?runs?/i.test(message)
+      ? API_ERROR_KINDS.AMBIGUOUS_RUN
+      : API_ERROR_KINDS.CONFLICT;
+  } else if (
+    options.contractEndpoint
+    && (response.status === 404 || response.status === 405 || response.status === 501)
+  ) {
+    kind = API_ERROR_KINDS.OLD_CONTRACT;
+  } else if (response.status === 400 || response.status === 422) {
     kind = API_ERROR_KINDS.BACKEND_VALIDATION;
   }
   throw new MotoApiError(message, {
@@ -144,6 +156,91 @@ async function throwFromResponse(response, fallbackMessage) {
     status: response.status,
     details: message,
   });
+}
+
+const PROOF_RUN_MODES = new Set(['one_round', 'loop_with_pruning']);
+
+function proofRunContractError(message) {
+  return new MotoApiError(message, {
+    kind: API_ERROR_KINDS.OLD_CONTRACT,
+    details: 'Update the MOTO backend, then reload this page.',
+  });
+}
+
+export function buildProofSourceKey(scope = 'autonomous', sourceType, sourceId) {
+  return `${scope || 'autonomous'}:${sourceType || ''}:${sourceId || ''}`;
+}
+
+export function normalizeProofRunSnapshot(value, fallback = {}) {
+  const snapshot = value?.run || value?.proof_run || value;
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+    throw proofRunContractError('The backend returned an unsupported proof-run response.');
+  }
+  const proofRunId = snapshot.proof_run_id;
+  const sourceType = snapshot.source_type || fallback.sourceType;
+  const sourceId = snapshot.source_id || fallback.sourceId;
+  if (!proofRunId || !sourceType || !sourceId) {
+    throw proofRunContractError('The backend proof-run response is missing run or source identity.');
+  }
+  const runMode = snapshot.run_mode || fallback.runMode || 'one_round';
+  if (!PROOF_RUN_MODES.has(runMode)) {
+    throw proofRunContractError(`The backend returned an unsupported proof run mode: ${runMode}.`);
+  }
+  const generation = Number(snapshot.lifecycle_generation ?? snapshot.generation ?? 1);
+  const scope = snapshot.scope || fallback.scope || 'autonomous';
+  return {
+    ...snapshot,
+    proof_run_id: String(proofRunId),
+    run_mode: runMode,
+    scope,
+    source_type: sourceType,
+    source_id: String(sourceId),
+    lifecycle_generation: Number.isFinite(generation) && generation > 0 ? generation : 1,
+    status: snapshot.status || (snapshot.queued ? 'queued' : 'unknown'),
+    unbounded: snapshot.unbounded ?? runMode === 'loop_with_pruning',
+    source_key: buildProofSourceKey(
+      scope,
+      sourceType,
+      String(sourceId),
+    ),
+  };
+}
+
+export function normalizeProofRunList(value) {
+  const rawRuns = Array.isArray(value)
+    ? value
+    : (value?.runs || value?.proof_runs || value?.items);
+  if (!Array.isArray(rawRuns)) {
+    throw proofRunContractError('This backend does not expose proof-run discovery in the expected format.');
+  }
+  return {
+    runs: rawRuns.map((run) => normalizeProofRunSnapshot(run)),
+    next_cursor: value?.next_cursor ?? null,
+  };
+}
+
+async function requestProofRunJson(path, options, fallbackMessage) {
+  try {
+    const response = await fetch(`${API_BASE}${path}`, options);
+    if (!response.ok) {
+      await throwFromResponse(response, fallbackMessage, { contractEndpoint: true });
+    }
+    return await response.json();
+  } catch (error) {
+    if (error instanceof MotoApiError) throw error;
+    const method = String(options?.method || 'GET').toUpperCase();
+    throw new MotoApiError(
+      ['GET', 'HEAD', 'OPTIONS'].includes(method)
+        ? `${fallbackMessage}: backend unavailable`
+        : `${fallbackMessage}: the outcome is unknown; refresh proof runs before retrying`,
+      {
+        kind: ['GET', 'HEAD', 'OPTIONS'].includes(method)
+          ? API_ERROR_KINDS.BACKEND_UNAVAILABLE
+          : API_ERROR_KINDS.AMBIGUOUS_TRANSPORT,
+        cause: error,
+      },
+    );
+  }
 }
 
 export async function requestJson(url, options = {}, fallbackMessage = 'Backend request failed') {
@@ -529,7 +626,11 @@ export const autonomousAPI = {
 
   // Get status
   async getStatus() {
-    return requestJson(`${API_BASE}/auto-research/status`, {}, 'Failed to get autonomous status');
+    return requestJson(
+      `${API_BASE}/auto-research/status`,
+      { cache: 'no-store' },
+      'Failed to get autonomous status',
+    );
   },
 
   // Get all brainstorms
@@ -656,26 +757,116 @@ export const autonomousAPI = {
     return rememberProofStatus(await response.json());
   },
 
-  // Queue a manual proof check for one brainstorm or paper
-  async runProofCheck({ sourceType, sourceId, proofRuntimeConfig = null }) {
+  // Queue a manual proof run for one brainstorm or paper.
+  async runProofCheck({
+    sourceType,
+    sourceId,
+    scope = 'autonomous',
+    runMode = 'one_round',
+    proofRuntimeConfig = null,
+  }) {
+    if (!PROOF_RUN_MODES.has(runMode)) {
+      throw new MotoApiError(`Unsupported proof run mode: ${runMode}`, {
+        kind: API_ERROR_KINDS.BACKEND_VALIDATION,
+      });
+    }
     const body = {
       source_type: sourceType,
       source_id: sourceId,
+      run_mode: runMode,
     };
     if (proofRuntimeConfig) {
       body.proof_runtime_config = proofRuntimeConfig;
     }
-
-    const response = await fetch(`${API_BASE}/proofs/check`, {
+    const data = await requestProofRunJson('/proofs/check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData?.detail?.message || errorData?.detail || 'Failed to queue proof check');
+    }, 'Failed to queue proof run');
+    return normalizeProofRunSnapshot(data, { sourceType, sourceId, scope, runMode });
+  },
+
+  async listProofRuns({ scope = null, sourceType = null, sourceId = null } = {}) {
+    if (sourceType || sourceId) {
+      if (!scope || !sourceType || !sourceId) {
+        throw new MotoApiError(
+          'Proof-run source discovery requires scope, source type, and source ID.',
+          { kind: API_ERROR_KINDS.BACKEND_VALIDATION },
+        );
+      }
+      const sourceParams = new URLSearchParams({
+        scope,
+        source_type: sourceType,
+        source_id: sourceId,
+      });
+      const data = await requestProofRunJson(
+        `/proofs/runs/by-source?${sourceParams.toString()}`,
+        { cache: 'no-store' },
+        'Failed to discover proof runs for this source',
+      );
+      return {
+        ...normalizeProofRunList(data),
+        ambiguous: Boolean(data?.ambiguous),
+        preferred_proof_run_id: data?.preferred_proof_run_id ?? null,
+      };
     }
-    return response.json();
+    const params = new URLSearchParams();
+    if (scope) params.set('scope', scope);
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    const data = await requestProofRunJson(
+      `/proofs/runs${suffix}`,
+      { cache: 'no-store' },
+      'Failed to discover proof runs',
+    );
+    return normalizeProofRunList(data);
+  },
+
+  async getProofRun(proofRunId) {
+    const data = await requestProofRunJson(
+      `/proofs/runs/${encodeURIComponent(proofRunId)}`,
+      { cache: 'no-store' },
+      'Failed to load proof run',
+    );
+    return normalizeProofRunSnapshot(data);
+  },
+
+  async stopProofRun(proofRunId, lifecycleGeneration) {
+    const data = await requestProofRunJson(
+      `/proofs/runs/${encodeURIComponent(proofRunId)}/stop`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected_lifecycle_generation: lifecycleGeneration }),
+      },
+      'Failed to stop proof run',
+    );
+    return normalizeProofRunSnapshot(data);
+  },
+
+  async updateProofLiveContext({
+    proofId,
+    scope = 'autonomous',
+    status,
+    runId,
+    proofSetRevision,
+    reason,
+    theoremHash = '',
+    leanHash = '',
+  }) {
+    const path = withProofScope(`/proofs/${encodeURIComponent(proofId)}/live-context`, scope);
+    return requestProofRunJson(path, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status,
+        actor: 'user',
+        expected_run_id: runId,
+        expected_proof_set_revision: proofSetRevision,
+        reason,
+        expected_theorem_hash: theoremHash,
+        expected_lean_hash: leanHash,
+      }),
+    }, 'Failed to update proof live context');
   },
 
   // Get one proof with full Lean code

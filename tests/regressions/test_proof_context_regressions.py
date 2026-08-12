@@ -1398,6 +1398,99 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("saved_append_theorem", content)
         self.assertEqual(content.count("theorem saved_append_theorem"), 1)
 
+    async def test_saved_compiler_paper_configures_scoped_novelty_role(self):
+        configured_roles = {}
+        stage_calls = {}
+        proof_config = {
+            "lean4_enabled": True,
+            "user_prompt": "Saved paper prompt",
+            "submitter_provider": "openrouter",
+            "submitter_model": "rigor-model",
+            "submitter_openrouter_provider": "RigorHost",
+            "submitter_openrouter_reasoning_effort": "high",
+            "submitter_lm_studio_fallback": "rigor-fallback",
+            "submitter_context": 4096,
+            "submitter_max_tokens": 512,
+            "submitter_supercharge_enabled": True,
+            "validator_provider": "openai_codex_oauth",
+            "validator_model": "validator-model",
+            "validator_openrouter_provider": "ValidatorHost",
+            "validator_openrouter_reasoning_effort": "xhigh",
+            "validator_lm_studio_fallback": "validator-fallback",
+            "validator_context": 8192,
+            "validator_max_tokens": 1024,
+            "validator_supercharge_enabled": True,
+        }
+
+        class FakeStage:
+            async def run(self, **kwargs):
+                stage_calls.update(kwargs)
+
+        def capture_role(role_id, config):
+            configured_roles[role_id] = config
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "saved-paper.txt"
+            output_path.write_text("Saved paper body.", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    compiler_route,
+                    "_build_saved_compiler_proof_content",
+                    new=mock.AsyncMock(return_value="Saved paper proof context."),
+                ),
+                mock.patch.object(
+                    compiler_route,
+                    "_release_pre_reserved_source",
+                    new=mock.AsyncMock(),
+                ),
+                mock.patch.object(
+                    compiler_route.api_client_manager,
+                    "configure_role",
+                    side_effect=capture_role,
+                ),
+                mock.patch.object(
+                    compiler_route,
+                    "ProofVerificationStage",
+                    return_value=FakeStage(),
+                ),
+                mock.patch.object(
+                    compiler_route.manual_proof_database,
+                    "inject_into_prompt",
+                    return_value="Saved paper prompt",
+                ),
+                mock.patch.object(
+                    compiler_route.manual_proof_database,
+                    "get_or_create_active_run_id",
+                    new=mock.AsyncMock(return_value="manual-run"),
+                ),
+                mock.patch.object(
+                    compiler_route.assistant_proof_search_coordinator,
+                    "stop_all",
+                    new=mock.AsyncMock(),
+                ),
+            ):
+                await compiler_route._run_saved_compiler_paper_proof_check(
+                    "Saved paper body.",
+                    "Saved paper title",
+                    proof_config,
+                    output_path,
+                    source_reserved=True,
+                )
+
+        novelty_role = configured_roles[
+            "autonomous_proof_novelty_compiler_manual_paper"
+        ]
+        self.assertEqual(novelty_role.provider, "openai_codex_oauth")
+        self.assertEqual(novelty_role.model_id, "validator-model")
+        self.assertEqual(novelty_role.openrouter_provider, "ValidatorHost")
+        self.assertEqual(novelty_role.openrouter_reasoning_effort, "xhigh")
+        self.assertEqual(novelty_role.lm_studio_fallback_id, "validator-fallback")
+        self.assertEqual(novelty_role.context_window, 8192)
+        self.assertEqual(novelty_role.max_output_tokens, 1024)
+        self.assertTrue(novelty_role.supercharge_enabled)
+        self.assertNotIn("autonomous_proof_novelty", configured_roles)
+        self.assertEqual(stage_calls["role_suffix_override"], "compiler_manual_paper")
+
     async def test_manual_current_paper_source_read_requests_stripped_proofs(self):
         class FakeCurrentPaperLibrary(_FakePaperLibrary):
             def __init__(self):
@@ -1569,6 +1662,72 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
         self.assertIn("stored_proof_sentinel", twice)
+
+    def test_owning_run_prune_filters_model_context_but_not_canonical_records(self):
+        db = ProofDatabase()
+        db._index_data = {
+            "next_proof_id": 3,
+            "proofs": [
+                {
+                    "proof_id": "proof_active",
+                    "theorem_statement": "Active theorem sentinel.",
+                    "source_type": "paper",
+                    "source_id": "paper_001",
+                    "lean_code": "theorem active_sentinel : True := by trivial",
+                    "novel": True,
+                    "novelty_tier": "mathematical_discovery",
+                    "live_context_status": "active",
+                },
+                {
+                    "proof_id": "proof_pruned",
+                    "theorem_statement": "Pruned theorem sentinel.",
+                    "source_type": "paper",
+                    "source_id": "paper_001",
+                    "lean_code": "theorem pruned_sentinel : True := by trivial",
+                    "novel": True,
+                    "novelty_tier": "mathematical_discovery",
+                    "live_context_status": "pruned",
+                    "live_context_owner_run_id": "run_owner",
+                },
+            ],
+        }
+
+        owning_prompt = db.inject_into_prompt(
+            "User prompt.",
+            requesting_run_id="run_owner",
+        )
+        future_prompt = db.inject_into_prompt(
+            "User prompt.",
+            requesting_run_id="run_future",
+        )
+
+        self.assertIn("active_sentinel", owning_prompt)
+        self.assertNotIn("pruned_sentinel", owning_prompt)
+        self.assertIn("pruned_sentinel", future_prompt)
+        self.assertEqual(len(db._index_data["proofs"]), 2)
+
+    def test_malformed_live_context_status_fails_closed_for_model_injection(self):
+        db = ProofDatabase()
+        db._index_data = {
+            "next_proof_id": 2,
+            "proofs": [
+                {
+                    "proof_id": "proof_malformed",
+                    "theorem_statement": "Malformed theorem sentinel.",
+                    "source_type": "paper",
+                    "source_id": "paper_001",
+                    "lean_code": "theorem malformed_sentinel : True := by trivial",
+                    "novel": True,
+                    "novelty_tier": "mathematical_discovery",
+                    "live_context_status": "unknown",
+                },
+            ],
+        }
+
+        prompt = db.inject_into_prompt("User prompt.", requesting_run_id="run_owner")
+
+        self.assertNotIn("malformed_sentinel", prompt)
+        self.assertEqual(db._index_data["proofs"][0]["live_context_status"], "unknown")
 
     async def test_saved_compiler_proof_content_strips_appended_paper_proofs(self):
         old_read_manual_aggregator_context = compiler_route._read_manual_aggregator_context
@@ -1971,7 +2130,8 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events.count("proof_attempt_failed"), 5)
         self.assertTrue(any("MODEL OUTPUT TRUNCATED" in summary for summary in attempt_failure_summaries))
         self.assertIn("proof_check_complete", events)
-        self.assertIn("proof_attempts_exhausted", events)
+        self.assertNotIn("proof_attempts_exhausted", events)
+        self.assertIn("proof_truncation_recovery_exhausted", events)
 
     async def test_chat_finish_reason_length_counts_as_failed_attempt(self):
         old_lean4_enabled = system_config.lean4_enabled
@@ -2039,7 +2199,8 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.had_error)
         self.assertEqual(events.count("proof_attempt_failed"), 5)
         self.assertTrue(any("MODEL OUTPUT TRUNCATED" in summary for summary in attempt_failure_summaries))
-        self.assertIn("proof_attempts_exhausted", events)
+        self.assertNotIn("proof_attempts_exhausted", events)
+        self.assertIn("proof_truncation_recovery_exhausted", events)
         self.assertIn("proof_check_complete", events)
 
     async def test_codex_transient_gateway_disconnect_preserves_proof_checkpoint(self):
@@ -2444,10 +2605,12 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         system_config.lean4_enabled = True
         stage = ProofVerificationStage()
         events: list[str] = []
+        event_payloads: list[tuple[str, dict]] = []
         checkpoint_statuses: list[str] = []
 
-        async def broadcast(event_type, _payload):
+        async def broadcast(event_type, payload):
             events.append(event_type)
+            event_payloads.append((event_type, payload))
 
         async def checkpoint(payload):
             checkpoint_statuses.append(payload["status"])
@@ -2507,6 +2670,19 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.total_candidates, 0)
         self.assertIn("no_candidates", checkpoint_statuses)
         self.assertIn("proof_check_no_candidates", events)
+        self.assertNotIn("proof_attempt_started", events)
+        self.assertLess(
+            events.index("proof_check_no_candidates"),
+            events.index("proof_check_complete"),
+        )
+        completion_payload = next(
+            payload
+            for event_type, payload in event_payloads
+            if event_type == "proof_check_complete"
+        )
+        self.assertEqual(completion_payload["total_candidates"], 0)
+        self.assertEqual(completion_payload["verified_count"], 0)
+        self.assertEqual(completion_payload["novel_count"], 0)
 
 
 class AutonomousProofFailedHintCleanupTests(unittest.IsolatedAsyncioTestCase):

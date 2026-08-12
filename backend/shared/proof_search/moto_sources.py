@@ -131,6 +131,10 @@ def _record_from_library_entry(
         novelty_reasoning=str(entry.get("novelty_reasoning", "") or ""),
         verified=True,
         created_at=str(entry.get("created_at", "") or ""),
+        live_context_status=str(entry.get("live_context_status") or "active"),
+        live_context_owner_run_id=str(entry.get("live_context_owner_run_id") or ""),
+        live_context_pruned_at=str(entry.get("live_context_pruned_at") or ""),
+        live_context_pruned_by=str(entry.get("live_context_pruned_by") or ""),
         canonical_uri=f"moto-proof://{corpus}/{session_id}/{proof_id}",
         metadata={
             "novel": bool(entry.get("novel", False)),
@@ -142,6 +146,15 @@ def _record_from_library_entry(
             "canonical_identity_version": identity.version,
             "canonical_theorem_statement_hash": identity.theorem_statement_hash,
             "canonical_lean_code_hash": identity.lean_code_hash if lean_code else "",
+            "live_context_status": str(entry.get("live_context_status") or "active"),
+            "live_context_owner_run_id": str(
+                entry.get("live_context_owner_run_id") or ""
+            ),
+            "live_context_pruned_at": entry.get("live_context_pruned_at"),
+            "live_context_pruned_by": entry.get("live_context_pruned_by"),
+            "live_context_prune_reason": str(
+                entry.get("live_context_prune_reason") or ""
+            ),
             ASSISTANT_EXCLUDE_STANDALONE_EXACT_DUPLICATE_EMPHASIS: (
                 entry.get("artifact_purpose")
                 == STANDALONE_EXACT_DUPLICATE_EMPHASIS_PURPOSE
@@ -189,6 +202,14 @@ def normalize_proof_record(
         novelty_reasoning=proof.novelty_reasoning,
         verified=True,
         created_at=proof.created_at.isoformat() if proof.created_at else "",
+        live_context_status=proof.live_context_status,
+        live_context_owner_run_id=proof.live_context_owner_run_id,
+        live_context_pruned_at=(
+            proof.live_context_pruned_at.isoformat()
+            if proof.live_context_pruned_at
+            else ""
+        ),
+        live_context_pruned_by=proof.live_context_pruned_by or "",
         canonical_uri=f"moto-proof://{corpus}/{proof.proof_id}",
         metadata={
             "theorem_id": proof.theorem_id,
@@ -203,6 +224,15 @@ def normalize_proof_record(
             "canonical_identity_version": identity.version,
             "canonical_theorem_statement_hash": identity.theorem_statement_hash,
             "canonical_lean_code_hash": identity.lean_code_hash if proof.lean_code else "",
+            "live_context_status": proof.live_context_status,
+            "live_context_owner_run_id": proof.live_context_owner_run_id,
+            "live_context_pruned_at": (
+                proof.live_context_pruned_at.isoformat()
+                if proof.live_context_pruned_at
+                else None
+            ),
+            "live_context_pruned_by": proof.live_context_pruned_by,
+            "live_context_prune_reason": proof.live_context_prune_reason,
         },
     )
 

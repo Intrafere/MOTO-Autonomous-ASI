@@ -1838,7 +1838,7 @@ def verify_instance_ports(runtime: InstanceRuntime) -> None:
 def is_pid_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except OSError:
+    except (OSError, SystemError):
         return False
     return True
 

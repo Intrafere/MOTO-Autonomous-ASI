@@ -2,7 +2,12 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { autonomousAPI, proofSearchAPI } from '../../services/api';
 import { buildResearchRunGroups, formatRunPromptPreview } from '../../utils/researchRunHistory';
 import { downloadTextFile } from '../../utils/downloadHelpers';
-import { classifyProofNovelty, getCanonicalProofIdentity, sanitizeDomId } from '../../utils/proofPresentation';
+import {
+  classifyProofLiveContext,
+  classifyProofNovelty,
+  getCanonicalProofIdentity,
+  sanitizeDomId,
+} from '../../utils/proofPresentation';
 import { readBooleanStorage } from '../../utils/safeStorage';
 import './FinalAnswerLibrary.css';
 import './ProofLibrary.css';
@@ -753,6 +758,7 @@ export default function ProofLibrary({
                       const cardDomId = sanitizeDomId(id, 'proof-card');
                       const detailsDomId = sanitizeDomId(id, 'proof-library-details');
                       const isExpanded = expandedId === id;
+                      const liveContext = classifyProofLiveContext(proof, { historical: true });
 
                       return (
                         <div
@@ -794,6 +800,11 @@ export default function ProofLibrary({
                               >
                                 {getTierBadge(proof).label}
                               </span>
+                              {liveContext.isPruned && (
+                                <span className={`proof-library-live-context-badge ${liveContext.badgeClass}`}>
+                                  {liveContext.badgeLabel}
+                                </span>
+                              )}
                               <span className="word-count">
                                 {proof.solver || 'Lean 4'}
                               </span>
@@ -820,6 +831,17 @@ export default function ProofLibrary({
                                 Verified: {formatDate(proof.created_at)}
                               </span>
                             </div>
+                            {liveContext.isPruned && (
+                              <div className="proof-library-live-context-note">
+                                <strong>Historical live-context status</strong>
+                                <span>
+                                  This proof was pruned only from originating run {liveContext.ownerRunId || 'unknown'}.
+                                  Its verified record and complete content remain read-only here.
+                                </span>
+                                <span>Actor: {liveContext.actorLabel}</span>
+                                <span>Reason: {liveContext.reason || 'No reason was recorded.'}</span>
+                              </div>
+                            )}
                           </div>
 
                             <div
@@ -925,6 +947,7 @@ export default function ProofLibrary({
             const cardDomId = sanitizeDomId(id, 'proof-card');
             const detailsDomId = sanitizeDomId(id, 'proof-library-details');
             const isExpanded = expandedId === id;
+            const liveContext = classifyProofLiveContext(proof, { historical: true });
             return (
               <div
                 id={cardDomId}
@@ -958,6 +981,11 @@ export default function ProofLibrary({
                     <span className={`format-badge ${getTierBadge(proof).cssClass}`}>
                       {getTierBadge(proof).label}
                     </span>
+                    {liveContext.isPruned && (
+                      <span className={`proof-library-live-context-badge ${liveContext.badgeClass}`}>
+                        {liveContext.badgeLabel}
+                      </span>
+                    )}
                     <span className="word-count">
                       {proof.solver || 'Lean 4'}
                     </span>
@@ -965,6 +993,16 @@ export default function ProofLibrary({
                   <p className="proof-statement">
                     {truncate(proof.theorem_statement, 300)}
                   </p>
+                  {liveContext.isPruned && (
+                    <div className="proof-library-live-context-note">
+                      <strong>Historical live-context status</strong>
+                      <span>
+                        Pruned only from originating run {liveContext.ownerRunId || 'unknown'} by {liveContext.actorLabel}.
+                        This history record is read-only.
+                      </span>
+                      <span>Reason: {liveContext.reason || 'No reason was recorded.'}</span>
+                    </div>
+                  )}
                 </div>
                   <div
                     id={detailsDomId}

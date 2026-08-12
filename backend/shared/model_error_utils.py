@@ -9,7 +9,11 @@ from backend.shared.openrouter_client import (
     OpenRouterInvalidResponseError,
     OpenRouterPrivacyPolicyError,
 )
-from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteError
+from backend.shared.provider_errors import (
+    ProviderContextLengthError,
+    ProviderRepairRequiredError,
+    ProviderRouteError,
+)
 
 
 _NON_RETRYABLE_MODEL_ERROR_MARKERS = (
@@ -25,6 +29,15 @@ _NON_RETRYABLE_MODEL_ERROR_MARKERS = (
     "no openrouter api key is available",
     "openrouter credits exhausted",
     "openrouter privacy settings are blocking",
+    "authentication failed",
+    "invalid api key",
+    "invalid model",
+    "model is not loaded",
+    "model not loaded",
+    "model process has terminated",
+    "permission denied",
+    "subscription is required",
+    "unsupported model",
 )
 
 _RETRYABLE_OUTPUT_FAILURE_MARKERS = (
@@ -45,6 +58,8 @@ _TRANSIENT_MODEL_CALL_MARKERS = (
     "http 503",
     "http 504",
     "incomplete chunked read",
+    "lm studio connection failed",
+    "lm studio transient",
     "openai codex connection failed",
     "openai codex transient",
     "openrouter connection failed",
@@ -67,6 +82,7 @@ _TRANSIENT_MODEL_CALL_MARKERS = (
 _TRANSIENT_MODEL_PROVIDER_MARKERS = (
     "codex",
     "grok",
+    "lm studio",
     "openrouter",
     "sakana",
     "xai",
@@ -153,7 +169,7 @@ def is_transient_model_call_error(exc: Exception) -> bool:
 
 def is_non_retryable_model_error(exc: Exception) -> bool:
     """Return true when a model/API failure should halt workflow progress."""
-    if isinstance(exc, ProviderContextLengthError):
+    if isinstance(exc, (ProviderContextLengthError, ProviderRepairRequiredError)):
         return True
     if isinstance(exc, ProviderRouteError) and exc.cause is not None:
         return is_non_retryable_model_error(exc.cause)

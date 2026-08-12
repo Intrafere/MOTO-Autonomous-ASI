@@ -30,6 +30,16 @@ KNOWN_EXERCISE_TOKENS = frozenset(
         "scoped_event",
         "start_blocked",
         "stop_resume",
+        "pruned_artifact_preserved",
+        "owning_context_excluded",
+        "validator_gate",
+        "no_prune",
+        "non_blocking_pruning",
+        "stale_commit_fenced",
+        "overflow_truthful",
+        "continuous_ownership",
+        "automatic_round_policy",
+        "occurrence_scope",
     }
 )
 
@@ -169,6 +179,7 @@ def observed_exercise_tokens(model: WorkflowModel) -> frozenset[str]:
         and "mandatory_source_overflow_rejected_visible" in model.exercise_observations
     ):
         observed.add("mandatory_source_overflow")
+    observed.update(KNOWN_EXERCISE_TOKENS.intersection(model.exercise_observations))
 
     return frozenset(observed)
 

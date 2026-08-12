@@ -307,9 +307,7 @@ async def test_autonomous_parent_propagates_once_and_stale_payload_can_be_reset(
     assert events[0][1]["reason"] == "context_overflow"
     assert events[0][1]["configured_model"] == "child-writer"
 
-    coordinator._fatal_stop_reason = None
-    coordinator._fatal_stop_message = ""
-    coordinator._fatal_stop_payload = {}
+    coordinator._terminal_event = None
     coordinator._stop_broadcast_sent = False
     await coordinator._broadcast_stopped_once()
     assert "configured_model" not in events[1][1]

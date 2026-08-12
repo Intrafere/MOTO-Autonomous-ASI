@@ -1,0 +1,24 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "independent_validator",
+    "retarget_rejected"
+  ],
+  "fields": [
+    "proof_pruning",
+    "provider_pause_resume",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "proof_pruning.validator_gates_automatic_mutation"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_automatic_prune_requires_validator_acceptance",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/unit/test_proof_pruning_agents.py"
+}

@@ -20,7 +20,7 @@ from backend.shared.proof_search.models import (
 )
 
 RESULT_CAP = 7
-PROOF_SEARCH_INDEX_SCHEMA_VERSION = 3
+PROOF_SEARCH_INDEX_SCHEMA_VERSION = 4
 
 
 class ProofSearchIndexer:
@@ -95,7 +95,13 @@ class ProofSearchIndexer:
         except (sqlite3.Error, TypeError, ValueError):
             return False
 
-    def search(self, request: ProofSearchRequest) -> ProofSearchResponse:
+    def search(
+        self,
+        request: ProofSearchRequest,
+        *,
+        requesting_run_id: str = "",
+        filter_live_context: bool = False,
+    ) -> ProofSearchResponse:
         if not self.db_path.exists():
             return ProofSearchResponse(
                 results=[],
@@ -105,7 +111,12 @@ class ProofSearchIndexer:
 
         with closing(self._connect()) as conn:
             self._create_schema(conn)
-            candidates = self._query_candidates(conn, request)
+            candidates = self._query_candidates(
+                conn,
+                request,
+                requesting_run_id=requesting_run_id,
+                filter_live_context=filter_live_context,
+            )
             records = self._dedupe_and_limit(candidates, request, result_cap=RESULT_CAP)
             corpus_counts = self._corpus_counts(conn, request.corpora)
 
@@ -140,6 +151,8 @@ class ProofSearchIndexer:
         exclude_corpus_scopes: Iterable[str] | None = None,
         exclude_session_ids: Iterable[str] | None = None,
         exclude_run_ids: Iterable[str] | None = None,
+        requesting_run_id: str = "",
+        filter_live_context: bool = False,
     ) -> list[UnifiedProofSearchRecord]:
         """Return a wider internal candidate pool without changing public route caps."""
         if not self.db_path.exists():
@@ -154,6 +167,8 @@ class ProofSearchIndexer:
                 exclude_corpus_scopes=exclude_corpus_scopes,
                 exclude_session_ids=exclude_session_ids,
                 exclude_run_ids=exclude_run_ids,
+                requesting_run_id=requesting_run_id,
+                filter_live_context=filter_live_context,
             )
             records = self._dedupe_and_limit(candidates, request, result_cap=pool_limit)
 
@@ -512,6 +527,10 @@ class ProofSearchIndexer:
                 novelty_reasoning TEXT NOT NULL,
                 verified INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
+                live_context_status TEXT NOT NULL DEFAULT 'active',
+                live_context_owner_run_id TEXT NOT NULL DEFAULT '',
+                live_context_pruned_at TEXT NOT NULL DEFAULT '',
+                live_context_pruned_by TEXT NOT NULL DEFAULT '',
                 canonical_uri TEXT NOT NULL,
                 metadata_json TEXT NOT NULL
             )
@@ -532,6 +551,26 @@ class ProofSearchIndexer:
             conn.execute(
                 "ALTER TABLE proof_records ADD COLUMN canonical_theorem_statement_hash TEXT NOT NULL DEFAULT ''"
             )
+        if "live_context_status" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN live_context_status TEXT NOT NULL DEFAULT 'active'"
+            )
+        if "live_context_owner_run_id" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN live_context_owner_run_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "live_context_pruned_at" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN live_context_pruned_at TEXT NOT NULL DEFAULT ''"
+            )
+        if "live_context_pruned_by" not in columns:
+            conn.execute(
+                "ALTER TABLE proof_records ADD COLUMN live_context_pruned_by TEXT NOT NULL DEFAULT ''"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proof_records_live_context "
+            "ON proof_records(live_context_owner_run_id, live_context_status)"
+        )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS proof_index_metadata "
             "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -607,6 +646,8 @@ class ProofSearchIndexer:
         exclude_corpus_scopes: Iterable[str] | None = None,
         exclude_session_ids: Iterable[str] | None = None,
         exclude_run_ids: Iterable[str] | None = None,
+        requesting_run_id: str = "",
+        filter_live_context: bool = False,
     ) -> list[tuple[UnifiedProofSearchRecord, float]]:
         clauses = []
         params: list[Any] = []
@@ -654,6 +695,17 @@ class ProofSearchIndexer:
             placeholders = ",".join("?" for _ in excluded_runs)
             clauses.append(f"r.run_id NOT IN ({placeholders})")
             params.extend(excluded_runs)
+        if filter_live_context:
+            requester = str(requesting_run_id or "").strip()
+            if not requester:
+                clauses.append("r.live_context_status = 'active'")
+            else:
+                clauses.append(
+                    "(r.live_context_status = 'active' OR "
+                    "(r.live_context_status = 'pruned' AND "
+                    "r.live_context_owner_run_id != ?))"
+                )
+                params.append(requester)
 
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         fts_query = _build_fts_query(
@@ -783,6 +835,10 @@ class ProofSearchIndexer:
             novelty_reasoning=row["novelty_reasoning"],
             verified=bool(row["verified"]),
             created_at=row["created_at"],
+            live_context_status=row["live_context_status"],
+            live_context_owner_run_id=row["live_context_owner_run_id"],
+            live_context_pruned_at=row["live_context_pruned_at"],
+            live_context_pruned_by=row["live_context_pruned_by"],
             canonical_uri=row["canonical_uri"],
             metadata=metadata,
         )
@@ -843,7 +899,8 @@ _PROOF_RECORD_INSERT_SQL = """
         canonical_lean_code_hash, canonical_theorem_statement_hash, imports_json,
         dependency_names_json, topic_tags_json, domain_tags_json, module,
         source_path, novelty_tier, novelty_reasoning, verified, created_at,
-        canonical_uri, metadata_json
+        live_context_status, live_context_owner_run_id, live_context_pruned_at,
+        live_context_pruned_by, canonical_uri, metadata_json
     ) VALUES (
         :search_id, :corpus, :corpus_scope, :source_kind, :proof_id,
         :external_fingerprint, :release_id, :session_id, :run_id, :source_type, :source_id,
@@ -853,7 +910,8 @@ _PROOF_RECORD_INSERT_SQL = """
         :canonical_lean_code_hash, :canonical_theorem_statement_hash, :imports_json,
         :dependency_names_json, :topic_tags_json, :domain_tags_json, :module,
         :source_path, :novelty_tier, :novelty_reasoning, :verified, :created_at,
-        :canonical_uri, :metadata_json
+        :live_context_status, :live_context_owner_run_id, :live_context_pruned_at,
+        :live_context_pruned_by, :canonical_uri, :metadata_json
     )
 """
 

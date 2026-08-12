@@ -12,6 +12,7 @@ ShouldStopFn = Optional[Callable[[], bool]]
 
 _provider_resume_event: Optional[asyncio.Event] = None
 _active_pause_count = 0
+_provider_reset_generation = 0
 
 _CREDIT_PAUSE_MARKERS = (
     "account free credits exhausted",
@@ -74,11 +75,28 @@ def mark_provider_paused() -> int:
 
 def resume_provider_pauses() -> int:
     """Wake all provider-paused proof workflows."""
-    global _active_pause_count
+    global _active_pause_count, _provider_reset_generation
     resumed = _active_pause_count
     _active_pause_count = 0
+    _provider_reset_generation += 1
     _get_resume_event().set()
     return resumed
+
+
+def get_provider_reset_generation() -> int:
+    """Return the monotonic provider-reset generation."""
+    return _provider_reset_generation
+
+
+async def wait_for_provider_reset(
+    observed_generation: int,
+    should_stop: ShouldStopFn = None,
+) -> None:
+    """Wait for the next reset without joining the main proof-stage pause count."""
+    while _provider_reset_generation <= int(observed_generation):
+        if should_stop is not None and should_stop():
+            raise asyncio.CancelledError()
+        await asyncio.sleep(0.25)
 
 
 async def wait_for_provider_resume(should_stop: ShouldStopFn = None) -> None:

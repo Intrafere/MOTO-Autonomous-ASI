@@ -4,13 +4,16 @@ Proof database, Lean 4 status, manual proof checks, and certificate export route
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from backend.api.routes import websocket
@@ -23,8 +26,20 @@ from backend.aggregator.memory.shared_training import (
 )
 from backend.autonomous.core.autonomous_coordinator import autonomous_coordinator
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
+from backend.autonomous.core.proof_round_driver import (
+    ContinuousPruningPolicy,
+    OneRoundPolicy,
+    ProofRoundDriver,
+    summarize_round_result,
+)
+from backend.autonomous.core.proof_run_manager import (
+    ProofRunControl,
+    ProofRunSourceInvalidError,
+    proof_run_manager,
+)
+from backend.autonomous.core.proof_pruning_coordinator import ProofPruningCoordinator
 from backend.autonomous.memory.brainstorm_memory import BrainstormMemory, brainstorm_memory
-from backend.autonomous.memory.paper_library import paper_library
+from backend.autonomous.memory.paper_library import PaperLibrary, paper_library
 from backend.autonomous.memory.proof_database import ProofDatabase, manual_proof_database, proof_database
 from backend.autonomous.memory.proof_database import (
     is_duplicate_novel_tier,
@@ -37,7 +52,7 @@ from backend.compiler.core.compiler_coordinator import compiler_coordinator
 from backend.compiler.memory.manual_prompt import load_manual_compiler_prompt
 from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import paper_memory
-from backend.shared.api_client_manager import api_client_manager
+from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.config import system_config
 from backend.shared.lean4_client import (
     clear_lean4_client,
@@ -46,20 +61,39 @@ from backend.shared.lean4_client import (
     initialize_lean4_client,
 )
 from backend.shared.models import (
+    CurrentProofListResponse,
     ModelConfig,
+    ProofAttemptFeedback,
     ProofCheckRequest,
     ProofCertificateResponse,
+    ProofCandidate,
+    ProofLiveContextMutationRequest,
+    ProofLiveContextMutationResponse,
     ProofLibraryEntry,
     ProofLibraryResponse,
+    ProofStageResult,
+    ProofRunQueueResponse,
+    ProofRunCollectionResponse,
+    ProofRunSnapshot,
+    ProofRunSourceLookupResponse,
+    ProofRunStopRequest,
     ProofRoleConfigSnapshot,
     ProofRuntimeConfigSnapshot,
     ProofSettingsUpdateRequest,
 )
 from backend.shared.manual_proof_context import get_manual_proof_context_lock
-from backend.shared.path_safety import resolve_path_within_root
+from backend.shared.model_error_utils import (
+    is_non_retryable_model_error,
+    is_transient_model_call_error,
+)
+from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
+from backend.shared.provider_errors import ProviderRepairRequiredError
+from backend.shared.provider_pause import is_provider_credit_pause_error
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
+from backend.shared.proof_search.search_service import proof_search_service
 from backend.shared.runtime_settings import RuntimeSettingsError, save_proof_runtime_settings
+from backend.shared.sleep_inhibitor import sleep_inhibitor
 from backend.shared.smt_client import clear_smt_client, get_smt_client
 
 logger = logging.getLogger(__name__)
@@ -75,6 +109,44 @@ _manual_proof_run_lock = asyncio.Lock()
 _LEAN_STATUS_STARTING_LOG_INTERVAL_SECONDS = 60.0
 _last_lean_status_starting_log_at = 0.0
 _ASSISTANT_MANUAL_SOURCE_SUMMARY_CHARS = 8000
+ProofAppendCallback = Callable[[object], Awaitable[bool]]
+
+
+@dataclass(frozen=True)
+class ProofSourceAdapter:
+    """Resolved proof source and every storage behavior bound to its identity."""
+
+    source_type: str
+    source_id: str
+    source_title: str
+    source_content: str
+    user_prompt: str
+    canonical_user_prompt: str
+    proof_database: ProofDatabase
+    proof_store_id: str
+    scope: str
+    writable: bool
+    append_to_source: bool
+    append_proof_callback: Optional[ProofAppendCallback]
+    source_path: Optional[Path] = None
+
+    async def fingerprint(self) -> str:
+        """Fingerprint the current physical boundary for future loop re-resolution."""
+        parts = [
+            self.source_type,
+            self.source_id,
+            self.proof_store_id,
+            str(self.writable),
+            hashlib.sha256(self.source_content.encode("utf-8")).hexdigest(),
+        ]
+        if self.source_path is not None:
+            try:
+                stat = await asyncio.to_thread(self.source_path.stat)
+            except FileNotFoundError:
+                parts.append("source:missing")
+            else:
+                parts.append(f"source:{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}")
+        return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
 
 
 def _log_lean_status_starting_up(detail: str) -> None:
@@ -88,6 +160,19 @@ def _log_lean_status_starting_up(detail: str) -> None:
         "Lean 4 is still starting up; proof status will become ready after workspace bootstrap completes. %s",
         detail,
     )
+
+
+async def _invalidate_pruned_proof_context(proof_id: str) -> None:
+    """Invalidate Assistant state and rebuild the derived human/search index."""
+    assistant_proof_search_coordinator.invalidate_live_context_occurrence(proof_id)
+    try:
+        await proof_search_service.rebuild_index()
+    except Exception as exc:
+        logger.warning(
+            "Proof-search refresh failed after automatic prune %s: %s",
+            str(proof_id)[:120],
+            str(exc)[:240],
+        )
 
 
 def _manual_proof_history_root() -> Path:
@@ -174,7 +259,10 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
     if event_type == "proof_check_started":
         return "Proof check started for the manual Aggregator database"
     if event_type == "proof_check_no_candidates":
-        return "Proof discovery found 0 proof candidates; no proofs will be attempted"
+        return (
+            "Proof discovery: the model searched for useful novel proof candidates and "
+            "found none, so no Lean proof attempts were needed."
+        )
     if event_type == "proof_check_candidates_found":
         count = int(data.get("count") or 0)
         subject = "proof candidate" if count == 1 else "proof candidates"
@@ -201,6 +289,43 @@ def _manual_aggregator_proof_event_message(event_type: str, data: dict) -> str:
         return f"Proof dependency added: {target}"
     if event_type == "proof_check_complete":
         return f"Proof check complete: {data.get('verified_count') or 0} verified, {data.get('novel_count') or 0} novel"
+    round_index = int(data.get("round_index") or data.get("proof_round_index") or 0)
+    round_label = f"Round {round_index}" if round_index > 0 else "Proof run"
+    if event_type == "proof_run_queued":
+        mode = " continuous" if data.get("run_mode") == "loop_with_pruning" else ""
+        return f"{round_label} queued in{mode} mode"
+    if event_type == "proof_run_round_started":
+        return (
+            f"{round_label} started. Proof discovery will identify prompt-relevant candidates, "
+            "Lean 4 will verify each attempted proof, and accepted proofs may trigger a "
+            "non-blocking pruning review."
+        )
+    if event_type == "proof_run_round_complete":
+        candidate_count = data.get("candidate_count")
+        if candidate_count == 0:
+            detail = (
+                "Discovery: the model searched for useful novel proof candidates and "
+                "found none, so no Lean proof attempts were needed."
+            )
+        elif isinstance(candidate_count, int):
+            subject = "candidate" if candidate_count == 1 else "candidates"
+            detail = f"Discovery found {candidate_count} {subject} for this round."
+        else:
+            detail = "The round finished its proof discovery and verification work."
+        continuation = (
+            " The next round will start automatically; the loop continues until you press Stop."
+            if data.get("run_mode") == "loop_with_pruning"
+            and data.get("next_round_automatic") is not False
+            else ""
+        )
+        return f"{round_label} complete. {detail}{continuation}"
+    if event_type == "proof_run_provider_paused":
+        return f"{round_label} paused for provider credits"
+    if event_type == "proof_run_provider_resumed":
+        return f"{round_label} resumed after the provider pause"
+    if event_type == "proof_run_terminal":
+        reason = data.get("terminal_reason") or "completed"
+        return f"Proof run ended: {reason}"
     return f"Proof event: {event_type}"
 
 
@@ -260,6 +385,21 @@ def _normalize_proof_response_provenance(proof) -> dict:
         or payload.get("novelty_reasoning")
         or ""
     )
+    payload["live_context_status"] = str(
+        payload.get("live_context_status") or "active"
+    )
+    payload["live_context_owner_run_id"] = str(
+        payload.get("live_context_owner_run_id") or ""
+    )
+    payload["live_context_prune_reason"] = str(
+        payload.get("live_context_prune_reason") or ""
+    )
+    payload["live_context_prune_validator_reasoning"] = str(
+        payload.get("live_context_prune_validator_reasoning") or ""
+    )
+    payload["live_context_prune_trigger_reasons"] = list(
+        payload.get("live_context_prune_trigger_reasons") or []
+    )
     return payload
 
 
@@ -270,17 +410,6 @@ def _get_request_proof_database(request: ProofCheckRequest) -> ProofDatabase:
     ):
         return manual_proof_database
     return proof_database
-
-
-def _schedule_lean4_warm_start(client) -> None:
-    """Warm the Lean workspace without blocking a settings/status request."""
-    async def _warm_start() -> None:
-        try:
-            await client.warm_start()
-        except Exception as exc:  # pragma: no cover - defensive background task
-            logger.warning("Lean 4 client warm start failed: %s", exc)
-
-    asyncio.create_task(_warm_start())
 
 
 def _safe_path_label(path_value: str) -> str:
@@ -524,11 +653,20 @@ async def _get_manual_check_status() -> Tuple[bool, str]:
     return True, ""
 
 
-def _configure_manual_roles(source_type: str, snapshot: ProofRuntimeConfigSnapshot) -> ProofRoleConfigSnapshot:
+def _configure_manual_roles(
+    source_type: str,
+    snapshot: ProofRuntimeConfigSnapshot,
+    *,
+    proof_run_id: str = "",
+) -> ProofRoleConfigSnapshot:
+    from backend.autonomous.agents.proof_pruning_agent import proof_run_role_suffix
+
     role_config = snapshot.brainstorm if source_type == "brainstorm" else snapshot.paper
     if not role_config.model_id or not snapshot.validator.model_id:
         raise RuntimeError("Manual proof roles are missing a configured submitter or validator model.")
     suffix = f"manual_{source_type}"
+    if proof_run_id:
+        suffix = f"{suffix}_{proof_run_role_suffix('manual', proof_run_id)}"
     api_client_manager.configure_role(
         f"autonomous_proof_identification_{suffix}",
         _build_model_config(role_config),
@@ -542,7 +680,16 @@ def _configure_manual_roles(source_type: str, snapshot: ProofRuntimeConfigSnapsh
         _build_model_config(role_config),
     )
     api_client_manager.configure_role(
-        "autonomous_proof_novelty",
+        f"autonomous_proof_novelty_{suffix}",
+        _build_model_config(snapshot.validator),
+    )
+    proposer_role = snapshot.paper
+    api_client_manager.configure_role(
+        f"autonomous_proof_prune_proposer_{suffix}",
+        _build_model_config(proposer_role),
+    )
+    api_client_manager.configure_role(
+        f"autonomous_proof_prune_validator_{suffix}",
         _build_model_config(snapshot.validator),
     )
     assistant_config = snapshot.assistant if snapshot.assistant.model_id else snapshot.validator
@@ -567,6 +714,7 @@ async def _refresh_manual_assistant_memory(
     source_title: str,
     source_content: str,
     user_prompt: str,
+    scoped_proof_database: ProofDatabase = manual_proof_database,
 ) -> None:
     """Schedule Try-to-Prove Assistant memory before proof prompt preflight.
 
@@ -584,7 +732,7 @@ async def _refresh_manual_assistant_memory(
         )
         return
 
-    run_id = await manual_proof_database.get_or_create_active_run_id()
+    run_id = await scoped_proof_database.get_or_create_active_run_id()
     snapshot = AssistantTargetSnapshot(
         workflow_mode="manual_proof_check",
         target_kind="proof_candidate",
@@ -593,7 +741,7 @@ async def _refresh_manual_assistant_memory(
         user_prompt=user_prompt,
         current_prompt_or_topic=source_title,
         current_submission_or_draft=_compact_manual_assistant_source(source_content),
-        writing_goal="User-triggered Try to Prove This proof discovery over the selected source.",
+        writing_goal="User-triggered Search For More Mathematical Proofs discovery over the selected source.",
         paper_or_proof_draft_summary=_compact_manual_assistant_source(source_content),
         target_statement=user_prompt or source_title or f"{source_type}:{source_id}",
         formal_sketch=_compact_manual_assistant_source(source_content),
@@ -622,6 +770,7 @@ async def _refresh_manual_assistant_memory(
 async def _prompt_with_verified_proof_context(
     prompt: str,
     scoped_proof_database: ProofDatabase = proof_database,
+    requesting_run_id: str = "",
 ) -> str:
     """Apply proof-library context to a source-specific manual proof prompt."""
     source_prompt = (prompt or "").strip()
@@ -629,33 +778,66 @@ async def _prompt_with_verified_proof_context(
         source_prompt = (await research_metadata.get_user_prompt()).strip()
     if not source_prompt:
         source_prompt = (await research_metadata.get_base_user_prompt()).strip()
-    return scoped_proof_database.inject_into_prompt(source_prompt)
+    if not requesting_run_id:
+        run_id_getter = getattr(
+            scoped_proof_database,
+            "get_or_create_active_run_id",
+            None,
+        )
+        if run_id_getter is not None:
+            requesting_run_id = await run_id_getter()
+    try:
+        return scoped_proof_database.inject_into_prompt(
+            source_prompt,
+            requesting_run_id=requesting_run_id,
+        )
+    except TypeError as exc:
+        if "requesting_run_id" not in str(exc):
+            raise
+        return scoped_proof_database.inject_into_prompt(source_prompt)
 
 
-def _history_proof_database_for_session(session_id: str) -> Optional[ProofDatabase]:
-    """Return a read-only proof database view for a history session."""
+def _history_session_dir(session_id: str) -> Optional[Path]:
+    """Resolve an existing autonomous history session without creating it."""
     if not session_id:
         return None
     if session_id == "legacy":
-        proofs_dir = Path(system_config.data_dir) / "proofs"
-    else:
-        try:
-            session_path = resolve_path_within_root(
-                Path(system_config.auto_sessions_base_dir),
-                session_id,
-            )
-        except Exception:
-            return None
-        proofs_dir = session_path / "proofs"
-    if not proofs_dir.exists():
+        return Path(system_config.data_dir)
+    try:
+        session_path = resolve_path_within_root(
+            Path(system_config.auto_sessions_base_dir),
+            session_id,
+        )
+    except Exception:
+        return None
+    if not session_path.is_dir():
+        return None
+    return session_path
+
+
+def _history_proof_database_for_session(
+    session_id: str,
+    *,
+    require_existing_store: bool = True,
+) -> Optional[ProofDatabase]:
+    """Return a proof database fixed to one historical session."""
+    session_dir = _history_session_dir(session_id)
+    if session_dir is None:
+        return None
+    proofs_dir = session_dir / "proofs"
+    if require_existing_store and not proofs_dir.exists():
         return None
     history_db = ProofDatabase()
-    history_db._base_dir = proofs_dir
-    history_db._index_data = None
+    history_db.set_base_dir(proofs_dir)
     return history_db
 
 
-async def _prompt_with_history_proof_context(prompt: str, session_id: str) -> str:
+async def _prompt_with_history_proof_context(
+    prompt: str,
+    session_id: str,
+    requesting_run_id: str = "",
+    scoped_proof_database: Optional[ProofDatabase] = None,
+) -> str:
     """Apply the selected history session's proof context when available."""
     source_prompt = (prompt or "").strip()
     if not source_prompt:
@@ -663,10 +845,21 @@ async def _prompt_with_history_proof_context(prompt: str, session_id: str) -> st
     if not source_prompt:
         source_prompt = (await research_metadata.get_base_user_prompt()).strip()
 
-    history_db = _history_proof_database_for_session(session_id)
+    history_db = scoped_proof_database or _history_proof_database_for_session(session_id)
     if history_db is None:
-        return proof_database.inject_into_prompt(source_prompt)
-    return history_db.inject_into_prompt(source_prompt)
+        try:
+            return proof_database.inject_into_prompt(
+                source_prompt,
+                requesting_run_id=requesting_run_id,
+            )
+        except TypeError as exc:
+            if "requesting_run_id" not in str(exc):
+                raise
+            return proof_database.inject_into_prompt(source_prompt)
+    return history_db.inject_into_prompt(
+        source_prompt,
+        requesting_run_id=requesting_run_id,
+    )
 
 
 async def _augment_paper_content_with_source_brainstorms(
@@ -866,29 +1059,176 @@ async def _resolve_manual_source(
     return content, metadata.title, user_prompt
 
 
-async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
-    source_title = ""
-    scoped_proof_database = _get_request_proof_database(request)
+def _proof_store_id(database: ProofDatabase, fallback: str) -> str:
+    """Return a stable physical store identity without exposing it publicly."""
     try:
-        source_content, source_title, user_prompt = await _resolve_manual_source(
-            request,
-            scoped_proof_database,
+        physical_path = str(database._base_dir.resolve(strict=False))
+        digest = hashlib.sha256(physical_path.encode("utf-8")).hexdigest()[:20]
+        return f"{fallback}:{digest}"
+    except Exception:
+        return fallback
+
+
+def _validate_proof_run_source_id(source_type: str, source_id: str) -> str:
+    """Validate source IDs accepted by proof-run lookup.
+
+    Historical autonomous papers use the composite `{session_id}:{paper_id}`
+    key. Each side is still a path component, but the separator itself is part
+    of the public source identity.
+    """
+    raw_source_id = str(source_id or "").strip()
+    if source_type == "paper" and ":" in raw_source_id:
+        session_id, paper_id = raw_source_id.split(":", 1)
+        return (
+            f"{validate_single_path_component(session_id, 'history session ID')}:"
+            f"{validate_single_path_component(paper_id, 'history paper ID')}"
         )
-        if request.source_id == MANUAL_AGGREGATOR_SOURCE_ID:
-            canonical_user_prompt = await _manual_aggregator_prompt()
-        elif request.source_id == MANUAL_COMPILER_CURRENT_SOURCE_ID:
-            canonical_user_prompt = (
-                compiler_coordinator.user_prompt or await load_manual_compiler_prompt()
+    return validate_single_path_component(raw_source_id, "proof source ID")
+
+
+async def _resolve_proof_source_adapter(request: ProofCheckRequest) -> ProofSourceAdapter:
+    """Resolve source content and bind it to the only store/append target it may use."""
+    if request.source_type == "paper" and ":" in request.source_id:
+        session_id, paper_id = request.source_id.split(":", 1)
+        history_paper = await paper_library.get_history_paper(session_id, paper_id)
+        if not history_paper:
+            raise HTTPException(status_code=404, detail="Paper not found")
+
+        session_dir = _history_session_dir(session_id)
+        papers_dir = paper_library.get_history_papers_dir(session_id)
+        if session_dir is None or papers_dir is None:
+            raise HTTPException(status_code=404, detail="Paper not found")
+        scoped_library = PaperLibrary._build_scoped_library(papers_dir)
+        source_path = Path(scoped_library.get_paper_path(paper_id))
+        if not source_path.is_file():
+            raise HTTPException(status_code=404, detail="Paper content not found")
+
+        scoped_database = _history_proof_database_for_session(
+            session_id,
+            require_existing_store=False,
+        )
+        if scoped_database is None:
+            raise HTTPException(status_code=404, detail="Research session not found")
+        await scoped_database.initialize()
+
+        content = paper_library.strip_verified_proofs_from_content(
+            str(history_paper.get("content", "") or "")
+        )
+        if not content:
+            raise HTTPException(status_code=404, detail="Paper content not found")
+        source_brainstorm_ids = history_paper.get("source_brainstorm_ids") or []
+        history_brainstorm_memory = _history_brainstorm_memory_for_session(session_id)
+        if source_brainstorm_ids and history_brainstorm_memory is not None:
+            content = await _augment_paper_content_with_source_brainstorms(
+                content,
+                source_brainstorm_ids,
+                source_brainstorm_memory=history_brainstorm_memory,
             )
-        elif ":" in request.source_id and request.source_type == "paper":
-            session_id, paper_id = request.source_id.split(":", 1)
-            history_paper = await paper_library.get_history_paper(session_id, paper_id)
-            canonical_user_prompt = str(
-                (history_paper or {}).get("user_prompt", "") or ""
-            )
-        else:
-            canonical_user_prompt = await research_metadata.get_user_prompt()
-        snapshot = await _get_runtime_snapshot(request)
+        canonical_prompt = str(
+            history_paper.get("user_prompt", "")
+            or history_paper.get("title", "")
+            or paper_id
+        )
+        run_id = await scoped_database.get_or_create_active_run_id()
+        user_prompt = await _prompt_with_history_proof_context(
+            canonical_prompt,
+            session_id,
+            requesting_run_id=run_id,
+            scoped_proof_database=scoped_database,
+        )
+
+        async def _append_history_paper_proof(proof_record) -> bool:
+            # Re-check the original source boundary immediately before mutation.
+            if not source_path.is_file():
+                return False
+            return await scoped_library.append_proofs_section(paper_id, proof_record)
+
+        return ProofSourceAdapter(
+            source_type=request.source_type,
+            source_id=request.source_id,
+            source_title=str(history_paper.get("title", "") or paper_id),
+            source_content=content,
+            user_prompt=user_prompt,
+            canonical_user_prompt=canonical_prompt,
+            proof_database=scoped_database,
+            proof_store_id=_proof_store_id(
+                scoped_database,
+                f"autonomous:session:{session_id}",
+            ),
+            scope=PROOF_SCOPE_AUTONOMOUS,
+            writable=True,
+            append_to_source=False,
+            append_proof_callback=_append_history_paper_proof,
+            source_path=source_path,
+        )
+
+    scoped_database = _get_request_proof_database(request)
+    content, title, user_prompt = await _resolve_manual_source(
+        request,
+        scoped_database,
+    )
+    if request.source_id == MANUAL_AGGREGATOR_SOURCE_ID:
+        canonical_prompt = await _manual_aggregator_prompt()
+    elif request.source_id == MANUAL_COMPILER_CURRENT_SOURCE_ID:
+        canonical_prompt = compiler_coordinator.user_prompt or await load_manual_compiler_prompt()
+    else:
+        canonical_prompt = await research_metadata.get_user_prompt()
+    is_manual = scoped_database is manual_proof_database
+    return ProofSourceAdapter(
+        source_type=request.source_type,
+        source_id=request.source_id,
+        source_title=title,
+        source_content=content,
+        user_prompt=user_prompt,
+        canonical_user_prompt=canonical_prompt,
+        proof_database=scoped_database,
+        proof_store_id=(
+            "manual:active" if is_manual else "autonomous:active"
+        ),
+        scope=PROOF_SCOPE_MANUAL if is_manual else PROOF_SCOPE_AUTONOMOUS,
+        writable=True,
+        append_to_source=not _is_non_appending_manual_source(request),
+        append_proof_callback=_manual_append_callback(request),
+    )
+
+
+async def _reuse_run_reservation(run_control: ProofRunControl) -> str:
+    return run_control.reservation_token
+
+
+async def _keep_run_reservation() -> None:
+    """The manager, not the round driver, owns manual-run cleanup."""
+
+
+async def _run_manual_proof_check(
+    request: ProofCheckRequest,
+    run_control: ProofRunControl | object,
+    runtime_snapshot: Optional[ProofRuntimeConfigSnapshot] = None,
+) -> None:
+    source_title = ""
+    legacy_sleep_owner = None
+    manager_owned_run = isinstance(run_control, ProofRunControl)
+    if not isinstance(run_control, ProofRunControl):
+        legacy_sleep_owner = run_control
+        sleep_inhibitor.acquire(legacy_sleep_owner)
+        run_control = ProofRunControl(
+            snapshot=ProofRunSnapshot(
+                proof_run_id="legacy-manual-proof-check",
+                run_mode="one_round",
+                scope="manual",
+                source_type=request.source_type,
+                source_id=request.source_id,
+                proof_store_id="legacy-manual",
+                run_id="legacy-manual",
+                lifecycle_generation=1,
+                status="running",
+            ),
+            sleep_owner=legacy_sleep_owner,
+        )
+    try:
+        source = await _resolve_proof_source_adapter(request)
+        source_title = source.source_title
+        snapshot = runtime_snapshot or await _get_runtime_snapshot(request)
         if snapshot is None:
             if _is_non_appending_manual_source(request):
                 raise RuntimeError(
@@ -899,40 +1239,379 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
             raise RuntimeError("No proof runtime model configuration is available yet.")
 
         async with _manual_proof_run_lock:
-            role_config = _configure_manual_roles(request.source_type, snapshot)
-            stage = autonomous_coordinator._proof_verification_stage
-            broadcast_fn = (
-                _broadcast_manual_aggregator_proof_event
-                if _is_manual_aggregator_request(request)
-                else websocket.broadcast_event
+            role_config = _configure_manual_roles(
+                request.source_type,
+                snapshot,
+                proof_run_id=run_control.snapshot.proof_run_id,
             )
-            await _refresh_manual_assistant_memory(
-                source_type=request.source_type,
-                source_id=request.source_id,
-                source_title=source_title,
-                source_content=source_content,
-                user_prompt=user_prompt,
+        stage = autonomous_coordinator._proof_verification_stage
+        broadcast_fn = (
+            _broadcast_manual_aggregator_proof_event
+            if _is_manual_aggregator_request(request)
+            else websocket.broadcast_event
+        )
+        scoped_proof_database = source.proof_database
+        active_run_id = await scoped_proof_database.get_or_create_active_run_id()
+        pruning_coordinator = ProofPruningCoordinator(
+            proof_database=scoped_proof_database,
+            runtime_snapshot=snapshot,
+            proof_run_id=run_control.snapshot.proof_run_id,
+            run_mode=run_control.snapshot.run_mode,
+            run_id=active_run_id,
+            lifecycle_generation=run_control.snapshot.lifecycle_generation,
+            scope="manual",
+            source_type=request.source_type,
+            source_id=request.source_id,
+            canonical_user_prompt=source.canonical_user_prompt,
+            proof_store_id=source.proof_store_id,
+            broadcast_fn=broadcast_fn,
+            persist_fn=lambda state: proof_run_manager.save_pruning_state(run_control, state),
+            load_fn=lambda: proof_run_manager.load_pruning_state(run_control),
+            invalidate_fn=_invalidate_pruned_proof_context,
+            should_stop=run_control.stop_event.is_set,
+        )
+        run_control.pruning_coordinator = pruning_coordinator
+        try:
+            await pruning_coordinator.restore()
+        except Exception:
+            logger.exception("Noncritical pruning restore failure for %s", run_control.snapshot.proof_run_id)
+
+        expected_store_id = source.proof_store_id
+        persisted_fingerprint = run_control.snapshot.source_content_fingerprint
+        current_fingerprint = await source.fingerprint()
+        if persisted_fingerprint and persisted_fingerprint != current_fingerprint:
+            await proof_run_manager.clear_candidate_checkpoint(run_control)
+            await proof_run_manager.update(
+                run_control,
+                source_revision=run_control.snapshot.source_revision + 1,
+                candidate_checkpoint_reference="",
+                last_round_summary="",
+                last_round_reference="",
             )
-            await stage.run_manual(
-                content=source_content,
-                source_type=request.source_type,
-                source_id=request.source_id,
-                user_prompt=user_prompt,
-                canonical_user_prompt=canonical_user_prompt,
-                run_id=await scoped_proof_database.get_or_create_active_run_id(),
-                submitter_model=role_config.model_id,
-                submitter_context=role_config.context_window,
-                submitter_max_tokens=role_config.max_output_tokens,
-                validator_model=snapshot.validator.model_id,
-                validator_context=snapshot.validator.context_window,
-                validator_max_tokens=snapshot.validator.max_output_tokens,
-                broadcast_fn=broadcast_fn,
-                novel_proofs_db=scoped_proof_database,
-                source_title=source_title,
-                source_reserved=True,
-                append_to_source=not _is_non_appending_manual_source(request),
-                append_proof_callback=_manual_append_callback(request),
+        assistant_boundary_keys: set[tuple[int, str]] = set()
+        retry_activity_payload: Optional[Dict[str, Any]] = None
+        await proof_run_manager.update(
+            run_control,
+            source_title=source.source_title,
+            source_content_fingerprint=current_fingerprint,
+            proof_set_revision=await scoped_proof_database.get_proof_set_revision(),
+        )
+
+        async def execute_round(
+            round_index: int,
+            round_trigger: str,
+            prior_round_results: str,
+            reservation_token: str,
+        ):
+            nonlocal source_title, current_fingerprint, retry_activity_payload
+            if legacy_sleep_owner is not None and round_index == 1:
+                refreshed = source
+            else:
+                try:
+                    refreshed = await _resolve_proof_source_adapter(request)
+                except HTTPException as exc:
+                    if exc.status_code == 404:
+                        raise ProofRunSourceInvalidError(str(exc.detail)) from exc
+                    raise
+            if refreshed.proof_store_id != expected_store_id:
+                raise ProofRunSourceInvalidError("The proof source storage boundary changed.")
+            refreshed_fingerprint = await refreshed.fingerprint()
+            source_changed = refreshed_fingerprint != current_fingerprint
+            if source_changed:
+                current_fingerprint = refreshed_fingerprint
+                await proof_run_manager.clear_candidate_checkpoint(run_control)
+                await proof_run_manager.update(
+                    run_control,
+                    source_content_fingerprint=current_fingerprint,
+                    source_revision=run_control.snapshot.source_revision + 1,
+                    candidate_checkpoint_reference="",
+                    last_round_summary="",
+                    last_round_reference="",
+                )
+                prior_round_results = ""
+            source_title = refreshed.source_title
+            await proof_run_manager.begin_round(
+                run_control,
+                round_number=round_index,
             )
+            await proof_run_manager.update(run_control, source_title=source_title)
+            assistant_boundary_key = (round_index, refreshed_fingerprint)
+            if assistant_boundary_key not in assistant_boundary_keys:
+                assistant_boundary_keys.add(assistant_boundary_key)
+                await _refresh_manual_assistant_memory(
+                    source_type=request.source_type,
+                    source_id=request.source_id,
+                    source_title=source_title,
+                    source_content=refreshed.source_content,
+                    user_prompt=refreshed.user_prompt,
+                    scoped_proof_database=scoped_proof_database,
+                )
+            checkpoint_status = ""
+            checkpoint_candidates: List[ProofCandidate] = []
+            proof_candidate_indexes: Dict[str, int] = {}
+            checkpoint_attempts: Dict[str, List[ProofAttemptFeedback]] = {}
+            checkpoint_theorem_names: Dict[str, str] = {}
+            checkpoint_truncation_streak: List[Dict[str, Any]] = []
+            checkpoint_result: Optional[ProofStageResult] = None
+            saved_checkpoint = await proof_run_manager.load_candidate_checkpoint(
+                run_control
+            )
+            if saved_checkpoint:
+                (
+                    checkpoint_candidates,
+                    proof_candidate_indexes,
+                    checkpoint_attempts,
+                    checkpoint_theorem_names,
+                    checkpoint_truncation_streak,
+                    checkpoint_result,
+                ) = autonomous_coordinator._deserialize_proof_checkpoint(
+                    saved_checkpoint
+                )
+                if checkpoint_candidates:
+                    logger.info(
+                        "Resuming manual proof run %s round %s from checkpoint with %s remaining candidate(s)",
+                        run_control.snapshot.proof_run_id,
+                        round_index,
+                        len(checkpoint_candidates),
+                    )
+
+            async def save_manual_checkpoint(payload: dict) -> None:
+                nonlocal checkpoint_status
+                checkpoint_status = str(payload.get("status") or "")
+                reference = (
+                    f"{run_control.snapshot.proof_run_id}:"
+                    f"{round_index}:{int(payload.get('checkpoint_revision') or 0)}"
+                )
+                await proof_run_manager.save_candidate_checkpoint(
+                    run_control,
+                    payload,
+                )
+                await proof_run_manager.update(
+                    run_control,
+                    candidate_checkpoint_reference=reference,
+                )
+
+            try:
+                result = await stage.run_manual(
+                    content=refreshed.source_content,
+                    source_type=request.source_type,
+                    source_id=request.source_id,
+                    user_prompt=refreshed.user_prompt,
+                    canonical_user_prompt=refreshed.canonical_user_prompt,
+                    run_id=active_run_id,
+                    submitter_model=role_config.model_id,
+                    submitter_context=role_config.context_window,
+                    submitter_max_tokens=role_config.max_output_tokens,
+                    validator_model=snapshot.validator.model_id,
+                    validator_context=snapshot.validator.context_window,
+                    validator_max_tokens=snapshot.validator.max_output_tokens,
+                    broadcast_fn=broadcast_fn,
+                    novel_proofs_db=scoped_proof_database,
+                    source_title=source_title,
+                    theorem_candidates=checkpoint_candidates or None,
+                    source_reserved=True,
+                    source_reservation_token=reservation_token or run_control.reservation_token,
+                    append_to_source=refreshed.append_to_source,
+                    append_proof_callback=refreshed.append_proof_callback,
+                    should_stop=run_control.stop_event.is_set,
+                    release_source_on_exit=False,
+                    proof_run_context={
+                        "proof_run_id": run_control.snapshot.proof_run_id,
+                        "run_mode": run_control.snapshot.run_mode,
+                        "lifecycle_generation": run_control.snapshot.lifecycle_generation,
+                        "proof_run_unbounded": run_control.snapshot.run_mode == "loop_with_pruning",
+                        "round_index": round_index,
+                        "round_trigger": round_trigger,
+                        "prior_round_results": prior_round_results,
+                    },
+                    proof_pruning_registered_callback=pruning_coordinator.notify_proof_registered,
+                    proof_pruning_pressure_callback=pruning_coordinator.notify_context_pressure,
+                    proof_pruning_route_fingerprint=pruning_coordinator.route_config_fingerprint(snapshot),
+                    proof_round_index=round_index,
+                    proof_max_rounds=(
+                        0
+                        if run_control.snapshot.run_mode == "loop_with_pruning"
+                        else 1
+                    ),
+                    prior_round_results=prior_round_results,
+                    proof_candidate_indexes=proof_candidate_indexes,
+                    checkpoint_attempts_by_candidate=checkpoint_attempts,
+                    checkpoint_theorem_names_by_candidate=checkpoint_theorem_names,
+                    checkpoint_truncation_streak=checkpoint_truncation_streak,
+                    checkpoint_result=checkpoint_result,
+                    checkpoint_callback=save_manual_checkpoint,
+                )
+                if retry_activity_payload is not None:
+                    await broadcast_fn(
+                        "proof_run_provider_resumed",
+                        {
+                            **retry_activity_payload,
+                            "proof_run_id": run_control.snapshot.proof_run_id,
+                            "run_mode": run_control.snapshot.run_mode,
+                            "lifecycle_generation": run_control.snapshot.lifecycle_generation,
+                            "scope": run_control.snapshot.scope,
+                            "source_type": run_control.snapshot.source_type,
+                            "source_id": run_control.snapshot.source_id,
+                            "round_index": round_index,
+                            "proof_round_index": round_index,
+                            "message": (
+                                f"{retry_activity_payload.get('provider_label') or 'Provider'} "
+                                f"retry {retry_activity_payload.get('retry_attempt') or 1} "
+                                "succeeded; the preserved proof round resumed."
+                            ),
+                        },
+                    )
+                    retry_activity_payload = None
+                if result is None:
+                    return "completed", None
+            except Exception as exc:
+                if is_provider_credit_pause_error(exc):
+                    await proof_run_manager.provider_paused(run_control)
+                    await proof_run_manager.wait_for_provider_or_control_wake(run_control)
+                    if run_control.stop_event.is_set():
+                        return "stopped", None
+                    await proof_run_manager.resumed(
+                        run_control,
+                        from_provider_pause=True,
+                    )
+                    return "retry_same_round", None
+                if isinstance(exc, RetryableProviderError):
+                    async def broadcast_retry_activity(
+                        state: str,
+                        payload: Dict[str, Any],
+                    ) -> None:
+                        nonlocal retry_activity_payload
+                        if state == "waiting":
+                            retry_activity_payload = dict(payload)
+                        event_payload = {
+                            **payload,
+                            "proof_run_id": run_control.snapshot.proof_run_id,
+                            "run_mode": run_control.snapshot.run_mode,
+                            "lifecycle_generation": run_control.snapshot.lifecycle_generation,
+                            "scope": run_control.snapshot.scope,
+                            "source_type": run_control.snapshot.source_type,
+                            "source_id": run_control.snapshot.source_id,
+                            "round_index": round_index,
+                            "proof_round_index": round_index,
+                            "proof_run_unbounded": (
+                                run_control.snapshot.run_mode == "loop_with_pruning"
+                            ),
+                            "message": (
+                                f"{payload.get('provider_label') or 'Provider'} could not complete "
+                                f"the current proof call. Retry {payload.get('retry_attempt') or 1} "
+                                f"will resume this same round after "
+                                f"{payload.get('retry_after_seconds') or 0} seconds."
+                                if state == "waiting"
+                                else (
+                                    f"Retry {payload.get('retry_attempt') or 1} is starting now "
+                                    "from the preserved proof-round checkpoint."
+                                )
+                            ),
+                        }
+                        await broadcast_fn(
+                            "proof_retry_scheduled"
+                            if state == "waiting"
+                            else "proof_retry_started",
+                            event_payload,
+                        )
+
+                    await api_client_manager.wait_for_retryable_provider_error(
+                        exc,
+                        role_id=exc.role_id or role_config.model_id,
+                        should_stop=run_control.stop_event.is_set,
+                        activity_callback=broadcast_retry_activity,
+                    )
+                    if run_control.stop_event.is_set():
+                        return "stopped", None
+                    return "retry_same_round", None
+                if is_transient_model_call_error(exc):
+                    await asyncio.sleep(5)
+                    if run_control.stop_event.is_set():
+                        return "stopped", None
+                    return "retry_same_round", None
+                if isinstance(exc, ProviderRepairRequiredError) or is_non_retryable_model_error(exc):
+                    await proof_run_manager.repair_required(
+                        run_control,
+                        reason=ProofVerificationStage._summarize_error(str(exc), limit=1000),
+                    )
+                    return "stopped", None
+                raise
+
+            summary = summarize_round_result(round_index, result)
+            if result.fatal_stop_reason:
+                await proof_run_manager.update(
+                    run_control,
+                    terminal_reason=result.fatal_stop_reason,
+                )
+            await proof_run_manager.complete_round(
+                run_control,
+                round_number=round_index,
+                valid_candidate_count=(
+                    result.total_candidates
+                    if not result.had_error and not result.fatal_stop_reason
+                    else None
+                ),
+                summary=summary,
+                candidate_checkpoint_reference=(
+                    ""
+                    if checkpoint_status in {"complete", "no_candidates"}
+                    else run_control.snapshot.candidate_checkpoint_reference
+                ),
+                proof_set_revision=await scoped_proof_database.get_proof_set_revision(),
+            )
+            if result.fatal_stop_reason:
+                return "fatal_stop", result
+            if (
+                run_control.snapshot.run_mode == "loop_with_pruning"
+                and result.total_candidates == 0
+                and not result.had_error
+                and not result.fatal_stop_reason
+            ):
+                if run_control.stop_event.is_set():
+                    return "stopped", result
+                await asyncio.sleep(0)
+                if run_control.stop_event.is_set():
+                    return "stopped", result
+                return "continue_reset", None
+            return ("completed_reset" if source_changed else "completed"), result
+
+        driver = ProofRoundDriver(
+            policy=(
+                ContinuousPruningPolicy()
+                if run_control.snapshot.run_mode == "loop_with_pruning"
+                else OneRoundPolicy()
+            ),
+            source_type=request.source_type,
+            source_id=request.source_id,
+            base_trigger="manual",
+            execute_round=execute_round,
+            should_stop=run_control.stop_event.is_set,
+            reserve_source=lambda _source_type, _source_id: _reuse_run_reservation(run_control),
+            release_source=lambda _source_type, _source_id, _token: _keep_run_reservation(),
+            initial_round_index=max(1, run_control.snapshot.last_completed_round + 1),
+        )
+        driver_status = await driver.run()
+        if driver_status == "error_preserved":
+            await proof_run_manager.error(
+                run_control,
+                terminal_reason="proof_stage_error",
+                reason="Proof verification preserved an error checkpoint. Review proof activity for details, then repair settings or retry.",
+            )
+            return
+        if driver_status == "fatal_stop":
+            await proof_run_manager.error(
+                run_control,
+                terminal_reason="proof_output_truncation_recovery_exhausted",
+                reason="Proof output truncation recovery was exhausted for this manual proof run.",
+            )
+            return
+        if driver_status == "stopped":
+            await proof_run_manager.update(
+                run_control,
+                status="stopping",
+                stop_requested=True,
+            )
+            return
     except Exception as exc:
         logger.exception("Manual proof check failed for %s %s", request.source_type, request.source_id)
         broadcast_fn = (
@@ -940,39 +1619,68 @@ async def _run_manual_proof_check(request: ProofCheckRequest) -> None:
             if _is_manual_aggregator_request(request)
             else websocket.broadcast_event
         )
-        await broadcast_fn(
-            "proof_check_complete",
-            {
-                "source_type": request.source_type,
-                "source_id": request.source_id,
-                "source_title": source_title,
-                "trigger": "manual",
-                "novel_count": 0,
-                "verified_count": 0,
-                "total_candidates": 0,
-                "message": (
-                    "Proof verification encountered an error: "
-                    f"{ProofVerificationStage._summarize_error(str(exc), limit=1800)}"
-                ),
-            },
-        )
-        await ProofVerificationStage.release_source(request.source_type, request.source_id)
+        if api_client_manager.is_provider_failure(exc):
+            logger.warning(
+                "Manual proof check left pending after provider failure for %s %s; "
+                "provider notification owns user repair guidance",
+                request.source_type,
+                request.source_id,
+            )
+        else:
+            await broadcast_fn(
+                "proof_check_complete",
+                {
+                    "source_type": request.source_type,
+                    "source_id": request.source_id,
+                    "source_title": source_title,
+                    "trigger": "manual",
+                    "novel_count": 0,
+                    "verified_count": 0,
+                    "total_candidates": 0,
+                    "message": (
+                        "Proof verification encountered an error: "
+                        f"{ProofVerificationStage._summarize_error(str(exc), limit=1800)}"
+                    ),
+                },
+            )
+        if manager_owned_run:
+            raise
     finally:
-        await assistant_proof_search_coordinator.stop_all(
-            broadcast=True,
-            reason="manual_proof_check_complete",
-        )
+        try:
+            await assistant_proof_search_coordinator.stop_all(
+                broadcast=True,
+                reason="manual_proof_check_complete",
+            )
+        except Exception:
+            logger.exception(
+                "Unable to stop Assistant memory after manual proof check %s %s",
+                request.source_type,
+                request.source_id,
+            )
+        if legacy_sleep_owner is not None:
+            try:
+                await ProofVerificationStage.release_source(
+                    request.source_type,
+                    request.source_id,
+                )
+            finally:
+                sleep_inhibitor.release(legacy_sleep_owner)
 
 
-@router.get("")
-async def list_proofs(scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS)):
+@router.get("", response_model=CurrentProofListResponse)
+async def list_proofs(
+    response: Response,
+    scope: str = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
     """Return all verified proofs plus aggregate counts."""
+    response.headers["Cache-Control"] = "no-store"
     scoped_proof_database = _get_scoped_proof_database(scope)
     proofs = await scoped_proof_database.get_all_proofs()
     return {
         "proofs": [_normalize_proof_response_provenance(proof) for proof in proofs],
         "counts": scoped_proof_database.count_proofs(),
         "scope": (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower(),
+        "proof_set_revision": await scoped_proof_database.get_proof_set_revision(),
     }
 
 
@@ -1133,49 +1841,46 @@ async def cleanup_known_proofs_from_files(confirm: bool = Query(default=False)):
 
 @router.get("/status")
 async def get_proofs_status():
-    """Return Lean 4 availability and proof-database status.
-
-    Non-blocking: Lean workspace checks use a short timeout so the
-    endpoint always returns quickly even when Lean is unavailable.
-    """
+    """Return cached Lean 4 availability and proof-database status."""
     version = ""
     workspace_ready = False
     mathlib_commit = ""
     lsp_active = False
     z3_version = ""
     smt_available = False
-    lean_status_starting_up = False
+    workspace_state = "disabled" if not system_config.lean4_enabled else "not_started"
+    workspace_error = ""
     manual_check_ready, manual_check_message = await _get_manual_check_status()
     if system_config.lean4_enabled:
         try:
             client = get_lean4_client()
-            version = await asyncio.wait_for(client.get_version(), timeout=5.0)
-            workspace_ready = await asyncio.wait_for(client.ensure_workspace(), timeout=5.0)
-            mathlib_commit = client.get_mathlib_commit()
+            workspace_status = client.get_workspace_status()
+            workspace_state = str(workspace_status.get("state") or "not_started")
+            workspace_ready = bool(workspace_status.get("ready"))
+            workspace_error = str(workspace_status.get("error") or "")
+            version = client.get_cached_version()
+            if workspace_ready:
+                mathlib_commit = client.get_mathlib_commit()
             lsp_active = client.is_server_active()
-        except asyncio.TimeoutError:
-            lean_status_starting_up = True
-            _log_lean_status_starting_up("The latest status check is waiting on startup work.")
         except Exception as exc:
-            lean_status_starting_up = True
-            _log_lean_status_starting_up(f"Latest status detail: {exc}")
+            workspace_state = "failed"
+            workspace_error = str(exc)
         if manual_check_ready:
             version_text = (version or "").strip().lower()
             version_unavailable = (
-                not version_text
-                or "not found" in version_text
+                bool(version_text)
+                and ("not found" in version_text
                 or "no such file" in version_text
-                or "not recognized" in version_text
+                or "not recognized" in version_text)
             )
-            if lean_status_starting_up:
-                manual_check_ready = False
-                manual_check_message = "Lean 4 is still starting up."
-            elif version_unavailable:
+            if version_unavailable:
                 manual_check_ready = False
                 manual_check_message = "Lean 4 executable is not available."
-            elif not workspace_ready:
+            elif workspace_state == "failed":
                 manual_check_ready = False
-                manual_check_message = "Lean 4 is still starting up."
+                manual_check_message = workspace_error or "Lean 4 workspace preparation failed."
+            elif not workspace_ready:
+                manual_check_message = "Lean 4 will finish preparing before verification."
 
     if system_config.smt_enabled:
         try:
@@ -1201,6 +1906,8 @@ async def get_proofs_status():
         "lsp_available": bool(system_config.lean4_enabled and system_config.lean4_lsp_enabled),
         "lsp_active": lsp_active,
         "workspace_ready": workspace_ready,
+        "workspace_state": workspace_state,
+        "workspace_error": workspace_error,
         "mathlib_commit": mathlib_commit,
         "smt_enabled": system_config.smt_enabled,
         "smt_available": smt_available,
@@ -1262,8 +1969,7 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
         await close_lean4_client()
         clear_lean4_client()
         if system_config.lean4_enabled:
-            client = initialize_lean4_client()
-            _schedule_lean4_warm_start(client)
+            initialize_lean4_client()
 
     if smt_settings_changed:
         clear_smt_client()
@@ -1277,8 +1983,8 @@ async def update_proof_settings(request: ProofSettingsUpdateRequest):
     return await get_proofs_status()
 
 
-@router.post("/check")
-async def run_manual_proof_check(request: ProofCheckRequest, background_tasks: BackgroundTasks):
+@router.post("/check", response_model=ProofRunQueueResponse)
+async def run_manual_proof_check(request: ProofCheckRequest):
     """Queue a user-triggered proof check for one brainstorm or paper."""
     if not system_config.lean4_enabled:
         raise HTTPException(status_code=501, detail={"lean4_enabled": False, "message": "Lean 4 proof checks are disabled."})
@@ -1306,19 +2012,179 @@ async def run_manual_proof_check(request: ProofCheckRequest, background_tasks: B
         )
 
     async with get_manual_proof_context_lock():
-        scoped_proof_database = _get_request_proof_database(request)
-        await _resolve_manual_source(request, scoped_proof_database)
+        source = await _resolve_proof_source_adapter(request)
+        run_id = await source.proof_database.get_or_create_active_run_id()
         try:
-            await ProofVerificationStage.reserve_source(request.source_type, request.source_id)
+            source_fingerprint = await source.fingerprint()
+            response = await proof_run_manager.queue(
+                scope=source.scope,
+                source_type=request.source_type,
+                source_id=request.source_id,
+                proof_store_id=source.proof_store_id,
+                run_id=run_id,
+                worker=lambda control: _run_manual_proof_check(request, control, snapshot),
+                run_mode=request.run_mode,
+                source_title=source.source_title,
+                source_content_fingerprint=source_fingerprint,
+                proof_set_revision=await source.proof_database.get_proof_set_revision(),
+                event_callback=(
+                    _broadcast_manual_aggregator_proof_event
+                    if _is_manual_aggregator_request(request)
+                    else websocket.broadcast_event
+                ),
+            )
+            get_lean4_client().start_workspace_bootstrap()
+            return response
         except RuntimeError:
-            raise HTTPException(status_code=409, detail="A proof verification is already running for that source.")
+            raise HTTPException(
+                status_code=409,
+                detail="A proof verification is already running for that source.",
+            )
 
-        background_tasks.add_task(_run_manual_proof_check, request)
-    return {
-        "queued": True,
-        "source_type": request.source_type,
-        "source_id": request.source_id,
-    }
+
+@router.get("/runs", response_model=ProofRunCollectionResponse)
+async def list_proof_runs(
+    response: Response,
+    scope: Optional[Literal["autonomous", "manual"]] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    """Return a bounded metadata-only proof-run collection for reconnect recovery."""
+    response.headers["Cache-Control"] = "no-store"
+    return await proof_run_manager.list_runs(limit=limit, scope=scope)
+
+
+@router.get("/runs/by-source", response_model=ProofRunSourceLookupResponse)
+async def lookup_proof_runs_by_source(
+    response: Response,
+    scope: Literal["autonomous", "manual"] = Query(...),
+    source_type: Literal["brainstorm", "paper"] = Query(...),
+    source_id: str = Query(..., min_length=1, max_length=512),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    """Resolve recent runs for one validated source when a queue response was lost."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        safe_source_id = _validate_proof_run_source_id(source_type, source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await proof_run_manager.find_by_source(
+        scope=scope,
+        source_type=source_type,
+        source_id=safe_source_id,
+        limit=limit,
+    )
+
+
+@router.get("/runs/{proof_run_id}", response_model=ProofRunSnapshot)
+async def get_proof_run(proof_run_id: str, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        safe_proof_run_id = validate_single_path_component(
+            proof_run_id,
+            "proof run ID",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    snapshot = await proof_run_manager.get(safe_proof_run_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Proof run not found")
+    return snapshot
+
+
+@router.post("/runs/{proof_run_id}/stop", response_model=ProofRunSnapshot)
+async def stop_proof_run(proof_run_id: str, request: ProofRunStopRequest):
+    try:
+        safe_proof_run_id = validate_single_path_component(
+            proof_run_id,
+            "proof run ID",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        snapshot = await proof_run_manager.stop(
+            safe_proof_run_id,
+            request.expected_lifecycle_generation,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Proof run not found")
+    return snapshot
+
+
+@router.patch(
+    "/{proof_id}/live-context",
+    response_model=ProofLiveContextMutationResponse,
+)
+async def update_proof_live_context(
+    proof_id: str,
+    request: ProofLiveContextMutationRequest,
+    scope: Literal["autonomous", "manual"] = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
+    scoped_database = _get_scoped_proof_database(scope)
+    try:
+        proof = await scoped_database.get_proof(proof_id)
+    except ValueError:
+        proof = None
+    if proof is None:
+        raise HTTPException(status_code=404, detail="Proof not found")
+
+    warnings = []
+    dependents = await scoped_database.get_proofs_depending_on(proof_id)
+    if dependents:
+        warnings.append(f"{len(dependents)} stored proof(s) depend on this occurrence.")
+    if proof.source_type in {"leanoj_final"}:
+        warnings.append("This occurrence is a verified final-solution proof.")
+    try:
+        updated, revision = await scoped_database.set_live_context_status(
+            proof_id=proof_id,
+            status=request.status,
+            expected_run_id=request.expected_run_id,
+            expected_proof_set_revision=request.expected_proof_set_revision,
+            actor=request.actor,
+            reason=request.reason,
+            expected_theorem_hash=request.expected_theorem_hash,
+            expected_lean_hash=request.expected_lean_hash,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Proof not found")
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    assistant_proof_search_coordinator.invalidate_live_context_occurrence(proof_id)
+
+    async def _refresh_proof_search_after_live_context_update() -> None:
+        try:
+            await proof_search_service.rebuild_index()
+        except Exception as exc:
+            logger.warning(
+                "Proof-search refresh failed after live-context update for %s: %s",
+                str(proof_id)[:120],
+                str(exc)[:240],
+            )
+
+    asyncio.create_task(_refresh_proof_search_after_live_context_update())
+    normalized_scope = (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower()
+    await websocket.broadcast_event(
+        "proof_live_context_updated",
+        {
+            "scope": normalized_scope,
+            "proof_id": proof_id,
+            "run_id": request.expected_run_id,
+            "live_context_status": updated.live_context_status,
+            "proof_set_revision": revision,
+        },
+    )
+    return ProofLiveContextMutationResponse(
+        scope=normalized_scope,
+        proof_id=proof_id,
+        run_id=request.expected_run_id,
+        live_context_status=updated.live_context_status,
+        live_context_pruned_at=updated.live_context_pruned_at,
+        proof_search_refresh_scheduled=True,
+        proof_set_revision=revision,
+        warnings=warnings,
+    )
 
 
 @router.get("/library", response_model=ProofLibraryResponse)
@@ -1372,6 +2238,16 @@ async def get_proof_library(
             "novel": novel_count,
             "duplicate_novel": duplicate_novel_count,
             "not_novel": not_novel_count,
+            "live_context_active": sum(
+                1
+                for proof in normalized_all
+                if proof.get("live_context_status", "active") != "pruned"
+            ),
+            "live_context_pruned": sum(
+                1
+                for proof in normalized_all
+                if proof.get("live_context_status", "active") == "pruned"
+            ),
         },
         "scope": normalized_scope,
         "category": normalized_category,
@@ -1473,6 +2349,20 @@ async def _certificate_response(proof, lean_code: str) -> JSONResponse:
         attempt_count=normalized.get("attempt_count") or 0,
         solver_hints=list(normalized.get("solver_hints") or []),
         dependencies=list(normalized.get("dependencies") or []),
+        live_context_status=normalized.get("live_context_status", "active"),
+        live_context_owner_run_id=normalized.get("live_context_owner_run_id", ""),
+        live_context_pruned_at=normalized.get("live_context_pruned_at"),
+        live_context_pruned_by=normalized.get("live_context_pruned_by"),
+        live_context_prune_reason=normalized.get("live_context_prune_reason", ""),
+        live_context_prune_validator_reasoning=normalized.get(
+            "live_context_prune_validator_reasoning", ""
+        ),
+        live_context_prune_snapshot_revision=normalized.get(
+            "live_context_prune_snapshot_revision"
+        ),
+        live_context_prune_trigger_reasons=list(
+            normalized.get("live_context_prune_trigger_reasons") or []
+        ),
     )
     return JSONResponse(content=payload.model_dump(mode="json"))
 
@@ -1550,6 +2440,8 @@ async def get_proof_dependencies(
                         "theorem_statement": dependent.theorem_statement,
                         "source_type": dependent.source_type,
                         "source_id": dependent.source_id,
+                        "live_context_status": dependent.live_context_status,
+                        "live_context_owner_run_id": dependent.live_context_owner_run_id,
                     }
                     for dependent in dependents
                 ],
@@ -1565,6 +2457,8 @@ async def get_proof_dependencies(
                 "theorem_statement": dependent.theorem_statement,
                 "source_type": dependent.source_type,
                 "source_id": dependent.source_id,
+                "live_context_status": dependent.live_context_status,
+                "live_context_owner_run_id": dependent.live_context_owner_run_id,
             }
             for dependent in reverse_dependencies
         ],
@@ -1607,6 +2501,8 @@ async def get_mathlib_dependents(
                 "theorem_statement": dependent.theorem_statement,
                 "source_type": dependent.source_type,
                 "source_id": dependent.source_id,
+                "live_context_status": dependent.live_context_status,
+                "live_context_owner_run_id": dependent.live_context_owner_run_id,
             }
             for dependent in dependents
         ],

@@ -6,7 +6,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import './AutonomousResearch.css';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
-import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import ProofCheckModeModal from './ProofCheckModeModal';
+import ProofRunStatusControls from './ProofRunStatusControls';
+import { isProofRunBusy, useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 
 const BrainstormList = ({ brainstorms, onRefresh, api }) => {
@@ -20,11 +22,14 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
   const [userChoseLatex, setUserChoseLatex] = useState(false);
   const unsubscribeRef = useRef(null);
   const [proofActionMessage, setProofActionMessage] = useState('');
+  const [proofCheckTarget, setProofCheckTarget] = useState(null);
+  const [proofCheckStarting, setProofCheckStarting] = useState(false);
   const {
     getSourceState,
     manualCheckEnabled,
     manualCheckReason,
     queueManualProofCheck,
+    stopProofRun,
   } = useProofCheckRuntime();
 
   // Auto-disable LaTeX rendering when brainstorm grows large (>50k chars).
@@ -156,17 +161,29 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
     URL.revokeObjectURL(url);
   };
 
-  const handleProofCheck = async (e, brainstorm) => {
+  const handleProofCheck = (e, brainstorm) => {
     e.stopPropagation();
+    setProofActionMessage('');
+    setProofCheckTarget(brainstorm);
+  };
+
+  const startProofCheck = async (runMode) => {
+    const brainstorm = proofCheckTarget;
+    if (!brainstorm) return;
     try {
-      setProofActionMessage('');
+      setProofCheckStarting(true);
       await queueManualProofCheck({
         sourceType: 'brainstorm',
         sourceId: brainstorm.topic_id,
+        scope: 'autonomous',
+        runMode,
       });
-      setProofActionMessage(`Queued proof check for brainstorm ${brainstorm.topic_id}.`);
+      setProofActionMessage(`Queued ${runMode === 'loop_with_pruning' ? 'continuous' : 'one-round'} proof check for brainstorm ${brainstorm.topic_id}.`);
+      setProofCheckTarget(null);
     } catch (error) {
       setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    } finally {
+      setProofCheckStarting(false);
     }
   };
 
@@ -210,6 +227,15 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
         <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
           {proofActionMessage}
         </div>
+      )}
+      {proofCheckTarget && (
+        <ProofCheckModeModal
+          sourceTitle={proofCheckTarget.topic_prompt || proofCheckTarget.topic_id}
+          busy={proofCheckStarting}
+          error={proofActionMessage.startsWith('Failed') ? proofActionMessage : ''}
+          onClose={() => setProofCheckTarget(null)}
+          onConfirm={startProofCheck}
+        />
       )}
 
       {brainstorms.map((brainstorm) => (
@@ -261,23 +287,30 @@ const BrainstormList = ({ brainstorms, onRefresh, api }) => {
             ) : (
               <>
                 {(() => {
-                  const proofCheckState = getSourceState('brainstorm', brainstorm.topic_id);
+                  const proofCheckState = getSourceState('brainstorm', brainstorm.topic_id, 'autonomous');
                   const proofCheckLabel = proofCheckState?.status === 'queued'
                     ? 'Queueing Proof Check...'
                     : proofCheckState?.status === 'running'
                       ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
                       : 'Try to prove with Lean 4 theorem prover';
                   return (
-                    <button
-                      className="btn-download-small"
-                      onClick={(e) => handleProofCheck(e, brainstorm)}
-                      disabled={!manualCheckEnabled || Boolean(proofCheckState)}
-                      title={proofCheckState?.status === 'running'
-                        ? 'A proof verification is already running for this brainstorm.'
-                        : manualCheckReason || 'Queue a manual proof check for this brainstorm.'}
-                    >
-                      {proofCheckLabel}
-                    </button>
+                    <>
+                      <button
+                        className="btn-download-small"
+                        onClick={(e) => handleProofCheck(e, brainstorm)}
+                        disabled={!manualCheckEnabled || isProofRunBusy(proofCheckState)}
+                        title={proofCheckState?.status === 'running'
+                          ? 'A proof verification is already running for this brainstorm.'
+                          : manualCheckReason || 'Queue a manual proof check for this brainstorm.'}
+                      >
+                        {proofCheckLabel}
+                      </button>
+                      <ProofRunStatusControls
+                        run={proofCheckState}
+                        sourceLabel={brainstorm.topic_prompt || brainstorm.topic_id}
+                        onStop={stopProofRun}
+                      />
+                    </>
                   );
                 })()}
 

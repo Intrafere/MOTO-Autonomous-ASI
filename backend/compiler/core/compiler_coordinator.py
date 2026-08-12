@@ -249,7 +249,8 @@ class CompilerCoordinator:
         writer_supercharge_enabled: bool = False,
         high_param_supercharge_enabled: bool = False,
         critique_submitter_supercharge_enabled: bool = False,
-        allow_mathematical_proofs: bool = True
+        allow_mathematical_proofs: bool = True,
+        proof_context_requesting_run_id: str = "",
     ) -> None:
         """
         Initialize the compiler coordinator.
@@ -276,6 +277,17 @@ class CompilerCoordinator:
             critique_submitter_*: Deprecated compatibility aliases mirrored from Rigor & Proofs
         """
         logger.info("Initializing compiler coordinator...")
+        if proof_context_requesting_run_id:
+            self.proof_context_requesting_run_id = proof_context_requesting_run_id
+        elif self.autonomous_mode:
+            session_manager = getattr(proof_database, "_session_manager", None)
+            self.proof_context_requesting_run_id = str(
+                getattr(session_manager, "session_id", "") or ""
+            )
+        else:
+            self.proof_context_requesting_run_id = (
+                await manual_proof_database.get_or_create_active_run_id()
+            )
         
         # Store user prompt, paper title, and model configs
         self.user_prompt = compiler_prompt
@@ -399,6 +411,7 @@ class CompilerCoordinator:
             compiler_prompt,
             websocket_broadcaster=self.websocket_broadcaster,
             proof_database_store=proof_database if self.autonomous_mode else None,
+            proof_context_requesting_run_id=self.proof_context_requesting_run_id,
         )
         self.writer_submitter.solution_path_manager = self.solution_path_manager
         await self.writer_submitter.initialize()
@@ -427,6 +440,7 @@ class CompilerCoordinator:
             validator_context_window=self.validator_context_window,
             validator_max_tokens=self.validator_max_tokens,
             proof_database_store=proof_database if self.autonomous_mode else manual_proof_database,
+            proof_context_requesting_run_id=self.proof_context_requesting_run_id,
         )
         self.high_param_submitter.solution_path_manager = self.solution_path_manager
         self.high_param_submitter.set_rigor_proof_source(
@@ -488,6 +502,7 @@ class CompilerCoordinator:
             compiler_prompt,
             websocket_broadcaster=self.websocket_broadcaster,
             proof_database_store=proof_database if self.autonomous_mode else None,
+            proof_context_requesting_run_id=self.proof_context_requesting_run_id,
             solution_path_manager=self.solution_path_manager,
         )
         await self.validator.initialize()

@@ -76,7 +76,8 @@ def assert_coverage_metadata_valid(record: InteractionCoverage) -> None:
         raise AssertionError(f"{record.scenario_id} has duplicate asserted invariants.")
     if record.runner == "pytest":
         for selector in record.test_selectors:
-            if selector.count("::") != 1 or not selector.split("::", 1)[1].startswith("test_"):
+            parts = selector.split("::")
+            if len(parts) not in {2, 3} or not parts[-1].startswith("test_"):
                 raise AssertionError(
                     f"{record.scenario_id} has non-exact pytest selector {selector!r}."
                 )

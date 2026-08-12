@@ -5,8 +5,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../../services/api';
 import { websocket } from '../../services/websocket';
 import LatexRenderer from '../LatexRenderer';
+import ProofCheckModeModal from '../autonomous/ProofCheckModeModal';
+import ProofRunStatusControls from '../autonomous/ProofRunStatusControls';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 import {
+  isProofRunBusy,
   MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
   useProofCheckRuntime,
 } from '../../hooks/useProofCheckRuntime';
@@ -16,12 +19,15 @@ export default function LiveResults({ onClearPrompt = null }) {
   const [autoScroll, setAutoScroll] = useState(true);
   const [showLatex, setShowLatex] = useState(false); // Raw text by default for performance with large docs
   const [proofActionMessage, setProofActionMessage] = useState('');
+  const [proofCheckModalOpen, setProofCheckModalOpen] = useState(false);
+  const [proofCheckStarting, setProofCheckStarting] = useState(false);
   const resultsRef = useRef(null);
   const {
     canQueueManualProofCheck,
     getManualCheckReason,
     getSourceState,
     queueManualProofCheck,
+    stopProofRun,
   } = useProofCheckRuntime();
 
   useEffect(() => {
@@ -111,25 +117,35 @@ export default function LiveResults({ onClearPrompt = null }) {
     URL.revokeObjectURL(url);
   };
 
-  const handleProofCheck = async () => {
+  const handleProofCheck = () => {
+    setProofActionMessage('');
+    setProofCheckModalOpen(true);
+  };
+
+  const startProofCheck = async (runMode) => {
     try {
-      setProofActionMessage('');
+      setProofCheckStarting(true);
       await queueManualProofCheck({
         sourceType: 'brainstorm',
         sourceId: MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
+        scope: 'manual',
+        runMode,
       });
-      setProofActionMessage('Queued proof check for the manual Aggregator database.');
+      setProofActionMessage(`Queued ${runMode === 'loop_with_pruning' ? 'continuous' : 'one-round'} proof check for the manual Aggregator database.`);
+      setProofCheckModalOpen(false);
     } catch (error) {
       setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    } finally {
+      setProofCheckStarting(false);
     }
   };
 
-  const proofCheckState = getSourceState('brainstorm', MANUAL_AGGREGATOR_PROOF_SOURCE_ID);
+  const proofCheckState = getSourceState('brainstorm', MANUAL_AGGREGATOR_PROOF_SOURCE_ID, 'manual');
   const proofCheckLabel = proofCheckState?.status === 'queued'
     ? 'Queueing Proof Check...'
     : proofCheckState?.status === 'running'
       ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
-      : 'Try to Prove This';
+      : 'Search For More Mathematical Proofs';
   const hasResults = Boolean(results && results !== 'No accepted submissions yet.');
   const proofCheckEnabled = hasResults && canQueueManualProofCheck('brainstorm', MANUAL_AGGREGATOR_PROOF_SOURCE_ID);
   const proofCheckTitle = proofCheckState?.status === 'running'
@@ -150,7 +166,7 @@ export default function LiveResults({ onClearPrompt = null }) {
         <button
           onClick={handleProofCheck}
           className="secondary"
-          disabled={!proofCheckEnabled || Boolean(proofCheckState)}
+          disabled={!proofCheckEnabled || isProofRunBusy(proofCheckState)}
           title={hasResults ? proofCheckTitle : 'No accepted submissions to prove yet.'}
         >
           {proofCheckLabel}
@@ -180,6 +196,20 @@ export default function LiveResults({ onClearPrompt = null }) {
           {proofActionMessage}
         </div>
       )}
+      {proofCheckModalOpen && (
+        <ProofCheckModeModal
+          sourceTitle="the manual Aggregator database"
+          busy={proofCheckStarting}
+          error={proofActionMessage.startsWith('Failed') ? proofActionMessage : ''}
+          onClose={() => setProofCheckModalOpen(false)}
+          onConfirm={startProofCheck}
+        />
+      )}
+      <ProofRunStatusControls
+        run={proofCheckState}
+        sourceLabel="Manual Aggregator database"
+        onStop={stopProofRun}
+      />
 
       <div className="results-container" ref={resultsRef}>
         <LatexRenderer

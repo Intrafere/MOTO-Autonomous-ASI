@@ -26,6 +26,16 @@ Schema version: 1.
 | `prompt.proof_source_context_required` | passed | uncovered | uncovered | uncovered |
 | `prompt.user_prompt_direct_injected` | passed | uncovered | uncovered | uncovered |
 | `prompt.validator_excludes_assistant_memory` | passed | uncovered | uncovered | uncovered |
+| `proof_loop.automatic_round_policy_preserved` | passed | uncovered | passed | uncovered |
+| `proof_loop.continuous_explicit_ownership` | passed | uncovered | blocked (Focused manager and driver tests observe no-candidate continuation, detailed round activity, Stop cleanup, and non-resumable state separately; no bounded real adapter currently observes the complete continuous route lifecycle as one interaction.) | uncovered |
+| `proof_pruning.artifacts_and_future_memory_preserved` | passed | uncovered | passed | uncovered |
+| `proof_pruning.commit_lifecycle_fenced` | passed | uncovered | passed | uncovered |
+| `proof_pruning.context_overflow_truthful` | passed | uncovered | blocked (Existing isolated tests observe nonfatal proof overflow and pruning triggers separately; no bounded seam observes an overflow arriving during a prune commit without synthesizing the transition owner.) | uncovered |
+| `proof_pruning.no_prune_is_valid` | passed | uncovered | passed | uncovered |
+| `proof_pruning.occurrence_scope_isolated` | passed | uncovered | passed | uncovered |
+| `proof_pruning.owning_run_context_excludes_pruned` | passed | uncovered | passed | uncovered |
+| `proof_pruning.review_non_blocking` | passed | uncovered | passed | uncovered |
+| `proof_pruning.validator_gates_automatic_mutation` | passed | uncovered | passed | uncovered |
 | `proof_runtime.hosted_proof_settings_unavailable` | uncovered | passed | uncovered | uncovered |
 | `proof_runtime.no_lean_when_disabled` | passed | uncovered | passed | uncovered |
 | `proof_runtime.no_smt_when_disabled` | passed | uncovered | uncovered | uncovered |

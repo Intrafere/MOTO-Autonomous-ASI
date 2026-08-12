@@ -6,6 +6,10 @@
 import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { autonomousAPI } from '../../services/api';
 import ApiCallLogs from '../ApiCallLogs';
+import {
+  formatEmptyProofDiscoveryMessage,
+  formatProofRunEventMessage,
+} from '../../utils/activityStyles';
 import './AutonomousResearch.css';
 
 const AutonomousResearchLogs = ({ stats, events }) => {
@@ -85,7 +89,15 @@ const AutonomousResearchLogs = ({ stats, events }) => {
     const proofRoundLabel = () => {
       const round = Number(data.proof_round_index || 0);
       const maxRounds = Number(data.proof_max_rounds || 0);
-      if (round <= 0 || maxRounds <= 1) return '';
+      if (round <= 0) return '';
+      if (
+        data.run_mode === 'loop_with_pruning'
+        || data.proof_run_unbounded === true
+        || maxRounds === 0
+      ) {
+        return `Proof round ${round}`;
+      }
+      if (maxRounds <= 1) return '';
       return `Proof round ${round}/${maxRounds}`;
     };
     const proofLeanResponse = () => {
@@ -101,7 +113,9 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
         error = `${error} You can change this timeout in Advanced Settings.`;
       }
-      return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
+      return error
+        ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
+        : 'Lean 4 proof-attempt feedback (not a MOTO system error): proof not verified. The model uses these diagnostics if another attempt follows.';
     };
     const formatProofNoveltyTier = (tier) => {
       switch (tier) {
@@ -198,7 +212,9 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       case 'proof_retry_started':
         return `Retrying ${data.count || 0} failed proof candidate(s) against paper ${data.source_id}`;
       case 'proof_check_no_candidates':
-        return `${proofRoundLabel() ? `${proofRoundLabel()} discovery` : 'Proof discovery'} found 0 proof candidates; no proofs will be attempted`;
+        return formatEmptyProofDiscoveryMessage(
+          proofRoundLabel() ? `${proofRoundLabel()} discovery` : 'Proof discovery',
+        );
       case 'proof_check_candidates_found': {
         const count = Number(data.count || 0);
         const subject = count === 1 ? 'proof candidate' : 'proof candidates';
@@ -206,17 +222,23 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
       }
       case 'proof_attempt_started':
-        return `${proofName}, Attempt ${data.attempt || 1} started: ${proofTarget}`;
+        return data.message
+          ? `${data.message} Target: ${proofTarget}`
+          : `${proofName}, Attempt ${data.attempt || 1} started: ${proofTarget}`;
       case 'proof_attempt_failed':
-        return `${proofName}, Attempt ${data.attempt || '?'} final: ${proofLeanResponse()}`;
+        return data.failure_kind === 'output_truncated' || data.lean_was_run === false
+          ? `${proofName}, Attempt ${data.attempt || '?'} final: ${data.message || 'Model output truncated before usable Lean code was returned; Lean 4 was not run.'}`
+          : `${proofName}, Attempt ${data.attempt || '?'} result: ${proofLeanResponse()}`;
       case 'proof_lean_accepted':
         return `${proofName}, Attempt ${data.attempt || '?'} final: ${proofLeanResponse()}`;
       case 'proof_integrity_rejected':
-        return `${proofName} error: integrity rejected - ${data.reason || proofTarget}`;
+        return `${proofName} proof feedback: integrity check rejected this attempt — ${data.reason || proofTarget}`;
       case 'proof_verified':
         return `${proofName} verified and accepted: ${proofTarget}`;
       case 'proof_attempts_exhausted':
         return `${proofName} terminated: proof attempts exhausted for ${proofTarget}`;
+      case 'proof_truncation_recovery_exhausted':
+        return data.message || `${proofName} exhausted output-truncation recovery.`;
       case 'novel_proof_discovered':
         return proofNoveltyMessage();
       case 'known_proof_verified':
@@ -227,6 +249,35 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         const detail = data.message ? ` - ${String(data.message).replace(/\s+/g, ' ').trim()}` : '';
         return `${proofRoundLabel() || 'Proof check'} complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
       }
+      case 'proof_run_queued':
+      case 'proof_run_round_started':
+      case 'proof_run_round_complete':
+      case 'proof_run_provider_paused':
+      case 'proof_run_repair_required':
+      case 'proof_run_terminal':
+        return formatProofRunEventMessage(event.event, data);
+      case 'proof_prune_review_queued':
+        return `Proof-context prune review queued (${(data.trigger_reasons || []).join(', ') || 'proof pressure'})`;
+      case 'proof_prune_review_started':
+        return 'Proof-context prune review started in the background';
+      case 'proof_prune_proposed':
+        return `Proof-context prune proposed for ${data.proposal?.proof_id || data.proof_id || 'one occurrence'}`;
+      case 'proof_prune_validation_started':
+        return 'Independent proof-context prune validation started';
+      case 'proof_prune_no_change':
+        return `Proof-context review kept all active proofs${data.reason ? `: ${data.reason}` : ''}`;
+      case 'proof_prune_rejected':
+        return `Proof-context prune rejected${data.reason ? `: ${data.reason}` : ''}`;
+      case 'proof_prune_stale':
+        return `Proof-context prune became stale and was not applied${data.reason ? `: ${data.reason}` : ''}`;
+      case 'proof_prune_applied':
+        return `Proof-context prune applied to ${data.proof_id || 'one occurrence'}`;
+      case 'proof_prune_provider_paused':
+        return data.message || 'Proof-context pruning paused for provider credits; proof solving continues';
+      case 'proof_prune_repair_required':
+        return `Proof-context pruning needs settings repair${data.message ? `: ${data.message}` : ''}`;
+      case 'proof_prune_error':
+        return data.message || 'Proof-context pruning failed without changing proof context';
       case 'hung_connection_alert': {
         const model = data.model || 'model';
         const provider = data.provider || 'provider';
@@ -243,7 +294,11 @@ const AutonomousResearchLogs = ({ stats, events }) => {
     if (
       eventName === 'proof_attempt_failed' ||
       eventName === 'proof_attempts_exhausted' ||
+      eventName === 'proof_truncation_recovery_exhausted' ||
       eventName === 'proof_integrity_rejected' ||
+      eventName === 'proof_prune_rejected' ||
+      eventName === 'proof_prune_stale' ||
+      eventName === 'proof_prune_error' ||
       eventName === 'smt_check_error'
     ) {
       return 'log-reject';
@@ -254,12 +309,16 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       eventName === 'novel_proof_discovered' ||
       eventName === 'known_proof_verified' ||
       eventName === 'proof_registration_duplicate' ||
-      eventName === 'proof_check_complete'
+      eventName === 'proof_check_complete' ||
+      eventName === 'proof_prune_no_change' ||
+      eventName === 'proof_prune_applied'
     ) {
       return 'log-success';
     }
     if (
       eventName === 'hung_connection_alert'
+      || eventName === 'proof_prune_provider_paused'
+      || eventName === 'proof_prune_repair_required'
     ) {
       return 'log-warning';
     }

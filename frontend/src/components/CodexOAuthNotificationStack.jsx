@@ -15,7 +15,12 @@ const IconKey = () => (
   </svg>
 );
 
-export default function CodexOAuthNotificationStack({ notifications, onDismiss, onOpenCloudAccess }) {
+export default function CodexOAuthNotificationStack({
+  notifications,
+  onDismiss,
+  onOpenCloudAccess,
+  embedded = false,
+}) {
   if (!notifications || notifications.length === 0) {
     return null;
   }
@@ -23,10 +28,10 @@ export default function CodexOAuthNotificationStack({ notifications, onDismiss, 
   return (
     <div
       style={{
-        position: 'fixed',
-        bottom: '20px',
-        left: '360px',
-        zIndex: 999999,
+        position: embedded ? 'static' : 'fixed',
+        bottom: embedded ? undefined : '20px',
+        left: embedded ? undefined : '360px',
+        zIndex: embedded ? undefined : 999999,
         display: 'flex',
         flexDirection: 'column',
         gap: '8px',
@@ -61,6 +66,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
     ? notification.role_id.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
     : 'OAuth provider';
   const providerLabel = notification.provider_label || 'OAuth';
+  const isUsageLimit = notification.reason === 'usage_limit_reached';
 
   return (
     <div
@@ -103,7 +109,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
           </div>
           <div>
             <div style={{ fontSize: '10px', color: '#ddd6fe', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: '700' }}>
-              OAuth Needs Attention
+              {isUsageLimit ? 'Provider Cooldown' : 'OAuth Needs Attention'}
             </div>
             <div style={{ fontSize: '14px', fontWeight: '700', lineHeight: '1.2', color: '#f5f3ff' }}>
               {providerLabel}
@@ -150,7 +156,7 @@ function CodexOAuthNotification({ notification, onDismiss, onOpenCloudAccess }) 
           cursor: 'pointer',
         }}
       >
-        Open OpenRouter/OAuth
+        {isUsageLimit ? 'Open Provider Settings' : 'Open OpenRouter/OAuth'}
       </button>
 
       <style>{`
