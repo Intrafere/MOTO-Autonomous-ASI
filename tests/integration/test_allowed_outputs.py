@@ -316,6 +316,11 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
             high_param_context_size=3000,
             high_param_max_output_tokens=300,
             high_param_supercharge_enabled=True,
+            validator_provider="openai_codex_oauth",
+            validator_openrouter_provider="ValidatorHost",
+            validator_openrouter_reasoning_effort="xhigh",
+            validator_lm_studio_fallback="validator-fallback",
+            validator_supercharge_enabled=True,
         )
         configured_roles = {}
         stage_calls = {}
@@ -349,6 +354,26 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
         self.assertEqual(proof_role.context_window, 3000)
         self.assertEqual(proof_role.max_output_tokens, 300)
         self.assertTrue(proof_role.supercharge_enabled)
+        proof_validator_role = configured_roles["autonomous_proof_novelty_compiler_aggregator"]
+        self.assertEqual(proof_validator_role.provider, request.validator_provider)
+        self.assertEqual(proof_validator_role.model_id, request.validator_model)
+        self.assertEqual(
+            proof_validator_role.openrouter_provider,
+            request.validator_openrouter_provider,
+        )
+        self.assertEqual(
+            proof_validator_role.openrouter_reasoning_effort,
+            request.validator_openrouter_reasoning_effort,
+        )
+        self.assertEqual(
+            proof_validator_role.lm_studio_fallback_id,
+            request.validator_lm_studio_fallback,
+        )
+        self.assertEqual(proof_validator_role.context_window, request.validator_context_size)
+        self.assertEqual(proof_validator_role.max_output_tokens, request.validator_max_output_tokens)
+        self.assertTrue(proof_validator_role.supercharge_enabled)
+        self.assertNotIn("autonomous_proof_novelty", configured_roles)
+        self.assertEqual(stage_calls["role_suffix_override"], "compiler_aggregator")
         self.assertEqual(stage_calls["submitter_model"], "rigor-model")
         self.assertEqual(stage_calls["submitter_context"], 3000)
         self.assertEqual(stage_calls["submitter_max_tokens"], 300)
@@ -406,18 +431,18 @@ class AllowedOutputRouteTests(IsolatedAsyncioTestCase):
 
 
 class ProofStatusReadinessTests(IsolatedAsyncioTestCase):
-    async def test_status_marks_manual_check_unready_when_workspace_is_not_ready(self) -> None:
+    async def test_status_keeps_manual_check_queueable_when_workspace_is_not_started(self) -> None:
         previous_lean_enabled = proofs_route.system_config.lean4_enabled
         previous_smt_enabled = proofs_route.system_config.smt_enabled
         proofs_route.system_config.lean4_enabled = True
         proofs_route.system_config.smt_enabled = False
 
         class FakeLeanClient:
-            async def get_version(self):
-                return "Lean (version 4.0.0)"
+            def get_workspace_status(self):
+                return {"state": "not_started", "ready": False, "error": ""}
 
-            async def ensure_workspace(self):
-                return False
+            def get_cached_version(self):
+                return ""
 
             def get_mathlib_commit(self):
                 return ""
@@ -437,8 +462,9 @@ class ProofStatusReadinessTests(IsolatedAsyncioTestCase):
             proofs_route.system_config.lean4_enabled = previous_lean_enabled
             proofs_route.system_config.smt_enabled = previous_smt_enabled
 
-        self.assertFalse(payload["manual_check_ready"])
-        self.assertEqual(payload["manual_check_message"], "Lean 4 is still starting up.")
+        self.assertTrue(payload["manual_check_ready"])
+        self.assertEqual(payload["workspace_state"], "not_started")
+        self.assertEqual(payload["manual_check_message"], "Lean 4 will finish preparing before verification.")
 
     async def test_manual_aggregator_snapshot_does_not_fall_back_to_autonomous_config(self) -> None:
         autonomous_snapshot = {

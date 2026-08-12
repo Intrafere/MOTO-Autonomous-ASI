@@ -194,6 +194,37 @@ test('renders duplicate novel proof badge', async () => {
   expect(screen.getByText('Duplicate Novel')).toBeInTheDocument();
 });
 
+test('presents historical prune state as read-only originating-run metadata', async () => {
+  const user = userEvent.setup();
+  autonomousAPI.getProofLibrary.mockResolvedValue({
+    counts: { novel: 1, live_context_pruned: 1 },
+    proofs: [{
+      proof_id: 'pruned-history-1',
+      session_id: 'session-pruned',
+      run_id: 'run-pruned',
+      theorem_name: 'Pruned.History',
+      theorem_statement: 'theorem pruned_history : True',
+      novelty_tier: 'mathematical_discovery',
+      novel: true,
+      live_context_status: 'pruned',
+      live_context_owner_run_id: 'run-pruned',
+      live_context_pruned_by: 'automatic_proof_pruning',
+      live_context_prune_reason: 'Superseded for this route',
+    }],
+  });
+  buildResearchRunGroups.mockReturnValue([{
+    sessionId: 'run-pruned',
+    userPrompt: 'Pruned proof run',
+  }]);
+
+  render(<ProofLibrary />);
+  await user.click(await screen.findByRole('button', { name: /Pruned proof run/i }));
+  expect(screen.getByText('Pruned from live context')).toBeInTheDocument();
+  expect(screen.getByText(/pruned only from originating run run-pruned/i)).toBeInTheDocument();
+  expect(screen.getByText(/Automatic proof-pruning review/i)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /undo|restore|prune from live/i })).not.toBeInTheDocument();
+});
+
 test('selected proof id switches filters, expands, and hydrates matching proof history card', async () => {
   autonomousAPI.getProofLibrary.mockResolvedValue({
     counts: { not_novel: 1 },

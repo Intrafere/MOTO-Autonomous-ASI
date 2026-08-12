@@ -9,6 +9,7 @@ from backend.shared.proof_search.indexer import ProofSearchIndexer
 from backend.shared.proof_identity import CANONICAL_PROOF_IDENTITY_VERSION
 from backend.shared.proof_search.models import (
     CorpusOverview,
+    ProofSearchAccessContext,
     ProofSearchRequest,
     ProofSearchResponse,
     UnifiedProofSearchRecord,
@@ -59,7 +60,12 @@ class ProofSearchService:
             None if include_disabled else default_proof_search_corpora(),
         )
 
-    async def search(self, request: ProofSearchRequest) -> ProofSearchResponse:
+    async def search(
+        self,
+        request: ProofSearchRequest,
+        *,
+        access: ProofSearchAccessContext | None = None,
+    ) -> ProofSearchResponse:
         request = self._filter_request_corpora(request)
         if not request.corpora:
             return ProofSearchResponse(
@@ -71,7 +77,13 @@ class ProofSearchService:
                 weak_result_warning="No proof-search corpora are enabled for this request.",
             )
         await self._ensure_index()
-        return await asyncio.to_thread(ProofSearchIndexer(self.index_path).search, request)
+        trusted_access = access or ProofSearchAccessContext()
+        return await asyncio.to_thread(
+            ProofSearchIndexer(self.index_path).search,
+            request,
+            requesting_run_id=trusted_access.requesting_run_id,
+            filter_live_context=trusted_access.filters_live_context,
+        )
 
     async def search_candidate_pool(
         self,
@@ -81,6 +93,7 @@ class ProofSearchService:
         exclude_corpus_scopes: list[str] | None = None,
         exclude_session_ids: list[str] | None = None,
         exclude_run_ids: list[str] | None = None,
+        access: ProofSearchAccessContext | None = None,
     ) -> list[UnifiedProofSearchRecord]:
         """Return a wider internal candidate pool for Assistant ranking.
 
@@ -92,6 +105,7 @@ class ProofSearchService:
         if not request.corpora:
             return []
         await self._ensure_index()
+        trusted_access = access or ProofSearchAccessContext()
         return await asyncio.to_thread(
             ProofSearchIndexer(self.index_path).search_candidate_pool,
             request,
@@ -99,6 +113,8 @@ class ProofSearchService:
             exclude_corpus_scopes=exclude_corpus_scopes,
             exclude_session_ids=exclude_session_ids,
             exclude_run_ids=exclude_run_ids,
+            requesting_run_id=trusted_access.requesting_run_id,
+            filter_live_context=trusted_access.filters_live_context,
         )
 
     async def exact_identity_neighborhood(
@@ -136,6 +152,7 @@ class ProofSearchService:
         session_id: str | None = None,
         search_id: str | None = None,
         run_id: str | None = None,
+        access: ProofSearchAccessContext | None = None,
     ) -> UnifiedProofSearchRecord | None:
         """Fetch one indexed proof and hydrate SyntheticLib4 fixture code when available."""
         if corpus not in set(default_proof_search_corpora()):
@@ -149,6 +166,15 @@ class ProofSearchService:
             search_id=search_id,
             run_id=run_id,
         )
+        trusted_access = access or ProofSearchAccessContext()
+        if record is not None and trusted_access.filters_live_context:
+            status = str(record.live_context_status or "").strip().lower()
+            owner = str(record.live_context_owner_run_id or "").strip()
+            requester = str(trusted_access.requesting_run_id or "").strip()
+            if status not in {"active", "pruned"}:
+                return None
+            if status == "pruned" and (not requester or not owner or owner == requester):
+                return None
 
         if record is None or record.corpus != "syntheticlib4" or record.lean_code:
             return record

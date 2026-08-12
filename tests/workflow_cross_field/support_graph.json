@@ -2054,6 +2054,87 @@
       {
         "declared_adapters": [
           "model",
+          "real_coordinator"
+        ],
+        "field": "continuous_proof_loop",
+        "invariant_id": "proof_loop.automatic_round_policy_preserved"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator",
+          "real_route"
+        ],
+        "field": "continuous_proof_loop",
+        "invariant_id": "proof_loop.continuous_explicit_ownership"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
+        "invariant_id": "proof_pruning.artifacts_and_future_memory_preserved"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
+        "invariant_id": "proof_pruning.commit_lifecycle_fenced"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
+        "invariant_id": "proof_pruning.context_overflow_truthful"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
+        "invariant_id": "proof_pruning.no_prune_is_valid"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
+        "invariant_id": "proof_pruning.occurrence_scope_isolated"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
+        "invariant_id": "proof_pruning.owning_run_context_excludes_pruned"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
+        "invariant_id": "proof_pruning.review_non_blocking"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
+        "invariant_id": "proof_pruning.validator_gates_automatic_mutation"
+      },
+      {
+        "declared_adapters": [
+          "model",
           "real_route"
         ],
         "field": "proof_runtime_gating",
@@ -2434,6 +2515,12 @@
       {
         "adapter": "model",
         "result": "passed",
+        "scenario_id": "model_proof_pruning_continuous_contracts",
+        "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
+      },
+      {
+        "adapter": "model",
+        "result": "passed",
         "scenario_id": "model_proof_runtime_gating_allowed_outputs",
         "test_file": "tests/workflow_scenarios/test_cross_field_analysis.py"
       },
@@ -2452,6 +2539,18 @@
       {
         "adapter": "real_coordinator",
         "result": "passed",
+        "scenario_id": "real_automatic_prune_requires_validator_acceptance",
+        "test_file": "tests/unit/test_proof_pruning_agents.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_automatic_round_caller_count_policy_preserved",
+        "test_file": "tests/unit/test_autonomous_proof_rounds.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
         "scenario_id": "real_autonomous_overflow_terminal_stop_once",
         "test_file": "tests/workflow_real_adapters/test_build_d_overflow_lifecycles.py"
       },
@@ -2466,6 +2565,12 @@
         "result": "passed",
         "scenario_id": "real_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes",
         "test_file": "tests/workflow_real_adapters/test_proof_routes.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "blocked",
+        "scenario_id": "real_continuous_loop_stop_terminal_zero_policy",
+        "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
       },
       {
         "adapter": "real_coordinator",
@@ -2571,6 +2676,18 @@
       },
       {
         "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_no_prune_is_valid_non_mutating_result",
+        "test_file": "tests/unit/test_proof_pruning_coordinator.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_owning_run_context_and_cached_assistant_exclude_pruned",
+        "test_file": "tests/unit/test_assistant_proof_search.py"
+      },
+      {
+        "adapter": "real_coordinator",
         "result": "blocked",
         "scenario_id": "real_parent_action_fencing_unavailable_without_production_seam",
         "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
@@ -2594,10 +2711,40 @@
         "test_file": "tests/workflow_real_adapters/test_high_value_scenarios.py"
       },
       {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_prune_commit_rechecks_lifecycle_and_revision",
+        "test_file": "tests/unit/test_proof_pruning_snapshot.py"
+      },
+      {
         "adapter": "real_route",
         "result": "passed",
         "scenario_id": "real_pruned_paper_preserved_but_removed_from_active_context",
         "test_file": "tests/workflow_real_adapters/test_build_d_proof_scope_filesystem.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_pruned_proof_artifacts_and_future_memory_preserved",
+        "test_file": "tests/regressions/test_proof_context_regressions.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_pruning_is_occurrence_and_owning_run_scoped",
+        "test_file": "tests/unit/test_proof_pruning_snapshot.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "blocked",
+        "scenario_id": "real_pruning_overflow_commit_interleaving_unobservable",
+        "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "passed",
+        "scenario_id": "real_pruning_review_pending_does_not_block_registration",
+        "test_file": "tests/unit/test_proof_pruning_coordinator.py"
       },
       {
         "adapter": "real_coordinator",

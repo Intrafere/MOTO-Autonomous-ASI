@@ -1,16 +1,20 @@
 # MOTO Autonomous ASI
 ## Autonomous Prototype Superintelligence for Rigorous Research and Solution Generation, with Optional Lean 4 Proof Verification
-**Version: 1.1.03**
+**Version: 1.1.04**
+
+**Runtime & License**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 20.19+](https://img.shields.io/badge/node-20.19+-green.svg)](https://nodejs.org/)
+
+**Inference Capabilities**
+
 [![ChatGPT Subscription](https://img.shields.io/badge/ChatGPT_Subscription-Codex_OAuth-10a37f.svg)](https://chatgpt.com/)
 [![SuperGrok Subscription](https://img.shields.io/badge/SuperGrok_Subscription-xAI_OAuth-black.svg)](https://grok.com/)
 [![Sakana Fugu Subscription](https://img.shields.io/badge/Sakana_Fugu-Subscription_API-e85d75.svg)](https://sakana.ai/fugu/)
 [![OpenRouter: API Key](https://img.shields.io/badge/OpenRouter-API_Key-6467f2.svg)](https://openrouter.ai/)
 [![LM Studio: Local Models](https://img.shields.io/badge/LM_Studio-Local_Models-7c3aed.svg)](https://lmstudio.ai/)
-
 
 **A breakthrough in AI-automated theorem generation. Press the one-click launcher file "Click To Launch MOTO.bat" to run the program. MOTO is an autonomous research and solution-generation system powered by Intrafere Research Group's prototype-superintelligence discovery of [Top-P Exploration Through Structured Brainstorming & Validated Feedback](https://intrafere.com/structured-brainstorming-validated-feedback/): a combination of reiterative brainstorming, validation, feedback, and pruning that creates prototype-level superintelligence using creative/combinatory multi-model data from nearly any combination of AI models. When relevant and enabled, MOTO pairs this exploration with automated theorem generation and Lean 4 machine-checked proofs for the exact formal statements it successfully proves.**
 
@@ -36,6 +40,8 @@ Paired with Top-P Exploration — and secondary to it — MOTO has an **optional
 
 MOTO also includes a non-blocking Assistant memory layer. As submitters, writers, proof solvers, and LeanOJ solvers work, MOTO observes the current prompt/phase/target, searches local verified proof history and SyntheticLib4 when enabled, and prepares an up-to-7 memory-support pack. The main workflow never waits for this search; when a relevant pack is ready, it is injected as optional supporting context into later eligible producer calls. Validators and critique phases never receive Assistant memory.
 
+Manual proof checks offer two execution choices: a compatibility-preserving single round, or an unbounded loop with automatic live-context pruning that remains active until the operator stops it. Pruning is occurrence-level and non-destructive. A pruned proof is suppressed only from the owning run's live model context; its Lean source, certificate, graph and history visibility, downloads, future-run proof-memory retrieval, and SyntheticLib-facing eligibility remain intact. This control does not change Autonomous Research's existing automatic proof-round count.
+
 Give the program a try — MOTO is as cool as it sounds. Windows has a one-click launcher and Ubuntu 24.04 now has a repo-root launcher too. Use the two links below to download Python and Node.js, they should automatically install in seconds. Once those are downloaded, click the green "< > Code" drop-down menu on the top right of this GitHub page and download the zip file. On Windows, extract it to your desktop and double-click `Click To Launch MOTO.bat`. On Ubuntu 24.04, extract it and run `bash linux-ubuntu-launcher.sh`. Configure provider access through **OpenRouter/OAuth** with an OpenRouter API key, or connect LM Studio for local/faster performance. Desktop **oAuth** logins such as OpenAI Codex or xAI Grok/SuperGrok are supplementary model providers after startup, not a standalone startup path, because RAG embeddings still require OpenRouter, LM Studio, or hosted FastEmbed. xAI Console API keys are separate from Grok subscription OAuth and may consume API credits. Then select your agents in the settings profile - if desired and you are unsure you may use the preselected "fastest" profile.
 
 ***Now you are set up and every time you press launch your home lab is ready for your prompt!*** **Give MOTO the toughest question you can think of and press start to begin YOUR creations!**
@@ -48,7 +54,7 @@ Give the program a try — MOTO is as cool as it sounds. Windows has a one-click
 
 MOTO (Multi-Output Token Orchestrator) is a high-risk high-reward, novelty-seeking S.T.E.M. research and solution system designed to run for days at a time after you press start, without user interaction. Mathematics, theorem discovery, and formal proof remain first-class capabilities whenever relevant. This program can support multiple simultaneous models working in parallel from local LM Studio, OpenRouter API keys, desktop OAuth providers such as OpenAI Codex/ChatGPT and xAI Grok/SuperGrok, or a mix of those providers.
 
-On Windows desktop, MOTO prevents idle-triggered system sleep while a top-level workflow is active and restores normal power behavior when it stops. The display may still turn off, and explicit Sleep, Hibernate, shutdown, and critical-battery actions are not blocked. Hosted/generic mode does not use this desktop power request.
+On Windows desktop, MOTO holds system-required and execution-required Power Requests while a top-level workflow is active and restores normal power behavior when it stops. The display may still turn off, and explicit Sleep, lid-close, Hibernate, shutdown, and critical-battery actions are not blocked. On Modern Standby systems running on battery, Windows may terminate these requests five minutes after the configured sleep timeout; use AC power for unattended long runs. Hosted/generic mode does not use this desktop power request.
 
 ### Key Features
 
@@ -79,6 +85,17 @@ Before installation, you need:
    - **OpenRouter API key**: Sign up at OpenRouter.ai and get a paid or free API key to use cloud models from many providers. You can see which models are free by checking the "show only free models" checkbox(es) in MOTO settings.
    - **oAuth login (desktop only)**: In the `OpenRouter/OAuth` overlay, choose the `OAuth` section to sign in through a supported subscription OAuth provider such as OpenAI Codex/ChatGPT or xAI Grok/SuperGrok. This is separate from regular API-key billing, unavailable in hosted/generic mode, and supplementary to an OpenRouter key or LM Studio because OAuth providers do not supply MOTO's RAG embeddings.
 5. **On first startup, pick your provider path**: After you acknowledge the disclaimer, MOTO will prompt you to configure OpenRouter or confirm that LM Studio is running with both `nomic-ai/nomic-embed-text-v1.5` and a usable chat model loaded. If you save an OpenRouter key there, the recommended default autonomous profile is applied immediately so you can open Settings and see it already selected. Desktop OAuth logins can also be configured from the header after startup, once the embedding-capable provider path is ready.
+
+#### Privacy and External Data Flow
+
+Your provider choices determine what leaves the machine:
+
+- **Closest to offline during normal research:** use LM Studio at its default loopback address for both model inference and embeddings, and leave OpenRouter, desktop cloud providers, Wolfram|Alpha, and other optional network integrations disabled.
+- **OpenRouter or desktop OAuth/subscription provider:** the provider receives the complete model-visible context assembled for each selected role. Depending on the workflow, this may include prompts, uploaded or retrieved text, accumulated research, drafts, proof material, feedback, and tool results.
+- **Wolfram|Alpha enabled:** Wolfram receives each generated computational query that the writing model invokes and the App ID. A cloud writing model also receives Wolfram's returned result.
+- **Hosted/generic mode:** embeddings run inside the sandbox with FastEmbed, but language-model inference uses OpenRouter, so hosted operation is not near-offline.
+
+Desktop credentials are persisted through the operating system's credential store, not browser `localStorage`; hosted credentials are environment-injected or held in backend process memory. “Near-offline” is not an air-gap guarantee: installation, updates, package/model downloads, optional Lean/Mathlib setup, non-loopback LM Studio configuration, and enabled integrations can use the network. Before processing sensitive material, read the full [security, privacy, credential-storage, logging, and provider-retention guidance](SECURITY.md#privacy-and-external-data-flow).
 
 #### Optional Lean 4 / SMT Proof Verification Requirements
 

@@ -985,6 +985,28 @@
   white-space: normal;
 }
 
+.openrouter-free-models-control__pro-tooltip {
+  width: min(430px, calc(100vw - 2rem));
+}
+
+.openrouter-free-models-control__pro-tips,
+.openrouter-free-models-control__pro-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.openrouter-free-models-control__pro-tips {
+  gap: 0.75rem;
+}
+
+.openrouter-free-models-control__pro-section {
+  gap: 0.2rem;
+}
+
+.openrouter-free-models-control__pro-section strong {
+  color: #9fc8ff;
+}
+
 /* Flex column for checkbox groups */
 .checkbox-group-col {
   display: flex;

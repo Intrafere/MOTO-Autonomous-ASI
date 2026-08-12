@@ -1,0 +1,328 @@
+from datetime import datetime
+from unittest import IsolatedAsyncioTestCase, TestCase, mock
+
+from pydantic import ValidationError
+
+from backend.autonomous.agents.proof_pruning_agent import (
+    ProofPruningReviewService,
+    parse_proof_prune_proposal,
+    parse_proof_prune_validation,
+    proof_run_role_suffix,
+    validate_proposal_against_snapshot,
+)
+from backend.shared.models import (
+    ProofPruneAggregateEntry,
+    ProofPruneProofDescriptor,
+    ProofPruneProposal,
+    ProofPruneSnapshot,
+    ProofRoleConfigSnapshot,
+    ProofRuntimeConfigSnapshot,
+)
+
+
+def _snapshot() -> ProofPruneSnapshot:
+    aggregate = [
+        ProofPruneAggregateEntry(
+            proof_id="proof-old",
+            theorem_name="t",
+            canonical_theorem_hash="th",
+            canonical_lean_hash="lh",
+            novelty_tier="mathematical_discovery",
+            source_type="paper",
+            source_id="paper-1",
+            created_at=datetime(2026, 1, 1),
+            dependency_extraction_status="complete",
+            exact_identity_occurrence_count=2,
+            eligible_candidate=True,
+        ),
+        ProofPruneAggregateEntry(
+            proof_id="proof-new",
+            theorem_name="t",
+            canonical_theorem_hash="th",
+            canonical_lean_hash="lh",
+            novelty_tier="mathematical_discovery",
+            source_type="paper",
+            source_id="paper-2",
+            created_at=datetime(2026, 1, 2),
+            dependency_extraction_status="complete",
+            exact_identity_occurrence_count=2,
+            eligible_candidate=True,
+        ),
+    ]
+    descriptors = [
+        ProofPruneProofDescriptor(
+            proof_id=entry.proof_id,
+            theorem_name=entry.theorem_name,
+            theorem_statement="True",
+            canonical_theorem_hash=entry.canonical_theorem_hash,
+            canonical_lean_hash=entry.canonical_lean_hash,
+            novelty_tier=entry.novelty_tier,
+            source_type=entry.source_type,
+            source_id=entry.source_id,
+            created_at=entry.created_at,
+            dependency_extraction_status="complete",
+            comparator_proof_ids=[
+                "proof-new" if entry.proof_id == "proof-old" else "proof-old"
+            ],
+            lean_code="theorem t : True := by trivial",
+            lean_code_included=True,
+        )
+        for entry in aggregate
+    ]
+    return ProofPruneSnapshot(
+        snapshot_id="snapshot",
+        proof_set_revision=2,
+        proof_store_id="manual:active",
+        owning_run_id="owning-run",
+        proof_run_id="proof-run-1",
+        proof_run_lifecycle_generation=1,
+        scope="manual",
+        source_type="paper",
+        source_id="paper-1",
+        canonical_user_prompt="Prove the objective.",
+        trigger_reasons=["scheduled"],
+        whole_set=aggregate,
+        candidate_descriptors=descriptors,
+    )
+
+
+def _runtime() -> ProofRuntimeConfigSnapshot:
+    proposer = ProofRoleConfigSnapshot(
+        provider="openrouter",
+        model_id="proposer-model",
+        openrouter_provider="Provider A",
+        openrouter_reasoning_effort="high",
+        lm_studio_fallback_id="fallback",
+        context_window=32000,
+        max_output_tokens=2000,
+        supercharge_enabled=True,
+    )
+    validator = ProofRoleConfigSnapshot(
+        provider="lm_studio",
+        model_id="validator-model",
+        context_window=24000,
+        max_output_tokens=1500,
+    )
+    return ProofRuntimeConfigSnapshot(
+        brainstorm=proposer,
+        paper=proposer,
+        validator=validator,
+    )
+
+
+class ProofPruningContractTests(TestCase):
+    def test_no_prune_requires_null_targets(self) -> None:
+        result = parse_proof_prune_proposal(
+            '{"action":"no_prune","proof_id":null,'
+            '"expected_theorem_hash":null,"expected_lean_hash":null,'
+            '"reasoning":"All routes are unique."}'
+        )
+        self.assertEqual(result.action, "no_prune")
+        with self.assertRaises(ValidationError):
+            ProofPruneProposal(
+                action="no_prune",
+                proof_id="proof-old",
+                expected_theorem_hash=None,
+                expected_lean_hash=None,
+                reasoning="invalid",
+            )
+
+    def test_proposal_requires_id_and_hashes(self) -> None:
+        with self.assertRaises(ValidationError):
+            ProofPruneProposal(
+                action="propose_prune",
+                proof_id="proof-old",
+                expected_theorem_hash="th",
+                expected_lean_hash=None,
+                reasoning="missing Lean hash",
+            )
+
+    def test_validator_cannot_replace_target(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_proof_prune_validation(
+                '{"decision":"accept","proof_id":"other","reasoning":"ok"}',
+                expected_proof_id="proof-old",
+            )
+
+    def test_guard_checks_hashes_and_dependency_state(self) -> None:
+        snapshot = _snapshot()
+        allowed = validate_proposal_against_snapshot(
+            ProofPruneProposal(
+                action="propose_prune",
+                proof_id="proof-old",
+                expected_theorem_hash="th",
+                expected_lean_hash="lh",
+                reasoning="Exact redundant occurrence.",
+            ),
+            snapshot,
+        )
+        self.assertTrue(allowed.allowed)
+        rejected = validate_proposal_against_snapshot(
+            ProofPruneProposal(
+                action="propose_prune",
+                proof_id="proof-old",
+                expected_theorem_hash="wrong",
+                expected_lean_hash="lh",
+                reasoning="Wrong identity.",
+            ),
+            snapshot,
+        )
+        self.assertFalse(rejected.allowed)
+        self.assertIn("theorem_hash_mismatch", rejected.reasons)
+
+    def test_role_suffix_is_stable_and_run_specific(self) -> None:
+        first = proof_run_role_suffix("manual", "proof-run-1")
+        self.assertEqual(first, proof_run_role_suffix("manual", "proof-run-1"))
+        self.assertNotEqual(first, proof_run_role_suffix("manual", "proof-run-2"))
+
+
+class ProofPruningAgentTests(IsolatedAsyncioTestCase):
+    async def test_no_prune_skips_validator_and_preserves_role_configs(self) -> None:
+        calls = []
+
+        async def fake_completion(**kwargs):
+            calls.append(kwargs)
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"no_prune","proof_id":null,'
+                                '"expected_theorem_hash":null,'
+                                '"expected_lean_hash":null,'
+                                '"reasoning":"Every proof remains useful."}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+        with mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent.api_client_manager.generate_completion",
+            side_effect=fake_completion,
+        ), mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent.api_client_manager.configure_role"
+        ) as configure:
+            service = ProofPruningReviewService(
+                runtime_snapshot=_runtime(),
+                scope="manual",
+                proof_run_id="proof-run-1",
+            )
+            result = await service.review(_snapshot())
+
+        self.assertEqual(result.outcome, "no_prune")
+        self.assertEqual(len(calls), 1)
+        configured = {call.args[0]: call.args[1] for call in configure.call_args_list}
+        proposer_id = next(key for key in configured if "prune_proposer" in key)
+        validator_id = next(key for key in configured if "prune_validator" in key)
+        self.assertEqual(configured[proposer_id].model_id, "proposer-model")
+        self.assertTrue(configured[proposer_id].supercharge_enabled)
+        self.assertEqual(configured[validator_id].model_id, "validator-model")
+
+    async def test_accept_returns_commit_intent_without_mutation(self) -> None:
+        outputs = [
+            (
+                '{"action":"propose_prune","proof_id":"proof-old",'
+                '"expected_theorem_hash":"th","expected_lean_hash":"lh",'
+                '"reasoning":"The newer exact occurrence preserves the contribution."}'
+            ),
+            (
+                '{"decision":"accept","proof_id":"proof-old",'
+                '"reasoning":"No dependency or route is lost."}'
+            ),
+        ]
+
+        async def fake_completion(**_kwargs):
+            return {"choices": [{"message": {"content": outputs.pop(0)}}]}
+
+        with mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent.api_client_manager.generate_completion",
+            side_effect=fake_completion,
+        ), mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent.api_client_manager.configure_role"
+        ):
+            result = await ProofPruningReviewService(
+                runtime_snapshot=_runtime(),
+                scope="manual",
+                proof_run_id="proof-run-1",
+            ).review(_snapshot(), current_revision=2)
+
+        self.assertEqual(result.outcome, "commit_intent")
+        self.assertEqual(result.commit_intent.proof_id, "proof-old")
+        self.assertEqual(result.commit_intent.proof_set_revision, 2)
+
+    async def test_deterministic_guard_rejection_skips_validator(self) -> None:
+        calls = []
+
+        async def fake_completion(**kwargs):
+            calls.append(kwargs)
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"propose_prune","proof_id":"proof-old",'
+                                '"expected_theorem_hash":"wrong",'
+                                '"expected_lean_hash":"lh",'
+                                '"reasoning":"Attempt stale target."}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+        with mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent.api_client_manager.generate_completion",
+            side_effect=fake_completion,
+        ), mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent.api_client_manager.configure_role"
+        ):
+            result = await ProofPruningReviewService(
+                runtime_snapshot=_runtime(),
+                scope="manual",
+                proof_run_id="proof-run-1",
+            ).review(_snapshot())
+
+        self.assertEqual(result.outcome, "rejected")
+        self.assertEqual(result.validation.decision, "reject")
+        self.assertIn("theorem_hash_mismatch", result.validation.reasoning)
+        self.assertEqual(len(calls), 1)
+
+    async def test_malformed_output_gets_one_sanitized_repair(self) -> None:
+        calls = []
+        outputs = [
+            "<think>private</think>{broken",
+            (
+                '{"action":"no_prune","proof_id":null,'
+                '"expected_theorem_hash":null,"expected_lean_hash":null,'
+                '"reasoning":"Insufficient evidence."}'
+            ),
+        ]
+
+        async def fake_completion(**kwargs):
+            calls.append(kwargs)
+            return {"choices": [{"message": {"content": outputs.pop(0)}}]}
+
+        with mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent.api_client_manager.generate_completion",
+            side_effect=fake_completion,
+        ), mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent.api_client_manager.configure_role"
+        ):
+            result = await ProofPruningReviewService(
+                runtime_snapshot=_runtime(),
+                scope="manual",
+                proof_run_id="proof-run-1",
+            ).review(_snapshot())
+
+        self.assertEqual(result.outcome, "no_prune")
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[1]["task_id"].endswith("_retry"))
+        retry_messages = calls[1]["messages"]
+        assistant_messages = [
+            message["content"]
+            for message in retry_messages
+            if message["role"] == "assistant"
+        ]
+        if assistant_messages:
+            self.assertNotIn("<think>", assistant_messages[0])

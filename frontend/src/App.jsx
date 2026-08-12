@@ -31,6 +31,7 @@ import {
 import WorkflowPanel from './components/WorkflowPanel';
 import SolutionPathModal from './components/SolutionPathModal';
 import { solutionPathEventMatches } from './utils/solutionPathPresentation';
+import { reconcileAutonomousLifecycle } from './utils/workflowLifecycle';
 import BoostControlModal from './components/BoostControlModal';
 import StartupProviderSetupModal from './components/StartupProviderSetupModal';
 import OpenRouterApiKeyModal from './components/OpenRouterApiKeyModal';
@@ -44,6 +45,7 @@ import CritiqueNotificationStack from './components/CritiqueNotificationStack';
 import ProofNotificationStack from './components/autonomous/ProofNotificationStack';
 import CreditExhaustionNotificationStack from './components/CreditExhaustionNotificationStack';
 import CodexOAuthNotificationStack from './components/CodexOAuthNotificationStack';
+import ModelErrorNotificationStack from './components/ModelErrorNotificationStack';
 import UpdateNotificationBanner from './components/UpdateNotificationBanner';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import intrafereLogoMark from './assets/brand/intrafere-logo-no-text.png';
@@ -80,13 +82,27 @@ import { CLOUD_ACCESS_PROVIDERS, isCloudAccessProvider } from './utils/oauthProv
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  formatEmptyProofDiscoveryMessage,
+  formatProofRunEventMessage,
+  formatProviderUsageLimitActivityMessage,
+  formatProviderUsageLimitResumedMessage,
   formatSolutionPathEventMessage,
   buildAutonomousProofProviderPauseActivity,
   buildRejectionFeedbackNoticeActivity,
   hasRecentAssistantProofPackDuplicate,
+  hasRecentProofActivityDuplicate,
+  isProviderUsageLimitActive,
+  shouldShowProviderUsageLimitPopup,
   shouldAddRejectionFeedbackNotice,
 } from './utils/activityStyles';
-import { sanitizePersistedActivityValue } from './utils/activityPersistence';
+import {
+  compactLiveActivityEvent,
+  isProviderNotificationDismissed,
+  MAX_LIVE_ACTIVITY_EVENTS,
+  persistDismissedProviderNotificationId,
+  readPersistedLiveActivity,
+  shouldRecordWorkflowStoppedActivity,
+} from './utils/liveActivityPersistence';
 import {
   canStorePromptDraftInLocalStorage,
   readPromptDraftSync,
@@ -109,18 +125,9 @@ const EMBEDDING_MODEL_HINTS = ['embed', 'embedding', 'nomic', 'bge', 'e5', 'gte'
 const AUTONOMOUS_ROLE_PREFIXES = ['validator', 'assistant', 'writer', 'high_param'];
 const HIGH_SCORE_CRITIQUE_THRESHOLD = 6.25;
 const SEEN_HIGH_SCORE_CRITIQUES_STORAGE_KEY = 'seenHighScoreCritiqueNotifications';
-// Read-only compatibility key. Older releases stored opaque notification IDs
-// here, while an intermediate release stored SHA-256 fingerprints.
-const DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY = 'dismissedOAuthProviderNotifications';
-const DISMISSED_PROVIDER_NOTIFICATION_FINGERPRINT_PREFIX = 'dismissedOAuthProviderNotificationFingerprint:';
 const MAX_SEEN_HIGH_SCORE_CRITIQUES = 500;
-const MAX_DISMISSED_PROVIDER_NOTIFICATION_IDS = 500;
-const MAX_LIVE_ACTIVITY_EVENTS = 5000;
 const AUTONOMOUS_LIVE_ACTIVITY_STORAGE_KEY = 'autonomous_live_activity_events';
 const LEANOJ_LIVE_ACTIVITY_STORAGE_KEY = 'leanoj_live_activity_events';
-const MAX_PERSISTED_ACTIVITY_STRING_LENGTH = 2000;
-const MAX_PERSISTED_ACTIVITY_ARRAY_ITEMS = 20;
-const MAX_PERSISTED_ACTIVITY_OBJECT_KEYS = 60;
 const MAX_PROOF_NOTIFICATIONS = 20;
 const UPDATE_NOTICE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const DEFAULT_CAPABILITIES = Object.freeze({
@@ -204,80 +211,6 @@ function persistSeenHighScoreCritiques(seenSet) {
   }
 }
 
-async function fingerprintProviderNotificationId(value) {
-  const input = new TextEncoder().encode(String(value || ''));
-  const digest = await window.crypto.subtle.digest('SHA-256', input);
-  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function readLegacyDismissedProviderNotificationIds() {
-  if (typeof window === 'undefined') {
-    return new Set();
-  }
-
-  try {
-    const raw = window.localStorage.getItem(DISMISSED_PROVIDER_NOTIFICATION_IDS_STORAGE_KEY);
-    const values = raw ? JSON.parse(raw) : [];
-    return new Set(Array.isArray(values) ? values.filter(value => typeof value === 'string') : []);
-  } catch (error) {
-    console.warn('Could not read legacy dismissed provider notification IDs:', error);
-    return new Set();
-  }
-}
-
-function dismissedProviderNotificationFingerprintKey(fingerprint) {
-  return `${DISMISSED_PROVIDER_NOTIFICATION_FINGERPRINT_PREFIX}${fingerprint}`;
-}
-
-function trimDismissedProviderNotificationMarkers() {
-  const markers = [];
-  for (let index = 0; index < window.localStorage.length; index += 1) {
-    const key = window.localStorage.key(index);
-    if (key?.startsWith(DISMISSED_PROVIDER_NOTIFICATION_FINGERPRINT_PREFIX)) {
-      markers.push({
-        key,
-        createdAt: Number(window.localStorage.getItem(key)) || 0,
-      });
-    }
-  }
-  markers
-    .sort((left, right) => left.createdAt - right.createdAt)
-    .slice(0, Math.max(0, markers.length - MAX_DISMISSED_PROVIDER_NOTIFICATION_IDS))
-    .forEach(({ key }) => window.localStorage.removeItem(key));
-}
-
-export async function isProviderNotificationDismissed(notificationId) {
-  if (typeof window === 'undefined') {
-    return false;
-  }
-
-  const normalizedId = String(notificationId || '');
-  const fingerprint = await fingerprintProviderNotificationId(normalizedId);
-  if (window.localStorage.getItem(dismissedProviderNotificationFingerprintKey(fingerprint)) !== null) {
-    return true;
-  }
-
-  const legacyIds = readLegacyDismissedProviderNotificationIds();
-  return legacyIds.has(normalizedId) || legacyIds.has(fingerprint);
-}
-
-export async function persistDismissedProviderNotificationId(notificationId) {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  try {
-    const fingerprint = await fingerprintProviderNotificationId(notificationId);
-    window.localStorage.setItem(
-      dismissedProviderNotificationFingerprintKey(fingerprint),
-      String(Date.now()),
-    );
-    trimDismissedProviderNotificationMarkers();
-  } catch (error) {
-    console.warn('Could not save dismissed provider notification IDs:', error);
-  }
-}
-
 function getProviderNotificationKey(data = {}) {
   if (data.notification_key) {
     return String(data.notification_key);
@@ -305,12 +238,23 @@ function buildOAuthProviderNotification(data = {}, fallbackProvider = 'oauth') {
     role_id: roleId,
     model: data.model,
     reason,
-    message: data.message || `Check your ${isCodex ? 'OpenAI Codex' : 'OAuth provider'} connection, sign in again, and retry.`,
+    message: reason === 'usage_limit_reached'
+      ? formatProviderUsageLimitActivityMessage(data, data.provider_label)
+      : (
+        data.message
+        || `Check your ${isCodex ? 'OpenAI Codex' : 'OAuth provider'} connection, sign in again, and retry.`
+      ),
     timestamp: data.created_at || data._serverTimestamp || data.timestamp || new Date().toISOString(),
+    cooldown_until: data.cooldown_until,
+    resets_at: data.resets_at,
+    fallback_model: data.fallback_model,
   };
 }
 
 async function addOAuthProviderNotification(setNotifications, data = {}, fallbackProvider = 'oauth') {
+  if (data.reason === 'usage_limit_reached' && !shouldShowProviderUsageLimitPopup(data)) {
+    return;
+  }
   const notification = buildOAuthProviderNotification(data, fallbackProvider);
   if (await isProviderNotificationDismissed(notification.notification_key)) {
     return;
@@ -321,6 +265,22 @@ async function addOAuthProviderNotification(setNotifications, data = {}, fallbac
     }
     return [...prev, notification].slice(-3);
   });
+}
+
+async function addModelErrorNotification(setNotifications, data = {}) {
+  const notificationKey = getProviderNotificationKey(data);
+  if (await isProviderNotificationDismissed(notificationKey)) return;
+  const notification = {
+    ...data,
+    notification_key: notificationKey,
+    title: data.title || 'Proof model output repeatedly truncated',
+    message: data.message || 'Autonomous research stopped after proof output recovery was exhausted.',
+  };
+  setNotifications(prev => (
+    prev.some(item => item.notification_key === notificationKey)
+      ? prev
+      : [...prev, notification].slice(-3)
+  ));
 }
 
 function truncateOAuthActivityDetail(value, maxChars = 1800) {
@@ -354,19 +314,7 @@ function buildOAuthActivityMessage(data = {}, fallbackProviderLabel = 'OAuth pro
 }
 
 function buildOAuthUsageLimitActivityMessage(data = {}, fallbackProviderLabel = 'OAuth provider') {
-  const providerLabel = data.provider_label || fallbackProviderLabel;
-  const roleId = data.role_id || 'a role';
-  const resetsIn = Number(data.resets_in_seconds);
-  const resetText = Number.isFinite(resetsIn) && resetsIn > 0
-    ? ` Provider reset in about ${Math.max(1, Math.ceil(resetsIn / 60))} minute(s).`
-    : '';
-  const fallbackText = data.fallback_model
-    ? ` Using LM Studio fallback (${data.fallback_model}) until reset.`
-    : ' Roles without fallback will wait until the provider reset.';
-  if (data.message) {
-    return String(data.message);
-  }
-  return `${providerLabel} usage limit reached for ${roleId}.${fallbackText}${resetText}`;
+  return formatProviderUsageLimitActivityMessage(data, fallbackProviderLabel);
 }
 
 const createDefaultAggregatorSubmitterConfigs = () => (
@@ -572,88 +520,6 @@ function coercePositiveIntegerSetting(value, fallback) {
     return parsed;
   }
   return fallback;
-}
-
-export function readPersistedLiveActivity(storageKey) {
-  try {
-    const savedEvents = localStorage.getItem(storageKey);
-    if (!savedEvents) {
-      return [];
-    }
-    const parsed = sanitizePersistedActivityValue(JSON.parse(savedEvents));
-    return Array.isArray(parsed)
-      ? parsed
-        .filter((event) => event && typeof event === 'object')
-        .map((event) => {
-          const eventName = event.event || event.type;
-          const isOverflow = eventName === 'context_overflow_error'
-            || (
-              (eventName === 'auto_research_stopped' || eventName === 'leanoj_stopped')
-              && event?.data?.reason === 'context_overflow'
-            );
-          return isOverflow
-            ? { ...event, message: formatContextOverflowActivityMessage(event.data || {}) }
-            : event;
-        })
-        .slice(-MAX_LIVE_ACTIVITY_EVENTS)
-      : [];
-  } catch (error) {
-    console.error(`Failed to load ${storageKey}:`, error);
-    return [];
-  }
-}
-
-export function shouldRecordWorkflowStoppedActivity(eventName, data = {}) {
-  return !(
-    (eventName === 'auto_research_stopped' || eventName === 'leanoj_stopped')
-    && data?.reason === 'context_overflow'
-  );
-}
-
-function compactPersistedActivityValue(value, depth = 0) {
-  if (value == null || typeof value === 'number' || typeof value === 'boolean') {
-    return value;
-  }
-  if (typeof value === 'string') {
-    return value.length > MAX_PERSISTED_ACTIVITY_STRING_LENGTH
-      ? `${value.slice(0, MAX_PERSISTED_ACTIVITY_STRING_LENGTH)}...`
-      : value;
-  }
-  if (depth >= 3) {
-    return '[omitted]';
-  }
-  if (Array.isArray(value)) {
-    return value
-      .slice(0, MAX_PERSISTED_ACTIVITY_ARRAY_ITEMS)
-      .map((item) => compactPersistedActivityValue(item, depth + 1));
-  }
-  if (typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .slice(0, MAX_PERSISTED_ACTIVITY_OBJECT_KEYS)
-        .map(([key, nestedValue]) => [key, compactPersistedActivityValue(nestedValue, depth + 1)])
-    );
-  }
-  return String(value);
-}
-
-export function compactLiveActivityEvent(event) {
-  if (!event || typeof event !== 'object') {
-    return null;
-  }
-  const sanitizedEvent = sanitizePersistedActivityValue(event);
-  return {
-    event: sanitizedEvent.event || sanitizedEvent.type || '',
-    type: sanitizedEvent.type,
-    timestamp: sanitizedEvent.timestamp || sanitizedEvent.fullTimestamp || '',
-    fullTimestamp: sanitizedEvent.fullTimestamp,
-    // Persist the user-visible message after recursive credential redaction so
-    // live activity remains useful across reloads without storing secrets.
-    message: typeof sanitizedEvent.message === 'string'
-      ? compactPersistedActivityValue(sanitizedEvent.message)
-      : '',
-    data: compactPersistedActivityValue(sanitizedEvent.data || {}),
-  };
 }
 
 function persistLiveActivity(storageKey, events) {
@@ -929,6 +795,8 @@ function App() {
   const [leanojActivity, setLeanojActivity] = useState(() => (
     readPersistedLiveActivity(LEANOJ_LIVE_ACTIVITY_STORAGE_KEY)
   ));
+  const [aggregatorProviderActivity, setAggregatorProviderActivity] = useState([]);
+  const [compilerProviderActivity, setCompilerProviderActivity] = useState([]);
   const [leanojSettings, setLeanojSettings] = useState(() => getStoredLeanOJSettings());
   const [leanojProofRefreshToken, setLeanojProofRefreshToken] = useState(0);
   
@@ -959,6 +827,35 @@ function App() {
   // Credit exhaustion notification state (persistent until dismissed)
   const [creditExhaustionNotifications, setCreditExhaustionNotifications] = useState([]);
   const [codexOAuthNotifications, setCodexOAuthNotifications] = useState([]);
+  const [modelErrorNotifications, setModelErrorNotifications] = useState([]);
+
+  const addScopedProviderActivity = useCallback((notification = {}) => {
+    const notificationKey = notification.notification_key;
+    const workflowMode = String(notification.workflow_mode || '').toLowerCase();
+    if (!notificationKey || !workflowMode) return;
+    const event = {
+      event: notification.event_type || 'oauth_provider_error',
+      type: notification.event_type || 'oauth_provider_error',
+      timestamp: notification.created_at || notification._serverTimestamp || new Date().toISOString(),
+      message: notification.event_type === 'provider_usage_limit_resumed'
+        ? formatProviderUsageLimitResumedMessage(notification, notification.provider_label)
+        : (
+          notification.reason === 'usage_limit_reached'
+            ? buildOAuthUsageLimitActivityMessage(notification, notification.provider_label)
+            : buildOAuthActivityMessage(notification, notification.provider_label)
+        ),
+      data: notification,
+    };
+    const appendOnce = setter => setter(previous => (
+      previous.some(item => item?.data?.notification_key === notificationKey)
+        ? previous
+        : [...previous, event].slice(-MAX_LIVE_ACTIVITY_EVENTS)
+    ));
+    if (workflowMode === 'autonomous') appendOnce(setAutonomousActivity);
+    else if (workflowMode === 'leanoj') appendOnce(setLeanojActivity);
+    else if (workflowMode === 'aggregator') appendOnce(setAggregatorProviderActivity);
+    else if (workflowMode === 'compiler') appendOnce(setCompilerProviderActivity);
+  }, []);
 
   useEffect(() => {
     persistLiveActivity(AUTONOMOUS_LIVE_ACTIVITY_STORAGE_KEY, autonomousActivity);
@@ -972,6 +869,12 @@ function App() {
   const autonomousRunningRef = useRef(autonomousRunning);
   const autonomousTierRef = useRef(autonomousStatus?.current_tier || null);
   const autonomousLifecycleGenerationRef = useRef(0);
+  const autonomousStatusRequestRef = useRef(0);
+  const seenAutonomousTerminalEventsRef = useRef(new Set(
+    autonomousActivity
+      .map((event) => event?.data?.terminal_event_id)
+      .filter(Boolean)
+  ));
   const leanojLifecycleGenerationRef = useRef(0);
   const openRouterKeyJustSavedRef = useRef(false);
   const cloudAccessJustConfiguredRef = useRef(false);
@@ -989,6 +892,64 @@ function App() {
   useEffect(() => {
     autonomousTierRef.current = autonomousStatus?.current_tier || null;
   }, [autonomousStatus]);
+
+  const applyAutonomousStatus = useCallback((status, requestId = null) => {
+    if (
+      requestId !== null
+      && requestId !== autonomousStatusRequestRef.current
+    ) {
+      return false;
+    }
+    const decision = reconcileAutonomousLifecycle({
+      status,
+      wasRunning: autonomousRunningRef.current,
+      seenTerminalEventIds: seenAutonomousTerminalEventsRef.current,
+    });
+    if (!decision) {
+      return false;
+    }
+
+    setAutonomousStatus(status);
+    autonomousRunningRef.current = decision.isRunning;
+    setAutonomousRunning(decision.isRunning);
+    setAutonomousStarting(false);
+    setAutonomousStopping(false);
+    if (decision.isRunning) {
+      setAnyWorkflowRunning(true);
+    } else if (autonomousRunningRef.current === false) {
+      // Top-level workflow starts are mutually exclusive. A stopped
+      // authoritative Autonomous snapshot releases its stale global UI lock;
+      // the global status poll will still assert another active mode if one
+      // was started from a different client.
+      setAnyWorkflowRunning(false);
+    }
+    if (
+      decision.lifecycleGeneration
+      > autonomousLifecycleGenerationRef.current
+    ) {
+      autonomousLifecycleGenerationRef.current = decision.lifecycleGeneration;
+    }
+    if (decision.shouldRecoverTerminalEvent) {
+      seenAutonomousTerminalEventsRef.current.add(
+        decision.terminalEvent.terminal_event_id
+      );
+      const data = decision.terminalEvent;
+      setAutonomousActivity((previous) => [
+        ...previous,
+        {
+          event: data.reason === 'context_overflow'
+            ? 'context_overflow_error'
+            : (data.event_type || 'auto_research_stopped'),
+          timestamp: data.occurred_at || new Date().toISOString(),
+          message: data.reason === 'context_overflow'
+            ? formatContextOverflowActivityMessage(data)
+            : (data.message || 'Autonomous research stopped'),
+          data,
+        },
+      ].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+    }
+    return true;
+  }, []);
 
   const markHighScoreCritiqueSeen = useCallback((seenKey) => {
     if (!seenKey) {
@@ -1345,6 +1306,7 @@ function App() {
   // without having to click Start first.
   useEffect(() => {
     const checkInitialStatus = async () => {
+      const requestId = ++autonomousStatusRequestRef.current;
       try {
         const [status, brainstormsData, papersData, stats] = await Promise.all([
           autonomousAPI.getStatus(),
@@ -1358,21 +1320,37 @@ function App() {
         setBrainstorms(brainstormsData.brainstorms || []);
         setPapers(papersData.papers || []);
         setAutonomousStats(stats);
-        setAutonomousStatus(status);
-        
-        // If backend reports running, also sync the running state
-        if (status.is_running) {
-          console.log('Autonomous research detected as running, syncing state...');
-          setAutonomousRunning(true);
-          setAnyWorkflowRunning(true);
-        }
+        applyAutonomousStatus(status, requestId);
       } catch (error) {
         console.error('Failed to check initial autonomous status:', error);
       }
     };
     
     checkInitialStatus();
-  }, []);
+  }, [applyAutonomousStatus]);
+
+  useEffect(() => {
+    const reconcileFromStatus = async () => {
+      const requestId = ++autonomousStatusRequestRef.current;
+      try {
+        const status = await autonomousAPI.getStatus();
+        applyAutonomousStatus(status, requestId);
+      } catch (error) {
+        console.debug('Could not reconcile autonomous lifecycle:', error);
+      }
+    };
+    const unsubscribe = websocket.on('connected', reconcileFromStatus);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void reconcileFromStatus();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      unsubscribe();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [applyAutonomousStatus]);
 
   // Recover high-score critique popups from persisted paper metadata. WebSocket
   // events are best-effort, so a sleeping/closed browser can miss the live event.
@@ -1458,6 +1436,20 @@ function App() {
           return;
         }
         (payload.notifications || []).forEach((notification) => {
+          if (
+            notification.reason === 'usage_limit_reached'
+            && !isProviderUsageLimitActive(notification)
+          ) {
+            return;
+          }
+          addScopedProviderActivity(notification);
+          if (notification.notification_kind === 'model_error') {
+            addModelErrorNotification(setModelErrorNotifications, notification);
+            return;
+          }
+          if (notification.event_type === 'provider_usage_limit_resumed') {
+            return;
+          }
           addOAuthProviderNotification(
             setCodexOAuthNotifications,
             notification,
@@ -1475,7 +1467,7 @@ function App() {
       cancelled = true;
       unsubscribe();
     };
-  }, []);
+  }, [addScopedProviderActivity]);
 
   // Autonomous WebSocket event listeners
   useEffect(() => {
@@ -1493,6 +1485,9 @@ function App() {
     );
     const addActivity = (event) => {
       setAutonomousActivity(prev => {
+        if (hasRecentProofActivityDuplicate(prev, event.event, event.data || {})) {
+          return prev;
+        }
         if (hasRecentAssistantProofPackDuplicate(prev, event.event, event.data || {}, event.timestamp)) {
           return prev;
         }
@@ -1603,7 +1598,15 @@ function App() {
     const proofRoundLabel = (data = {}) => {
       const round = Number(data.proof_round_index || 0);
       const maxRounds = Number(data.proof_max_rounds || 0);
-      if (round <= 0 || maxRounds <= 1) return '';
+      if (round <= 0) return '';
+      if (
+        data.run_mode === 'loop_with_pruning'
+        || data.proof_run_unbounded === true
+        || maxRounds === 0
+      ) {
+        return `Proof round ${round}`;
+      }
+      if (maxRounds <= 1) return '';
       return `Proof round ${round}/${maxRounds}`;
     };
     const formatProofCandidatesFoundMessage = (data = {}) => {
@@ -1626,7 +1629,9 @@ function App() {
       if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
         error = `${error} You can change this timeout in Advanced Settings.`;
       }
-      return error ? `Lean 4 response: ${error} - proof not verified.` : 'Lean 4 response: proof not verified.';
+      return error
+        ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
+        : 'Lean 4 proof-attempt feedback (not a MOTO system error): proof not verified. The model uses these diagnostics if another attempt follows.';
     };
     const formatProofNoveltyTier = (tier) => {
       switch (tier) {
@@ -2028,6 +2033,38 @@ function App() {
       setProofRefreshToken((prev) => prev + 1);
     }));
 
+    [
+      'proof_run_started',
+      'proof_run_queued',
+      'proof_run_round_started',
+      'proof_run_round_complete',
+      'proof_run_stopping',
+      'proof_run_stopped',
+      'proof_run_provider_paused',
+      'proof_run_repair_required',
+      'proof_run_terminal',
+      'proof_run_failed',
+      'proof_pruning_queued',
+      'proof_pruning_started',
+      'proof_pruning_provider_paused',
+      'proof_pruning_repair_required',
+      'proof_pruning_applied',
+      'proof_pruning_no_prune',
+      'proof_pruning_rejected',
+      'proof_pruning_error',
+    ].forEach((eventName) => {
+      unsubscribers.push(websocket.on(eventName, (data = {}) => {
+        setProofRefreshToken((prev) => prev + 1);
+        if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+        addActivity({
+          event: eventName,
+          timestamp: getTimestamp(data),
+          message: formatProofRunEventMessage(eventName, data),
+          data,
+        });
+      }));
+    });
+
     unsubscribers.push(websocket.on('proof_retry_scheduled', (data) => {
       setProofRefreshToken((prev) => prev + 1);
     }));
@@ -2043,7 +2080,9 @@ function App() {
       addActivity({
         event: 'proof_check_no_candidates',
         timestamp: getTimestamp(data),
-        message: `${roundLabel ? `${roundLabel} discovery` : 'Proof discovery'} found 0 proof candidates; no proofs will be attempted`,
+        message: formatEmptyProofDiscoveryMessage(
+          roundLabel ? `${roundLabel} discovery` : 'Proof discovery',
+        ),
         data
       });
     }));
@@ -2065,7 +2104,9 @@ function App() {
       addActivity({
         event: 'proof_attempt_started',
         timestamp: getTimestamp(data),
-        message: `${proofName(data)}, Attempt ${data.attempt || 1} started: ${proofTarget(data)}`,
+        message: data.message
+          ? `${data.message} Target: ${proofTarget(data)}`
+          : `${proofName(data)}, Attempt ${data.attempt || 1} started: ${proofTarget(data)}`,
         data
       });
     }));
@@ -2085,7 +2126,9 @@ function App() {
       addActivity({
         event: 'proof_attempt_failed',
         timestamp: getTimestamp(data),
-        message: `${proofName(data)}, Attempt ${data.attempt || '?'} final: ${proofLeanResponse(data)}`,
+        message: data.failure_kind === 'output_truncated' || data.lean_was_run === false
+          ? `${proofName(data)}, Attempt ${data.attempt || '?'} final: ${data.message || 'Model output truncated before usable Lean code was returned; Lean 4 was not run.'}`
+          : `${proofName(data)}, Attempt ${data.attempt || '?'} result: ${proofLeanResponse(data)}`,
         data
       });
     }));
@@ -2104,6 +2147,34 @@ function App() {
       });
     }));
 
+    const proofPruneEvents = [
+      'proof_prune_review_queued',
+      'proof_prune_review_started',
+      'proof_prune_proposed',
+      'proof_prune_no_change',
+      'proof_prune_validation_started',
+      'proof_prune_rejected',
+      'proof_prune_stale',
+      'proof_prune_applied',
+      'proof_prune_provider_paused',
+      'proof_prune_repair_required',
+      'proof_prune_error'
+    ];
+    proofPruneEvents.forEach((eventName) => {
+      unsubscribers.push(websocket.on(eventName, (data) => {
+        if (eventName === 'proof_prune_applied') {
+          setProofRefreshToken((prev) => prev + 1);
+        }
+        if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+        addActivity({
+          event: eventName,
+          timestamp: getTimestamp(data),
+          message: data.message || data.reason || eventName.replaceAll('_', ' '),
+          data
+        });
+      }));
+    });
+
     unsubscribers.push(websocket.on('proof_lean_accepted', (data) => {
       if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       addActivity({
@@ -2119,7 +2190,7 @@ function App() {
       addActivity({
         event: 'proof_integrity_rejected',
         timestamp: getTimestamp(data),
-        message: `${proofName(data)} error: integrity rejected - ${formatReason(data.reason, 960) || proofTarget(data)}`,
+        message: `${proofName(data)} proof feedback: integrity check rejected this attempt — ${formatReason(data.reason, 960) || proofTarget(data)}`,
         data
       });
     }));
@@ -2130,6 +2201,16 @@ function App() {
         event: 'proof_attempts_exhausted',
         timestamp: getTimestamp(data),
         message: `${proofName(data)} terminated: proof attempts exhausted for ${proofTarget(data)}`,
+        data
+      });
+    }));
+
+    unsubscribers.push(websocket.on('proof_truncation_recovery_exhausted', (data) => {
+      if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+      addActivity({
+        event: 'proof_truncation_recovery_exhausted',
+        timestamp: getTimestamp(data),
+        message: data.message || `${proofName(data)} exhausted output-truncation recovery.`,
         data
       });
     }));
@@ -2256,6 +2337,9 @@ function App() {
     
     unsubscribers.push(websocket.on('auto_research_stopped', (data = {}) => {
       autonomousLifecycleGenerationRef.current += 1;
+      if (data.terminal_event_id) {
+        seenAutonomousTerminalEventsRef.current.add(data.terminal_event_id);
+      }
       setAutonomousStarting(false);
       setAutonomousRunning(false);
       setAutonomousStopping(false);
@@ -2268,6 +2352,9 @@ function App() {
           message: data.message || `Research stopped. Total: ${data.final_stats?.total_papers_completed || 0} papers`,
           data
         });
+      }
+      if (data.reason === 'proof_output_truncation_recovery_exhausted') {
+        void addModelErrorNotification(setModelErrorNotifications, data);
       }
     }));
     
@@ -2583,48 +2670,38 @@ function App() {
 
     unsubscribers.push(websocket.on('openai_codex_oauth_error', (data) => {
       console.error('OpenAI Codex OAuth error:', data);
-      addActivity({
-        event: 'openai_codex_oauth_error',
-        timestamp: getTimestamp(data),
-        ...data,
-        message: buildOAuthActivityMessage(data, 'OpenAI Codex'),
-      });
+      addScopedProviderActivity(data);
       addOAuthProviderNotification(setCodexOAuthNotifications, data, 'openai_codex_oauth');
     }));
 
     unsubscribers.push(websocket.on('oauth_provider_error', (data) => {
       console.error('OAuth provider error:', data);
-      const providerLabel = data.provider_label || 'OAuth provider';
-      addActivity({
-        event: 'oauth_provider_error',
-        timestamp: getTimestamp(data),
-        ...data,
-        message: buildOAuthActivityMessage(data, providerLabel),
-      });
+      addScopedProviderActivity(data);
       addOAuthProviderNotification(setCodexOAuthNotifications, data, data.provider || 'oauth');
     }));
 
     unsubscribers.push(websocket.on('sakana_fugu_error', (data) => {
       console.error('Sakana Fugu error:', data);
-      addActivity({
-        event: 'sakana_fugu_error',
-        timestamp: getTimestamp(data),
-        ...data,
-        message: buildOAuthActivityMessage(data, 'Sakana Fugu'),
-      });
+      addScopedProviderActivity(data);
       addOAuthProviderNotification(setCodexOAuthNotifications, data, 'sakana_fugu');
     }));
 
     unsubscribers.push(websocket.on('oauth_provider_usage_limited', (data) => {
       console.warn('OAuth provider usage limit:', data);
-      const providerLabel = data.provider_label || 'OpenAI Codex';
-      addActivity({
-        event: 'oauth_provider_usage_limited',
-        timestamp: getTimestamp(data),
-        ...data,
-        message: buildOAuthUsageLimitActivityMessage(data, providerLabel),
-      });
+      addScopedProviderActivity(data);
       addOAuthProviderNotification(setCodexOAuthNotifications, data, data.provider || 'openai_codex_oauth');
+    }));
+
+    unsubscribers.push(websocket.on('provider_usage_limit_resumed', (data) => {
+      console.info('Provider usage-limit cooldown ended:', data);
+      addScopedProviderActivity({
+        ...data,
+        event_type: 'provider_usage_limit_resumed',
+      });
+      const provider = data.provider;
+      setCodexOAuthNotifications(previous => previous.filter(notification => (
+        notification.provider !== provider || notification.reason !== 'usage_limit_reached'
+      )));
     }));
 
     unsubscribers.push(websocket.on('leanoj_provider_paused', (data) => {
@@ -3071,7 +3148,13 @@ function App() {
         leanojAPI.getStatus().then(setLeanojStatus).catch(console.error);
       }],
       ['proof_check_started', (data) => addLeanOJSharedProofActivity('proof_check_started', data, (eventData) => `Proof check started for ${eventData.source_type} ${eventData.source_id}`)],
-      ['proof_check_no_candidates', (data) => addLeanOJSharedProofActivity('proof_check_no_candidates', data, (eventData) => `No formal theorem candidates found in ${eventData.source_type} ${eventData.source_id}`)],
+      ['proof_check_no_candidates', (data) => addLeanOJSharedProofActivity(
+        'proof_check_no_candidates',
+        data,
+        (eventData) => formatEmptyProofDiscoveryMessage(
+          `Proof discovery for ${eventData.source_type} ${eventData.source_id}`,
+        ),
+      )],
       ['proof_check_candidates_found', (data) => addLeanOJSharedProofActivity('proof_check_candidates_found', data, (eventData) => `Proof candidates found: ${eventData.count || 0}`)],
       ['proof_attempt_started', (data) => addLeanOJSharedProofActivity('proof_attempt_started', data, leanOJAttemptStartedMessage)],
       ['proof_attempt_failed', (data) => addLeanOJSharedProofActivity('proof_attempt_failed', data, leanOJAttemptFinalMessage)],
@@ -3103,6 +3186,7 @@ function App() {
     if (!autonomousRunning) return;
     
     const interval = setInterval(async () => {
+      const requestId = ++autonomousStatusRequestRef.current;
       try {
         const [status, brainstormsData, papersData, stats] = await Promise.all([
           autonomousAPI.getStatus(),
@@ -3111,7 +3195,7 @@ function App() {
           autonomousAPI.getStats()
         ]);
         
-        setAutonomousStatus(status);
+        applyAutonomousStatus(status, requestId);
         setBrainstorms(brainstormsData.brainstorms || []);
         setPapers(papersData.papers || []);
         setAutonomousStats(stats);
@@ -3121,7 +3205,7 @@ function App() {
     }, 3000);
     
     return () => clearInterval(interval);
-  }, [autonomousRunning]);
+  }, [autonomousRunning, applyAutonomousStatus]);
 
   useEffect(() => {
     if (!leanojRunning) return;
@@ -3301,16 +3385,17 @@ function App() {
       autonomousLifecycleGenerationRef.current += 1;
       setAutonomousRunning(false);
       setAnyWorkflowRunning(false);
-      autonomousAPI.getStatus().then(setAutonomousStatus).catch((error) => {
+      const requestId = ++autonomousStatusRequestRef.current;
+      autonomousAPI.getStatus().then((status) => {
+        applyAutonomousStatus(status, requestId);
+      }).catch((error) => {
         console.warn('Autonomous research stopped, but status refresh failed:', error);
       });
     } catch (error) {
       if (error.kind === API_ERROR_KINDS.AMBIGUOUS_TRANSPORT) {
         try {
           const status = await autonomousAPI.getStatus();
-          setAutonomousStatus(status);
-          setAutonomousRunning(Boolean(status.is_running));
-          setAnyWorkflowRunning(Boolean(status.is_running));
+          applyAutonomousStatus(status);
           if (!status.is_running) {
             autonomousLifecycleGenerationRef.current += 1;
             return;
@@ -3620,6 +3705,11 @@ function App() {
       }
       return prev.filter(n => n.id !== notificationId);
     });
+  };
+
+  const handleDismissModelErrorNotification = (notificationKey) => {
+    void persistDismissedProviderNotificationId(notificationKey);
+    setModelErrorNotifications(prev => prev.filter(item => item.notification_key !== notificationKey));
   };
 
   const handleOpenCloudAccessFromCodexNotification = () => {
@@ -4339,7 +4429,9 @@ function App() {
             />
           )}
           {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
-          {activeTab === 'aggregator-logs' && <AggregatorLogs />}
+          {activeTab === 'aggregator-logs' && (
+            <AggregatorLogs providerActivity={aggregatorProviderActivity} />
+          )}
           {activeTab === 'aggregator-results' && (
             <LiveResults
               onClearPrompt={() => {
@@ -4369,7 +4461,9 @@ function App() {
             />
           )}
           {/* Full-width settings screens with model sidebars are rendered outside the padded tab container. */}
-          {activeTab === 'compiler-logs' && <CompilerLogs />}
+          {activeTab === 'compiler-logs' && (
+            <CompilerLogs providerActivity={compilerProviderActivity} />
+          )}
           {activeTab === 'compiler-live-paper' && <LivePaper capabilities={capabilities} />}
           {activeTab === 'compiler-proofs' && (
             <MathematicalProofs
@@ -4650,11 +4744,35 @@ function App() {
         onDismissAll={() => setCreditExhaustionNotifications([])}
       />
 
-      <CodexOAuthNotificationStack
-        notifications={codexOAuthNotifications}
-        onDismiss={handleDismissCodexOAuthNotification}
-        onOpenCloudAccess={handleOpenCloudAccessFromCodexNotification}
-      />
+      <div
+        data-testid="left-notification-lane"
+        style={{
+          position: 'fixed',
+          bottom: 20,
+          left: 'clamp(12px, 25vw, 360px)',
+          width: 'min(380px, calc(100vw - 24px))',
+          maxHeight: 'calc(100vh - 40px)',
+          overflowY: 'auto',
+          zIndex: 999999,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          pointerEvents: 'none',
+        }}
+      >
+        <CodexOAuthNotificationStack
+          notifications={codexOAuthNotifications}
+          onDismiss={handleDismissCodexOAuthNotification}
+          onOpenCloudAccess={handleOpenCloudAccessFromCodexNotification}
+          embedded
+        />
+
+        <ModelErrorNotificationStack
+          notifications={modelErrorNotifications}
+          onDismiss={handleDismissModelErrorNotification}
+          embedded
+        />
+      </div>
 
       {/* Critique Modal - Opens when notification is clicked */}
       {showCritiqueModal && selectedCritiquePaper && (

@@ -1,0 +1,24 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "cached_pack_refiltered",
+    "owning_run_excluded"
+  ],
+  "fields": [
+    "proof_pruning",
+    "prompt_context",
+    "assistant_memory"
+  ],
+  "invariants": [
+    "proof_pruning.owning_run_context_excludes_pruned"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_owning_run_context_and_cached_assistant_exclude_pruned",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/unit/test_assistant_proof_search.py"
+}

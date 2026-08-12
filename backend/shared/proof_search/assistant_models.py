@@ -45,7 +45,7 @@ AssistantSelectionMode = Literal[
     "cached_oauth_cooldown",
     "deterministic_oauth_cooldown",
 ]
-ASSISTANT_PROOF_PACK_SCHEMA_VERSION = "moto.assistant_proof_pack.v2"
+ASSISTANT_PROOF_PACK_SCHEMA_VERSION = "moto.assistant_proof_pack.v3"
 
 
 def _now_iso() -> str:
@@ -188,6 +188,7 @@ class AssistantProofSupport(BaseModel):
         if not isinstance(occurrences, list):
             occurrence = {
                 "search_id": record.search_id,
+                "proof_id": record.proof_id,
                 "corpus": record.corpus,
                 "corpus_scope": record.corpus_scope or record.release_id,
                 "session_id": record.session_id,
@@ -195,6 +196,10 @@ class AssistantProofSupport(BaseModel):
                 "source_type": record.source_type,
                 "source_id": record.source_id,
                 "source_title": record.source_title,
+                "live_context_status": record.live_context_status,
+                "live_context_owner_run_id": record.live_context_owner_run_id,
+                "live_context_pruned_at": record.live_context_pruned_at,
+                "live_context_pruned_by": record.live_context_pruned_by,
             }
             if record.metadata.get("assistant_exclude_standalone_exact_duplicate_emphasis") is True:
                 occurrence["assistant_exclude_standalone_exact_duplicate_emphasis"] = "true"

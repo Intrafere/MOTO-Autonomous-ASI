@@ -307,6 +307,104 @@
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
 }
 
+.math-proof-card.live-context-pruned-collapsed {
+  opacity: 0.62;
+  filter: saturate(0.6);
+  border-style: dashed;
+}
+
+.math-proof-card.live-context-pruned-expanded {
+  opacity: 1;
+  filter: none;
+  border-style: solid;
+}
+
+.proof-live-context-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.76rem;
+  font-weight: 700;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.proof-live-context-badge--pruned {
+  color: #cbd5e1;
+  background: rgba(100, 116, 139, 0.16);
+}
+
+.proof-live-context-badge--active {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.09);
+}
+
+.proof-live-context-note,
+.proof-live-context-confirm {
+  margin-top: 0.8rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px dashed rgba(148, 163, 184, 0.35);
+  border-radius: 0.8rem;
+  background: rgba(15, 23, 42, 0.55);
+  color: var(--text-secondary, #cbd5e1);
+  display: grid;
+  gap: 0.35rem;
+}
+
+.proof-live-context-confirm {
+  border-style: solid;
+  border-color: rgba(251, 191, 36, 0.42);
+}
+
+.proof-live-context-confirm label {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+
+.proof-live-context-confirm textarea {
+  min-height: 5rem;
+  resize: vertical;
+  border: 1px solid var(--border-default, #374151);
+  border-radius: 0.65rem;
+  padding: 0.65rem;
+  background: #0f172a;
+  color: var(--text-primary, #f3f4f6);
+  font: inherit;
+}
+
+.proof-live-context-warning {
+  color: #fde68a;
+}
+
+.proof-live-context-confirm-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.proof-live-context-confirm-actions button,
+.math-proof-live-context-action {
+  border: 1px solid rgba(251, 191, 36, 0.42);
+  border-radius: 0.7rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(251, 191, 36, 0.1);
+  color: #fde68a;
+  cursor: pointer;
+}
+
+.math-proof-live-context-action.restore {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.09);
+  color: #86efac;
+}
+
+.proof-live-context-confirm-actions button:disabled,
+.math-proof-live-context-action:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .math-proof-card.novel {
   border-color: rgba(34, 197, 94, 0.35);
 }

@@ -5,20 +5,32 @@ Stores both novel and non-novel verified proofs centrally for UI/API access.
 Novel proofs are also formatted for highest-priority direct prompt injection.
 """
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
 import shutil
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Mapping, Optional, Union
 
 import aiofiles
 
 from backend.shared.config import system_config
 from backend.shared.log_redaction import redact_log_text
-from backend.shared.models import FailedProofCandidate, ProofCandidate, ProofRecord
+from backend.shared.models import (
+    FailedProofCandidate,
+    ProofCandidate,
+    ProofPruneAggregateEntry,
+    ProofPruneCommitIntent,
+    ProofPruneContextPressure,
+    ProofPruneProofDescriptor,
+    ProofPruneSnapshot,
+    ProofRecord,
+)
 from backend.shared.path_safety import resolve_filename_within_root, validate_single_path_component
 from backend.shared.proof_identity import canonical_proof_identity
 from backend.autonomous.prompts.proof_prompts import format_failure_hints_for_injection
@@ -52,6 +64,58 @@ def is_syntheticlib_novel_tier(novelty_tier: str) -> bool:
 
 def is_prompt_injection_novel_tier(novelty_tier: str) -> bool:
     return str(novelty_tier or "").strip().lower() in PROMPT_INJECTION_NOVEL_TIERS
+
+
+ProofLike = Union[ProofRecord, Mapping[str, Any]]
+
+
+def _proof_live_context_value(proof: ProofLike, field: str, default: Any = None) -> Any:
+    if isinstance(proof, Mapping):
+        return proof.get(field, default)
+    return getattr(proof, field, default)
+
+
+def is_live_context_pruned(proof: ProofLike, requesting_run_id: str) -> bool:
+    """Return whether an occurrence is unavailable to this run's model context.
+
+    Missing legacy status is active. Unknown/malformed state fails closed for
+    model context, while canonical and human-facing callers remain unfiltered.
+    A valid prune is local to its owning run and therefore remains available to
+    future runs.
+    """
+    raw_status = _proof_live_context_value(proof, "live_context_status", None)
+    if raw_status is None or str(raw_status).strip() == "":
+        return False
+    status = str(raw_status).strip().lower()
+    if status == "active":
+        return False
+    if status != "pruned":
+        return True
+
+    owner_run_id = str(
+        _proof_live_context_value(proof, "live_context_owner_run_id", "") or ""
+    ).strip()
+    requester = str(requesting_run_id or "").strip()
+    if not owner_run_id or not requester:
+        return True
+    return owner_run_id == requester
+
+
+def is_live_context_active(proof: ProofLike, requesting_run_id: str) -> bool:
+    """Return whether an occurrence may enter the requesting run's context."""
+    return not is_live_context_pruned(proof, requesting_run_id)
+
+
+def filter_live_context_records(
+    proofs: List[ProofLike],
+    requesting_run_id: str,
+) -> List[ProofLike]:
+    """Filter records for model use without mutating canonical occurrences."""
+    return [
+        proof
+        for proof in proofs
+        if is_live_context_active(proof, requesting_run_id)
+    ]
 
 
 def normalize_proof_library_category(category: Optional[str] = None, novel_only: Optional[bool] = None) -> str:
@@ -153,6 +217,10 @@ class ProofDatabase:
         self._refresh_runtime_root()
         return self._base_dir / "proofs_index.json"
 
+    def _get_revision_path(self) -> Path:
+        self._refresh_runtime_root()
+        return self._base_dir / "proof_set_revision.json"
+
     def _get_record_path(self, proof_id: str) -> Path:
         safe_id = self._safe_proof_id(proof_id)
         return self._resolve_storage_path(f"proof_{safe_id}.json")
@@ -177,8 +245,61 @@ class ProofDatabase:
     def _default_index(self) -> Dict[str, Any]:
         return {
             "next_proof_id": 1,
+            "proof_set_revision": 0,
             "proofs": [],
         }
+
+    @staticmethod
+    def _atomic_write_text_sync(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, path)
+        except Exception:
+            try:
+                os.unlink(temporary_name)
+            except OSError:
+                pass
+            raise
+
+    async def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
+        await asyncio.to_thread(
+            self._atomic_write_text_sync,
+            path,
+            json.dumps(payload, indent=2),
+        )
+
+    def _load_durable_revision_sync(self) -> int:
+        path = self._get_revision_path()
+        if not path.exists():
+            return 0
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return max(0, int(payload.get("proof_set_revision", 0)))
+        except Exception as exc:
+            logger.warning("Failed to load proof-set revision at %s: %s", path, exc)
+            return 0
+
+    def _save_durable_revision_sync(self, revision: int) -> None:
+        self._atomic_write_text_sync(
+            self._get_revision_path(),
+            json.dumps({"proof_set_revision": max(0, int(revision))}, indent=2),
+        )
+
+    async def _save_durable_revision(self) -> None:
+        await self._atomic_write_json(
+            self._get_revision_path(),
+            {"proof_set_revision": int(self._index_data.get("proof_set_revision", 0))},
+        )
 
     async def get_or_create_active_run_id(self) -> str:
         """Return the durable explicit run ID owned by this proof database."""
@@ -240,8 +361,35 @@ class ProofDatabase:
                 max_numeric_id = max(max_numeric_id, int(match.group(1)))
         return {
             "next_proof_id": max(max_numeric_id + 1, len(proofs) + 1, 1),
+            "proof_set_revision": self._load_durable_revision_sync(),
             "proofs": proofs,
         }
+
+    def _reconcile_index_from_record_files_sync(self) -> bool:
+        """Refresh the derived index when authoritative record files differ."""
+        if not any(self._base_dir.glob("proof_*.json")):
+            # Legacy stores may contain only the embedded index. Preserve them
+            # until an individual record file is first published.
+            return False
+        rebuilt = self._rebuild_index_from_record_files_sync()
+        current_proofs = self._index_data.get("proofs", []) if self._index_data else []
+        if current_proofs == rebuilt["proofs"]:
+            return False
+        metadata = {
+            key: value
+            for key, value in (self._index_data or {}).items()
+            if key not in {"proofs", "next_proof_id", "proof_set_revision"}
+        }
+        self._index_data = {
+            **metadata,
+            **rebuilt,
+            "proof_set_revision": max(
+                int((self._index_data or {}).get("proof_set_revision", 0)),
+                int(rebuilt.get("proof_set_revision", 0)),
+            ) + 1,
+        }
+        self._save_durable_revision_sync(self._index_data["proof_set_revision"])
+        return True
 
     async def initialize(self) -> None:
         """Ensure storage exists and load the index."""
@@ -275,7 +423,14 @@ class ProofDatabase:
             self._index_data["next_proof_id"] = len(self._index_data.get("proofs", [])) + 1
         if "proofs" not in self._index_data:
             self._index_data["proofs"] = []
+        self._index_data["proof_set_revision"] = max(
+            int(self._index_data.get("proof_set_revision", 0)),
+            await asyncio.to_thread(self._load_durable_revision_sync),
+        )
+        reconciled = await asyncio.to_thread(self._reconcile_index_from_record_files_sync)
         self._rebuild_reverse_indexes()
+        if reconciled:
+            await self._save_index()
 
     def _ensure_index_loaded_sync(self) -> None:
         if self._index_data is not None:
@@ -294,12 +449,20 @@ class ProofDatabase:
 
         self._index_data.setdefault("next_proof_id", len(self._index_data.get("proofs", [])) + 1)
         self._index_data.setdefault("proofs", [])
+        self._index_data["proof_set_revision"] = max(
+            int(self._index_data.get("proof_set_revision", 0)),
+            self._load_durable_revision_sync(),
+        )
+        if self._reconcile_index_from_record_files_sync():
+            self._atomic_write_text_sync(
+                self._get_index_path(),
+                json.dumps(self._index_data, indent=2),
+            )
         self._rebuild_reverse_indexes()
 
     async def _save_index(self) -> None:
         self._base_dir.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(self._get_index_path(), "w", encoding="utf-8") as handle:
-            await handle.write(json.dumps(self._index_data, indent=2))
+        await self._atomic_write_json(self._get_index_path(), self._index_data)
 
     @staticmethod
     def _serialize_record(record: ProofRecord) -> Dict[str, Any]:
@@ -373,10 +536,18 @@ class ProofDatabase:
         """Persist one proof's metadata and Lean source through validated paths."""
         record_path = self._get_record_path(stored_record.proof_id)
         lean_path = self._get_lean_path(stored_record.proof_id)
-        async with aiofiles.open(record_path, "w", encoding="utf-8") as handle:
-            await handle.write(json.dumps(serialized, indent=2))
-        async with aiofiles.open(lean_path, "w", encoding="utf-8") as handle:
-            await handle.write(stored_record.lean_code)
+        await self._atomic_write_json(record_path, serialized)
+        await asyncio.to_thread(
+            self._atomic_write_text_sync,
+            lean_path,
+            stored_record.lean_code,
+        )
+
+    async def _increment_proof_set_revision(self) -> int:
+        revision = int(self._index_data.get("proof_set_revision", 0)) + 1
+        self._index_data["proof_set_revision"] = revision
+        await self._save_durable_revision()
+        return revision
 
     async def add_proof_occurrence(self, record: ProofRecord) -> ProofRecord:
         """Persist a full record for each newly verified current-run occurrence."""
@@ -399,6 +570,7 @@ class ProofDatabase:
             self._index_data["proofs"] = proofs
             current_number = self._index_data.get("next_proof_id", 1)
             self._index_data["next_proof_id"] = max(current_number + 1, len(proofs) + 1)
+            await self._increment_proof_set_revision()
             self._rebuild_reverse_indexes()
             await self._save_index()
             return stored_record
@@ -436,7 +608,8 @@ class ProofDatabase:
 
             self._index_data["proofs"] = proofs
             current_number = self._index_data.get("next_proof_id", 1)
-            self._index_data["next_proof_id"] = max(current_number, len(proofs) + 1)
+            self._index_data["next_proof_id"] = max(current_number + 1, len(proofs) + 1)
+            await self._increment_proof_set_revision()
             self._rebuild_reverse_indexes()
             await self._save_index()
 
@@ -629,8 +802,563 @@ class ProofDatabase:
                 )
             ]
 
-    async def update_proof_dependencies(self, proof_id: str, dependencies) -> Optional[ProofRecord]:
+    async def get_all_proofs_for_live_context(
+        self,
+        requesting_run_id: str,
+        novel_only: Optional[bool] = None,
+    ) -> List[ProofRecord]:
+        """Return model-visible proofs for one owning run.
+
+        This deliberately wraps, rather than changes, canonical enumeration.
+        Registration, graph, archive, export, and human-view code must continue
+        to use ``get_all_proofs``.
+        """
+        proofs = await self.get_all_proofs(novel_only=novel_only)
+        return [
+            proof
+            for proof in proofs
+            if is_live_context_active(proof, requesting_run_id)
+        ]
+
+    async def capture_pruning_snapshot(
+        self,
+        *,
+        proof_store_id: str,
+        owning_run_id: str,
+        proof_run_id: str,
+        proof_run_lifecycle_generation: int,
+        owning_lifecycle_generation: Optional[int] = None,
+        scope: str,
+        source_type: str,
+        source_id: str,
+        canonical_user_prompt: str,
+        session_id: str = "",
+        trigger_reasons: Optional[List[str]] = None,
+        accepted_prompt_novel_total: int = 0,
+        context_pressure: Optional[ProofPruneContextPressure] = None,
+        max_candidate_descriptors: int = 12,
+    ) -> ProofPruneSnapshot:
+        """Atomically capture a deterministic, non-mutating pruning snapshot.
+
+        Every active occurrence is represented in ``whole_set``. Detailed
+        descriptors are bounded to deterministically eligible exact-identity
+        candidates and their comparators. This method never calls a model and
+        never changes live-context state.
+        """
+        normalized_run_id = str(owning_run_id or "").strip()
+        normalized_owning_generation = int(
+            owning_lifecycle_generation or proof_run_lifecycle_generation
+        )
+        normalized_prompt = str(canonical_user_prompt or "")
+        if not normalized_run_id:
+            raise ValueError("A stable owning run ID is required.")
+        if not normalized_prompt.strip():
+            raise ValueError("The canonical user prompt is required.")
+        if max_candidate_descriptors < 1:
+            raise ValueError("max_candidate_descriptors must be positive.")
+
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            revision = int(self._index_data.get("proof_set_revision", 0))
+            records = [
+                self._deserialize_record(data)
+                for data in self._index_data.get("proofs", [])
+            ]
+            active_records = [
+                record
+                for record in records
+                if is_live_context_active(record, normalized_run_id)
+            ]
+
+        records_by_id = {record.proof_id: record for record in active_records}
+        canonical_identity_by_id = {
+            record.proof_id: canonical_proof_identity(
+                record.theorem_statement,
+                record.lean_code,
+            )
+            for record in active_records
+        }
+        identity_groups: Dict[tuple[str, str], List[ProofRecord]] = {}
+        dependent_counts: Dict[str, int] = {
+            record.proof_id: 0 for record in active_records
+        }
+        for record in active_records:
+            canonical_identity = canonical_identity_by_id[record.proof_id]
+            identity_key = (
+                str(
+                    record.canonical_theorem_statement_hash
+                    or canonical_identity.theorem_statement_hash
+                ),
+                str(record.canonical_lean_code_hash or canonical_identity.lean_code_hash),
+            )
+            identity_groups.setdefault(identity_key, []).append(record)
+            for dependency in record.dependencies:
+                if dependency.kind != "moto":
+                    continue
+                referenced_id = str(dependency.source_ref or dependency.name or "").strip()
+                if referenced_id in dependent_counts:
+                    dependent_counts[referenced_id] += 1
+
+        protected_by_id: Dict[str, List[str]] = {}
+        eligible_ids: List[str] = []
+        comparator_ids: List[str] = []
+        aggregate: List[ProofPruneAggregateEntry] = []
+
+        for record in sorted(active_records, key=lambda item: item.proof_id):
+            canonical_identity = canonical_identity_by_id[record.proof_id]
+            theorem_hash = str(
+                record.canonical_theorem_statement_hash
+                or canonical_identity.theorem_statement_hash
+            )
+            lean_hash = str(
+                record.canonical_lean_code_hash
+                or canonical_identity.lean_code_hash
+            )
+            identity_key = (
+                theorem_hash,
+                lean_hash,
+            )
+            group = sorted(
+                identity_groups.get(identity_key, []),
+                key=lambda item: (item.created_at, item.proof_id),
+            )
+            protected_reasons: List[str] = []
+            if record.dependency_extraction_status != "complete":
+                protected_reasons.append("dependency_extraction_incomplete")
+            if dependent_counts.get(record.proof_id, 0) > 0:
+                protected_reasons.append("active_dependency_root")
+            if len(group) <= 1:
+                protected_reasons.append("only_active_exact_identity_occurrence")
+            # Exact duplicate occurrences are the only automatically eligible
+            # targets at this layer. Broader supersession needs explicit,
+            # bounded semantic evidence and therefore remains protected.
+            eligible = len(group) > 1 and not protected_reasons
+            protected_by_id[record.proof_id] = protected_reasons
+            if eligible:
+                eligible_ids.append(record.proof_id)
+                comparator_ids.extend(
+                    candidate.proof_id
+                    for candidate in reversed(group)
+                    if candidate.proof_id != record.proof_id
+                )
+
+            aggregate.append(
+                ProofPruneAggregateEntry(
+                    proof_id=record.proof_id,
+                    theorem_name=record.theorem_name,
+                    canonical_theorem_hash=theorem_hash,
+                    canonical_lean_hash=lean_hash,
+                    novelty_tier=record.novelty_tier,
+                    independent_novelty_tier=record.independent_novelty_tier,
+                    source_type=record.source_type,
+                    source_id=record.source_id,
+                    created_at=record.created_at,
+                    dependency_extraction_status=record.dependency_extraction_status,
+                    dependency_count=len(record.dependencies),
+                    dependent_count=dependent_counts.get(record.proof_id, 0),
+                    exact_identity_occurrence_count=len(group),
+                    protected_reasons=protected_reasons,
+                    eligible_candidate=eligible,
+                )
+            )
+
+        selected_candidate_ids = sorted(set(eligible_ids))[:max_candidate_descriptors]
+        selected_comparator_ids: List[str] = []
+        for proof_id in comparator_ids:
+            if (
+                len(selected_candidate_ids) + len(selected_comparator_ids)
+                >= max_candidate_descriptors
+            ):
+                break
+            if (
+                proof_id in records_by_id
+                and proof_id not in selected_candidate_ids
+                and proof_id not in selected_comparator_ids
+            ):
+                selected_comparator_ids.append(proof_id)
+
+        def descriptor(record: ProofRecord) -> ProofPruneProofDescriptor:
+            canonical_identity = canonical_identity_by_id[record.proof_id]
+            identity_key = (
+                str(
+                    record.canonical_theorem_statement_hash
+                    or canonical_identity.theorem_statement_hash
+                ),
+                str(record.canonical_lean_code_hash or canonical_identity.lean_code_hash),
+            )
+            comparators = [
+                item.proof_id
+                for item in sorted(
+                    identity_groups.get(identity_key, []),
+                    key=lambda item: (item.created_at, item.proof_id),
+                )
+                if item.proof_id != record.proof_id
+            ]
+            return ProofPruneProofDescriptor(
+                proof_id=record.proof_id,
+                theorem_name=record.theorem_name,
+                theorem_statement=record.theorem_statement,
+                canonical_theorem_hash=identity_key[0],
+                canonical_lean_hash=identity_key[1],
+                novelty_tier=record.novelty_tier,
+                novelty_reasoning=record.novelty_reasoning,
+                independent_novelty_tier=record.independent_novelty_tier,
+                independent_novelty_reasoning=record.independent_novelty_reasoning,
+                source_type=record.source_type,
+                source_id=record.source_id,
+                source_title=record.source_title,
+                created_at=record.created_at,
+                dependencies=list(record.dependencies),
+                dependency_extraction_status=record.dependency_extraction_status,
+                protected_reasons=protected_by_id.get(record.proof_id, []),
+                comparator_proof_ids=comparators,
+                lean_code=record.lean_code,
+                lean_code_included=bool(record.lean_code),
+            )
+
+        candidate_descriptors = [
+            descriptor(records_by_id[proof_id])
+            for proof_id in selected_candidate_ids
+        ]
+        comparator_descriptors = [
+            descriptor(records_by_id[proof_id])
+            for proof_id in selected_comparator_ids
+        ]
+        identity_payload = {
+            "proof_set_revision": revision,
+            "proof_store_id": str(proof_store_id),
+            "owning_run_id": normalized_run_id,
+            "proof_run_id": str(proof_run_id),
+            "proof_run_lifecycle_generation": proof_run_lifecycle_generation,
+            "owning_lifecycle_generation": normalized_owning_generation,
+            "proof_ids": [entry.proof_id for entry in aggregate],
+            "theorem_hashes": [entry.canonical_theorem_hash for entry in aggregate],
+            "lean_hashes": [entry.canonical_lean_hash for entry in aggregate],
+        }
+        snapshot_id = hashlib.sha256(
+            json.dumps(
+                identity_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return ProofPruneSnapshot(
+            snapshot_id=snapshot_id,
+            proof_set_revision=revision,
+            proof_store_id=str(proof_store_id),
+            owning_run_id=normalized_run_id,
+            proof_run_id=str(proof_run_id),
+            proof_run_lifecycle_generation=proof_run_lifecycle_generation,
+            owning_lifecycle_generation=normalized_owning_generation,
+            scope=scope,
+            source_type=source_type,
+            source_id=str(source_id),
+            session_id=str(session_id or ""),
+            canonical_user_prompt=normalized_prompt,
+            trigger_reasons=list(trigger_reasons or []),
+            accepted_prompt_novel_total=accepted_prompt_novel_total,
+            context_pressure=context_pressure or ProofPruneContextPressure(),
+            whole_set=aggregate,
+            candidate_descriptors=candidate_descriptors,
+            comparator_descriptors=comparator_descriptors,
+            evidence_bounded=(
+                len(selected_candidate_ids) + len(selected_comparator_ids)
+                < len(set(eligible_ids + comparator_ids))
+            ),
+        )
+
+    async def get_proof_set_revision(self) -> int:
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            return int(self._index_data.get("proof_set_revision", 0))
+
+    async def set_live_context_status(
+        self,
+        *,
+        proof_id: str,
+        status: str,
+        expected_run_id: str,
+        expected_proof_set_revision: int,
+        actor: str,
+        reason: str,
+        validator_reasoning: str = "",
+        snapshot_revision: Optional[int] = None,
+        trigger_reasons: Optional[List[str]] = None,
+        expected_theorem_hash: str = "",
+        expected_lean_hash: str = "",
+    ) -> tuple[ProofRecord, int]:
+        """Atomically update owning-run live-context state without touching Lean."""
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            current_revision = int(self._index_data.get("proof_set_revision", 0))
+            if current_revision != int(expected_proof_set_revision):
+                raise RuntimeError("Proof set changed; refresh and retry.")
+
+            proof_index = next(
+                (
+                    index
+                    for index, proof in enumerate(self._index_data.get("proofs", []))
+                    if proof.get("proof_id") == proof_id
+                ),
+                None,
+            )
+            if proof_index is None:
+                raise KeyError(proof_id)
+            record = self._deserialize_record(self._index_data["proofs"][proof_index])
+            normalized_run_id = str(record.run_id or f"legacy:{record.source_type}:{record.source_id}")
+            if normalized_run_id != str(expected_run_id or "").strip():
+                raise RuntimeError("Proof run changed; refresh and retry.")
+            if expected_theorem_hash and expected_theorem_hash != record.canonical_theorem_statement_hash:
+                raise RuntimeError("Proof theorem identity changed; refresh and retry.")
+            if expected_lean_hash and expected_lean_hash != record.canonical_lean_code_hash:
+                raise RuntimeError("Proof Lean identity changed; refresh and retry.")
+            if status not in {"active", "pruned"}:
+                raise ValueError("Live-context status must be active or pruned.")
+            if actor not in {"user", "automatic_proof_pruning"}:
+                raise ValueError("Unsupported live-context actor.")
+
+            if status == record.live_context_status:
+                if status == "active" or (
+                    record.live_context_owner_run_id == normalized_run_id
+                    and record.live_context_pruned_by == actor
+                ):
+                    return record, current_revision
+            if (
+                status == "active"
+                and record.live_context_status == "pruned"
+                and record.live_context_owner_run_id == normalized_run_id
+                and record.live_context_pruned_by == "automatic_proof_pruning"
+            ):
+                raise RuntimeError("Validator-approved automatic pruning is immutable in its owning run.")
+
+            if status == "active":
+                updated = record.model_copy(
+                    update={
+                        "live_context_status": "active",
+                        "live_context_owner_run_id": "",
+                        "live_context_pruned_at": None,
+                        "live_context_pruned_by": None,
+                        "live_context_prune_reason": "",
+                        "live_context_prune_validator_reasoning": "",
+                        "live_context_prune_snapshot_revision": None,
+                        "live_context_prune_trigger_reasons": [],
+                    }
+                )
+            else:
+                bounded_reason = str(reason or "").strip()[:2000]
+                if not bounded_reason:
+                    raise ValueError("A non-empty prune reason is required.")
+                updated = record.model_copy(
+                    update={
+                        "live_context_status": "pruned",
+                        "live_context_owner_run_id": normalized_run_id,
+                        "live_context_pruned_at": datetime.now(),
+                        "live_context_pruned_by": actor,
+                        "live_context_prune_reason": bounded_reason,
+                        "live_context_prune_validator_reasoning": str(
+                            validator_reasoning or ""
+                        ).strip()[:4000],
+                        "live_context_prune_snapshot_revision": snapshot_revision,
+                        "live_context_prune_trigger_reasons": list(trigger_reasons or []),
+                    }
+                )
+
+            serialized = self._serialize_record(updated)
+            previous_serialized = self._serialize_record(record)
+            previous_revision = current_revision
+            record_path = self._get_record_path(proof_id)
+            await self._atomic_write_json(record_path, serialized)
+            self._index_data["proofs"][proof_index] = serialized
+            try:
+                new_revision = await self._increment_proof_set_revision()
+                self._rebuild_reverse_indexes()
+                await self._save_index()
+            except Exception:
+                self._index_data["proofs"][proof_index] = previous_serialized
+                self._index_data["proof_set_revision"] = previous_revision
+                await self._atomic_write_json(record_path, previous_serialized)
+                await asyncio.to_thread(
+                    self._save_durable_revision_sync,
+                    previous_revision,
+                )
+                raise
+            return updated, new_revision
+
+    async def commit_pruning_intent(
+        self,
+        intent: ProofPruneCommitIntent,
+        *,
+        snapshot: ProofPruneSnapshot,
+        expected_proof_store_id: str,
+        expected_proof_run_id: str,
+        expected_lifecycle_generation: int,
+    ) -> tuple[ProofRecord, int]:
+        """Commit one accepted prune after rechecking decision-relevant facts.
+
+        Unrelated additions do not stale the decision. The target, its cited
+        exact-identity comparators, dependency/protection state, hashes, store,
+        run and lifecycle must still match the immutable review snapshot.
+        """
+        if snapshot.proof_store_id != str(expected_proof_store_id):
+            raise RuntimeError("Proof store changed; refresh and retry.")
+        if snapshot.proof_run_id != str(expected_proof_run_id):
+            raise RuntimeError("Proof run changed; refresh and retry.")
+        if (
+            snapshot.proof_run_lifecycle_generation
+            != int(expected_lifecycle_generation)
+        ):
+            raise RuntimeError("Proof lifecycle changed; refresh and retry.")
+        if snapshot.owning_lifecycle_generation != int(expected_lifecycle_generation):
+            raise RuntimeError("Owning workflow lifecycle changed; refresh and retry.")
+        if intent.snapshot_id != snapshot.snapshot_id:
+            raise RuntimeError("Pruning snapshot identity changed; refresh and retry.")
+
+        snapshot_entries = {entry.proof_id: entry for entry in snapshot.whole_set}
+        snapshot_target = snapshot_entries.get(intent.proof_id)
+        if snapshot_target is None or not snapshot_target.eligible_candidate:
+            raise RuntimeError("Pruning target is no longer eligible.")
+        descriptor = next(
+            (
+                item
+                for item in snapshot.candidate_descriptors
+                if item.proof_id == intent.proof_id
+            ),
+            None,
+        )
+        if descriptor is None:
+            raise RuntimeError("Pruning target evidence is unavailable.")
+
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            current_revision = int(self._index_data.get("proof_set_revision", 0))
+            current_records = {
+                str(data.get("proof_id", "")): self._deserialize_record(data)
+                for data in self._index_data.get("proofs", [])
+                if data.get("proof_id")
+            }
+            target = current_records.get(intent.proof_id)
+            if target is None:
+                raise KeyError(intent.proof_id)
+            if not is_live_context_active(target, intent.owning_run_id):
+                raise RuntimeError("Pruning target is no longer active.")
+            target_identity = canonical_proof_identity(
+                target.theorem_statement,
+                target.lean_code,
+            )
+            theorem_hash = str(
+                target.canonical_theorem_statement_hash
+                or target_identity.theorem_statement_hash
+            )
+            lean_hash = str(
+                target.canonical_lean_code_hash or target_identity.lean_code_hash
+            )
+            if theorem_hash != intent.expected_theorem_hash:
+                raise RuntimeError("Pruning target theorem identity changed.")
+            if lean_hash != intent.expected_lean_hash:
+                raise RuntimeError("Pruning target Lean identity changed.")
+            if target.dependency_extraction_status != "complete":
+                raise RuntimeError("Pruning target dependency state is incomplete.")
+
+            active_dependents = []
+            for record in current_records.values():
+                if not is_live_context_active(record, intent.owning_run_id):
+                    continue
+                for dependency in record.dependencies:
+                    reference = str(
+                        dependency.source_ref or dependency.name or ""
+                    ).strip()
+                    if dependency.kind == "moto" and reference == target.proof_id:
+                        active_dependents.append(record.proof_id)
+            if active_dependents:
+                raise RuntimeError("Pruning target became an active dependency root.")
+
+            comparator_ids = list(descriptor.comparator_proof_ids)
+            matching_comparator = False
+            for comparator_id in comparator_ids:
+                comparator = current_records.get(comparator_id)
+                if comparator is None or not is_live_context_active(
+                    comparator, intent.owning_run_id
+                ):
+                    continue
+                comparator_identity = canonical_proof_identity(
+                    comparator.theorem_statement,
+                    comparator.lean_code,
+                )
+                if (
+                    str(
+                        comparator.canonical_theorem_statement_hash
+                        or comparator_identity.theorem_statement_hash
+                    )
+                    == theorem_hash
+                    and str(
+                        comparator.canonical_lean_code_hash
+                        or comparator_identity.lean_code_hash
+                    )
+                    == lean_hash
+                ):
+                    matching_comparator = True
+                    break
+            if not matching_comparator:
+                raise RuntimeError(
+                    "The stronger active comparator changed or is unavailable."
+                )
+
+            proof_index = next(
+                index
+                for index, data in enumerate(self._index_data.get("proofs", []))
+                if data.get("proof_id") == target.proof_id
+            )
+            updated = target.model_copy(
+                update={
+                    "live_context_status": "pruned",
+                    "live_context_owner_run_id": intent.owning_run_id,
+                    "live_context_pruned_at": datetime.now(),
+                    "live_context_pruned_by": "automatic_proof_pruning",
+                    "live_context_prune_reason": intent.proposer_reasoning[:2000],
+                    "live_context_prune_validator_reasoning": (
+                        intent.validator_reasoning[:4000]
+                    ),
+                    "live_context_prune_snapshot_revision": (
+                        intent.proof_set_revision
+                    ),
+                    "live_context_prune_trigger_reasons": list(
+                        intent.trigger_reasons
+                    ),
+                }
+            )
+            serialized = self._serialize_record(updated)
+            await self._atomic_write_json(
+                self._get_record_path(target.proof_id),
+                serialized,
+            )
+            self._index_data["proofs"][proof_index] = serialized
+            new_revision = await self._increment_proof_set_revision()
+            self._rebuild_reverse_indexes()
+            await self._save_index()
+            logger.info(
+                "Applied proof live-context prune %s from snapshot revision %s "
+                "at current revision %s",
+                target.proof_id,
+                snapshot.proof_set_revision,
+                current_revision,
+            )
+            return updated, new_revision
+
+    async def update_proof_dependencies(
+        self,
+        proof_id: str,
+        dependencies,
+        *,
+        extraction_status: str = "complete",
+        extraction_detail: str = "",
+    ) -> Optional[ProofRecord]:
         """Persist a new dependency list for an existing proof record."""
+        if extraction_status not in {"not_attempted", "complete", "partial", "failed"}:
+            raise ValueError("Unsupported dependency extraction status.")
         async with self._lock:
             if self._index_data is None:
                 await self._load_index()
@@ -643,7 +1371,16 @@ class ProofDatabase:
                     updated_proofs.append(proof_data)
                     continue
                 record = self._deserialize_record(proof_data)
-                updated_record = record.model_copy(update={"dependencies": list(dependencies or [])})
+                updated_record = record.model_copy(
+                    update={
+                        "dependencies": list(dependencies or []),
+                        "dependency_extraction_status": extraction_status,
+                        "dependency_extraction_detail": str(
+                            extraction_detail or ""
+                        ).strip()[:1000],
+                        "dependency_extracted_at": datetime.now(),
+                    }
+                )
                 updated_proofs.append(self._serialize_record(updated_record))
 
             if updated_record is None:
@@ -652,8 +1389,11 @@ class ProofDatabase:
             self._index_data["proofs"] = updated_proofs
             self._rebuild_reverse_indexes()
 
-            async with aiofiles.open(self._get_record_path(proof_id), "w", encoding="utf-8") as handle:
-                await handle.write(json.dumps(self._serialize_record(updated_record), indent=2))
+            await self._atomic_write_json(
+                self._get_record_path(proof_id),
+                self._serialize_record(updated_record),
+            )
+            await self._increment_proof_set_revision()
             await self._save_index()
             return updated_record
 
@@ -734,6 +1474,14 @@ class ProofDatabase:
                 "is_novel": proof.novel,
                 "novelty_tier": proof.novelty_tier,
                 "created_at": proof.created_at.isoformat() if proof.created_at else None,
+                "live_context_status": proof.live_context_status,
+                "live_context_owner_run_id": proof.live_context_owner_run_id,
+                "live_context_pruned_at": (
+                    proof.live_context_pruned_at.isoformat()
+                    if proof.live_context_pruned_at
+                    else None
+                ),
+                "live_context_pruned_by": proof.live_context_pruned_by,
             }
             for proof in proofs
         ]
@@ -808,12 +1556,19 @@ class ProofDatabase:
             "duplicate_novel": duplicate_novel_count,
             "not_novel": not_novel_count,
             "known": len(proofs) - syntheticlib_novel_count,
+            "live_context_active": sum(
+                1 for proof in proofs if proof.get("live_context_status", "active") != "pruned"
+            ),
+            "live_context_pruned": sum(
+                1 for proof in proofs if proof.get("live_context_status", "active") == "pruned"
+            ),
         }
 
     def get_known_proofs_summary_for_browsing(
         self,
         source_id: Optional[str] = None,
         limit: int = 15,
+        requesting_run_id: str = "",
     ) -> str:
         """Return a compact summary of known (non-novel) proofs for optional prompt injection.
 
@@ -836,7 +1591,11 @@ class ProofDatabase:
         proofs = self._index_data.get("proofs", []) if self._index_data else []
         known_proofs = [
             p for p in proofs
-            if not p.get("novel") or is_duplicate_novel_tier(p.get("novelty_tier", ""))
+            if (
+                not p.get("novel")
+                or is_duplicate_novel_tier(p.get("novelty_tier", ""))
+            )
+            and is_live_context_active(p, requesting_run_id)
         ]
 
         if source_id:
@@ -867,7 +1626,7 @@ class ProofDatabase:
         lines.append("=== END KNOWN PROOFS ===")
         return "\n".join(lines)
 
-    def get_novel_proofs_for_injection(self) -> str:
+    def get_novel_proofs_for_injection(self, requesting_run_id: str = "") -> str:
         """Format the novel proofs block for highest-priority prompt injection."""
         self._ensure_index_loaded_sync()
         proofs = self._index_data.get("proofs", []) if self._index_data else []
@@ -877,6 +1636,7 @@ class ProofDatabase:
                 is_prompt_injection_novel_tier(proof.get("novelty_tier", ""))
                 or not str(proof.get("novelty_tier") or "").strip()
             )
+            and is_live_context_active(proof, requesting_run_id)
         ]
 
         if not novel_proofs:
@@ -908,9 +1668,9 @@ class ProofDatabase:
         lines.append("=== END VERIFIED PROOFS ===")
         return "\n".join(lines)
 
-    def inject_into_prompt(self, prompt: str) -> str:
+    def inject_into_prompt(self, prompt: str, requesting_run_id: str = "") -> str:
         """Prepend the verified novel proofs block when available."""
-        proofs_block = self.get_novel_proofs_for_injection()
+        proofs_block = self.get_novel_proofs_for_injection(requesting_run_id)
         if not proofs_block:
             return prompt
         if "=== VERIFIED NOVEL MATHEMATICAL PROOFS (Lean 4 Verified) ===" in prompt:
@@ -1134,6 +1894,20 @@ class ProofDatabase:
                 "created_at": proof_data.get("created_at", ""),
                 "user_prompt": user_prompt,
                 "dependencies": proof_data.get("dependencies", []),
+                "live_context_status": proof_data.get("live_context_status", "active"),
+                "live_context_owner_run_id": proof_data.get("live_context_owner_run_id", ""),
+                "live_context_pruned_at": proof_data.get("live_context_pruned_at"),
+                "live_context_pruned_by": proof_data.get("live_context_pruned_by"),
+                "live_context_prune_reason": proof_data.get("live_context_prune_reason", ""),
+                "live_context_prune_validator_reasoning": proof_data.get(
+                    "live_context_prune_validator_reasoning", ""
+                ),
+                "live_context_prune_snapshot_revision": proof_data.get(
+                    "live_context_prune_snapshot_revision"
+                ),
+                "live_context_prune_trigger_reasons": proof_data.get(
+                    "live_context_prune_trigger_reasons", []
+                ),
             })
 
         return results

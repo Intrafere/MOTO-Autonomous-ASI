@@ -235,6 +235,10 @@ class Lean4Client:
         self._workspace_ready = False
         self._workspace_unhealthy_error = ""
         self._workspace_lock = asyncio.Lock()
+        self._workspace_bootstrap_task: Optional[asyncio.Task[bool]] = None
+        self._workspace_bootstrap_state = "not_started"
+        self._workspace_bootstrap_error = ""
+        self._lean_version = ""
 
     @classmethod
     def _get_lean_execution_lock(cls) -> asyncio.Lock:
@@ -267,11 +271,84 @@ class Lean4Client:
         return False
 
     async def warm_start(self) -> None:
-        """Perform optional startup work during FastAPI lifespan."""
-        await self.ensure_workspace()
+        """Compatibility wrapper for explicitly requested workspace preparation."""
+        await self.await_workspace_ready()
 
     async def close(self) -> None:
         """Release client resources during backend shutdown."""
+        task = self._workspace_bootstrap_task
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.debug("Lean 4 workspace bootstrap cancelled during client close")
+            except Exception as exc:
+                logger.debug("Lean 4 workspace bootstrap failed during client close: %s", exc)
+        self._workspace_bootstrap_task = None
+        if self._workspace_bootstrap_state == "starting":
+            self._workspace_bootstrap_state = "not_started"
+
+    def get_workspace_status(self) -> dict[str, Any]:
+        """Return cached workspace state without starting Lean or touching the filesystem."""
+        return {
+            "state": self._workspace_bootstrap_state,
+            "ready": bool(self._workspace_ready and self._workspace_bootstrap_state == "ready"),
+            "error": self._workspace_bootstrap_error or self._workspace_unhealthy_error,
+        }
+
+    def start_workspace_bootstrap(self) -> asyncio.Task[bool]:
+        """Start one shared workspace bootstrap task and return it without waiting."""
+        task = self._workspace_bootstrap_task
+        if task is not None and not task.done():
+            return task
+        if self._workspace_ready and self._workspace_bootstrap_state == "ready":
+            async def _already_ready() -> bool:
+                return True
+
+            task = asyncio.create_task(_already_ready())
+            self._workspace_bootstrap_task = task
+            return task
+
+        self._workspace_bootstrap_state = "starting"
+        self._workspace_bootstrap_error = ""
+        task = asyncio.create_task(self._run_workspace_bootstrap())
+        self._workspace_bootstrap_task = task
+        return task
+
+    async def await_workspace_ready(self) -> bool:
+        """Wait for the shared bootstrap without letting one cancelled waiter stop it."""
+        task = self.start_workspace_bootstrap()
+        return await asyncio.shield(task)
+
+    async def _run_workspace_bootstrap(self) -> bool:
+        try:
+            async with self._workspace_lock:
+                ready = await self._ensure_workspace_locked()
+            if not ready:
+                self._workspace_bootstrap_state = "failed"
+                self._workspace_bootstrap_error = self._workspace_unhealthy_error or (
+                    f"{_LEAN_WORKSPACE_ERROR_PREFIX}: Lean 4 workspace preparation failed."
+                )
+                return False
+            await self._after_workspace_bootstrap()
+            self._workspace_bootstrap_state = "ready"
+            self._workspace_bootstrap_error = ""
+            return True
+        except asyncio.CancelledError:
+            self._workspace_bootstrap_state = "not_started"
+            raise
+        except Exception as exc:
+            logger.exception("Lean 4 workspace bootstrap failed")
+            self._workspace_ready = False
+            self._workspace_bootstrap_state = "failed"
+            self._workspace_bootstrap_error = (
+                f"{_LEAN_WORKSPACE_ERROR_PREFIX}: Lean 4 workspace preparation failed: {exc}"
+            )
+            return False
+
+    async def _after_workspace_bootstrap(self) -> None:
+        """Run client-specific initialization after the shared workspace is ready."""
         return
 
     def get_mathlib_package_dir(self) -> Path:
@@ -422,6 +499,8 @@ class Lean4Client:
     def _mark_workspace_unhealthy(self, output: str) -> None:
         self._workspace_ready = False
         self._workspace_unhealthy_error = self._format_workspace_infrastructure_error(output)
+        self._workspace_bootstrap_state = "failed"
+        self._workspace_bootstrap_error = self._workspace_unhealthy_error
 
     def _workspace_unavailable_result(self, *, tactic_script: bool = False) -> Lean4Result:
         error_output = self._workspace_unhealthy_error or (
@@ -484,6 +563,9 @@ class Lean4Client:
             repaired = await self._ensure_workspace_locked()
             if not repaired:
                 self._mark_workspace_unhealthy(output)
+            else:
+                self._workspace_bootstrap_state = "ready"
+                self._workspace_bootstrap_error = ""
             return repaired
 
     async def get_version(self) -> str:
@@ -498,10 +580,13 @@ class Lean4Client:
             return (stderr or stdout).strip()
         return (stdout or stderr).strip()
 
+    def get_cached_version(self) -> str:
+        """Return the version observed by bootstrap without invoking Lean."""
+        return self._lean_version
+
     async def ensure_workspace(self) -> bool:
-        """Create a reusable Mathlib-enabled workspace if missing."""
-        async with self._workspace_lock:
-            return await self._ensure_workspace_locked()
+        """Wait for the shared, lazily started Mathlib workspace bootstrap."""
+        return await self.await_workspace_ready()
 
     async def _ensure_workspace_locked(self) -> bool:
         """Create a reusable Mathlib-enabled workspace while holding the workspace lock."""
@@ -1242,13 +1327,14 @@ class Lean4LspClient(Lean4Client):
         )
 
     async def warm_start(self) -> None:
-        """Best-effort startup of the persistent Lean server."""
-        if not system_config.lean4_enabled:
-            return
-        workspace_ready = await self.ensure_workspace()
-        if not workspace_ready:
-            logger.warning("Lean 4 LSP warm start skipped because the workspace is not ready.")
-            return
+        """Compatibility wrapper for explicitly requested workspace/LSP preparation."""
+        await self.await_workspace_ready()
+
+    async def _after_workspace_bootstrap(self) -> None:
+        self._subprocess_fallback._workspace_ready = True
+        self._subprocess_fallback._workspace_bootstrap_state = "ready"
+        self._subprocess_fallback._workspace_unhealthy_error = ""
+        self._subprocess_fallback._workspace_bootstrap_error = ""
         if not system_config.lean4_lsp_enabled or not self._lsp_healthy:
             return
         try:
@@ -1257,6 +1343,8 @@ class Lean4LspClient(Lean4Client):
             await self._mark_unhealthy(f"warm start failed: {exc}")
 
     async def close(self) -> None:
+        await super().close()
+        await self._subprocess_fallback.close()
         await self._shutdown_server(mark_unhealthy=False)
 
     def _cancel_idle_shutdown(self) -> None:
@@ -1903,6 +1991,11 @@ def get_lean4_client() -> Lean4Client:
             workspace_dir=system_config.lean4_workspace_dir,
         )
     return _lean4_client
+
+
+def start_lean4_workspace_bootstrap() -> asyncio.Task[bool]:
+    """Lazily start the singleton workspace bootstrap without awaiting it."""
+    return get_lean4_client().start_workspace_bootstrap()
 
 
 async def close_lean4_client() -> None:

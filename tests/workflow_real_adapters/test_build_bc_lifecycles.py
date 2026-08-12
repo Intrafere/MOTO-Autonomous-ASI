@@ -441,11 +441,18 @@ async def test_manual_compiler_proof_only_route_owns_background_task(monkeypatch
     release = asyncio.Event()
     class Stage:
         @classmethod
-        async def reserve_source(cls, source_type, source_id):
+        async def reserve_source(cls, source_type, source_id, *, owner_token=None):
             entered.set()
+            return owner_token or "test-reservation-token"
 
-    async def bounded_check(_request, *, source_reserved=False):
+    async def bounded_check(
+        _request,
+        *,
+        source_reserved=False,
+        source_reservation_token="",
+    ):
         assert source_reserved is True
+        assert source_reservation_token
         await release.wait()
 
     monkeypatch.setattr(compiler_route, "ProofVerificationStage", Stage)

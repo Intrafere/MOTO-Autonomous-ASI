@@ -2,15 +2,23 @@ import React, { useState, useEffect } from 'react';
 import { websocket } from '../../services/websocket';
 import { api } from '../../services/api';
 import LiveActivityFeed from '../LiveActivityFeed';
-import { MANUAL_AGGREGATOR_PROOF_SOURCE_ID } from '../../hooks/useProofCheckRuntime';
+import { MANUAL_AGGREGATOR_PROOF_SOURCE_ID } from '../../utils/manualProofSources';
+import {
+  formatAggregatorPersistedOverflowMessage,
+  shouldIncludeAggregatorProofContextOverflow,
+  shouldIncludeAggregatorSolutionPathEvent,
+} from '../../utils/manualLogRouting';
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  formatEmptyProofDiscoveryMessage,
+  formatProofRunEventMessage,
   formatSolutionPathEventMessage,
   buildRejectionFeedbackNoticeActivity,
   getActivityClass,
   getActivityIcon,
   hasRecentAssistantProofPackDuplicate,
+  hasRecentProofActivityDuplicate,
   shouldAddRejectionFeedbackNotice,
 } from '../../utils/activityStyles';
 import '../settings-common.css';
@@ -32,6 +40,25 @@ const MANUAL_PROOF_EVENTS = [
   'novel_proof_discovered',
   'proof_dependency_added',
   'proof_check_complete',
+  'proof_retry_scheduled',
+  'proof_retry_started',
+  'proof_run_queued',
+  'proof_run_round_started',
+  'proof_run_round_complete',
+  'proof_run_provider_paused',
+  'proof_run_provider_resumed',
+  'proof_run_terminal',
+  'proof_prune_review_queued',
+  'proof_prune_review_started',
+  'proof_prune_proposed',
+  'proof_prune_validation_started',
+  'proof_prune_provider_paused',
+  'proof_prune_repair_required',
+  'proof_prune_applied',
+  'proof_prune_no_change',
+  'proof_prune_rejected',
+  'proof_prune_stale',
+  'proof_prune_error',
 ];
 const ASSISTANT_MEMORY_EVENTS = [
   'assistant_proof_pack_updated',
@@ -49,14 +76,10 @@ const SOLUTION_PATH_EVENTS = [
 ];
 const HIDDEN_AGGREGATOR_ACTIVITY_EVENTS = new Set(['new_submission']);
 
-export const shouldIncludeAggregatorProofContextOverflow = (data = {}) => (
-  data.source_type === 'brainstorm'
-  && data.source_id === MANUAL_AGGREGATOR_PROOF_SOURCE_ID
-);
-
-export const shouldIncludeAggregatorSolutionPathEvent = (data = {}) => {
-  const workflowMode = String(data.workflow_mode || data.mode || '').toLowerCase();
-  return !workflowMode || workflowMode === 'aggregator';
+export {
+  formatAggregatorPersistedOverflowMessage,
+  shouldIncludeAggregatorProofContextOverflow,
+  shouldIncludeAggregatorSolutionPathEvent,
 };
 
 const normalizeAggregatorEventName = (eventName = '') => {
@@ -78,6 +101,9 @@ const normalizeAggregatorEventName = (eventName = '') => {
 
 const getEventStorageKey = (event = {}) => {
   const data = event.data || {};
+  if (data.notification_key) {
+    return `provider:${data.notification_key}`;
+  }
   const normalizedType = normalizeAggregatorEventName(event.type || '');
   if (MANUAL_PROOF_EVENTS.includes(normalizedType) && data.manual_event_id) {
     return `manual-proof:${data.manual_event_id}`;
@@ -146,14 +172,16 @@ const leanProofResponse = (data = {}) => {
   if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
     error = `${error} You can change this timeout in Advanced Settings.`;
   }
-  return error ? `Lean 4 response: ${error} - proof not verified.` : '';
+  return error
+    ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
+    : '';
 };
 
 const formatLeanProofAttempt = (prefix, data = {}) => {
   const attempt = data.attempt ? `, attempt ${data.attempt}` : '';
   const response = leanProofResponse(data);
   const base = `${prefix}: ${proofTargetLabel(data)}${attempt}`;
-  return response ? `${base} - ${response}` : base;
+  return response ? `${base} — ${response}` : base;
 };
 
 const mergeEventLists = (...eventLists) => {
@@ -191,12 +219,12 @@ const countLatestRejectionStreak = (events) => {
   return count;
 };
 
-export const formatAggregatorPersistedOverflowMessage = (event = {}) => (
-  formatContextOverflowActivityMessage(event.metadata || {})
-);
-
-export default function AggregatorLogs() {
+export default function AggregatorLogs({ providerActivity = [] }) {
   const [events, setEvents] = useState([]);
+
+  useEffect(() => {
+    setEvents(prev => mergeEventLists(providerActivity, prev));
+  }, [providerActivity]);
   const [status, setStatus] = useState(null);
   const [recoveryStatus, setRecoveryStatus] = useState(null);
 
@@ -276,7 +304,16 @@ export default function AggregatorLogs() {
       if (!Array.isArray(parsed)) {
         return [];
       }
-      return parsed.map((event) => {
+      return parsed.filter((event) => {
+        const message = String(event?.message || '');
+        return (
+          event?.type !== 'proof_run_idle'
+          && event?.type !== 'proof_run_next_round_required'
+          && event?.data?.status !== 'idle_between_rounds'
+          && event?.data?.terminal_reason !== 'three_consecutive_zero_candidate_rounds'
+          && !/waiting for Run Next Round|three consecutive valid.*no candidates/i.test(message)
+        );
+      }).map((event) => {
         if (!event) {
           return event;
         }
@@ -482,7 +519,15 @@ export default function AggregatorLogs() {
   const proofRoundPrefix = (data = {}) => {
     const round = Number(data.proof_round_index || 0);
     const maxRounds = Number(data.proof_max_rounds || 0);
-    return round > 0 && maxRounds > 1 ? `Proof round ${round}/${maxRounds} discovery` : 'Proof discovery';
+    if (round <= 0) return 'Proof discovery';
+    if (
+      data.run_mode === 'loop_with_pruning'
+      || data.proof_run_unbounded === true
+      || maxRounds === 0
+    ) {
+      return `Proof round ${round} discovery`;
+    }
+    return maxRounds > 1 ? `Proof round ${round}/${maxRounds} discovery` : 'Proof discovery';
   };
 
   const formatProofEvent = (eventName, data = {}) => {
@@ -490,7 +535,7 @@ export default function AggregatorLogs() {
       case 'proof_check_started':
         return 'Proof check started for the manual Aggregator database';
       case 'proof_check_no_candidates':
-        return `${proofRoundPrefix(data)} found 0 proof candidates; no proofs will be attempted`;
+        return formatEmptyProofDiscoveryMessage(proofRoundPrefix(data));
       case 'proof_check_candidates_found': {
         const count = Number(data.count || 0);
         const subject = count === 1 ? 'proof candidate' : 'proof candidates';
@@ -501,7 +546,7 @@ export default function AggregatorLogs() {
       case 'proof_lean_accepted':
         return `Lean accepted proof: ${proofTargetLabel(data)}`;
       case 'proof_attempt_failed':
-        return formatLeanProofAttempt('Proof attempt failed', data);
+        return formatLeanProofAttempt('Proof attempt feedback', data);
       case 'proof_attempts_exhausted':
         return formatLeanProofAttempt('Proof attempts exhausted', data);
       case 'proof_integrity_rejected':
@@ -520,6 +565,27 @@ export default function AggregatorLogs() {
         const detail = data.message ? ` - ${compactProofText(data.message)}` : '';
         return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
       }
+      case 'proof_retry_scheduled':
+      case 'proof_retry_started':
+        return data.message || formatProofRunEventMessage(eventName, data);
+      case 'proof_run_queued':
+      case 'proof_run_round_started':
+      case 'proof_run_round_complete':
+      case 'proof_run_provider_paused':
+      case 'proof_run_provider_resumed':
+      case 'proof_run_terminal':
+      case 'proof_prune_review_queued':
+      case 'proof_prune_review_started':
+      case 'proof_prune_proposed':
+      case 'proof_prune_validation_started':
+      case 'proof_prune_provider_paused':
+      case 'proof_prune_repair_required':
+      case 'proof_prune_applied':
+      case 'proof_prune_no_change':
+      case 'proof_prune_rejected':
+      case 'proof_prune_stale':
+      case 'proof_prune_error':
+        return formatProofRunEventMessage(eventName, data);
       default:
         return `Proof event: ${eventName}`;
     }
@@ -542,6 +608,9 @@ export default function AggregatorLogs() {
       timestamp,
     };
     setEvents(prev => {
+      if (hasRecentProofActivityDuplicate(prev, type, data)) {
+        return prev;
+      }
       if (hasRecentAssistantProofPackDuplicate(prev, type, data, timestamp)) {
         return prev;
       }

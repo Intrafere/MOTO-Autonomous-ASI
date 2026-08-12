@@ -16,7 +16,11 @@ from backend.api.routes import syntheticlib4 as syntheticlib4_route
 from backend.shared.proof_identity import CANONICAL_PROOF_IDENTITY_VERSION
 from backend.shared.proof_search.indexer import ProofSearchIndexer
 from backend.shared.proof_search import moto_sources
-from backend.shared.proof_search.models import ProofSearchRequest, UnifiedProofSearchRecord
+from backend.shared.proof_search.models import (
+    ProofSearchAccessContext,
+    ProofSearchRequest,
+    UnifiedProofSearchRecord,
+)
 from backend.shared.proof_search.search_service import ProofSearchService
 from backend.shared.proof_search.syntheticlib4_sources import load_syntheticlib4_fixture_records
 from backend.shared.proof_search.tool_adapter import (
@@ -140,6 +144,45 @@ class SyntheticLib4FixtureTests(TestCase):
         )
         self.assertEqual(first.canonical_lean_code_hash, second.canonical_lean_code_hash)
         self.assertTrue(set(first.dedupe_keys()).intersection(second.dedupe_keys()))
+
+    def test_owning_run_model_search_filters_before_dedupe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            indexer = ProofSearchIndexer(Path(temp_dir) / "proofs.sqlite")
+            base = UnifiedProofSearchRecord(
+                search_id="moto:owner:proof_1",
+                corpus="moto",
+                proof_id="proof_1",
+                theorem_statement="theorem shared : True",
+                lean_code="theorem shared : True := by trivial",
+                theorem_statement_hash="statement_hash",
+                lean_code_hash="lean_hash",
+                canonical_uri="moto-proof://moto/proof_1",
+                live_context_status="pruned",
+                live_context_owner_run_id="owner",
+            )
+            active_duplicate = base.model_copy(
+                update={
+                    "search_id": "moto:other:proof_2",
+                    "proof_id": "proof_2",
+                    "run_id": "other",
+                    "live_context_status": "active",
+                    "live_context_owner_run_id": "",
+                    "canonical_uri": "moto-proof://moto/proof_2",
+                }
+            )
+            indexer.rebuild([base, active_duplicate])
+            request = ProofSearchRequest(query="shared", corpora=["moto"])
+
+            human = indexer.search(request)
+            model = indexer.search(
+                request,
+                requesting_run_id="owner",
+                filter_live_context=True,
+            )
+
+            self.assertEqual(human.result_count, 1)
+            self.assertEqual(model.result_count, 1)
+            self.assertEqual(model.results[0].proof_id, "proof_2")
 
     def test_fixture_client_hydrates_metadata_only_record(self) -> None:
         client = SyntheticLib4Client(FIXTURE_DIR)

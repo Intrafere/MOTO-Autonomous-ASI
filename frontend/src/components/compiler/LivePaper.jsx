@@ -11,7 +11,10 @@ import {
 } from '../../utils/downloadHelpers';
 import { prependDisclaimer } from '../../utils/disclaimerHelper';
 import PaperCritiqueModal from '../PaperCritiqueModal';
+import ProofCheckModeModal from '../autonomous/ProofCheckModeModal';
+import ProofRunStatusControls from '../autonomous/ProofRunStatusControls';
 import {
+  isProofRunBusy,
   MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
   useProofCheckRuntime,
 } from '../../hooks/useProofCheckRuntime';
@@ -27,6 +30,8 @@ function LivePaper({ capabilities }) {
   const [showLatex, setShowLatex] = useState(true);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [proofActionMessage, setProofActionMessage] = useState('');
+  const [proofCheckModalOpen, setProofCheckModalOpen] = useState(false);
+  const [proofCheckStarting, setProofCheckStarting] = useState(false);
   const paperContainerRef = useRef(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   const {
@@ -34,6 +39,7 @@ function LivePaper({ capabilities }) {
     getManualCheckReason,
     getSourceState,
     queueManualProofCheck,
+    stopProofRun,
   } = useProofCheckRuntime();
   
   // Critique modal state
@@ -212,25 +218,35 @@ function LivePaper({ capabilities }) {
     downloadRawText(paper, filename, outline, 'paper');
   };
 
-  const handleProofCheck = async () => {
+  const handleProofCheck = () => {
+    setProofActionMessage('');
+    setProofCheckModalOpen(true);
+  };
+
+  const startProofCheck = async (runMode) => {
     try {
-      setProofActionMessage('');
+      setProofCheckStarting(true);
       await queueManualProofCheck({
         sourceType: 'paper',
         sourceId: MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
+        scope: 'manual',
+        runMode,
       });
-      setProofActionMessage('Queued proof check for the current manual Compiler paper.');
+      setProofActionMessage(`Queued ${runMode === 'loop_with_pruning' ? 'continuous' : 'one-round'} proof check for the current manual Compiler paper.`);
+      setProofCheckModalOpen(false);
     } catch (error) {
       setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    } finally {
+      setProofCheckStarting(false);
     }
   };
 
-  const proofCheckState = getSourceState('paper', MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID);
+  const proofCheckState = getSourceState('paper', MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID, 'manual');
   const proofCheckLabel = proofCheckState?.status === 'queued'
     ? 'Queueing Proof Check...'
     : proofCheckState?.status === 'running'
       ? `Proof Check Running${proofCheckState.candidateCount ? ` (${proofCheckState.candidateCount})` : '...'}`
-      : 'Try to Prove This';
+      : 'Search For More Mathematical Proofs';
   const proofCheckEnabled = Boolean(paper) && canQueueManualProofCheck('paper', MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID);
   const proofCheckTitle = proofCheckState?.status === 'running'
     ? 'A proof verification is already running for the current manual Compiler paper.'
@@ -287,7 +303,7 @@ function LivePaper({ capabilities }) {
           <button
             onClick={handleProofCheck}
             className="btn btn-secondary"
-            disabled={!proofCheckEnabled || Boolean(proofCheckState)}
+            disabled={!proofCheckEnabled || isProofRunBusy(proofCheckState)}
             title={paper ? proofCheckTitle : 'No paper content to prove yet.'}
           >
             {proofCheckLabel}
@@ -343,6 +359,20 @@ function LivePaper({ capabilities }) {
           {proofActionMessage}
         </div>
       )}
+      {proofCheckModalOpen && (
+        <ProofCheckModeModal
+          sourceTitle="the current manual Compiler paper"
+          busy={proofCheckStarting}
+          error={proofActionMessage.startsWith('Failed') ? proofActionMessage : ''}
+          onClose={() => setProofCheckModalOpen(false)}
+          onConfirm={startProofCheck}
+        />
+      )}
+      <ProofRunStatusControls
+        run={proofCheckState}
+        sourceLabel="Current manual Compiler paper"
+        onStop={stopProofRun}
+      />
 
       <div className="paper-container" ref={paperContainerRef}>
         {paper ? (

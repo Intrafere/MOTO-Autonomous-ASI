@@ -12,8 +12,10 @@ import {
   sanitizeFilename,
 } from '../../utils/downloadHelpers';
 import PaperCritiqueModal from '../PaperCritiqueModal';
+import ProofCheckModeModal from './ProofCheckModeModal';
+import ProofRunStatusControls from './ProofRunStatusControls';
 import { autonomousAPI } from '../../services/api';
-import { useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
+import { isProofRunBusy, useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
 import { websocket } from '../../services/websocket';
 
@@ -38,11 +40,14 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
   const [critiqueModalOpen, setCritiqueModalOpen] = useState(false);
   const [critiquePaper, setCritiquePaper] = useState(null);
   const [proofActionMessage, setProofActionMessage] = useState('');
+  const [proofCheckTarget, setProofCheckTarget] = useState(null);
+  const [proofCheckStarting, setProofCheckStarting] = useState(false);
   const {
     getSourceState,
     manualCheckEnabled,
     manualCheckReason,
     queueManualProofCheck,
+    stopProofRun,
   } = useProofCheckRuntime();
 
   const loadCurrentPrunedPapers = useCallback(async () => {
@@ -196,17 +201,30 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
     downloadRawText(content, filename, outline);
   };
 
-  const handleProofCheck = async (e, paperId) => {
+  const handleProofCheck = (e, paper) => {
     e.stopPropagation();
+    if (paper.is_pruned || paper.status === 'in_progress') return;
+    setProofActionMessage('');
+    setProofCheckTarget(paper);
+  };
+
+  const startProofCheck = async (runMode) => {
+    const paper = proofCheckTarget;
+    if (!paper) return;
     try {
-      setProofActionMessage('');
+      setProofCheckStarting(true);
       await queueManualProofCheck({
         sourceType: 'paper',
-        sourceId: paperId,
+        sourceId: paper.paper_id,
+        scope: 'autonomous',
+        runMode,
       });
-      setProofActionMessage(`Queued proof check for paper ${paperId}.`);
+      setProofActionMessage(`Queued ${runMode === 'loop_with_pruning' ? 'continuous' : 'one-round'} proof check for paper ${paper.paper_id}.`);
+      setProofCheckTarget(null);
     } catch (error) {
       setProofActionMessage(`Failed to queue proof check: ${error.message}`);
+    } finally {
+      setProofCheckStarting(false);
     }
   };
 
@@ -396,10 +414,14 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
         </div>
       )}
 
-      {proofActionMessage && (
-        <div className={`test-result-banner ${proofActionMessage.startsWith('Failed') ? 'test-result-banner--error' : 'test-result-banner--success'}`}>
-          {proofActionMessage}
-        </div>
+      {proofCheckTarget && (
+        <ProofCheckModeModal
+          sourceTitle={proofCheckTarget.title || proofCheckTarget.paper_id}
+          busy={proofCheckStarting}
+          error={proofActionMessage.startsWith('Failed') ? proofActionMessage : ''}
+          onClose={() => setProofCheckTarget(null)}
+          onConfirm={startProofCheck}
+        />
       )}
 
       {proofActionMessage && (
@@ -472,7 +494,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
               <>
                 <div className="paper-actions">
                   {!paper.is_pruned && (() => {
-                    const proofCheckState = getSourceState('paper', paper.paper_id);
+                    const proofCheckState = getSourceState('paper', paper.paper_id, 'autonomous');
                     const proofCheckLabel = proofCheckState?.status === 'queued'
                       ? 'Queueing Proof Check...'
                       : proofCheckState?.status === 'running'
@@ -482,14 +504,21 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
                       ? 'A proof verification is already running for this paper.'
                       : manualCheckReason || 'Queue a manual proof check for this paper.';
                     return (
-                      <button
-                        className="btn-download"
-                        onClick={(e) => handleProofCheck(e, paper.paper_id)}
-                        disabled={!manualCheckEnabled || Boolean(proofCheckState)}
-                        title={proofCheckTitle}
-                      >
-                        {proofCheckLabel}
-                      </button>
+                      <>
+                        <button
+                          className="btn-download"
+                          onClick={(e) => handleProofCheck(e, paper)}
+                          disabled={!manualCheckEnabled || isProofRunBusy(proofCheckState)}
+                          title={proofCheckTitle}
+                        >
+                          {proofCheckLabel}
+                        </button>
+                        <ProofRunStatusControls
+                          run={proofCheckState}
+                          sourceLabel={paper.title || paper.paper_id}
+                          onStop={stopProofRun}
+                        />
+                      </>
                     );
                   })()}
 

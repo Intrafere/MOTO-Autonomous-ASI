@@ -133,6 +133,12 @@ DIRECT-ANSWER-FIRST PRINCIPLE:
 - Include background and preliminaries only to the extent needed to support the direct answer cleanly and rigorously
 - Do not require theorem/proof structure for an objective that is better served by another rigorous, independently checkable solution form
 
+STANDARD-LENGTH DISCIPLINE:
+- Choose the normal paper/report length appropriate to the subject and user prompt, not the maximum length the context window permits
+- Prefer the smallest outline that can carry the strongest rigorous answer without redundancy
+- Do not add separate sections merely to restate rigor, governance, verification, limitations, or evidence posture when they can be integrated into the relevant solution section
+- Use additional major sections only when they introduce a distinct necessary component of the answer
+
 - Produce a numbered outline with major sections and subsections
 - Incorporate the strongest helpful source ideas where appropriate
 - Flag gaps explicitly if the evidence is insufficient

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from tests.workflow_harness.coverage_metadata import InteractionCoverage
+from tests.workflow_harness.source_mappings import BUILD_07_REAL_ADAPTER_COVERAGE
 
 
 def _node(file_name: str, test_name: str) -> str:
@@ -363,6 +364,7 @@ _UNLINKED_REAL_ADAPTER_COVERAGE = (
     + BUILD_BC_REAL_COVERAGE
     + BUILD_D_REAL_COVERAGE
     + BUILD_E_REAL_COVERAGE
+    + BUILD_07_REAL_ADAPTER_COVERAGE
     + HIGH_VALUE_GAP_COVERAGE
 )
 
@@ -398,7 +400,10 @@ def _link_passed_records() -> tuple[InteractionCoverage, ...]:
         if record.result != "passed":
             linked.append(record)
             continue
-        selector = next(
+        explicit = tuple(
+            candidate for candidate in record.test_selectors if candidate not in used_selectors
+        )
+        selector = explicit[0] if explicit else next(
             (
                 candidate
                 for candidate in _ranked_selectors_from_test_file(record)

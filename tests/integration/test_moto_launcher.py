@@ -339,6 +339,10 @@ class ResolveInstanceRuntimeTests(TestCase):
             with mock.patch.object(moto_launcher, "is_pid_running", return_value=False):
                 moto_launcher.assert_runtime_lock_available(temp_dir)
 
+    def test_pid_running_treats_windows_invalid_parameter_as_not_running(self) -> None:
+        with mock.patch.object(moto_launcher.os, "kill", side_effect=SystemError("[WinError 87] The parameter is incorrect")):
+            self.assertFalse(moto_launcher.is_pid_running(4242))
+
 
 class WindowsLauncherStrategyTests(TestCase):
     def test_build_windows_service_command_prefers_path_safe_executable_name(self) -> None:

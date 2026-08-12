@@ -72,9 +72,18 @@ def _release_compiler_proof_only_lease() -> None:
 compiler_coordinator.top_level_terminal_callback = _release_compiler_workflow_lease
 
 
-async def _release_pre_reserved_source(source_type: str, source_id: str, reserved: bool) -> None:
+async def _release_pre_reserved_source(
+    source_type: str,
+    source_id: str,
+    reserved: bool,
+    reservation_token: str = "",
+) -> None:
     if reserved and source_id:
-        await ProofVerificationStage.release_source(source_type, source_id)
+        await ProofVerificationStage.release_source(
+            source_type,
+            source_id,
+            owner_token=reservation_token,
+        )
 
 
 def _positive_int_setting(value, setting_name: str) -> int:
@@ -85,6 +94,23 @@ def _positive_int_setting(value, setting_name: str) -> int:
     if parsed <= 0:
         raise ValueError(f"{setting_name} must be explicitly configured as a positive integer.")
     return parsed
+
+
+def _configure_proof_stage_roles(
+    role_suffix: str,
+    submitter_config: ModelConfig,
+    validator_config: ModelConfig,
+) -> None:
+    """Configure every LLM-backed role emitted by a scoped proof stage."""
+    for role_name in ("identification", "lemma_search", "formalization"):
+        api_client_manager.configure_role(
+            f"autonomous_proof_{role_name}_{role_suffix}",
+            submitter_config,
+        )
+    api_client_manager.configure_role(
+        f"autonomous_proof_novelty_{role_suffix}",
+        validator_config,
+    )
 
 
 def _validate_positive_role_limits(role_limits: dict[str, tuple[object, object]]) -> None:
@@ -150,6 +176,7 @@ async def _run_saved_compiler_paper_proof_check(
     *,
     source_id: str = "",
     source_reserved: bool = False,
+    source_reservation_token: str = "",
 ) -> None:
     """Run autonomous proof extraction/tiering for a saved manual compiler paper."""
     try:
@@ -198,20 +225,21 @@ async def _run_saved_compiler_paper_proof_check(
             max_output_tokens=_positive_int_setting(validator_max_tokens, "validator proof max output tokens"),
             supercharge_enabled=bool(proof_config.get("validator_supercharge_enabled", False)),
         )
-        for role_id in (
-            f"autonomous_proof_identification_{role_suffix}",
-            f"autonomous_proof_lemma_search_{role_suffix}",
-            f"autonomous_proof_formalization_{role_suffix}",
-        ):
-            api_client_manager.configure_role(role_id, submitter_config)
-        api_client_manager.configure_role("autonomous_proof_novelty", validator_config)
+        _configure_proof_stage_roles(
+            role_suffix,
+            submitter_config,
+            validator_config,
+        )
 
         stage = ProofVerificationStage()
         await stage.run(
             content=proof_content,
             source_type="paper",
             source_id=source_id,
-            user_prompt=manual_proof_database.inject_into_prompt(str(proof_config.get("user_prompt") or "")),
+            user_prompt=manual_proof_database.inject_into_prompt(
+                str(proof_config.get("user_prompt") or ""),
+                requesting_run_id=await manual_proof_database.get_or_create_active_run_id(),
+            ),
             submitter_model=submitter_model,
             submitter_context=submitter_config.context_window,
             submitter_max_tokens=submitter_config.max_output_tokens,
@@ -224,12 +252,18 @@ async def _run_saved_compiler_paper_proof_check(
             role_suffix_override=role_suffix,
             trigger="manual_compiler_save",
             source_reserved=source_reserved,
+            source_reservation_token=source_reservation_token,
             release_source_on_exit=False,
             append_to_source=False,
             append_proof_callback=lambda proof: _append_proof_to_saved_compiler_paper(output_path, proof),
         )
     finally:
-        await _release_pre_reserved_source("paper", source_id, source_reserved)
+        await _release_pre_reserved_source(
+            "paper",
+            source_id,
+            source_reserved,
+            source_reservation_token,
+        )
         await assistant_proof_search_coordinator.stop_all(
             broadcast=True,
             reason="saved_compiler_paper_proof_check_complete",
@@ -267,6 +301,7 @@ async def _run_compiler_aggregator_proof_check(
     request: CompilerStartRequest,
     *,
     source_reserved: bool = False,
+    source_reservation_token: str = "",
 ) -> None:
     """Run proof verification over the manual Aggregator database without writing a paper."""
     try:
@@ -303,13 +338,11 @@ async def _run_compiler_aggregator_proof_check(
             max_output_tokens=request.validator_max_output_tokens,
             supercharge_enabled=request.validator_supercharge_enabled,
         )
-        for role_id in (
-            f"autonomous_proof_identification_{role_suffix}",
-            f"autonomous_proof_lemma_search_{role_suffix}",
-            f"autonomous_proof_formalization_{role_suffix}",
-        ):
-            api_client_manager.configure_role(role_id, submitter_config)
-        api_client_manager.configure_role("autonomous_proof_novelty", validator_config)
+        _configure_proof_stage_roles(
+            role_suffix,
+            submitter_config,
+            validator_config,
+        )
         api_client_manager.configure_role(
             "compiler_assistant",
             ModelConfig(
@@ -349,11 +382,29 @@ async def _run_compiler_aggregator_proof_check(
             {"source_type": "brainstorm", "source_id": source_id},
         )
         stage = ProofVerificationStage()
+        get_active_run_id = getattr(
+            manual_proof_database,
+            "get_or_create_active_run_id",
+            None,
+        )
+        requesting_run_id = (
+            await get_active_run_id()
+            if callable(get_active_run_id)
+            else ""
+        )
+        proof_user_prompt = (
+            manual_proof_database.inject_into_prompt(
+                request.compiler_prompt,
+                requesting_run_id=requesting_run_id,
+            )
+            if requesting_run_id
+            else manual_proof_database.inject_into_prompt(request.compiler_prompt)
+        )
         await stage.run(
             content=f"PART 1 AGGREGATOR DATABASE:\n{content}",
             source_type="brainstorm",
             source_id=source_id,
-            user_prompt=manual_proof_database.inject_into_prompt(request.compiler_prompt),
+            user_prompt=proof_user_prompt,
             submitter_model=request.high_param_model,
             submitter_context=request.high_param_context_size,
             submitter_max_tokens=request.high_param_max_output_tokens,
@@ -366,6 +417,7 @@ async def _run_compiler_aggregator_proof_check(
             role_suffix_override=role_suffix,
             trigger="manual_compiler_aggregator",
             source_reserved=source_reserved,
+            source_reservation_token=source_reservation_token,
             append_to_source=False,
             append_proof_callback=append_proof_to_manual_shared_training,
         )
@@ -374,7 +426,12 @@ async def _run_compiler_aggregator_proof_check(
             {"source_type": "brainstorm", "source_id": source_id},
         )
     finally:
-        await _release_pre_reserved_source("brainstorm", MANUAL_AGGREGATOR_SOURCE_ID, source_reserved)
+        await _release_pre_reserved_source(
+            "brainstorm",
+            MANUAL_AGGREGATOR_SOURCE_ID,
+            source_reserved,
+            source_reservation_token,
+        )
         await assistant_proof_search_coordinator.stop_all(
             broadcast=True,
             reason="compiler_aggregator_proof_check_complete",
@@ -386,12 +443,14 @@ async def _run_owned_compiler_aggregator_proof_check(
     request: CompilerStartRequest,
     *,
     source_reserved: bool = False,
+    source_reservation_token: str = "",
 ) -> None:
     """Keep proof-only workflow ownership tied to the exact background task."""
     try:
         await _run_compiler_aggregator_proof_check(
             request,
             source_reserved=source_reserved,
+            source_reservation_token=source_reservation_token,
         )
     finally:
         _release_compiler_proof_only_lease()
@@ -490,7 +549,10 @@ async def start_compiler(request: CompilerStartRequest):
                     )
                 async with get_manual_proof_context_lock():
                     try:
-                        await ProofVerificationStage.reserve_source("brainstorm", MANUAL_AGGREGATOR_SOURCE_ID)
+                        reservation_token = await ProofVerificationStage.reserve_source(
+                            "brainstorm",
+                            MANUAL_AGGREGATOR_SOURCE_ID,
+                        )
                     except RuntimeError:
                         raise HTTPException(status_code=409, detail="A proof verification is already running for the manual Aggregator database.")
                     try:
@@ -501,9 +563,12 @@ async def start_compiler(request: CompilerStartRequest):
                             _run_owned_compiler_aggregator_proof_check(
                                 request,
                                 source_reserved=True,
+                                source_reservation_token=reservation_token,
                             )
                         )
                         _compiler_proof_only_task.add_done_callback(_log_background_task_failure)
+                        from backend.shared.lean4_client import start_lean4_workspace_bootstrap
+                        start_lean4_workspace_bootstrap()
                     except BaseException:
                         task_was_started = _compiler_proof_only_task is not None
                         if _compiler_proof_only_task is not None:
@@ -513,7 +578,9 @@ async def start_compiler(request: CompilerStartRequest):
                         _release_compiler_proof_only_lease()
                         if not task_was_started:
                             await ProofVerificationStage.release_source(
-                                "brainstorm", MANUAL_AGGREGATOR_SOURCE_ID
+                                "brainstorm",
+                                MANUAL_AGGREGATOR_SOURCE_ID,
+                                owner_token=reservation_token,
                             )
                         raise
                 return {
@@ -689,6 +756,9 @@ async def start_compiler(request: CompilerStartRequest):
                 COMPILER_WORKFLOW_OWNER
             )
             parent_start_committed = True
+            if effective_allow_mathematical_proofs:
+                from backend.shared.lean4_client import start_lean4_workspace_bootstrap
+                start_lean4_workspace_bootstrap()
 
             return {"status": "started", "message": "Compiler started successfully"}
     
@@ -1010,7 +1080,10 @@ async def _save_paper_unlocked():
                 "validator_supercharge_enabled": getattr(compiler_coordinator, "validator_supercharge_enabled", False),
             }
             try:
-                await ProofVerificationStage.reserve_source("paper", proof_source_id)
+                reservation_token = await ProofVerificationStage.reserve_source(
+                    "paper",
+                    proof_source_id,
+                )
             except RuntimeError:
                 proof_check_scheduled = False
                 logger.info("Saved compiler paper proof check already running for source %s", proof_source_id)
@@ -1030,6 +1103,7 @@ async def _save_paper_unlocked():
                     output_path,
                     source_id=proof_source_id,
                     source_reserved=True,
+                    source_reservation_token=reservation_token,
                 )
             )
             _saved_compiler_proof_tasks.add(task)

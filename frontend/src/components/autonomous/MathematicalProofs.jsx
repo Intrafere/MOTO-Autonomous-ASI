@@ -1,14 +1,21 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import './MathematicalProofs.css';
 import ProofGraph from './ProofGraph';
+import ProofCheckModeModal from './ProofCheckModeModal';
+import ProofRunStatusControls from './ProofRunStatusControls';
+import { websocket } from '../../services/websocket';
 import {
-  buildCurrentProofRuntimeConfig,
-  buildProofRuntimeConfigForSource,
-  isProofRuntimeConfigComplete,
+  isProofRunBusy,
   MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
   MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
+  useProofCheckRuntime,
 } from '../../hooks/useProofCheckRuntime';
 import { downloadTextFile } from '../../utils/downloadHelpers';
+import {
+  buildProofLiveContextMutation,
+  classifyProofLiveContext,
+  getProofLiveContextRiskWarnings,
+} from '../../utils/proofPresentation';
 
 function formatDate(isoString) {
   if (!isoString) {
@@ -113,11 +120,24 @@ function MathematicalProofs({
   const [expandedProofId, setExpandedProofId] = useState(null);
   const [manualSourceType, setManualSourceType] = useState(defaultSourceType);
   const [manualSourceId, setManualSourceId] = useState('');
+  const [showProofCheckMode, setShowProofCheckMode] = useState(false);
   const [manualCheckPending, setManualCheckPending] = useState(false);
   const [manualCheckMessage, setManualCheckMessage] = useState('');
   const [dependencyStateByProofId, setDependencyStateByProofId] = useState({});
   const [viewMode, setViewMode] = useState('list');
   const [proofGraphState, setProofGraphState] = useState(createEmptyGraphState);
+  const [proofSetRevision, setProofSetRevision] = useState(null);
+  const [liveContextConfirm, setLiveContextConfirm] = useState(null);
+  const [liveContextPendingId, setLiveContextPendingId] = useState(null);
+  const [liveContextMessage, setLiveContextMessage] = useState('');
+  const {
+    proofStatus: sharedProofStatus,
+    queueManualProofCheck,
+    getSourceState,
+    manualCheckEnabled,
+    manualCheckReason,
+    stopProofRun,
+  } = useProofCheckRuntime();
 
   const loadProofs = async () => {
     try {
@@ -134,6 +154,9 @@ function MathematicalProofs({
 
       if (proofsResult.status === 'fulfilled') {
         setProofs(proofsResult.value.proofs || []);
+        if (Number.isInteger(proofsResult.value.proof_set_revision)) {
+          setProofSetRevision(proofsResult.value.proof_set_revision);
+        }
       } else {
         setError(`Failed to load proofs: ${proofsResult.reason?.message || 'Unknown error'}`);
       }
@@ -159,6 +182,18 @@ function MathematicalProofs({
   useEffect(() => {
     loadProofs();
   }, [refreshToken, proofScope]);
+
+  useEffect(() => {
+    const unsubscribe = websocket.on('proof_live_context_updated', (data = {}) => {
+      if (data.scope !== proofScope) return;
+      loadProofs();
+      setProofGraphState(createEmptyGraphState());
+      if (typeof api.refreshLatestAssistantPack === 'function') {
+        api.refreshLatestAssistantPack().catch(() => {});
+      }
+    });
+    return unsubscribe;
+  }, [api, proofScope]);
 
   useEffect(() => {
     if (!selectedProofId) {
@@ -435,21 +470,23 @@ function MathematicalProofs({
     [visibleProofs]
   );
   const showManualPanel = Boolean(proofStatus?.lean4_path);
-  const currentProofRuntimeConfig = proofScope === 'manual'
-    ? buildProofRuntimeConfigForSource(manualSourceType, manualSourceId)
-    : buildCurrentProofRuntimeConfig();
-  const hasCurrentProofRuntimeConfig = isProofRuntimeConfigComplete(currentProofRuntimeConfig);
+  const effectiveProofStatus = sharedProofStatus || proofStatus;
+  const sourceRunState = manualSourceId
+    ? getSourceState(manualSourceType, manualSourceId, proofScope)
+    : null;
   const manualChecksDisabled = (
-    !proofStatus?.lean4_enabled ||
-    (!proofStatus?.manual_check_ready && !hasCurrentProofRuntimeConfig) ||
+    !manualCheckEnabled ||
+    isProofRunBusy(sourceRunState) ||
     availableSources.length === 0
   );
-  const manualChecksDisabledReason = !proofStatus
+  const manualChecksDisabledReason = !effectiveProofStatus
     ? 'Loading proof runtime status...'
-    : !proofStatus?.lean4_enabled
+    : !effectiveProofStatus?.lean4_enabled
       ? 'Lean 4 proof checks are disabled.'
-    : !proofStatus?.manual_check_ready && !hasCurrentProofRuntimeConfig
-      ? (proofStatus?.manual_check_message || 'Manual proof checks are not ready yet.')
+    : isProofRunBusy(sourceRunState)
+      ? 'A proof run is already active for this source.'
+    : !manualCheckEnabled
+      ? (manualCheckReason || 'Manual proof checks are not ready yet.')
       : availableSources.length === 0
         ? (manualSourceType === 'brainstorm' ? 'No brainstorms are available yet.' : 'No completed papers are available yet.')
         : '';
@@ -459,7 +496,7 @@ function MathematicalProofs({
     setViewMode('list');
   };
 
-  const handleRunProofCheck = async () => {
+  const handleRunProofCheck = async (runMode) => {
     if (!manualSourceId) {
       return;
     }
@@ -467,15 +504,16 @@ function MathematicalProofs({
     try {
       setManualCheckPending(true);
       setManualCheckMessage('');
-      const proofRuntimeConfig = proofScope === 'manual'
-        ? buildProofRuntimeConfigForSource(manualSourceType, manualSourceId)
-        : buildCurrentProofRuntimeConfig();
-      await api.runProofCheck({
+      await queueManualProofCheck({
         sourceType: manualSourceType,
         sourceId: manualSourceId,
-        proofRuntimeConfig: isProofRuntimeConfigComplete(proofRuntimeConfig) ? proofRuntimeConfig : null,
+        scope: proofScope,
+        runMode,
       });
-      setManualCheckMessage(`Queued proof check for ${manualSourceType} ${manualSourceId}.`);
+      setManualCheckMessage(
+        `Queued ${runMode === 'loop_with_pruning' ? 'continuous' : 'one-round'} proof check for ${manualSourceType} ${manualSourceId}.`
+      );
+      setShowProofCheckMode(false);
     } catch (err) {
       setManualCheckMessage(`Failed to queue proof check: ${err.message}`);
     } finally {
@@ -505,6 +543,69 @@ function MathematicalProofs({
       );
     } catch (err) {
       setError(`Failed to download proof certificate: ${err.message}`);
+    }
+  };
+
+  const refreshLiveContextSurfaces = async () => {
+    await loadProofs();
+    setProofGraphState(createEmptyGraphState());
+    const refreshers = [
+      api.refreshProofGraph,
+      api.refreshLatestAssistantPack,
+    ].filter((callback) => typeof callback === 'function');
+    await Promise.allSettled(refreshers.map((callback) => callback()));
+  };
+
+  const handleLiveContextMutation = async (proof, status) => {
+    const reason = status === 'pruned'
+      ? String(liveContextConfirm?.reason || '').trim()
+      : 'User restored this occurrence to the owning run live context.';
+    if (status === 'pruned' && !reason) {
+      setLiveContextMessage('Enter a reason before pruning this proof from live context.');
+      return;
+    }
+    if (typeof api.updateProofLiveContext !== 'function') {
+      setLiveContextMessage('Live-context mutation is unavailable in this frontend/API build.');
+      return;
+    }
+    try {
+      setLiveContextPendingId(proof.proof_id);
+      setLiveContextMessage('');
+      const payload = buildProofLiveContextMutation(proof, {
+        status,
+        reason,
+        proofSetRevision,
+      });
+      const response = await api.updateProofLiveContext({
+        proofId: proof.proof_id,
+        scope: proofScope,
+        status: payload.status,
+        runId: payload.expected_run_id,
+        proofSetRevision: payload.expected_proof_set_revision,
+        reason: payload.reason,
+        theoremHash: payload.expected_theorem_hash,
+        leanHash: payload.expected_lean_hash,
+      });
+      if (Number.isInteger(response?.proof_set_revision)) {
+        setProofSetRevision(response.proof_set_revision);
+      }
+      setLiveContextConfirm(null);
+      setLiveContextMessage(
+        status === 'pruned'
+          ? 'Proof pruned from this run’s live model context. The verified record and downloads remain intact.'
+          : 'Proof restored to this run’s live model context.'
+      );
+      await refreshLiveContextSurfaces();
+    } catch (err) {
+      const stale = err?.status === 409 || /revision|stale|changed|conflict/i.test(err?.message || '');
+      setLiveContextMessage(
+        stale
+          ? 'The proof set changed before this action completed. Refreshing current state; review the proof and try again.'
+          : `Live-context update failed: ${err.message || 'Unknown error'}`
+      );
+      if (stale) await refreshLiveContextSurfaces();
+    } finally {
+      setLiveContextPendingId(null);
     }
   };
 
@@ -655,19 +756,38 @@ function MathematicalProofs({
             </select>
             <button
               className="math-proofs-run-check"
-              onClick={handleRunProofCheck}
+              onClick={() => setShowProofCheckMode(true)}
               disabled={manualChecksDisabled || manualCheckPending}
               title={manualChecksDisabledReason || undefined}
             >
-              {manualCheckPending ? 'Queueing...' : 'Run Proof Check'}
+              {manualCheckPending ? 'Queueing...' : 'Search For More Mathematical Proofs'}
             </button>
           </div>
         </div>
+      )}
+      <ProofRunStatusControls
+        run={sourceRunState}
+        sourceLabel={manualSourceId ? `${manualSourceType} ${manualSourceId}` : ''}
+        onStop={stopProofRun}
+      />
+      {showProofCheckMode && (
+        <ProofCheckModeModal
+          sourceTitle={`${manualSourceType} ${manualSourceId}`}
+          busy={manualCheckPending}
+          error={manualCheckMessage.startsWith('Failed') ? manualCheckMessage : ''}
+          onClose={() => setShowProofCheckMode(false)}
+          onConfirm={handleRunProofCheck}
+        />
       )}
 
       {manualCheckMessage && (
         <div className={`math-proofs-banner ${manualCheckMessage.startsWith('Failed') ? 'error' : 'success'}`}>
           {manualCheckMessage}
+        </div>
+      )}
+      {liveContextMessage && (
+        <div className={`math-proofs-banner ${/failed|unavailable|changed|enter a reason/i.test(liveContextMessage) ? 'error' : 'success'}`}>
+          {liveContextMessage}
         </div>
       )}
 
@@ -677,7 +797,7 @@ function MathematicalProofs({
       {!loading && !error && visibleProofs.length === 0 && (
         <div className="math-proofs-empty">
           {proofScope === 'manual'
-            ? 'No manual proofs verified yet. Use Try to Prove This or run a manual proof check here.'
+            ? 'No manual proofs verified yet. Use Search For More Mathematical Proofs or run a manual proof check here.'
             : 'No proofs verified yet. Proofs are automatically checked at brainstorm and paper completion.'}
         </div>
       )}
@@ -723,10 +843,14 @@ function MathematicalProofs({
               proofStatus?.lean4_enabled &&
               (dependencyState?.loading || dependsOn.length > 0 || dependedOnBy.length > 0 || mathlibDependedOnBy.length > 0)
             );
+            const liveContext = classifyProofLiveContext(proof);
+            const riskWarnings = getProofLiveContextRiskWarnings(proof, dependencyState);
+            const isMutationPending = liveContextPendingId === proof.proof_id;
+            const isConfirming = liveContextConfirm?.proofId === proof.proof_id;
             return (
               <article
                 key={proof.proof_id}
-                className={`math-proof-card ${getTierBadge(proof).cardClass}`}
+                className={`math-proof-card ${getTierBadge(proof).cardClass} ${liveContext.isPruned && !isExpanded ? 'live-context-pruned-collapsed' : ''} ${liveContext.isPruned && isExpanded ? 'live-context-pruned-expanded' : ''}`}
               >
                 <div className="math-proof-card-header">
                   <div>
@@ -737,6 +861,11 @@ function MathematicalProofs({
                       <span className="math-proof-source">
                         {proof.source_type} {proof.source_id}
                       </span>
+                      {liveContext.isPruned && (
+                        <span className={`proof-live-context-badge ${liveContext.badgeClass}`}>
+                          {liveContext.badgeLabel}
+                        </span>
+                      )}
                     </div>
                     <h3>{proof.theorem_statement}</h3>
                     <p className="math-proof-summary">
@@ -768,7 +897,49 @@ function MathematicalProofs({
                   <span>Solver: {proof.solver || 'Lean 4'}</span>
                   <span>Attempts: {proof.attempt_count || proof.attempts?.length || 0}</span>
                   <span>Created: {formatDate(proof.created_at)}</span>
+                  {liveContext.isPruned && <span>Owning run: {liveContext.ownerRunId || 'Unknown'}</span>}
+                  {liveContext.isPruned && <span>Pruned by: {liveContext.actorLabel}</span>}
                 </div>
+
+                {liveContext.isPruned && (
+                  <div className="proof-live-context-note">
+                    <strong>Excluded only from the owning run’s live model context.</strong>
+                    <span>{liveContext.reason || 'No prune reason was recorded.'}</span>
+                  </div>
+                )}
+
+                {isConfirming && (
+                  <div className="proof-live-context-confirm" role="group" aria-label="Confirm live-context prune">
+                    <strong>Prune this proof from the owning run’s live model context?</strong>
+                    <span>The verified record, history, certificate, Lean source, and future-run retrieval remain available.</span>
+                    {riskWarnings.map((warning) => (
+                      <span key={warning} className="proof-live-context-warning">Warning: {warning}</span>
+                    ))}
+                    <label>
+                      Reason
+                      <textarea
+                        value={liveContextConfirm.reason}
+                        onChange={(event) => setLiveContextConfirm((current) => ({
+                          ...current,
+                          reason: event.target.value,
+                        }))}
+                        placeholder="Why should this occurrence leave the current run context?"
+                      />
+                    </label>
+                    <div className="proof-live-context-confirm-actions">
+                      <button
+                        type="button"
+                        onClick={() => handleLiveContextMutation(proof, 'pruned')}
+                        disabled={isMutationPending}
+                      >
+                        {isMutationPending ? 'Pruning…' : 'Confirm prune'}
+                      </button>
+                      <button type="button" onClick={() => setLiveContextConfirm(null)} disabled={isMutationPending}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {isExpanded && (
                   <div
@@ -792,6 +963,29 @@ function MathematicalProofs({
                       >
                         Download .lean
                       </button>
+                      {liveContext.canPrune && (
+                        <button
+                          type="button"
+                          className="math-proof-live-context-action"
+                          onClick={() => setLiveContextConfirm({
+                            proofId: proof.proof_id,
+                            reason: '',
+                          })}
+                          disabled={isMutationPending}
+                        >
+                          Prune from live context
+                        </button>
+                      )}
+                      {liveContext.canUndo && (
+                        <button
+                          type="button"
+                          className="math-proof-live-context-action restore"
+                          onClick={() => handleLiveContextMutation(proof, 'active')}
+                          disabled={isMutationPending}
+                        >
+                          {isMutationPending ? 'Restoring…' : 'Undo user prune'}
+                        </button>
+                      )}
                     </div>
 
                     {proof.theorem_name && (

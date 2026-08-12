@@ -18,6 +18,7 @@ from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.free_model_manager import free_model_manager
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.log_redaction import redact_log_text
+from backend.shared.provider_errors import ProviderRepairRequiredError
 from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_RESOLUTION,
     CONTEXT_OVERFLOW_STOP_MESSAGE,
@@ -141,6 +142,7 @@ class Coordinator:
         self.fatal_error_message: Optional[str] = None
         self.fatal_error_type: Optional[str] = None
         self.fatal_error_payload: Optional[Dict[str, Any]] = None
+        self.disabled_submitter_ids: set[int] = set()
 
         # Optional source-level hard cap used by autonomous brainstorm mode.
         self.max_total_acceptances: Optional[int] = None
@@ -257,6 +259,7 @@ class Coordinator:
         allow_trusted_context_files: bool = False,
         trusted_context_texts: Optional[Dict[str, str]] = None,
         proof_database_store: Optional[Any] = None,
+        proof_context_requesting_run_id: str = "",
         local_rejection_log_dir: Optional[str] = None,
         solution_path_manager: Optional[Any] = None,
         solution_path_acceptance_count_owner: bool = True,
@@ -290,6 +293,8 @@ class Coordinator:
             proof_database_store: Optional proof DB for verified-proof prompt
                 injection. Manual top-level Aggregator leaves this unset so
                 cleared/archived proofs cannot leak into new runs.
+            proof_context_requesting_run_id: Stable owning-run ID used only to
+                filter model-visible proof context.
             local_rejection_log_dir: Optional directory for submitter rejection
                 logs. Internal child aggregators use this to avoid sharing the
                 manual Aggregator rejection files.
@@ -489,6 +494,7 @@ class Coordinator:
                 coordinator=self,
                 creativity_emphasis_boost_enabled=self.creativity_emphasis_boost_enabled,
                 proof_database_store=proof_database_store,
+                proof_context_requesting_run_id=proof_context_requesting_run_id,
                 local_rejection_log_dir=local_rejection_log_dir,
                 local_rejection_log_template=local_rejection_log_template,
                 reset_local_rejection_log_on_initialize=reset_local_rejection_logs_on_start,
@@ -531,6 +537,7 @@ class Coordinator:
             user_files_content=user_files_content,
             websocket_broadcaster=self.websocket_broadcaster,
             proof_database_store=proof_database_store,
+            proof_context_requesting_run_id=proof_context_requesting_run_id,
             solution_path_manager=solution_path_manager,
         )
         await self.validator.initialize()
@@ -913,6 +920,12 @@ class Coordinator:
                     role_id="aggregator_validator",
                     should_stop=lambda: not self.is_running,
                 )
+            except ProviderRepairRequiredError as e:
+                await self._handle_provider_repair_required(
+                    e,
+                    role_id="aggregator_validator",
+                )
+                break
             except ContextAllocationError as e:
                 await self._handle_context_overflow(e, role_id="aggregator_validator")
                 break
@@ -947,6 +960,8 @@ class Coordinator:
                 for i, submitter in enumerate(self.submitters, 1):
                     if not self.is_running:
                         break
+                    if submitter.submitter_id in self.disabled_submitter_ids:
+                        continue
                     
                     logger.debug(f"Round {round_number}: Submitter {i} generating...")
                     submission = await submitter._generate_submission()
@@ -1030,6 +1045,12 @@ class Coordinator:
                     role_id="aggregator_single_model",
                     should_stop=lambda: not self.is_running,
                 )
+            except ProviderRepairRequiredError as e:
+                await self._handle_provider_repair_required(
+                    e,
+                    role_id="aggregator_single_model",
+                )
+                break
             except ContextAllocationError as e:
                 await self._handle_context_overflow(e, role_id="aggregator_single_model")
                 break
@@ -1364,6 +1385,90 @@ class Coordinator:
         self.fatal_error_payload = dict(payload)
         await self._broadcast("context_overflow_error", payload)
         await self._add_persisted_event("context_overflow_error", payload["message"], payload)
+
+    async def _handle_submitter_provider_repair_required(
+        self,
+        submitter: SubmitterAgent,
+        error: ProviderRepairRequiredError,
+    ) -> None:
+        """Disable one redundant generation lane, or stop if none would remain."""
+        self.disabled_submitter_ids.add(submitter.submitter_id)
+        submitter.is_running = False
+        submitter.state.is_active = False
+        remaining = [
+            item for item in self.submitters
+            if item.submitter_id not in self.disabled_submitter_ids
+        ]
+        role_id = f"aggregator_submitter_{submitter.submitter_id}"
+        if not remaining:
+            await self._handle_provider_repair_required(error, role_id=role_id)
+            return
+        payload = {
+            "workflow_mode": "aggregator" if self.persist_event_log else "autonomous",
+            "role_id": role_id,
+            "submitter_id": submitter.submitter_id,
+            "provider": error.provider,
+            "provider_label": error.provider_label,
+            "model": error.model,
+            "reason": error.reason,
+            "recoverable": True,
+            "workflow_continues": True,
+            "message": (
+                f"Submitter {submitter.submitter_id} was disabled for this run after "
+                f"{error.provider_label} reported a spending or entitlement limit. "
+                f"Research continues with {len(remaining)} submitter lane(s)."
+            ),
+            "terminal_guidance": error.terminal_guidance,
+        }
+        await self._broadcast("provider_role_disabled", payload)
+        await self._add_persisted_event(
+            "provider_role_disabled",
+            payload["message"],
+            payload,
+        )
+
+    async def _handle_provider_repair_required(
+        self,
+        error: ProviderRepairRequiredError,
+        *,
+        role_id: str,
+    ) -> None:
+        """Stop when a definitive provider failure blocks workflow progression."""
+        self.fatal_error_type = "provider_repair_required"
+        self.fatal_error_message = str(error)
+        self.is_running = False
+        self._notify_top_level_terminal()
+        current_task = asyncio.current_task()
+        for submitter in self.submitters:
+            if submitter._task is current_task:
+                submitter.is_running = False
+                submitter.state.is_active = False
+                continue
+            await submitter.stop()
+        await queue_manager.clear()
+        payload = {
+            "workflow_mode": "aggregator" if self.persist_event_log else "autonomous",
+            "role_id": role_id,
+            "provider": error.provider,
+            "provider_label": error.provider_label,
+            "model": error.model,
+            "reason": error.reason,
+            "recoverable": True,
+            "workflow_continues": False,
+            "message": (
+                f"Research stopped because {error.provider_label} cannot serve the "
+                f"progression-critical role {role_id}."
+            ),
+            "error_detail": str(error),
+            "terminal_guidance": error.terminal_guidance,
+        }
+        self.fatal_error_payload = dict(payload)
+        await self._broadcast("provider_repair_required", payload)
+        await self._add_persisted_event(
+            "provider_repair_required",
+            payload["message"],
+            payload,
+        )
     
     async def _perform_cleanup_review(self) -> None:
         """

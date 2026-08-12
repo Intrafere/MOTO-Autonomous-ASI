@@ -414,6 +414,19 @@ async def test_research_metadata_proof_checkpoint_roundtrip_preserves_resume_cur
     assert loaded["trigger"] == "manual_retry"
     assert loaded["completed_triggers"] == []
     assert loaded["updated_at"]
+    first_revision = loaded["checkpoint_revision"]
+
+    resumed_checkpoint = dict(loaded)
+    resumed_checkpoint["checkpoint_revision"] = 1
+    resumed_checkpoint["status"] = "running"
+    await restored.save_proof_checkpoint(resumed_checkpoint)
+    resumed_loaded = await restored.get_proof_checkpoint(
+        "brainstorm",
+        "topic-roundtrip",
+        "manual_retry",
+    )
+    assert resumed_loaded is not None
+    assert resumed_loaded["checkpoint_revision"] == first_revision + 1
     assert await restored.get_proof_checkpoint("paper", "topic-roundtrip") is None
 
     await restored.mark_proof_checkpoint_trigger_complete(

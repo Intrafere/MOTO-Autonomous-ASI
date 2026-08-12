@@ -4,15 +4,18 @@ Orchestrates proof identification, Lean 4 attempts, retry handling, and novelty 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from backend.autonomous.agents.lemma_search_agent import MathlibLemmaSearchAgent
 from backend.autonomous.agents.proof_formalization_agent import ProofFormalizationAgent
 from backend.autonomous.agents.proof_identification_agent import ProofIdentificationAgent
+from backend.autonomous.agents.proof_pruning_agent import proof_run_role_suffix
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
 from backend.autonomous.memory.paper_library import paper_library
 from backend.autonomous.memory.proof_database import is_prompt_injection_novel_tier
@@ -30,10 +33,18 @@ from backend.shared.model_error_utils import (
     is_transient_model_call_error,
 )
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
-from backend.shared.models import ProofAttemptFeedback, ProofAttemptResult, ProofCandidate, ProofStageResult, SmtHint
+from backend.shared.models import (
+    ProofAttemptFeedback,
+    ProofAttemptResult,
+    ProofCandidate,
+    ProofPruneContextPressure,
+    ProofStageResult,
+    SmtHint,
+)
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.provider_pause import is_provider_credit_pause_error
 from backend.shared.smt_client import get_smt_client
+from backend.shared.utils import count_tokens
 from .proof_dependency_extractor import ProofDependencyExtractor
 
 logger = logging.getLogger(__name__)
@@ -42,7 +53,34 @@ BroadcastFn = Optional[Callable[[str, dict[str, Any]], Awaitable[None]]]
 ShouldStopFn = Optional[Callable[[], bool]]
 ProofCheckpointCallback = Optional[Callable[[dict[str, Any]], Awaitable[None]]]
 ProofAppendCallback = Optional[Callable[[Any], Awaitable[None]]]
+ProofPruningRegisteredCallback = Optional[
+    Callable[[Any, dict[str, Any]], Awaitable[None]]
+]
+ProofPruningPressureCallback = Optional[
+    Callable[..., Awaitable[None]]
+]
 LEAN_WORKSPACE_ERROR_PREFIX = "LEAN 4 WORKSPACE ERROR"
+PROOF_TRUNCATION_STOP_REASON = "proof_output_truncation_recovery_exhausted"
+PROOF_TRUNCATION_POLICY_VERSION = "proof-truncation-v1"
+
+
+def _candidate_fingerprint(candidate: ProofCandidate, source_type: str, source_id: str) -> str:
+    normalized = "\n".join(
+        [
+            source_type.strip().lower(),
+            source_id.strip().lower(),
+            " ".join((candidate.statement or "").split()).lower(),
+            " ".join((candidate.formal_sketch or "").split()).lower(),
+        ]
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _truncation_chain_exhausted(attempts: list[ProofAttemptFeedback]) -> bool:
+    return len(attempts) >= 5 and all(
+        attempt.failure_kind == "output_truncated" and not attempt.lean_code
+        for attempt in attempts
+    )
 
 
 @dataclass
@@ -67,7 +105,7 @@ class ProofVerificationProviderPause(Exception):
 class ProofVerificationStage:
     """Run the full proof-verification checkpoint pipeline."""
 
-    _active_sources: set[str] = set()
+    _active_sources: dict[str, str] = {}
     _active_sources_lock: Optional[asyncio.Lock] = None
 
     def __init__(self, solution_path_manager: Any = None) -> None:
@@ -108,37 +146,76 @@ class ProofVerificationStage:
             return set(cls._active_sources)
 
     @classmethod
-    async def reserve_source(cls, source_type: str, source_id: str) -> None:
+    async def reserve_source(
+        cls,
+        source_type: str,
+        source_id: str,
+        owner_token: str = "",
+    ) -> str:
         """Reserve a source before background execution begins."""
-        await cls._acquire_source(source_type, source_id)
+        resolved_token = owner_token or uuid.uuid4().hex
+        await cls._acquire_source(source_type, source_id, resolved_token)
+        return resolved_token
 
     @classmethod
-    async def release_source(cls, source_type: str, source_id: str) -> None:
-        """Release a previously reserved source."""
-        await cls._release_source(source_type, source_id)
+    async def release_source(
+        cls,
+        source_type: str,
+        source_id: str,
+        owner_token: str = "",
+    ) -> bool:
+        """Release a reservation only when the caller presents its owner token."""
+        return await cls._release_source(source_type, source_id, owner_token)
 
     @classmethod
-    async def _acquire_source(cls, source_type: str, source_id: str) -> None:
+    async def _acquire_source(
+        cls,
+        source_type: str,
+        source_id: str,
+        owner_token: str = "",
+    ) -> None:
         async with cls._get_active_sources_lock():
             source_key = cls._source_key(source_type, source_id)
             if source_key in cls._active_sources:
                 raise RuntimeError(f"Proof verification already running for {source_type} {source_id}")
-            cls._active_sources.add(source_key)
+            cls._active_sources[source_key] = owner_token or uuid.uuid4().hex
 
     @classmethod
-    async def _release_source(cls, source_type: str, source_id: str) -> None:
+    async def _release_source(
+        cls,
+        source_type: str,
+        source_id: str,
+        owner_token: str = "",
+    ) -> bool:
         async with cls._get_active_sources_lock():
-            cls._active_sources.discard(cls._source_key(source_type, source_id))
+            source_key = cls._source_key(source_type, source_id)
+            current_owner = cls._active_sources.get(source_key)
+            if current_owner is None:
+                return False
+            if not owner_token or owner_token != current_owner:
+                return False
+            cls._active_sources.pop(source_key, None)
+            return True
 
     async def _broadcast(self, broadcast_fn: BroadcastFn, event: str, data: dict[str, Any]) -> None:
         if broadcast_fn:
             await broadcast_fn(event, data)
 
     @staticmethod
-    def _role_suffix(source_type: str, override: Optional[str] = None) -> str:
+    def _role_suffix(
+        source_type: str,
+        override: Optional[str] = None,
+        proof_run_context: Optional[dict[str, Any]] = None,
+    ) -> str:
         if override:
-            return override
-        return "brainstorm" if source_type == "brainstorm" else "paper"
+            base = override
+        else:
+            base = "brainstorm" if source_type == "brainstorm" else "paper"
+        proof_run_id = str((proof_run_context or {}).get("proof_run_id", "") or "")
+        if not proof_run_id:
+            return base
+        scope = "manual" if base.startswith("manual_") else "autonomous"
+        return f"{base}_{proof_run_role_suffix(scope, proof_run_id)}"
 
     @staticmethod
     def _summarize_error(error_text: str, limit: int = 500) -> str:
@@ -184,9 +261,11 @@ class ProofVerificationStage:
     def _proof_label_for_index(index: int) -> str:
         """Return Proof A..Z, then AA..ZZ, then AAA.. for a 1-based index."""
         safe_index = max(1, int(index or 1))
-        letter = chr(ord("A") + ((safe_index - 1) % 26))
-        repeat_count = ((safe_index - 1) // 26) + 1
-        return letter * repeat_count
+        label = ""
+        while safe_index:
+            safe_index, remainder = divmod(safe_index - 1, 26)
+            label = chr(ord("A") + remainder) + label
+        return label
 
     @staticmethod
     def _should_append_verified_proof(
@@ -220,8 +299,15 @@ class ProofVerificationStage:
         if error_summary:
             if "timed out after" in error_summary.lower() and "Advanced Settings" not in error_summary:
                 error_summary = f"{error_summary} You can change this timeout in Advanced Settings."
-            return f"Lean 4 response: {error_summary} - proof not verified."
-        return "Lean 4 response: proof not verified."
+            return (
+                "Lean 4 proof-attempt feedback (not a MOTO system error): "
+                f"{error_summary} The model uses these diagnostics if another attempt follows. "
+                "Proof not verified."
+            )
+        return (
+            "Lean 4 proof-attempt feedback (not a MOTO system error): proof not verified. "
+            "The model uses these diagnostics if another attempt follows."
+        )
 
     @staticmethod
     def _extract_suggested_lemma_targets(error_text: str) -> list[str]:
@@ -471,6 +557,7 @@ class ProofVerificationStage:
         role_suffix_override: Optional[str] = None,
         trigger: str = "automatic",
         source_reserved: bool = False,
+        source_reservation_token: str = "",
         release_source_on_exit: bool = True,
         should_stop: ShouldStopFn = None,
         append_to_source: bool = True,
@@ -478,15 +565,26 @@ class ProofVerificationStage:
         proof_candidate_indexes: Optional[dict[str, int]] = None,
         checkpoint_attempts_by_candidate: Optional[dict[str, list[ProofAttemptFeedback]]] = None,
         checkpoint_theorem_names_by_candidate: Optional[dict[str, str]] = None,
+        checkpoint_truncation_streak: Optional[list[dict[str, Any]]] = None,
+        checkpoint_result: Optional[ProofStageResult] = None,
         checkpoint_callback: ProofCheckpointCallback = None,
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
         prior_round_results: str = "",
         canonical_user_prompt: str = "",
         run_id: str = "",
+        terminal_truncation_stop_enabled: bool = True,
+        proof_run_context: Optional[dict[str, Any]] = None,
+        proof_pruning_registered_callback: ProofPruningRegisteredCallback = None,
+        proof_pruning_pressure_callback: ProofPruningPressureCallback = None,
+        proof_pruning_route_fingerprint: str = "",
     ) -> ProofStageResult:
         """Run proof identification, formalization, Lean 4 checking, and novelty review."""
-        result = ProofStageResult(source_type=source_type, source_id=source_id)
+        result = (
+            checkpoint_result.model_copy(deep=True)
+            if checkpoint_result is not None
+            else ProofStageResult(source_type=source_type, source_id=source_id)
+        )
         resolved_candidates: list[ProofCandidate] = []
         candidate_indexes: dict[str, int] = dict(proof_candidate_indexes or {})
         processed_candidate_ids: set[str] = set()
@@ -499,15 +597,22 @@ class ProofVerificationStage:
             for theorem_id, theorem_name in (checkpoint_theorem_names_by_candidate or {}).items()
             if theorem_name
         }
+        truncation_streak: list[dict[str, Any]] = list(checkpoint_truncation_streak or [])
         checkpoint_state_lock = asyncio.Lock()
+        abort_event = asyncio.Event()
+        checkpoint_revision = 0
 
         async def save_checkpoint(status: str) -> None:
+            nonlocal checkpoint_revision
             if checkpoint_callback is None:
                 return
             async with checkpoint_state_lock:
                 if not resolved_candidates and status not in {"complete", "error", "no_candidates"}:
                     return
+                checkpoint_revision += 1
                 payload = {
+                    "checkpoint_revision": checkpoint_revision,
+                    "recovery_policy_version": PROOF_TRUNCATION_POLICY_VERSION,
                     "source_type": source_type,
                     "source_id": source_id,
                     "source_title": source_title,
@@ -540,26 +645,42 @@ class ProofVerificationStage:
                     "total_candidates": result.total_candidates,
                     "verified_count": result.verified_count,
                     "novel_count": result.novel_count,
+                    "truncation_streak": list(truncation_streak),
+                    "fatal_stop_reason": result.fatal_stop_reason,
+                    "fatal_stop_payload": dict(result.fatal_stop_payload),
                 }
-            await checkpoint_callback(payload)
+                # Keep persistence in the same critical section as snapshot
+                # creation so a slower older write cannot land after a newer
+                # concurrent candidate snapshot.
+                await checkpoint_callback(payload)
 
         def _stop_requested() -> bool:
+            if abort_event.is_set():
+                return True
             if should_stop is None:
                 return False
             try:
                 return bool(should_stop())
             except Exception:
                 return False
+        owned_reservation_token = source_reservation_token
         if not source_reserved:
-            await self._acquire_source(source_type, source_id)
+            owned_reservation_token = uuid.uuid4().hex
+            await self._acquire_source(
+                source_type,
+                source_id,
+                owned_reservation_token,
+            )
         try:
             base_event = {
                 "source_type": source_type,
                 "source_id": source_id,
                 "source_title": source_title,
+                "run_id": run_id,
                 "trigger": trigger,
                 "proof_round_index": proof_round_index,
                 "proof_max_rounds": proof_max_rounds,
+                **dict(proof_run_context or {}),
             }
             await self._broadcast(
                 broadcast_fn,
@@ -581,7 +702,12 @@ class ProofVerificationStage:
                 )
                 return result
 
-            role_suffix = self._role_suffix(source_type, role_suffix_override)
+            role_suffix = self._role_suffix(
+                source_type,
+                role_suffix_override,
+                proof_run_context,
+            )
+            novelty_role_id = f"autonomous_proof_novelty_{role_suffix}"
             identification_agent = ProofIdentificationAgent(
                 model_id=submitter_model,
                 context_window=submitter_context,
@@ -634,7 +760,7 @@ class ProofVerificationStage:
                     },
                 )
 
-            result.total_candidates = len(resolved_candidates)
+            result.total_candidates = max(result.total_candidates, len(resolved_candidates))
             await save_checkpoint("running")
             await self._broadcast(
                 broadcast_fn,
@@ -701,10 +827,13 @@ class ProofVerificationStage:
                     trigger=trigger,
                     novel_proofs_db=novel_proofs_db,
                     broadcast_fn=broadcast_fn,
-                    should_stop=should_stop,
+                    should_stop=_stop_requested,
                     prior_attempts=attempts_by_candidate.get(theorem_candidate.theorem_id, []),
                     prior_theorem_name=theorem_names_by_candidate.get(theorem_candidate.theorem_id, ""),
                     attempt_checkpoint_callback=record_attempts,
+                    proof_pruning_pressure_callback=proof_pruning_pressure_callback,
+                    proof_pruning_route_fingerprint=proof_pruning_route_fingerprint,
+                    run_id=run_id,
                 )
 
             verification_tasks = []
@@ -723,6 +852,8 @@ class ProofVerificationStage:
                 batch_index: int,
             ) -> tuple[int, _LeanVerificationOutcome]:
                 await batch_events[batch_index].wait()
+                if _stop_requested():
+                    raise asyncio.CancelledError()
                 return batch_index, await run_phase_a(theorem_candidate, proof_label)
 
             verification_tasks = [
@@ -737,6 +868,55 @@ class ProofVerificationStage:
                 for index, candidate in candidate_batch
             ]
             pending_tasks = set(verification_tasks)
+            ordered_outcomes: dict[int, tuple[str, dict[str, Any]]] = {}
+            next_ordered_index = min((index for index, _candidate in indexed_candidates), default=1)
+
+            async def commit_ordered_outcomes() -> bool:
+                nonlocal next_ordered_index, truncation_streak
+                while next_ordered_index in ordered_outcomes:
+                    outcome_kind, detail = ordered_outcomes.pop(next_ordered_index)
+                    next_ordered_index += 1
+                    if outcome_kind == "neutral":
+                        truncation_streak = []
+                        continue
+                    if outcome_kind != "truncation_exhausted":
+                        truncation_streak = []
+                        continue
+                    fingerprint = str(detail["candidate_fingerprint"])
+                    if truncation_streak and truncation_streak[-1].get("candidate_fingerprint") == fingerprint:
+                        continue
+                    truncation_streak = (truncation_streak + [detail])[-2:]
+                    await self._broadcast(
+                        broadcast_fn,
+                        "proof_truncation_recovery_exhausted",
+                        {
+                            **base_event,
+                            **detail,
+                            "consecutive_distinct_candidates": len(truncation_streak),
+                            "threshold": 2,
+                            "message": (
+                                f"{detail['proof_label']} exhausted all output-truncation recovery attempts "
+                                f"without returning usable Lean code ({len(truncation_streak)}/2 consecutive candidates)."
+                            ),
+                        },
+                    )
+                    if terminal_truncation_stop_enabled and len(truncation_streak) >= 2:
+                        abort_event.set()
+                        result.fatal_stop_reason = PROOF_TRUNCATION_STOP_REASON
+                        result.fatal_stop_payload = {
+                            **base_event,
+                            "consecutive_distinct_candidates": 2,
+                            "threshold": 2,
+                            "candidates": list(truncation_streak),
+                            "lean_was_run": False,
+                            "terminal_guidance": (
+                                "Increase the proof model output allowance, lower reasoning, or configure "
+                                "a different proof/Rigor & Proofs model or provider, then restart the run."
+                            ),
+                        }
+                        await save_checkpoint("fatal_truncation_exhausted")
+                        return True
+                return False
 
             def remaining_unprocessed_candidates() -> list[ProofCandidate]:
                 return [
@@ -854,8 +1034,16 @@ class ProofVerificationStage:
                                 # eligible after proof-model/context settings change.
                                 if candidate.theorem_id not in result.deferred_candidate_ids:
                                     result.deferred_candidate_ids.append(candidate.theorem_id)
+                                ordered_outcomes[candidate_indexes.get(candidate.theorem_id, 0)] = (
+                                    "neutral",
+                                    {},
+                                )
                                 mark_batch_outcome_processed(batch_index)
                                 await save_checkpoint("running")
+                                if await commit_ordered_outcomes():
+                                    await cancel_and_drain(set(done_tasks) - {future})
+                                    partial_stop = True
+                                    break
                                 continue
                             if source_type == "brainstorm" and trigger != "retry" and not context_overflow:
                                 await novel_proofs_db.record_failed_candidate(
@@ -864,6 +1052,8 @@ class ProofVerificationStage:
                                     error_summary,
                                     suggested_lemma_targets=suggested_targets,
                                 )
+                            fingerprint = _candidate_fingerprint(candidate, source_type, source_id)
+                            truncation_exhausted = _truncation_chain_exhausted(attempts)
                             result.results.append(
                                 ProofAttemptResult(
                                     theorem_id=candidate.theorem_id,
@@ -873,29 +1063,67 @@ class ProofVerificationStage:
                                     novel=False,
                                     attempts_used=len(attempts),
                                     error_summary=error_summary,
+                                    candidate_fingerprint=fingerprint,
+                                    truncation_recovery_exhausted=truncation_exhausted,
                                 )
+                            )
+                            ordered_outcomes[candidate_indexes.get(candidate.theorem_id, 0)] = (
+                                "truncation_exhausted" if truncation_exhausted else "other",
+                                {
+                                    "theorem_id": candidate.theorem_id,
+                                    "theorem_statement": candidate.statement,
+                                    "proof_label": proof_label,
+                                    "candidate_fingerprint": fingerprint,
+                                    "attempts_used": len(attempts),
+                                    "strategies_tried": [
+                                        {
+                                            "attempt": attempt.attempt,
+                                            "recovery_mode": attempt.recovery_mode,
+                                            "reasoning_effort": attempt.reasoning_effort,
+                                            "requested_output_tokens": attempt.requested_output_tokens,
+                                            "response_mode": attempt.response_mode,
+                                        }
+                                        for attempt in attempts
+                                    ],
+                                },
                             )
                             processed_candidate_ids.add(candidate.theorem_id)
                             mark_batch_outcome_processed(batch_index)
                             await save_checkpoint("running")
+                            if await commit_ordered_outcomes():
+                                await cancel_and_drain(set(done_tasks) - {future})
+                                partial_stop = True
+                                break
                             continue
 
                         integrity_task_id = f"proof_integrity_{self._integrity_task_sequence:03d}"
                         self._integrity_task_sequence += 1
-                        integrity = await validate_full_lean_proof_integrity(
-                            user_prompt=user_prompt,
-                            theorem_statement=candidate.statement,
-                            formal_sketch=candidate.formal_sketch,
-                            lean_code=lean_code,
-                            source_excerpt=candidate.source_excerpt or content,
-                            allowed_baseline="",
-                            validator_model=validator_model,
-                            validator_context=validator_context,
-                            validator_max_tokens=validator_max_tokens,
-                            task_id=integrity_task_id,
-                            role_id="autonomous_proof_novelty",
-                            require_statement_alignment=True,
-                        )
+                        while True:
+                            try:
+                                integrity = await validate_full_lean_proof_integrity(
+                                    user_prompt=user_prompt,
+                                    theorem_statement=candidate.statement,
+                                    formal_sketch=candidate.formal_sketch,
+                                    lean_code=lean_code,
+                                    source_excerpt=candidate.source_excerpt or content,
+                                    allowed_baseline="",
+                                    validator_model=validator_model,
+                                    validator_context=validator_context,
+                                    validator_max_tokens=validator_max_tokens,
+                                    task_id=integrity_task_id,
+                                    role_id=novelty_role_id,
+                                    require_statement_alignment=True,
+                                )
+                                break
+                            except RetryableProviderError as provider_error:
+                                await save_checkpoint("provider_paused")
+                                await api_client_manager.wait_for_retryable_provider_error(
+                                    provider_error,
+                                    role_id=novelty_role_id,
+                                    should_stop=should_stop,
+                                )
+                                if should_stop and should_stop():
+                                    raise asyncio.CancelledError()
                         if not integrity.valid:
                             integrity_feedback = ProofAttemptFeedback(
                                 attempt=(attempts[-1].attempt + 1 if attempts else 1),
@@ -940,9 +1168,14 @@ class ProofVerificationStage:
                                     error_summary=error_summary,
                                 )
                             )
+                            ordered_outcomes[candidate_indexes.get(candidate.theorem_id, 0)] = ("other", {})
                             processed_candidate_ids.add(candidate.theorem_id)
                             mark_batch_outcome_processed(batch_index)
                             await save_checkpoint("running")
+                            if await commit_ordered_outcomes():
+                                await cancel_and_drain(set(done_tasks) - {future})
+                                partial_stop = True
+                                break
                             continue
 
                         stored_theorem_statement = (
@@ -988,33 +1221,57 @@ class ProofVerificationStage:
                         if self._first_attempt_used_smt_hint(attempts, candidate.smt_hint):
                             solver_hints.append("smt-z3")
 
-                        registration = await register_verified_lean_proof(
-                            proof_database=novel_proofs_db,
-                            user_prompt=canonical_user_prompt or user_prompt,
-                            theorem_statement=stored_theorem_statement,
-                            lean_code=lean_code,
-                            validator_model=validator_model,
-                            validator_context=validator_context,
-                            validator_max_tokens=validator_max_tokens,
-                            task_id=novelty_task_id,
-                            role_id="autonomous_proof_novelty",
-                            source_type=source_type,
-                            source_id=source_id,
-                            source_title=source_title,
-                            theorem_id=candidate.theorem_id,
-                            theorem_name=stored_theorem_name,
-                            formal_sketch=stored_formal_sketch,
-                            solver="Lean 4",
-                            verification_notes=verification_notes,
-                            attempt_count=len(attempts),
-                            attempts=attempts,
-                            solver_hints=solver_hints,
-                            broadcast_fn=broadcast_fn,
-                            base_event=base_event,
-                            proof_label=proof_label,
-                            retry_origin_source_id=candidate.origin_source_id,
-                            run_id=run_id,
-                        )
+                        registration_kwargs = {
+                            "proof_database": novel_proofs_db,
+                            "user_prompt": canonical_user_prompt or user_prompt,
+                            "theorem_statement": stored_theorem_statement,
+                            "lean_code": lean_code,
+                            "validator_model": validator_model,
+                            "validator_context": validator_context,
+                            "validator_max_tokens": validator_max_tokens,
+                            "task_id": novelty_task_id,
+                            "role_id": novelty_role_id,
+                            "source_type": source_type,
+                            "source_id": source_id,
+                            "source_title": source_title,
+                            "theorem_id": candidate.theorem_id,
+                            "theorem_name": stored_theorem_name,
+                            "formal_sketch": stored_formal_sketch,
+                            "solver": "Lean 4",
+                            "verification_notes": verification_notes,
+                            "attempt_count": len(attempts),
+                            "attempts": attempts,
+                            "solver_hints": solver_hints,
+                            "broadcast_fn": broadcast_fn,
+                            "base_event": base_event,
+                            "proof_label": proof_label,
+                            "retry_origin_source_id": candidate.origin_source_id,
+                            "run_id": run_id,
+                        }
+                        while True:
+                            try:
+                                registration = await register_verified_lean_proof(
+                                    **registration_kwargs
+                                )
+                                break
+                            except RetryableProviderError as provider_error:
+                                await save_checkpoint("provider_paused")
+                                if trigger == "manual":
+                                    registration_kwargs["novelty_classification"] = (
+                                        "not_novel",
+                                        (
+                                            "Conservatively classified as not novel after a "
+                                            "transient failure in the post-Lean novelty check."
+                                        ),
+                                    )
+                                    continue
+                                await api_client_manager.wait_for_retryable_provider_error(
+                                    provider_error,
+                                    role_id=novelty_role_id,
+                                    should_stop=should_stop,
+                                )
+                                if should_stop and should_stop():
+                                    raise asyncio.CancelledError()
                         stored_record = registration.record
                         is_novel = stored_record.novel
                         is_prompt_novel = is_prompt_injection_novel_tier(stored_record.novelty_tier)
@@ -1054,13 +1311,20 @@ class ProofVerificationStage:
                                 relevant_lemmas=candidate.relevant_lemmas,
                                 current_proof_id=stored_record.proof_id,
                             )
-                            if dependencies:
-                                updated_record = await novel_proofs_db.update_proof_dependencies(
-                                    stored_record.proof_id,
-                                    dependencies,
+                            updated_record = await novel_proofs_db.update_proof_dependencies(
+                                stored_record.proof_id,
+                                dependencies,
+                                extraction_status="complete",
+                            )
+                            if (
+                                updated_record is not None
+                                and isinstance(
+                                    getattr(updated_record, "proof_id", None),
+                                    str,
                                 )
-                                if updated_record is not None:
-                                    stored_record = updated_record
+                            ):
+                                stored_record = updated_record
+                            if dependencies:
                                 await self._broadcast(
                                     broadcast_fn,
                                     "proof_dependency_added",
@@ -1076,10 +1340,40 @@ class ProofVerificationStage:
                                     },
                                 )
                         except Exception as exc:
+                            updated_record = await novel_proofs_db.update_proof_dependencies(
+                                stored_record.proof_id,
+                                [],
+                                extraction_status="failed",
+                                extraction_detail=str(exc),
+                            )
+                            if (
+                                updated_record is not None
+                                and isinstance(
+                                    getattr(updated_record, "proof_id", None),
+                                    str,
+                                )
+                            ):
+                                stored_record = updated_record
                             logger.debug(
                                 "Dependency extraction failed for theorem %s: %s",
                                 candidate.theorem_id,
                                 exc,
+                            )
+
+                        # Pruning is notified only after registration and
+                        # dependency/checkpoint state are safe. The callback
+                        # itself only updates counters/schedules owned work.
+                        if proof_pruning_registered_callback is not None:
+                            await proof_pruning_registered_callback(
+                                stored_record,
+                                {
+                                    "proof_set_revision": (
+                                        await novel_proofs_db.get_proof_set_revision()
+                                    ),
+                                    "proof_round_index": proof_round_index,
+                                    "trigger": trigger,
+                                    "duplicate": registration.duplicate,
+                                },
                             )
 
                         if candidate.origin_source_id:
@@ -1116,9 +1410,14 @@ class ProofVerificationStage:
                                 error_summary="",
                             )
                         )
+                        ordered_outcomes[candidate_indexes.get(candidate.theorem_id, 0)] = ("other", {})
                         processed_candidate_ids.add(candidate.theorem_id)
                         mark_batch_outcome_processed(batch_index)
                         await save_checkpoint("running")
+                        if await commit_ordered_outcomes():
+                            await cancel_and_drain(set(done_tasks) - {future})
+                            partial_stop = True
+                            break
                     if partial_stop:
                         break
             finally:
@@ -1167,7 +1466,11 @@ class ProofVerificationStage:
                     source_id,
                     exc,
                 )
-                role_suffix = self._role_suffix(source_type, role_suffix_override)
+                role_suffix = self._role_suffix(
+                    source_type,
+                    role_suffix_override,
+                    proof_run_context,
+                )
                 raise RetryableProviderError(
                     provider="unknown",
                     provider_label="Inference provider",
@@ -1207,7 +1510,11 @@ class ProofVerificationStage:
             return result
         finally:
             if release_source_on_exit:
-                await self._release_source(source_type, source_id)
+                await self._release_source(
+                    source_type,
+                    source_id,
+                    owned_reservation_token,
+                )
 
     async def _run_lean_pipeline_for_candidate(
         self,
@@ -1231,6 +1538,9 @@ class ProofVerificationStage:
         prior_attempts: Optional[list[ProofAttemptFeedback]] = None,
         prior_theorem_name: str = "",
         attempt_checkpoint_callback: Optional[Callable[[ProofCandidate, list[ProofAttemptFeedback]], Awaitable[None]]] = None,
+        proof_pruning_pressure_callback: ProofPruningPressureCallback = None,
+        proof_pruning_route_fingerprint: str = "",
+        run_id: str = "",
     ) -> _LeanVerificationOutcome:
         """Phase A for one candidate: lemma prep, SMT hint, and Lean 4 attempts.
 
@@ -1239,6 +1549,8 @@ class ProofVerificationStage:
         ``role_id`` remains the same for all attempts belonging to one
         candidate.
         """
+        if should_stop and should_stop():
+            raise asyncio.CancelledError()
         identification_agent = ProofIdentificationAgent(
             model_id=submitter_model,
             context_window=submitter_context,
@@ -1266,6 +1578,8 @@ class ProofVerificationStage:
             source_title=source_title,
             lemma_search_agent=lemma_search_agent,
         )
+        if should_stop and should_stop():
+            raise asyncio.CancelledError()
         smt_hint = await self._run_smt_check(
             user_prompt=user_prompt,
             source_type=source_type,
@@ -1278,6 +1592,8 @@ class ProofVerificationStage:
             identification_agent=identification_agent,
             broadcast_fn=broadcast_fn,
         )
+        if should_stop and should_stop():
+            raise asyncio.CancelledError()
         if smt_hint:
             candidate = candidate.model_copy(update={"smt_hint": smt_hint})
         if trigger == "retry" and candidate.origin_source_id:
@@ -1305,6 +1621,29 @@ class ProofVerificationStage:
             strategy: str,
             current_candidate=candidate,
         ) -> None:
+            recovery_mode = "configured"
+            reasoning_effort = None
+            response_mode = "json"
+            truncation_count = sum(
+                1 for attempt in active_attempts
+                if attempt.failure_kind == "output_truncated"
+            )
+            if truncation_count:
+                recovery_step = min(5, truncation_count + 1)
+                if recovery_step == 2:
+                    recovery_mode, response_mode = "compact_same_model", "compact_json"
+                elif recovery_step in {3, 4}:
+                    recovery_mode, reasoning_effort, response_mode = (
+                        "compact_reduced_reasoning" if recovery_step == 3 else "tactic_reduced_reasoning",
+                        "low",
+                        "compact_json",
+                    )
+                else:
+                    recovery_mode, reasoning_effort, response_mode = (
+                        "tactic_minimal_reasoning",
+                        "none",
+                        "compact_json",
+                    )
             await self._broadcast(
                 broadcast_fn,
                 "proof_attempt_started",
@@ -1315,6 +1654,19 @@ class ProofVerificationStage:
                     "proof_label": proof_label,
                     "attempt": attempt_number,
                     "strategy": strategy,
+                    "recovery_mode": recovery_mode,
+                    "reasoning_effort": reasoning_effort,
+                    "response_mode": response_mode,
+                    "message": (
+                        f"{proof_label}, Attempt {attempt_number} started"
+                        if recovery_mode == "configured"
+                        else (
+                            f"{proof_label}, Attempt {attempt_number} started after truncation using "
+                            f"{recovery_mode.replace('_', ' ')}"
+                            + (f" with reasoning={reasoning_effort}" if reasoning_effort else "")
+                            + "."
+                        )
+                    ),
                     "retry_origin_source_id": current_candidate.origin_source_id,
                 },
             )
@@ -1400,6 +1752,80 @@ class ProofVerificationStage:
                         "retry_origin_source_id": current_candidate.origin_source_id,
                     },
                 )
+                if (
+                    proof_pruning_pressure_callback is not None
+                    and novel_proofs_db is not None
+                ):
+                    active_proof_block = (
+                        novel_proofs_db.get_novel_proofs_for_injection(run_id)
+                        if hasattr(
+                            novel_proofs_db,
+                            "get_novel_proofs_for_injection",
+                        )
+                        else ""
+                    )
+                    active_proof_tokens = count_tokens(active_proof_block)
+                    pressure = ProofPruneContextPressure(
+                        trigger="context_pressure",
+                        prompt_tokens=feedback.prompt_tokens,
+                        available_input_tokens=feedback.max_input_tokens,
+                        active_proof_tokens=active_proof_tokens,
+                        mandatory_source_tokens=count_tokens(source_content),
+                        candidate_and_feedback_tokens=max(
+                            0,
+                            int(feedback.prompt_tokens or 0)
+                            - count_tokens(source_content)
+                            - active_proof_tokens,
+                        ),
+                        active_proof_context_tokens=active_proof_tokens,
+                        output_reserve_tokens=max(
+                            0,
+                            int(submitter_max_tokens or 0),
+                        ),
+                        configured_context_window=max(
+                            0,
+                            int(submitter_context or 0),
+                        ),
+                        route_config_fingerprint=proof_pruning_route_fingerprint,
+                        proof_set_revision=(
+                            await novel_proofs_db.get_proof_set_revision()
+                        ),
+                        detail=(
+                            "Candidate-local proof formalization overflow; "
+                            "mandatory source context remains authoritative."
+                        ),
+                    )
+                    await proof_pruning_pressure_callback(
+                        pressure,
+                        urgent=True,
+                        proof_set_revision=pressure.proof_set_revision,
+                    )
+            elif feedback.failure_kind == "output_truncated":
+                await self._broadcast(
+                    broadcast_fn,
+                    "proof_attempt_failed",
+                    {
+                        **base_event,
+                        "theorem_id": current_candidate.theorem_id,
+                        "theorem_statement": current_candidate.statement,
+                        "proof_label": proof_label,
+                        "attempt": feedback.attempt,
+                        "strategy": feedback.strategy,
+                        "failure_kind": feedback.failure_kind,
+                        "lean_was_run": False,
+                        "recovery_mode": feedback.recovery_mode,
+                        "reasoning_effort": feedback.reasoning_effort,
+                        "response_mode": feedback.response_mode,
+                        "requested_output_tokens": feedback.requested_output_tokens,
+                        "message": (
+                            "Model output truncated before usable Lean code was returned; "
+                            "Lean 4 was not run."
+                        ),
+                        "error_summary": self._summarize_error(feedback.error_output),
+                        "proof_verified": False,
+                        "retry_origin_source_id": current_candidate.origin_source_id,
+                    },
+                )
             else:
                 lean_response = self._lean_response_summary(feedback)
                 await self._broadcast(
@@ -1412,6 +1838,8 @@ class ProofVerificationStage:
                         "proof_label": proof_label,
                         "attempt": feedback.attempt,
                         "strategy": feedback.strategy,
+                        "failure_kind": feedback.failure_kind,
+                        "lean_was_run": feedback.lean_was_run,
                         "error_summary": self._summarize_error(feedback.error_output),
                         "lean_response": lean_response,
                         "proof_verified": False,
@@ -1489,7 +1917,13 @@ class ProofVerificationStage:
                 and ProofFormalizationAgent.is_context_overflow_feedback(attempts[-1])
             )
 
-        if not success and not workspace_error and not context_overflow and not (should_stop and should_stop()):
+        if (
+            not success
+            and not workspace_error
+            and not context_overflow
+            and not _truncation_chain_exhausted(attempts)
+            and not (should_stop and should_stop())
+        ):
             await self._broadcast(
                 broadcast_fn,
                 "proof_attempts_exhausted",
@@ -1530,9 +1964,25 @@ class ProofVerificationStage:
         novel_proofs_db,
         source_title: str = "",
         source_reserved: bool = False,
+        source_reservation_token: str = "",
         append_to_source: bool = True,
         append_proof_callback: ProofAppendCallback = None,
         should_stop: ShouldStopFn = None,
+        release_source_on_exit: bool = True,
+        proof_run_context: Optional[dict[str, Any]] = None,
+        proof_pruning_registered_callback: ProofPruningRegisteredCallback = None,
+        proof_pruning_pressure_callback: ProofPruningPressureCallback = None,
+        proof_pruning_route_fingerprint: str = "",
+        proof_round_index: int = 1,
+        proof_max_rounds: int = 1,
+        prior_round_results: str = "",
+        theorem_candidates: Optional[list[ProofCandidate]] = None,
+        proof_candidate_indexes: Optional[dict[str, int]] = None,
+        checkpoint_attempts_by_candidate: Optional[dict[str, list[ProofAttemptFeedback]]] = None,
+        checkpoint_theorem_names_by_candidate: Optional[dict[str, str]] = None,
+        checkpoint_truncation_streak: Optional[list[dict[str, Any]]] = None,
+        checkpoint_result: Optional[ProofStageResult] = None,
+        checkpoint_callback: ProofCheckpointCallback = None,
     ) -> ProofStageResult:
         """Run a user-triggered proof check using manual proof role IDs."""
         return await self.run(
@@ -1554,8 +2004,24 @@ class ProofVerificationStage:
             role_suffix_override=f"manual_{source_type}",
             trigger="manual",
             source_reserved=source_reserved,
-            release_source_on_exit=True,
+            source_reservation_token=source_reservation_token,
+            release_source_on_exit=release_source_on_exit,
             append_to_source=append_to_source,
             append_proof_callback=append_proof_callback,
             should_stop=should_stop,
+            terminal_truncation_stop_enabled=False,
+            proof_run_context=proof_run_context,
+            proof_pruning_registered_callback=proof_pruning_registered_callback,
+            proof_pruning_pressure_callback=proof_pruning_pressure_callback,
+            proof_pruning_route_fingerprint=proof_pruning_route_fingerprint,
+            proof_round_index=proof_round_index,
+            proof_max_rounds=proof_max_rounds,
+            prior_round_results=prior_round_results,
+            theorem_candidates=theorem_candidates,
+            proof_candidate_indexes=proof_candidate_indexes,
+            checkpoint_attempts_by_candidate=checkpoint_attempts_by_candidate,
+            checkpoint_theorem_names_by_candidate=checkpoint_theorem_names_by_candidate,
+            checkpoint_truncation_streak=checkpoint_truncation_streak,
+            checkpoint_result=checkpoint_result,
+            checkpoint_callback=checkpoint_callback,
         )

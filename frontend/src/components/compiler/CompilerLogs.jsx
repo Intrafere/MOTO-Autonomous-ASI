@@ -5,19 +5,27 @@ import LiveActivityFeed from '../LiveActivityFeed';
 import {
   formatContextOverflowActivityMessage,
   formatAssistantProofPackEventMessage,
+  formatEmptyProofDiscoveryMessage,
+  formatProofRunEventMessage,
   formatSolutionPathEventMessage,
   getActivityClass,
   getActivityIcon,
   hasRecentAssistantProofPackDuplicate,
+  hasRecentProofActivityDuplicate,
 } from '../../utils/activityStyles';
 import {
   MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
-} from '../../hooks/useProofCheckRuntime';
+} from '../../utils/manualProofSources';
+import {
+  compactCompilerActivityEvents,
+  shouldIncludeCompilerContextOverflow,
+  shouldIncludeCompilerProofContextOverflow,
+  shouldIncludeCompilerSolutionPathEvent,
+} from '../../utils/manualLogRouting';
 import { getNamespacedStorageKey } from '../../utils/runtimeConfig';
 import '../autonomous/AutonomousResearch.css';
 
 const MAX_COMPILER_ACTIVITY_EVENTS = 2000;
-const MAX_PERSISTED_TEXT_LENGTH = 1200;
 export const COMPILER_ACTIVITY_STORAGE_KEY = getNamespacedStorageKey('compiler_events_log');
 
 const MANUAL_PROOF_EVENTS = [
@@ -35,58 +43,33 @@ const MANUAL_PROOF_EVENTS = [
   'novel_proof_discovered',
   'proof_dependency_added',
   'proof_check_complete',
+  'proof_retry_scheduled',
+  'proof_retry_started',
+  'proof_run_queued',
+  'proof_run_round_started',
+  'proof_run_round_complete',
+  'proof_run_provider_paused',
+  'proof_run_provider_resumed',
+  'proof_run_terminal',
+  'proof_prune_review_queued',
+  'proof_prune_review_started',
+  'proof_prune_proposed',
+  'proof_prune_validation_started',
+  'proof_prune_provider_paused',
+  'proof_prune_repair_required',
+  'proof_prune_applied',
+  'proof_prune_no_change',
+  'proof_prune_rejected',
+  'proof_prune_stale',
+  'proof_prune_error',
 ];
 
-export const shouldIncludeCompilerContextOverflow = (data = {}) => {
-  const roleId = String(data.role_id || '').toLowerCase();
-  const workflowMode = String(data.workflow_mode || '').toLowerCase();
-  return !(
-    (workflowMode && workflowMode !== 'compiler')
-    || (!workflowMode && !roleId.startsWith('compiler_'))
-  );
+export {
+  compactCompilerActivityEvents,
+  shouldIncludeCompilerContextOverflow,
+  shouldIncludeCompilerProofContextOverflow,
+  shouldIncludeCompilerSolutionPathEvent,
 };
-
-export const shouldIncludeCompilerProofContextOverflow = (data = {}) => (
-  data.source_type === 'paper'
-  && (
-    data.source_id === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID
-    || String(data.source_id || '').startsWith('manual_compiler_')
-    || String(data.source_id || '').startsWith('compiler_manual_')
-  )
-);
-
-export const shouldIncludeCompilerSolutionPathEvent = (data = {}) => {
-  const workflowMode = String(data.workflow_mode || data.mode || '').toLowerCase();
-  return !workflowMode || workflowMode === 'compiler';
-};
-
-const compactPersistedValue = (value) => {
-  if (typeof value === 'string') {
-    return value.length > MAX_PERSISTED_TEXT_LENGTH
-      ? `${value.slice(0, MAX_PERSISTED_TEXT_LENGTH)}...`
-      : value;
-  }
-  if (Array.isArray(value)) {
-    return value.slice(0, 20).map(compactPersistedValue);
-  }
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .slice(0, 40)
-        .map(([key, nested]) => [key, compactPersistedValue(nested)])
-    );
-  }
-  return value;
-};
-
-export const compactCompilerActivityEvents = (events = []) => (
-  events.slice(0, MAX_COMPILER_ACTIVITY_EVENTS).map((event) => ({
-    type: event.type,
-    timestamp: event.timestamp,
-    fullTimestamp: event.fullTimestamp,
-    data: compactPersistedValue(event.data || {}),
-  }))
-);
 
 const compactProofText = (value, maxLength = 1800) => {
   const cleaned = String(value || '').replace(/\s+/g, ' ').trim();
@@ -115,17 +98,19 @@ const leanProofResponse = (data = {}) => {
   if (/timed out after/i.test(error) && !/Advanced Settings/.test(error)) {
     error = `${error} You can change this timeout in Advanced Settings.`;
   }
-  return error ? `Lean 4 response: ${error} - proof not verified.` : '';
+  return error
+    ? `Lean 4 proof-attempt feedback (not a MOTO system error): ${error} The model uses these diagnostics if another attempt follows. Proof not verified.`
+    : '';
 };
 
 const formatLeanProofAttempt = (prefix, data = {}) => {
   const attempt = data.attempt ? `, attempt ${data.attempt}` : '';
   const response = leanProofResponse(data);
   const base = `${prefix}: ${proofTargetLabel(data)}${attempt}`;
-  return response ? `${base} - ${response}` : base;
+  return response ? `${base} — ${response}` : base;
 };
 
-function CompilerLogs() {
+function CompilerLogs({ providerActivity = [] }) {
   const [metrics, setMetrics] = useState({
     construction: { acceptances: 0, rejections: 0, declines: 0, acceptance_rate: 0 },
     rigor: { acceptances: 0, rejections: 0, declines: 0, acceptance_rate: 0 },
@@ -136,6 +121,18 @@ function CompilerLogs() {
     total_submissions: 0
   });
   const [events, setEvents] = useState([]);
+
+  useEffect(() => {
+    setEvents(prev => {
+      const known = new Set(
+        prev.map(item => item?.data?.notification_key).filter(Boolean)
+      );
+      const incoming = providerActivity.filter(
+        item => !known.has(item?.data?.notification_key)
+      );
+      return [...incoming, ...prev].slice(0, MAX_COMPILER_ACTIVITY_EVENTS);
+    });
+  }, [providerActivity]);
   const [status, setStatus] = useState({ current_mode: 'idle' });
   const [error, setError] = useState(null);
   const [warning, setWarning] = useState(null);
@@ -411,6 +408,9 @@ function CompilerLogs() {
     };
     
     setEvents(prev => {
+      if (hasRecentProofActivityDuplicate(prev, newEvent.type, newEvent.data || {})) {
+        return prev;
+      }
       if (hasRecentAssistantProofPackDuplicate(prev, newEvent.type, newEvent.data || {}, fullTimestamp)) {
         return prev;
       }
@@ -444,7 +444,15 @@ function CompilerLogs() {
       const savedEvents = localStorage.getItem(COMPILER_ACTIVITY_STORAGE_KEY);
       if (savedEvents) {
         const parsed = JSON.parse(savedEvents);
-        setEvents(Array.isArray(parsed) ? parsed.slice(0, MAX_COMPILER_ACTIVITY_EVENTS) : []);
+        setEvents(Array.isArray(parsed) ? parsed.filter((event) => (
+          event?.type !== 'proof_run_idle'
+          && event?.type !== 'proof_run_next_round_required'
+          && event?.data?.status !== 'idle_between_rounds'
+          && event?.data?.terminal_reason !== 'three_consecutive_zero_candidate_rounds'
+          && !/waiting for Run Next Round|three consecutive valid.*no candidates/i.test(
+            String(event?.message || ''),
+          )
+        )).slice(0, MAX_COMPILER_ACTIVITY_EVENTS) : []);
       }
     } catch (e) {
       console.error('Failed to load events from localStorage:', e);
@@ -546,17 +554,27 @@ function CompilerLogs() {
     if (type === 'proof_check_no_candidates') {
       const round = Number(data.proof_round_index || 0);
       const maxRounds = Number(data.proof_max_rounds || 0);
-      const prefix = round > 0 && maxRounds > 1
-        ? `Proof round ${round}/${maxRounds} discovery`
+      const isUnbounded = (
+        data.run_mode === 'loop_with_pruning'
+        || data.proof_run_unbounded === true
+        || maxRounds === 0
+      );
+      const prefix = round > 0
+        ? `Proof round ${round}${!isUnbounded && maxRounds > 1 ? `/${maxRounds}` : ''} discovery`
         : 'Proof discovery';
-      return `${prefix} found 0 proof candidates; no proofs will be attempted`;
+      return formatEmptyProofDiscoveryMessage(prefix);
     }
     if (type === 'proof_check_candidates_found') {
       const count = Number(data.count || 0);
       const round = Number(data.proof_round_index || 0);
       const maxRounds = Number(data.proof_max_rounds || 0);
-      const prefix = round > 0 && maxRounds > 1
-        ? `Proof round ${round}/${maxRounds} discovery`
+      const isUnbounded = (
+        data.run_mode === 'loop_with_pruning'
+        || data.proof_run_unbounded === true
+        || maxRounds === 0
+      );
+      const prefix = round > 0
+        ? `Proof round ${round}${!isUnbounded && maxRounds > 1 ? `/${maxRounds}` : ''} discovery`
         : 'Proof discovery';
       const subject = count === 1 ? 'proof candidate' : 'proof candidates';
       return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
@@ -568,13 +586,13 @@ function CompilerLogs() {
       return `Lean accepted proof: ${proofTargetLabel(data)}`;
     }
     if (type === 'proof_attempt_failed') {
-      return formatLeanProofAttempt('Proof attempt failed', data);
+      return formatLeanProofAttempt('Proof attempt feedback', data);
     }
     if (type === 'proof_attempts_exhausted') {
       return formatLeanProofAttempt('Proof attempts exhausted', data);
     }
     if (type === 'proof_integrity_rejected') {
-      return `Proof integrity rejected: ${data.reason || data.message || proofTargetLabel(data)}`;
+      return `Proof feedback: integrity check rejected this attempt — ${data.reason || data.message || proofTargetLabel(data)}`;
     }
     if (type === 'proof_verified') {
       return `Proof verified: ${proofTargetLabel(data)}`;
@@ -594,6 +612,30 @@ function CompilerLogs() {
     if (type === 'proof_check_complete') {
       const detail = data.message ? ` - ${compactProofText(data.message)}` : '';
       return `Proof check complete: ${data.verified_count || 0} verified, ${data.novel_count || 0} novel${detail}`;
+    }
+    if (type === 'proof_retry_scheduled' || type === 'proof_retry_started') {
+      return data.message || formatProofRunEventMessage(type, data);
+    }
+    if ([
+      'proof_run_queued',
+      'proof_run_round_started',
+      'proof_run_round_complete',
+      'proof_run_provider_paused',
+      'proof_run_provider_resumed',
+      'proof_run_terminal',
+      'proof_prune_review_queued',
+      'proof_prune_review_started',
+      'proof_prune_proposed',
+      'proof_prune_validation_started',
+      'proof_prune_provider_paused',
+      'proof_prune_repair_required',
+      'proof_prune_applied',
+      'proof_prune_no_change',
+      'proof_prune_rejected',
+      'proof_prune_stale',
+      'proof_prune_error',
+    ].includes(type)) {
+      return formatProofRunEventMessage(type, data);
     }
     if (type === 'hung_connection_alert') {
       const model = data.model || 'model';

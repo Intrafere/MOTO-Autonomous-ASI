@@ -1,8 +1,8 @@
 {
   "action_ids": [
     "start_manual_aggregator",
-    "attempt_conflicting_start",
     "accept_manual_aggregator_submission",
+    "attempt_conflicting_start",
     "clear_manual_aggregator_state"
   ],
   "adapter": "model",
@@ -34,8 +34,8 @@
   ],
   "replay": [
     "start_manual_aggregator()",
-    "start_manual_compiler()",
     "accept_manual_aggregator_submission()",
+    "start_manual_compiler()",
     "clear()"
   ],
   "result": "passed",

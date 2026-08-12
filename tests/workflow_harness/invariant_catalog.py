@@ -54,6 +54,37 @@ class InvariantState(Protocol):
     exercise_observations: set[str]
     persisted_events: list[WorkflowEvent]
     terminal_stop_events: int
+    proof_artifacts: set[str]
+    visible_proofs: set[str]
+    exportable_proofs: set[str]
+    graph_proofs: set[str]
+    future_memory_proofs: set[str]
+    syntheticlib_eligible_proofs: set[str]
+    owning_run_context_proofs: set[str]
+    future_run_context_proofs: set[str]
+    pruned_proof_occurrences: set[str]
+    canonical_occurrences: dict[str, set[str]]
+    automatic_prune_proposals: int
+    validator_prune_acceptances: int
+    automatic_prune_mutations: int
+    no_prune_responses: int
+    no_prune_errors: int
+    pruning_review_pending: bool
+    proof_progress_while_pruning_pending: int
+    stale_prune_commit_attempts: int
+    stale_prune_mutations: int
+    pruning_success_from_context_overflow: int
+    continuous_loop_active: bool
+    continuous_loop_hidden_cap: int | None
+    continuous_source_reservations: int
+    continuous_stop_available: bool
+    continuous_restart_resumable: bool
+    continuous_stops_on_no_candidates: bool
+    continuous_round_activity_detailed: bool
+    continuous_cleanup_leaks: int
+    automatic_round_callers: int
+    automatic_round_maximum: int
+    automatic_round_stops_on_first_zero: bool
     checkpoint: dict[str, object]
     events: list[WorkflowEvent]
     replay: list[str]
@@ -353,6 +384,95 @@ def _assert_direct_sources_excluded_from_rag(model: WorkflowModel) -> None:
 def _assert_mandatory_source_overflow_visible(model: WorkflowModel) -> None:
     if not model.mandatory_source_overflow_visible:
         _fail(model, "Mandatory source overflow was truncated or hidden by optional RAG context.")
+
+
+def _assert_pruned_proof_artifacts_preserved(model: InvariantState) -> None:
+    required_sets = (
+        model.proof_artifacts,
+        model.visible_proofs,
+        model.exportable_proofs,
+        model.graph_proofs,
+        model.future_memory_proofs,
+        model.syntheticlib_eligible_proofs,
+    )
+    for proof_id in model.pruned_proof_occurrences:
+        if any(proof_id not in values for values in required_sets):
+            _fail(model, f"Pruned proof occurrence lost preserved artifact behavior: {proof_id!r}.")
+
+
+def _assert_owning_run_excludes_pruned_proofs(model: InvariantState) -> None:
+    leaked = model.pruned_proof_occurrences & model.owning_run_context_proofs
+    missing_future = model.pruned_proof_occurrences - model.future_run_context_proofs
+    if leaked:
+        _fail(model, f"Owning-run context includes pruned occurrences: {sorted(leaked)!r}.")
+    if missing_future:
+        _fail(model, f"Future-run memory excludes prior pruned occurrences: {sorted(missing_future)!r}.")
+
+
+def _assert_validator_gates_automatic_pruning(model: InvariantState) -> None:
+    if model.automatic_prune_mutations > min(
+        model.automatic_prune_proposals,
+        model.validator_prune_acceptances,
+    ):
+        _fail(model, "Automatic proof pruning mutated state without a valid proposal and Validator acceptance.")
+
+
+def _assert_no_prune_is_valid(model: InvariantState) -> None:
+    if model.no_prune_responses and model.no_prune_errors:
+        _fail(model, "A valid no-prune response was treated as an error.")
+
+
+def _assert_pruning_non_blocking(model: InvariantState) -> None:
+    if model.pruning_review_pending and model.proof_progress_while_pruning_pending < 1:
+        _fail(model, "Proof solving made no progress while pruning review was pending.")
+
+
+def _assert_prune_commits_lifecycle_fenced(model: InvariantState) -> None:
+    if model.stale_prune_commit_attempts and model.stale_prune_mutations:
+        _fail(model, "A stale or lifecycle-mismatched prune commit mutated proof state.")
+
+
+def _assert_context_overflow_truthful(model: InvariantState) -> None:
+    if model.pruning_success_from_context_overflow:
+        _fail(model, "Candidate-local context overflow was relabeled as pruning success.")
+    proof_overflows = [event for event in model.events if event.event_type == "proof_context_overflow"]
+    if any(event.payload.get("fatal") is not False for event in proof_overflows):
+        _fail(model, "Candidate-local context overflow was not reported as nonfatal/deferred.")
+
+
+def _assert_continuous_loop_explicit_ownership(model: InvariantState) -> None:
+    if not model.continuous_loop_active:
+        return
+    if model.continuous_loop_hidden_cap is not None:
+        _fail(model, "Continuous proof loop has a hidden automatic cap.")
+    if model.continuous_source_reservations != 1:
+        _fail(model, "Continuous proof loop does not own exactly one source reservation.")
+    if not model.continuous_stop_available:
+        _fail(model, "Continuous proof loop lacks explicit Stop control.")
+    if model.continuous_restart_resumable:
+        _fail(model, "Manual continuous proof loop exposes removed restart-resume state.")
+    if model.continuous_stops_on_no_candidates:
+        _fail(model, "Continuous proof loop stops automatically when rounds find no candidates.")
+    if not model.continuous_round_activity_detailed:
+        _fail(model, "Continuous proof loop does not expose detailed per-round live activity.")
+    if model.continuous_cleanup_leaks:
+        _fail(model, "Continuous proof loop leaked lifecycle ownership.")
+
+
+def _assert_automatic_round_policy_preserved(model: InvariantState) -> None:
+    if (model.automatic_round_callers, model.automatic_round_maximum) != (3, 4):
+        _fail(model, "Automatic proof caller/count policy changed from x3/current-up-to-four.")
+    if not model.automatic_round_stops_on_first_zero:
+        _fail(model, "Automatic proof rounds did not stop on the first valid zero-candidate result.")
+
+
+def _assert_pruning_occurrence_scoped(model: InvariantState) -> None:
+    for occurrences in model.canonical_occurrences.values():
+        if len(occurrences) < 2:
+            continue
+        pruned = occurrences & model.pruned_proof_occurrences
+        if pruned and occurrences <= model.pruned_proof_occurrences:
+            _fail(model, "Pruning one occurrence also pruned identical occurrences in other runs or sources.")
 
 
 INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
@@ -659,6 +779,86 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         adapters=("model", "real_coordinator"),
         checker=_assert_generated_appendices_stripped_from_prompts,
         description="Model-visible paper and brainstorm source reads strip generated proof appendices.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.artifacts_and_future_memory_preserved",
+        field="proof_pruning",
+        crossed_fields=("proof_scope_isolation", "workflow_filesystem_state", "assistant_memory"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_pruned_proof_artifacts_preserved,
+        description="Pruning preserves proof artifacts, visibility, exports, graph links, future memory, and SyntheticLib eligibility.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.owning_run_context_excludes_pruned",
+        field="proof_pruning",
+        crossed_fields=("prompt_context", "assistant_memory", "proof_scope_isolation"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_owning_run_excludes_pruned_proofs,
+        description="Owning-run model context excludes pruned occurrences while future runs may retrieve them.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.validator_gates_automatic_mutation",
+        field="proof_pruning",
+        crossed_fields=("provider_pause_resume", "workflow_filesystem_state"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_validator_gates_automatic_pruning,
+        description="Automatic pruning requires a valid proposal and independent Validator acceptance.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.no_prune_is_valid",
+        field="proof_pruning",
+        crossed_fields=("provider_pause_resume",),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_no_prune_is_valid,
+        description="A valid no-prune result causes no mutation and is not an error.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.review_non_blocking",
+        field="proof_pruning",
+        crossed_fields=("proof_runtime_gating", "provider_pause_resume"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_pruning_non_blocking,
+        description="Proof solving and later rounds continue while pruning model review is pending.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.commit_lifecycle_fenced",
+        field="proof_pruning",
+        crossed_fields=("runtime_exclusivity", "workflow_filesystem_state"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_prune_commits_lifecycle_fenced,
+        description="Stop, Clear, run, generation, revision, hash, and snapshot mismatches prevent prune mutation.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.context_overflow_truthful",
+        field="proof_pruning",
+        crossed_fields=("websocket_api_contracts", "proof_runtime_gating"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_context_overflow_truthful,
+        description="Candidate-local overflow remains nonfatal/deferred and is never reported as pruning success.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_loop.continuous_explicit_ownership",
+        field="continuous_proof_loop",
+        crossed_fields=("runtime_exclusivity", "workflow_filesystem_state", "provider_pause_resume"),
+        adapters=("model", "real_route", "real_coordinator"),
+        checker=_assert_continuous_loop_explicit_ownership,
+        description="Continuous manual proof loops run without a no-candidate limit, are explicitly stoppable, expose detailed per-round activity and no restart-resume state, and clean up one reservation.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_loop.automatic_round_policy_preserved",
+        field="continuous_proof_loop",
+        crossed_fields=("proof_runtime_gating", "workflow_filesystem_state"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_automatic_round_policy_preserved,
+        description="Pruning preserves x3/current-up-to-four automatic rounds and first-zero exit.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.occurrence_scope_isolated",
+        field="proof_pruning",
+        crossed_fields=("proof_scope_isolation", "assistant_memory"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_pruning_occurrence_scoped,
+        description="Pruning one occurrence does not affect canonical matches in other runs or sources.",
     ),
 )
 

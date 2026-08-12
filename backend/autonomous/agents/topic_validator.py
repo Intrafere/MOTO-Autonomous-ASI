@@ -233,6 +233,8 @@ class TopicValidatorAgent:
         except RetryableProviderError:
             raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"TopicValidator: Error during validation: {e}")
             if self.task_tracking_callback and 'task_id' in dir():
                 self.task_tracking_callback("completed", task_id)

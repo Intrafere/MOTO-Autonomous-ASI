@@ -395,6 +395,37 @@ class AssistantRankCache:
                 conn.execute("DELETE FROM assistant_cooldown_state")
             conn.commit()
 
+    def invalidate_proof_occurrence(self, proof_id: str) -> None:
+        """Drop derived packs/candidates that mention a mutated proof occurrence."""
+        if not self.db_path.exists() or not proof_id:
+            return
+        needle = f'%"proof_id":"{proof_id}"%'
+        spaced_needle = f'%"proof_id": "{proof_id}"%'
+        with closing(self._connect()) as conn:
+            self._create_schema(conn)
+            rows = conn.execute(
+                "SELECT target_hash FROM assistant_proof_packs "
+                "WHERE pack_json LIKE ? OR pack_json LIKE ?",
+                (needle, spaced_needle),
+            ).fetchall()
+            targets = [str(row["target_hash"]) for row in rows]
+            if not targets:
+                return
+            placeholders = ",".join("?" for _ in targets)
+            conn.execute(
+                f"DELETE FROM assistant_proof_packs WHERE target_hash IN ({placeholders})",
+                targets,
+            )
+            conn.execute(
+                f"DELETE FROM assistant_proof_candidates WHERE target_hash IN ({placeholders})",
+                targets,
+            )
+            conn.execute(
+                f"DELETE FROM assistant_goal_cache WHERE pack_target_hash IN ({placeholders})",
+                targets,
+            )
+            conn.commit()
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row

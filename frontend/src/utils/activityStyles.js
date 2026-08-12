@@ -83,6 +83,190 @@ export const formatSolutionPathEventMessage = (event = '', data = {}) => {
   }
 };
 
+const PROOF_RUN_EVENT_PREFIXES = ['proof_run_', 'proof_prune_'];
+
+export const isProofRunActivityEvent = (event = '') => (
+  PROOF_RUN_EVENT_PREFIXES.some((prefix) => String(event).startsWith(prefix))
+  || [
+    'proof_check_started',
+    'proof_check_no_candidates',
+    'proof_check_candidates_found',
+    'proof_check_complete',
+  ].includes(event)
+);
+
+export const getProofActivityScope = (data = {}) => {
+  const explicit = String(data.proof_scope || data.scope || data.workflow_mode || '').toLowerCase();
+  if (explicit === 'manual' || explicit === 'manual_proof_check') return 'manual';
+  if (explicit === 'autonomous') return 'autonomous';
+  const sourceId = String(data.source_id || '').toLowerCase();
+  const trigger = String(data.trigger || '').toLowerCase();
+  if (
+    sourceId === 'manual_aggregator'
+    || sourceId === 'manual_compiler_current'
+    || sourceId.startsWith('manual_compiler_')
+    || trigger.startsWith('manual')
+  ) {
+    return 'manual';
+  }
+  return 'autonomous';
+};
+
+export const getProofActivityIdentity = (event = '', data = {}) => {
+  if (!isProofRunActivityEvent(event)) return '';
+  const notificationIdentity = data.notification_key || data.notification_id;
+  if (notificationIdentity) return `proof-notification:${notificationIdentity}`;
+  const runId = data.proof_run_id || data.run_id;
+  if (!runId) return '';
+  const round = data.proof_round_index || data.round_index || data.current_round || '';
+  const generation = data.lifecycle_generation || '';
+  const eventInstance = data.event_id || data.sequence || '';
+  const subject = (
+    data.proposal_id
+    || data.candidate_id
+    || data.proof_id
+    || data.theorem_id
+    || data.proof_label
+    || ''
+  );
+  const attempt = data.attempt || data.attempt_index || '';
+  return [
+    'proof-run',
+    getProofActivityScope(data),
+    runId,
+    event,
+    `generation-${generation}`,
+    `round-${round}`,
+    `subject-${subject}`,
+    `attempt-${attempt}`,
+    `instance-${eventInstance}`,
+  ].join(':');
+};
+
+export const hasRecentProofActivityDuplicate = (events = [], event = '', data = {}) => {
+  const identity = getProofActivityIdentity(event, data);
+  if (!identity) return false;
+  return events.slice(-250).some((item) => (
+    getProofActivityIdentity(item.event || item.type || '', item.data || item) === identity
+  ));
+};
+
+export const formatEmptyProofDiscoveryMessage = (prefix = 'Proof discovery') => (
+  `${prefix}: the model searched for useful novel proof candidates and found none, `
+  + 'so no Lean proof attempts were needed.'
+);
+
+const parseProviderResetTime = (data = {}) => {
+  const raw = data.cooldown_until ?? data.resets_at;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric > 1e12 ? numeric : numeric * 1000;
+  }
+  return null;
+};
+
+export const isProviderUsageLimitActive = (data = {}, nowMs = Date.now()) => {
+  if ((data.reason || '') !== 'usage_limit_reached') return false;
+  const resetTime = parseProviderResetTime(data);
+  return resetTime === null || resetTime > nowMs;
+};
+
+export const shouldShowProviderUsageLimitPopup = (data = {}, nowMs = Date.now()) => (
+  isProviderUsageLimitActive(data, nowMs) && !data.fallback_model
+);
+
+export const formatProviderUsageLimitActivityMessage = (
+  data = {},
+  fallbackProviderLabel = 'Provider',
+) => {
+  const providerLabel = data.provider_label || fallbackProviderLabel;
+  const roleId = data.role_id || 'a role';
+  const resetTime = parseProviderResetTime(data);
+  const resetText = resetTime === null
+    ? ''
+    : ` Reset time: ${new Date(resetTime).toLocaleString()}.`;
+  if (data.fallback_model) {
+    return `${providerLabel} usage limit reached for ${roleId}. `
+      + `Using LM Studio fallback (${data.fallback_model}) until reset.${resetText}`;
+  }
+  return `${providerLabel} usage limit reached for ${roleId}. `
+    + `This role is waiting for the provider cooldown to end.${resetText}`;
+};
+
+export const formatProviderUsageLimitResumedMessage = (
+  data = {},
+  fallbackProviderLabel = 'Provider',
+) => {
+  const providerLabel = data.provider_label || fallbackProviderLabel;
+  const roleId = data.role_id || 'a role';
+  return `${providerLabel} usage limit ended for ${roleId}; provider work resumed.`;
+};
+
+export const formatProofRunEventMessage = (event = '', data = {}) => {
+  if (data.message) return data.message;
+  const round = Number(data.proof_round_index || data.round_index || data.current_round || 0);
+  const roundLabel = round > 0 ? `Round ${round}` : 'Proof run';
+  switch (event) {
+    case 'proof_run_started':
+    case 'proof_run_queued':
+      return `${roundLabel} started${data.run_mode === 'loop_with_pruning' ? ' in continuous mode' : ''}.`;
+    case 'proof_run_round_started':
+      return `${roundLabel} started. Proof discovery will identify prompt-relevant candidates, Lean 4 will verify each attempted proof, and accepted proofs may trigger a non-blocking pruning review.`;
+    case 'proof_run_round_complete': {
+      const candidateCount = Number(data.candidate_count);
+      const hasCandidateCount = Number.isFinite(candidateCount) && candidateCount >= 0;
+      const candidateText = hasCandidateCount
+        ? (candidateCount === 0
+          ? formatEmptyProofDiscoveryMessage('Discovery')
+          : `Discovery found ${candidateCount} ${candidateCount === 1 ? 'candidate' : 'candidates'} for this round.`)
+        : 'The round finished its proof discovery and verification work.';
+      const nextText = data.run_mode === 'loop_with_pruning' && data.next_round_automatic !== false
+        ? ' The next round will start automatically; the loop continues until you press Stop.'
+        : '';
+      return `${roundLabel} complete. ${candidateText}${nextText}`;
+    }
+    case 'proof_run_provider_resumed':
+      return `${roundLabel} resumed after the provider pause.`;
+    case 'proof_run_stopping':
+      return 'Proof run is stopping after its active work drains.';
+    case 'proof_run_stopped':
+      return 'Proof run stopped.';
+    case 'proof_run_provider_paused':
+      return 'Proof run paused for provider credits.';
+    case 'proof_run_repair_required':
+      return 'Proof run needs provider, model, source, or runtime repair. Repair settings, then start a new proof loop.';
+    case 'proof_run_terminal':
+    case 'proof_run_failed':
+      return `Proof run ended${(data.terminal_reason || data.reason) ? `: ${data.terminal_reason || data.reason}` : '.'}`;
+    case 'proof_prune_review_queued':
+      return 'Proof solving continues while a non-destructive pruning review waits to start.';
+    case 'proof_prune_review_started':
+      return 'Proof solving continues while the pruning review examines the active proof context.';
+    case 'proof_prune_proposed':
+      return data.proposal?.action === 'no_prune'
+        ? 'Rigor & Proofs proposed no pruning; keeping every proof is normal.'
+        : `Rigor & Proofs proposed excluding ${data.proposal?.proof_id || 'one occurrence'} from this run’s later context.`;
+    case 'proof_prune_validation_started':
+      return 'Validator is independently reviewing the non-destructive pruning proposal.';
+    case 'proof_prune_no_change':
+      return `No proof was pruned; this is a normal review result${data.reason ? `: ${data.reason}` : '.'}`;
+    case 'proof_prune_applied':
+      return `Proof occurrence ${data.proof_id || ''} was excluded only from this owning run’s later context; its record and exports remain available.`;
+    case 'proof_prune_rejected':
+      return `Validator rejected the pruning proposal${data.reason ? `: ${data.reason}` : '.'}`;
+    case 'proof_prune_stale':
+      return `The pruning proposal became stale and made no change${data.reason ? `: ${data.reason}` : '.'}`;
+    case 'proof_prune_provider_paused':
+      return 'Pruning paused for provider credits; proof solving continues independently.';
+    case 'proof_prune_repair_required':
+      return 'Pruning needs provider or settings repair; healthy proof solving continues independently.';
+    case 'proof_prune_error':
+      return `Pruning failed without changing proof validity or storage${data.message ? `: ${data.message}` : '.'}`;
+    default:
+      return String(event || 'proof run').replaceAll('_', ' ');
+  }
+};
+
 export const getActivityIcon = (event = '') => {
   switch (event) {
     case 'solution_path_activated':
@@ -148,6 +332,8 @@ export const getActivityIcon = (event = '') => {
       return '⧗';
     case 'oauth_provider_usage_limited':
       return '⏳';
+    case 'provider_usage_limit_resumed':
+      return '▶';
     case 'openai_codex_oauth_error':
     case 'oauth_provider_error':
     case 'sakana_fugu_error':
@@ -219,7 +405,19 @@ export const getActivityIcon = (event = '') => {
     case 'proof_framing_decided':
       return 'P';
     case 'proof_check_started':
+    case 'proof_run_started':
+    case 'proof_run_queued':
+    case 'proof_run_round_started':
       return '◌';
+    case 'proof_run_stopping':
+    case 'proof_run_stopped':
+      return '■';
+    case 'proof_run_provider_paused':
+      return '⏳';
+    case 'proof_run_repair_required':
+    case 'proof_run_terminal':
+    case 'proof_run_failed':
+      return '!';
     case 'proof_retry_scheduled':
       return '↺';
     case 'proof_retry_started':
@@ -242,6 +440,7 @@ export const getActivityIcon = (event = '') => {
       return '⚠';
     case 'proof_attempt_failed':
     case 'proof_attempts_exhausted':
+    case 'proof_truncation_recovery_exhausted':
       return '⚠';
     case 'context_overflow_error':
     case 'proof_context_overflow':
@@ -255,6 +454,20 @@ export const getActivityIcon = (event = '') => {
       return '◆';
     case 'proof_dependency_added':
       return '↗';
+    case 'proof_prune_review_queued':
+    case 'proof_prune_review_started':
+    case 'proof_prune_proposed':
+    case 'proof_prune_validation_started':
+      return '◌';
+    case 'proof_prune_no_change':
+    case 'proof_prune_applied':
+      return '✓';
+    case 'proof_prune_rejected':
+    case 'proof_prune_stale':
+    case 'proof_prune_provider_paused':
+    case 'proof_prune_repair_required':
+    case 'proof_prune_error':
+      return '!';
     case 'leanoj_started':
       return '▶';
     case 'leanoj_stopped':
@@ -342,6 +555,27 @@ export const getActivityClass = (event = '', item = {}) => {
     return 'activity-warning';
   }
 
+  if (event === 'provider_usage_limit_resumed') {
+    return 'activity-success';
+  }
+
+  if (
+    event === 'proof_run_provider_paused'
+    || event === 'proof_run_repair_required'
+    || event === 'proof_run_terminal'
+    || event === 'proof_run_failed'
+  ) {
+    return 'activity-warning';
+  }
+
+  if (
+    event === 'proof_run_round_complete'
+    || event === 'proof_run_stopping'
+    || event === 'proof_run_stopped'
+  ) {
+    return 'activity-info';
+  }
+
   if (event === 'openai_codex_oauth_error' || event === 'oauth_provider_error' || event === 'sakana_fugu_error') {
     return 'activity-warning';
   }
@@ -410,6 +644,7 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'tier3_rejection' ||
     event === 'proof_attempt_failed' ||
     event === 'proof_attempts_exhausted' ||
+    event === 'proof_truncation_recovery_exhausted' ||
     event === 'assistant_proof_pack_failed' ||
     event === 'proof_integrity_rejected' ||
     event === 'smt_check_error' ||

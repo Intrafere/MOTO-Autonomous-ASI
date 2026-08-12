@@ -520,6 +520,50 @@ class AutonomousResearchState(BaseModel):
     tier3_triggers: int = 0  # Number of times Tier 3 has been triggered
 
 
+class AutonomousTerminalEvent(BaseModel):
+    """Durable terminal lifecycle event used to recover missed live updates."""
+    terminal_event_id: str
+    run_id: str
+    lifecycle_generation: int = 0
+    event_type: str = "auto_research_stopped"
+    reason: str
+    message: str
+    occurred_at: datetime = Field(default_factory=datetime.now)
+    recoverable: bool = True
+    workflow_mode: Literal["autonomous"] = "autonomous"
+    role_id: Optional[str] = None
+    current_tier: Optional[str] = None
+    current_topic_id: Optional[str] = None
+    current_paper_id: Optional[str] = None
+    configured_model: Optional[str] = None
+    configured_provider: Optional[str] = None
+    effective_model: Optional[str] = None
+    effective_provider: Optional[str] = None
+    effective_host_provider: Optional[str] = None
+    route_kind: Optional[str] = None
+    resolution: Optional[str] = None
+    terminal_guidance: Optional[str] = None
+    error_detail: Optional[str] = None
+    required_tokens: Optional[int] = None
+    available_tokens: Optional[int] = None
+    context_window: Optional[int] = None
+    output_reserve: Optional[int] = None
+
+
+class AutonomousResearchStatusResponse(BaseModel):
+    """Authoritative lifecycle and progress snapshot for Autonomous Research."""
+    is_running: bool
+    run_id: str
+    lifecycle_generation: int = 0
+    resume_available: bool = False
+    current_tier: str
+    current_brainstorm: Optional[Dict[str, Any]] = None
+    current_paper: Optional[Dict[str, Any]] = None
+    tier3_status: Optional[Dict[str, Any]] = None
+    stats: Dict[str, Any] = Field(default_factory=dict)
+    terminal_event: Optional[AutonomousTerminalEvent] = None
+
+
 class AutonomousResearchStartRequest(BaseModel):
     """Request to start autonomous research mode."""
     user_research_prompt: str
@@ -694,6 +738,248 @@ class ProofDependency(BaseModel):
     source_ref: str = ""
 
 
+ProofDependencyExtractionStatus = Literal[
+    "not_attempted",
+    "complete",
+    "partial",
+    "failed",
+]
+
+
+class ProofPruneContextPressure(BaseModel):
+    """Safe metadata describing why a proof-context review was requested."""
+    model_config = ConfigDict(extra="forbid")
+
+    trigger: Literal["scheduled", "context_pressure", "manual", "test"] = "scheduled"
+    prompt_tokens: Optional[int] = Field(default=None, ge=0)
+    available_input_tokens: Optional[int] = Field(default=None, ge=0)
+    active_proof_tokens: Optional[int] = Field(default=None, ge=0)
+    mandatory_source_tokens: int = Field(default=0, ge=0)
+    candidate_and_feedback_tokens: int = Field(default=0, ge=0)
+    active_proof_context_tokens: int = Field(default=0, ge=0)
+    output_reserve_tokens: int = Field(default=0, ge=0)
+    configured_context_window: int = Field(default=0, ge=0)
+    route_config_fingerprint: str = Field(default="", max_length=256)
+    proof_set_revision: int = Field(default=0, ge=0)
+    measured_at: datetime = Field(default_factory=datetime.now)
+    detail: str = Field(default="", max_length=1000)
+
+    def pressure_fingerprint(self) -> str:
+        """Return a stable identity for coalescing unchanged pressure."""
+        import hashlib
+        import json
+
+        payload = self.model_dump(mode="json", exclude={"measured_at", "detail"})
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+
+class ProofPruneAggregateEntry(BaseModel):
+    """Compact deterministic accounting for one active proof occurrence."""
+    model_config = ConfigDict(extra="forbid")
+
+    proof_id: str = Field(min_length=1, max_length=256)
+    theorem_name: str = Field(default="", max_length=512)
+    canonical_theorem_hash: str = Field(min_length=1, max_length=256)
+    canonical_lean_hash: str = Field(min_length=1, max_length=256)
+    novelty_tier: str = Field(default="", max_length=128)
+    independent_novelty_tier: str = Field(default="", max_length=128)
+    source_type: str = Field(default="", max_length=128)
+    source_id: str = Field(default="", max_length=512)
+    created_at: datetime
+    dependency_extraction_status: ProofDependencyExtractionStatus = "not_attempted"
+    dependency_count: int = Field(default=0, ge=0)
+    dependent_count: int = Field(default=0, ge=0)
+    exact_identity_occurrence_count: int = Field(default=1, ge=1)
+    protected_reasons: List[str] = Field(default_factory=list)
+    eligible_candidate: bool = False
+
+
+class ProofPruneProofDescriptor(BaseModel):
+    """Bounded hydrated evidence for one candidate or comparator."""
+    model_config = ConfigDict(extra="forbid")
+
+    proof_id: str = Field(min_length=1, max_length=256)
+    theorem_name: str = Field(default="", max_length=512)
+    theorem_statement: str = Field(min_length=1)
+    canonical_theorem_hash: str = Field(min_length=1, max_length=256)
+    canonical_lean_hash: str = Field(min_length=1, max_length=256)
+    novelty_tier: str = Field(default="", max_length=128)
+    novelty_reasoning: str = Field(default="", max_length=4000)
+    independent_novelty_tier: str = Field(default="", max_length=128)
+    independent_novelty_reasoning: str = Field(default="", max_length=4000)
+    source_type: str = Field(default="", max_length=128)
+    source_id: str = Field(default="", max_length=512)
+    source_title: str = Field(default="", max_length=1000)
+    created_at: datetime
+    dependencies: List[ProofDependency] = Field(default_factory=list)
+    dependency_extraction_status: ProofDependencyExtractionStatus = "not_attempted"
+    protected_reasons: List[str] = Field(default_factory=list)
+    comparator_proof_ids: List[str] = Field(default_factory=list)
+    role_in_user_objective: str = Field(default="", max_length=2000)
+    lean_code: str = ""
+    lean_code_included: bool = False
+
+
+class ProofPruneProposal(BaseModel):
+    """Exact primary response contract for the pruning proposer."""
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["no_prune", "propose_prune"]
+    proof_id: Optional[str] = Field(default=None, max_length=256)
+    expected_theorem_hash: Optional[str] = Field(default=None, max_length=256)
+    expected_lean_hash: Optional[str] = Field(default=None, max_length=256)
+    reasoning: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_target_fields(self):
+        target_fields = (
+            self.proof_id,
+            self.expected_theorem_hash,
+            self.expected_lean_hash,
+        )
+        if self.action == "no_prune":
+            if any(value is not None for value in target_fields):
+                raise ValueError("no_prune requires all target fields to be null")
+            return self
+        if any(not str(value or "").strip() for value in target_fields):
+            raise ValueError(
+                "propose_prune requires proof_id and both expected hashes"
+            )
+        return self
+
+
+class ProofPruneValidation(BaseModel):
+    """Exact primary response contract for the independent Validator."""
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accept", "reject"]
+    proof_id: str = Field(min_length=1, max_length=256)
+    reasoning: str = Field(min_length=1, max_length=4000)
+
+
+class ProofPruneSnapshot(BaseModel):
+    """Immutable whole-set evidence supplied to both pruning roles."""
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str = Field(min_length=1, max_length=256)
+    proof_set_revision: int = Field(ge=0)
+    proof_store_id: str = Field(min_length=1, max_length=512)
+    owning_run_id: str = Field(min_length=1, max_length=512)
+    proof_run_id: str = Field(min_length=1, max_length=512)
+    proof_run_lifecycle_generation: int = Field(ge=1)
+    owning_lifecycle_generation: int = Field(default=1, ge=1)
+    scope: Literal["autonomous", "manual"]
+    source_type: Literal["brainstorm", "paper"]
+    source_id: str = Field(min_length=1, max_length=512)
+    session_id: str = Field(default="", max_length=512)
+    canonical_user_prompt: str = Field(min_length=1)
+    trigger_reasons: List[str] = Field(default_factory=list)
+    accepted_prompt_novel_total: int = Field(default=0, ge=0)
+    context_pressure: ProofPruneContextPressure = Field(
+        default_factory=ProofPruneContextPressure
+    )
+    whole_set: List[ProofPruneAggregateEntry] = Field(default_factory=list)
+    candidate_descriptors: List[ProofPruneProofDescriptor] = Field(
+        default_factory=list
+    )
+    comparator_descriptors: List[ProofPruneProofDescriptor] = Field(
+        default_factory=list
+    )
+    evidence_bounded: bool = False
+    captured_at: datetime = Field(default_factory=datetime.now)
+
+
+class ProofPruneGuardResult(BaseModel):
+    """Deterministic result produced before semantic validation."""
+    model_config = ConfigDict(extra="forbid")
+
+    allowed: bool
+    proof_id: Optional[str] = Field(default=None, max_length=256)
+    reasons: List[str] = Field(default_factory=list)
+
+
+class ProofPruneCommitIntent(BaseModel):
+    """Validated, non-mutating input for Build 04's commit service."""
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str
+    proof_id: str
+    owning_run_id: str
+    proof_set_revision: int = Field(ge=0)
+    expected_theorem_hash: str
+    expected_lean_hash: str
+    trigger_reasons: List[str] = Field(default_factory=list)
+    proposer_reasoning: str = Field(min_length=1, max_length=4000)
+    validator_reasoning: str = Field(min_length=1, max_length=4000)
+
+
+class ProofPruneReviewResult(BaseModel):
+    """Side-effect-free terminal result of one Build 03 review."""
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["no_prune", "rejected", "commit_intent"]
+    proposal: ProofPruneProposal
+    validation: Optional[ProofPruneValidation] = None
+    commit_intent: Optional[ProofPruneCommitIntent] = None
+
+
+class ProofPruningState(BaseModel):
+    """Durable, run-scoped Build 04 pruning orchestration state."""
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(ge=1)
+    policy_version: str
+    proof_run_id: str
+    run_id: str
+    lifecycle_generation: int = Field(ge=1)
+    scope: Literal["autonomous", "manual"]
+    source_type: Literal["brainstorm", "paper"]
+    source_id: str
+    proof_store_id: str
+    proof_set_revision: int = Field(default=0, ge=0)
+    accepted_prompt_novel_total: int = Field(default=0, ge=0)
+    last_scheduled_acceptance_baseline: int = Field(default=0, ge=0)
+    counted_proof_ids: List[str] = Field(default_factory=list)
+    queued_trigger_reasons: List[str] = Field(default_factory=list)
+    active_trigger_reasons: List[str] = Field(default_factory=list)
+    requested_snapshot_revision: int = Field(default=0, ge=0)
+    follow_up_required: bool = False
+    round_index: int = Field(default=1, ge=1)
+    active_proposal_id: str = ""
+    active_proposal_generation: int = Field(default=0, ge=0)
+    snapshot_id: str = ""
+    snapshot_revision: Optional[int] = Field(default=None, ge=0)
+    target_proof_id: str = ""
+    status: Literal[
+        "disabled",
+        "idle",
+        "queued",
+        "proposing",
+        "validating",
+        "provider_paused",
+        "repair_required",
+        "applied",
+        "no_prune",
+        "rejected",
+        "stale",
+        "error",
+    ] = "idle"
+    sanitized_proposal: Dict[str, Any] = Field(default_factory=dict)
+    sanitized_validation: Dict[str, Any] = Field(default_factory=dict)
+    provider_error_classification: str = ""
+    retry_count: int = Field(default=0, ge=0)
+    last_error_summary: str = Field(default="", max_length=1800)
+    last_applied_proof_id: str = ""
+    context_pressure: ProofPruneContextPressure = Field(
+        default_factory=ProofPruneContextPressure
+    )
+    last_reviewed_pressure_fingerprint: str = ""
+    last_reviewed_pressure_revision: int = Field(default=0, ge=0)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
 @dataclass
 class SmtResult:
     """Result of one SMT solver check."""
@@ -723,6 +1009,22 @@ class ProofAttemptFeedback(BaseModel):
     overflow_origin: Optional[Literal["local_preflight", "provider"]] = None
     prompt_tokens: Optional[int] = None
     max_input_tokens: Optional[int] = None
+    failure_kind: Optional[Literal[
+        "output_truncated",
+        "malformed_output",
+        "lean_rejected",
+        "context_overflow",
+        "workspace_error",
+        "integrity_rejected",
+    ]] = None
+    recovery_step: int = 1
+    recovery_mode: str = "configured"
+    recovery_policy_version: str = "proof-truncation-v1"
+    reasoning_effort: Optional[str] = None
+    requested_output_tokens: Optional[int] = None
+    response_mode: str = "json"
+    supercharge_disabled: bool = False
+    lean_was_run: bool = False
 
 
 ProofArtifactPurpose = Literal[
@@ -760,8 +1062,40 @@ class ProofRecord(BaseModel):
     attempt_count: int = 0
     attempts: List[ProofAttemptFeedback] = Field(default_factory=list)
     dependencies: List[ProofDependency] = Field(default_factory=list)
+    dependency_extraction_status: ProofDependencyExtractionStatus = "not_attempted"
+    dependency_extraction_detail: str = Field(default="", max_length=1000)
+    dependency_extracted_at: Optional[datetime] = None
     solver_hints: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
+    live_context_status: Literal["active", "pruned"] = "active"
+    live_context_owner_run_id: str = ""
+    live_context_pruned_at: Optional[datetime] = None
+    live_context_pruned_by: Optional[Literal["user", "automatic_proof_pruning"]] = None
+    live_context_prune_reason: str = ""
+    live_context_prune_validator_reasoning: str = ""
+    live_context_prune_snapshot_revision: Optional[int] = None
+    live_context_prune_trigger_reasons: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_live_context_state(self):
+        if self.live_context_status == "active":
+            self.live_context_owner_run_id = ""
+            self.live_context_pruned_at = None
+            self.live_context_pruned_by = None
+            self.live_context_prune_reason = ""
+            self.live_context_prune_validator_reasoning = ""
+            self.live_context_prune_snapshot_revision = None
+            self.live_context_prune_trigger_reasons = []
+            return self
+        if not self.live_context_owner_run_id.strip():
+            raise ValueError("Pruned proofs require an owning run ID")
+        if self.live_context_pruned_at is None:
+            raise ValueError("Pruned proofs require a prune timestamp")
+        if self.live_context_pruned_by is None:
+            raise ValueError("Pruned proofs require a prune actor")
+        if not self.live_context_prune_reason.strip():
+            raise ValueError("Pruned proofs require a reason")
+        return self
 
 
 class ProofLibraryEntry(BaseModel):
@@ -794,6 +1128,14 @@ class ProofLibraryEntry(BaseModel):
     created_at: str = ""
     dependencies: List[ProofDependency] = Field(default_factory=list)
     lean_code: str = ""
+    live_context_status: Literal["active", "pruned"] = "active"
+    live_context_owner_run_id: str = ""
+    live_context_pruned_at: Optional[str] = None
+    live_context_pruned_by: Optional[Literal["user", "automatic_proof_pruning"]] = None
+    live_context_prune_reason: str = ""
+    live_context_prune_validator_reasoning: str = ""
+    live_context_prune_snapshot_revision: Optional[int] = None
+    live_context_prune_trigger_reasons: List[str] = Field(default_factory=list)
 
 
 class ProofLibraryCounts(BaseModel):
@@ -802,6 +1144,8 @@ class ProofLibraryCounts(BaseModel):
     novel: int = 0
     duplicate_novel: int = 0
     not_novel: int = 0
+    live_context_active: int = 0
+    live_context_pruned: int = 0
 
 
 class ProofLibraryResponse(BaseModel):
@@ -809,6 +1153,15 @@ class ProofLibraryResponse(BaseModel):
     counts: ProofLibraryCounts = Field(default_factory=ProofLibraryCounts)
     scope: Literal["autonomous", "manual"]
     category: Literal["novel", "duplicate_novel", "not_novel", "all"]
+
+
+class CurrentProofListResponse(BaseModel):
+    """Current proof-store contents with the revision used by live-context controls."""
+
+    proofs: List[ProofRecord] = Field(default_factory=list)
+    counts: Dict[str, int] = Field(default_factory=dict)
+    scope: Literal["autonomous", "manual"]
+    proof_set_revision: int = Field(ge=0)
 
 
 class ProofCertificateResponse(BaseModel):
@@ -839,6 +1192,14 @@ class ProofCertificateResponse(BaseModel):
     attempt_count: int = 0
     solver_hints: List[str] = Field(default_factory=list)
     dependencies: List[ProofDependency] = Field(default_factory=list)
+    live_context_status: Literal["active", "pruned"] = "active"
+    live_context_owner_run_id: str = ""
+    live_context_pruned_at: Optional[str] = None
+    live_context_pruned_by: Optional[Literal["user", "automatic_proof_pruning"]] = None
+    live_context_prune_reason: str = ""
+    live_context_prune_validator_reasoning: str = ""
+    live_context_prune_snapshot_revision: Optional[int] = None
+    live_context_prune_trigger_reasons: List[str] = Field(default_factory=list)
 
 
 class ProofAttemptResult(BaseModel):
@@ -851,6 +1212,8 @@ class ProofAttemptResult(BaseModel):
     attempts_used: int = 0
     proof_id: Optional[str] = None
     error_summary: str = ""
+    candidate_fingerprint: str = ""
+    truncation_recovery_exhausted: bool = False
 
 
 class ProofStageResult(BaseModel):
@@ -864,13 +1227,170 @@ class ProofStageResult(BaseModel):
     had_error: bool = False
     error_message: str = ""
     deferred_candidate_ids: List[str] = Field(default_factory=list)
+    fatal_stop_reason: str = ""
+    fatal_stop_payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+ProofRunMode = Literal["one_round", "loop_with_pruning"]
+ProofRunStatus = Literal[
+    "queued",
+    "running",
+    "provider_paused",
+    "stopping",
+    "completed",
+    "stopped",
+    "error",
+]
+ProofRunIdlePolicy = Literal["provider_reset"]
+ProofPruningStatus = Literal[
+    "disabled",
+    "idle",
+    "queued",
+    "proposing",
+    "validating",
+    "provider_paused",
+    "repair_required",
+    "applied",
+    "no_prune",
+    "rejected",
+    "stale",
+    "error",
+]
+
+
+class ProofRunEventContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proof_run_id: str
+    run_mode: ProofRunMode
+    lifecycle_generation: int = Field(ge=1)
+    proof_run_unbounded: bool = False
+
+
+class ProofRunSnapshot(BaseModel):
+    """Current-process lifecycle projection for a manual proof run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proof_run_id: str
+    run_mode: ProofRunMode
+    scope: Literal["autonomous", "manual"]
+    source_type: Literal["brainstorm", "paper"]
+    source_id: str
+    source_title: str = ""
+    proof_store_id: str
+    run_id: str
+    lifecycle_generation: int = Field(ge=1)
+    status: ProofRunStatus
+    round_limit: Optional[int] = Field(default=1, ge=1)
+    unbounded: bool = False
+    current_round: int = Field(default=0, ge=0)
+    last_completed_round: int = Field(default=0, ge=0)
+    last_round_summary: str = Field(default="", max_length=4000)
+    last_round_reference: str = Field(default="", max_length=512)
+    source_content_fingerprint: str = ""
+    source_revision: int = Field(default=0, ge=0)
+    proof_set_revision: int = Field(default=0, ge=0)
+    candidate_checkpoint_reference: str = Field(default="", max_length=512)
+    route_runtime_fingerprint: str = Field(default="", max_length=256)
+    idle_reason: str = Field(default="", max_length=1000)
+    wake_generation: int = Field(default=0, ge=0)
+    idle_policy: Optional[ProofRunIdlePolicy] = None
+    provider_state: Optional[Dict[str, Any]] = None
+    policy_version: str = "proof-run-policy-v3"
+    schema_version: int = Field(default=3, ge=1)
+    started_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=datetime.now)
+    terminal_reason: str = ""
+    stop_requested: bool = False
+    pruning_status: ProofPruningStatus = "disabled"
+    pruning_state: Optional[Dict[str, Any]] = None
+    last_error_summary: str = ""
+    terminal_event_emitted: bool = False
+    cleanup_completed: bool = False
+
+
+class ProofRunQueueResponse(ProofRunSnapshot):
+    queued: bool = True
+
+
+class ProofRunCollectionItem(BaseModel):
+    """Bounded proof-run metadata safe for reconnect and queue recovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proof_run_id: str
+    run_mode: ProofRunMode
+    scope: Literal["autonomous", "manual"]
+    source_type: Literal["brainstorm", "paper"]
+    source_id: str
+    source_title: str = ""
+    run_id: str
+    lifecycle_generation: int = Field(ge=1)
+    status: ProofRunStatus
+    current_round: int = Field(default=0, ge=0)
+    last_completed_round: int = Field(default=0, ge=0)
+    proof_set_revision: int = Field(default=0, ge=0)
+    updated_at: datetime
+    terminal_reason: str = ""
+    pruning_status: ProofPruningStatus = "disabled"
+
+
+class ProofRunCollectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runs: List[ProofRunCollectionItem] = Field(default_factory=list)
+    count: int = Field(default=0, ge=0)
+    limit: int = Field(ge=1, le=50)
+    truncated: bool = False
+
+
+class ProofRunSourceLookupResponse(ProofRunCollectionResponse):
+    scope: Literal["autonomous", "manual"]
+    source_type: Literal["brainstorm", "paper"]
+    source_id: str
+    ambiguous: bool = False
+    preferred_proof_run_id: Optional[str] = None
+
+
+class ProofRunStopRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_lifecycle_generation: int = Field(ge=1)
+
+
+class ProofLiveContextMutationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["active", "pruned"]
+    actor: Literal["user"] = "user"
+    expected_run_id: str = Field(min_length=1, max_length=256)
+    expected_proof_set_revision: int = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=2000)
+    expected_theorem_hash: str = Field(default="", max_length=256)
+    expected_lean_hash: str = Field(default="", max_length=256)
+
+
+class ProofLiveContextMutationResponse(BaseModel):
+    success: bool = True
+    scope: Literal["autonomous", "manual"]
+    proof_id: str
+    run_id: str
+    live_context_status: Literal["active", "pruned"]
+    live_context_pruned_at: Optional[datetime] = None
+    proof_search_refresh_scheduled: bool = False
+    proof_set_revision: int = Field(ge=0)
+    warnings: List[str] = Field(default_factory=list)
 
 
 class ProofCheckRequest(BaseModel):
     """Request body for manually triggering a proof check."""
+    model_config = ConfigDict(extra="forbid")
+
     source_type: Literal["brainstorm", "paper"]
     source_id: str
     proof_runtime_config: Optional[Dict[str, Any]] = None
+    run_mode: ProofRunMode = "one_round"
 
 
 class ProofSettingsUpdateRequest(BaseModel):

@@ -394,7 +394,7 @@ function CompilerInterface({
       });
       if (enabled) {
         const leanVersion = String(updatedStatus.lean4_version || updatedStatus.lean_version || '').trim();
-        const leanVersionUnavailable = !leanVersion || /not found|no such file|not recognized/i.test(leanVersion);
+        const leanVersionUnavailable = /not found|no such file|not recognized/i.test(leanVersion);
         // A cold Mathlib sanity check can exceed the short status timeout even when
         // Lean is usable. Workflow proof stages wait on the real workspace check.
         if (!updatedStatus.lean4_enabled || leanVersionUnavailable) {

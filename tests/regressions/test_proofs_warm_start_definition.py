@@ -2,7 +2,7 @@ import ast
 from pathlib import Path
 
 
-def test_lean4_warm_start_helper_has_single_definition():
+def test_proofs_route_has_no_route_owned_lean_warm_start():
     route_path = Path(__file__).resolve().parents[2] / "backend" / "api" / "routes" / "proofs.py"
     module = ast.parse(route_path.read_text(encoding="utf-8"))
     definitions = [
@@ -11,4 +11,4 @@ def test_lean4_warm_start_helper_has_single_definition():
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == "_schedule_lean4_warm_start"
     ]
-    assert len(definitions) == 1
+    assert definitions == []

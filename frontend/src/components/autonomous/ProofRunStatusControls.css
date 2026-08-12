@@ -1,0 +1,44 @@
+.proof-run-status-controls {
+  margin: 0.55rem 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(124, 58, 237, 0.35);
+  border-radius: 8px;
+  background: rgba(124, 58, 237, 0.08);
+  font-size: 0.78rem;
+}
+
+.proof-run-status-controls__facts,
+.proof-run-status-controls__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.9rem;
+}
+
+.proof-run-status-controls__facts span {
+  text-transform: capitalize;
+}
+
+.proof-run-status-controls__actions {
+  margin-top: 0.55rem;
+}
+
+.proof-run-status-controls__progress {
+  margin-top: 0.45rem;
+  color: var(--text-secondary, #cbd5e1);
+  line-height: 1.4;
+}
+
+.proof-run-status-controls__actions button {
+  padding: 0.38rem 0.65rem;
+}
+
+.proof-run-status-controls__stop {
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.proof-run-status-controls__error {
+  margin-top: 0.45rem;
+  color: #fca5a5;
+}

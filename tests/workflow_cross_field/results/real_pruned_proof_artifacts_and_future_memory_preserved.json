@@ -1,0 +1,24 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {},
+  "evidence": [
+    "human_visible",
+    "future_run_retrievable"
+  ],
+  "fields": [
+    "proof_pruning",
+    "workflow_filesystem_state",
+    "assistant_memory"
+  ],
+  "invariants": [
+    "proof_pruning.artifacts_and_future_memory_preserved"
+  ],
+  "replay": [],
+  "result": "passed",
+  "scenario_id": "real_pruned_proof_artifacts_and_future_memory_preserved",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/regressions/test_proof_context_regressions.py"
+}

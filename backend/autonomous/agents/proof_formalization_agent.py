@@ -27,6 +27,8 @@ from backend.shared.proof_search.assistant_coordinator import assistant_proof_se
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config, system_config
 from backend.autonomous.prompts.proof_prompts import (
+    build_compact_proof_formalization_prompt,
+    build_compact_proof_tactic_script_prompt,
     build_proof_formalization_prompt,
     build_proof_tactic_script_prompt,
 )
@@ -81,6 +83,7 @@ _TRUNCATED_RESPONSE_STATUSES = {
     "max_tokens",
     "max_output_tokens",
 }
+TRUNCATION_RECOVERY_POLICY_VERSION = "proof-truncation-v1"
 
 
 class ProofFormalizationContextOverflowError(ValueError):
@@ -96,6 +99,10 @@ def _truncated_model_output_feedback(
     *,
     attempt_number: int,
     strategy: str,
+    recovery_mode: str = "configured",
+    reasoning_effort: str | None = None,
+    requested_output_tokens: int | None = None,
+    response_mode: str = "json",
 ) -> ProofAttemptFeedback:
     return ProofAttemptFeedback(
         attempt=attempt_number,
@@ -110,7 +117,39 @@ def _truncated_model_output_feedback(
         goal_states="",
         strategy=strategy,
         success=False,
+        failure_kind="output_truncated",
+        recovery_step=attempt_number,
+        recovery_mode=recovery_mode,
+        recovery_policy_version=TRUNCATION_RECOVERY_POLICY_VERSION,
+        reasoning_effort=reasoning_effort,
+        requested_output_tokens=requested_output_tokens,
+        response_mode=response_mode,
+        supercharge_disabled=attempt_number > 1,
+        lean_was_run=False,
     )
+
+
+def _truncation_recovery_settings(attempt_number: int) -> tuple[str, str | None, str]:
+    """Return a bounded, materially different recovery mode after attempt one."""
+    if attempt_number <= 1:
+        return "configured", None, "json"
+    if attempt_number == 2:
+        return "compact_same_model", None, "compact_json"
+    if attempt_number == 3:
+        return "compact_reduced_reasoning", "low", "compact_json"
+    if attempt_number == 4:
+        return "tactic_reduced_reasoning", "low", "compact_json"
+    return "tactic_minimal_reasoning", "none", "compact_json"
+
+
+def _truncation_recovery_step(prior_attempts: List[ProofAttemptFeedback]) -> int:
+    """Return the next persisted recovery step after any confirmed truncation."""
+    truncated = [
+        attempt
+        for attempt in prior_attempts
+        if attempt.failure_kind == "output_truncated"
+    ]
+    return min(5, len(truncated) + 1) if truncated else 1
 
 
 def _latest_assistant_pack_for_lean_attempts() -> tuple[str, str, list[dict[str, Any]]]:
@@ -430,8 +469,20 @@ class ProofFormalizationAgent:
         retrieved_proofs_context: str = "",
         assistant_memory_target_hash: str = "",
     ) -> tuple[str, str, ProofAttemptFeedback]:
+        recovery_step = _truncation_recovery_step(prior_attempts)
+        recovering_from_truncation = recovery_step > 1
+        recovery_mode, reasoning_effort, response_mode = (
+            _truncation_recovery_settings(recovery_step)
+            if recovering_from_truncation
+            else ("configured", None, "json")
+        )
+        prompt_builder = (
+            build_compact_proof_formalization_prompt
+            if recovering_from_truncation
+            else build_proof_formalization_prompt
+        )
         prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
-            build_proof_formalization_prompt,
+            prompt_builder,
             min_excerpt_length=1500,
             user_prompt=user_research_prompt,
             source_type=source_type,
@@ -449,6 +500,7 @@ class ProofFormalizationAgent:
             why_not_standard_known_result=theorem_candidate.why_not_standard_known_result,
             retrieved_proofs_context=retrieved_proofs_context,
         )
+        prompt_tokens = count_tokens(prompt)
 
         if prompt_tokens > max_input_tokens:
             feedback = ProofAttemptFeedback(
@@ -473,6 +525,8 @@ class ProofFormalizationAgent:
         task_id = self.get_current_task_id()
         self.task_sequence += 1
 
+        response_was_truncated = False
+        lean_was_invoked = False
         try:
             response = await api_client_manager.generate_completion(
                 task_id=task_id,
@@ -481,6 +535,8 @@ class ProofFormalizationAgent:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=self.max_output_tokens,
                 temperature=0.0,
+                _moto_disable_supercharge=recovering_from_truncation,
+                _moto_reasoning_effort_override=reasoning_effort,
             )
             if assistant_memory_target_hash:
                 assistant_proof_search_coordinator.mark_pack_consumed_by_solver(
@@ -488,21 +544,7 @@ class ProofFormalizationAgent:
                     role_id=self.role_id,
                     task_id=task_id,
                 )
-            if _response_indicates_output_truncation(response):
-                logger.warning(
-                    "ProofFormalizationAgent full-script attempt %s for %s returned a length-truncated provider response.",
-                    attempt_number,
-                    theorem_candidate.theorem_id,
-                )
-                return (
-                    "",
-                    source_excerpt,
-                    _truncated_model_output_feedback(
-                        theorem_candidate,
-                        attempt_number=attempt_number,
-                        strategy="full_script",
-                    ),
-                )
+            response_was_truncated = _response_indicates_output_truncation(response)
             if not response or not response.get("choices"):
                 raise ValueError("Empty response from formalization model.")
 
@@ -523,6 +565,7 @@ class ProofFormalizationAgent:
             if not lean_code:
                 raise ValueError("Formalization model did not return Lean 4 code.")
 
+            lean_was_invoked = True
             lean_result = await get_lean4_client().check_proof(
                 lean_code,
                 timeout=system_config.lean4_proof_timeout,
@@ -536,6 +579,14 @@ class ProofFormalizationAgent:
                 goal_states=lean_result.goal_states,
                 strategy="full_script",
                 success=lean_result.success,
+                    failure_kind=None if lean_result.success else "lean_rejected",
+                    recovery_step=attempt_number,
+                    recovery_mode=recovery_mode,
+                    reasoning_effort=reasoning_effort,
+                    requested_output_tokens=self.max_output_tokens,
+                    response_mode=response_mode,
+                    supercharge_disabled=recovering_from_truncation,
+                    lean_was_run=True,
             )
             return theorem_name, source_excerpt, feedback
         except FreeModelExhaustedError:
@@ -543,6 +594,25 @@ class ProofFormalizationAgent:
         except RetryableProviderError:
             raise
         except Exception as exc:
+            if response_was_truncated and not lean_was_invoked:
+                logger.warning(
+                    "ProofFormalizationAgent full-script attempt %s for %s returned an unusable length-truncated response.",
+                    attempt_number,
+                    theorem_candidate.theorem_id,
+                )
+                return (
+                    "",
+                    source_excerpt,
+                    _truncated_model_output_feedback(
+                        theorem_candidate,
+                        attempt_number=attempt_number,
+                        strategy="full_script",
+                        recovery_mode=recovery_mode,
+                        reasoning_effort=reasoning_effort,
+                        requested_output_tokens=self.max_output_tokens,
+                        response_mode=response_mode,
+                    ),
+                )
             if _is_provider_context_overflow(exc):
                 feedback = _provider_context_overflow_feedback(
                     theorem_candidate,
@@ -575,6 +645,10 @@ class ProofFormalizationAgent:
                         theorem_candidate,
                         attempt_number=attempt_number,
                         strategy="full_script",
+                        recovery_mode=recovery_mode,
+                        reasoning_effort=reasoning_effort,
+                        requested_output_tokens=self.max_output_tokens,
+                        response_mode=response_mode,
                     ),
                 )
             if is_transient_model_call_error(exc):
@@ -600,6 +674,12 @@ class ProofFormalizationAgent:
                 goal_states="",
                 strategy="full_script",
                 success=False,
+                failure_kind="malformed_output" if is_parse_error else None,
+                recovery_step=attempt_number,
+                recovery_mode=recovery_mode,
+                reasoning_effort=reasoning_effort,
+                requested_output_tokens=self.max_output_tokens,
+                response_mode=response_mode,
             )
             logger.warning(
                 "ProofFormalizationAgent full-script attempt %s failed for %s: %s",
@@ -760,8 +840,20 @@ class ProofFormalizationAgent:
             attempt_number = next_attempt_number + attempt_offset
             if attempt_start_callback and malformed_output_retries == 0:
                 await attempt_start_callback(attempt_number, "tactic_script")
+            recovery_step = _truncation_recovery_step(attempts)
+            recovering_from_truncation = recovery_step > 1
+            recovery_mode, reasoning_effort, response_mode = (
+                _truncation_recovery_settings(recovery_step)
+                if recovering_from_truncation
+                else ("configured", None, "json")
+            )
+            prompt_builder = (
+                build_compact_proof_tactic_script_prompt
+                if recovering_from_truncation
+                else build_proof_tactic_script_prompt
+            )
             prompt, source_excerpt, max_input_tokens, prompt_tokens = self._fit_prompt_to_context(
-                build_proof_tactic_script_prompt,
+                prompt_builder,
                 min_excerpt_length=1500,
                 user_prompt=user_research_prompt,
                 source_type=source_type,
@@ -779,6 +871,7 @@ class ProofFormalizationAgent:
                 why_not_standard_known_result=theorem_candidate.why_not_standard_known_result,
                 retrieved_proofs_context=retrieved_proofs_context,
             )
+            prompt_tokens = count_tokens(prompt)
 
             if prompt_tokens > max_input_tokens:
                 feedback = ProofAttemptFeedback(
@@ -806,6 +899,8 @@ class ProofFormalizationAgent:
             task_id = self.get_current_task_id()
             self.task_sequence += 1
 
+            response_was_truncated = False
+            lean_was_invoked = False
             try:
                 response = await api_client_manager.generate_completion(
                     task_id=task_id,
@@ -814,6 +909,8 @@ class ProofFormalizationAgent:
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=self.max_output_tokens,
                     temperature=0.0,
+                    _moto_disable_supercharge=recovering_from_truncation,
+                    _moto_reasoning_effort_override=reasoning_effort,
                 )
                 if assistant_target_hash:
                     assistant_proof_search_coordinator.mark_pack_consumed_by_solver(
@@ -821,22 +918,7 @@ class ProofFormalizationAgent:
                         role_id=self.role_id,
                         task_id=task_id,
                     )
-                if _response_indicates_output_truncation(response):
-                    logger.warning(
-                        "ProofFormalizationAgent tactic-script attempt %s for %s returned a length-truncated provider response.",
-                        attempt_number,
-                        theorem_candidate.theorem_id,
-                    )
-                    feedback = _truncated_model_output_feedback(
-                        theorem_candidate,
-                        attempt_number=attempt_number,
-                        strategy="tactic_script",
-                    )
-                    attempts.append(feedback)
-                    if attempt_callback:
-                        await attempt_callback(feedback)
-                    attempt_offset += 1
-                    continue
+                response_was_truncated = _response_indicates_output_truncation(response)
                 if not response or not response.get("choices"):
                     raise ValueError("Empty response from tactic formalization model.")
 
@@ -914,6 +996,7 @@ class ProofFormalizationAgent:
                     continue
 
                 lean_code = self._compose_tactic_script_code(theorem_header, tactic_commands)
+                lean_was_invoked = True
                 lean_result = await get_lean4_client().check_tactic_script(
                     theorem_header,
                     tactic_commands,
@@ -929,6 +1012,14 @@ class ProofFormalizationAgent:
                     strategy="tactic_script",
                     tactic_trace=tactic_trace,
                     success=lean_result.success,
+                    failure_kind=None if lean_result.success else "lean_rejected",
+                    recovery_step=attempt_number,
+                    recovery_mode=recovery_mode,
+                    reasoning_effort=reasoning_effort,
+                    requested_output_tokens=self.max_output_tokens,
+                    response_mode=response_mode,
+                    supercharge_disabled=recovering_from_truncation,
+                    lean_was_run=True,
                 )
                 malformed_output_retries = 0
                 attempts.append(feedback)
@@ -952,6 +1043,26 @@ class ProofFormalizationAgent:
             except RetryableProviderError:
                 raise
             except Exception as exc:
+                if response_was_truncated and not lean_was_invoked:
+                    logger.warning(
+                        "ProofFormalizationAgent tactic-script attempt %s for %s returned an unusable length-truncated response.",
+                        attempt_number,
+                        theorem_candidate.theorem_id,
+                    )
+                    feedback = _truncated_model_output_feedback(
+                        theorem_candidate,
+                        attempt_number=attempt_number,
+                        strategy="tactic_script",
+                        recovery_mode=recovery_mode,
+                        reasoning_effort=reasoning_effort,
+                        requested_output_tokens=self.max_output_tokens,
+                        response_mode=response_mode,
+                    )
+                    attempts.append(feedback)
+                    if attempt_callback:
+                        await attempt_callback(feedback)
+                    attempt_offset += 1
+                    continue
                 if _is_provider_context_overflow(exc):
                     feedback = _provider_context_overflow_feedback(
                         theorem_candidate,
@@ -984,6 +1095,10 @@ class ProofFormalizationAgent:
                         theorem_candidate,
                         attempt_number=attempt_number,
                         strategy="tactic_script",
+                        recovery_mode=recovery_mode,
+                        reasoning_effort=reasoning_effort,
+                        requested_output_tokens=self.max_output_tokens,
+                        response_mode=response_mode,
                     )
                     attempts.append(feedback)
                     if attempt_callback:
@@ -1013,6 +1128,12 @@ class ProofFormalizationAgent:
                     goal_states="",
                     strategy="tactic_script",
                     success=False,
+                    failure_kind="malformed_output" if is_parse_error else None,
+                    recovery_step=attempt_number,
+                    recovery_mode=recovery_mode,
+                    reasoning_effort=reasoning_effort,
+                    requested_output_tokens=self.max_output_tokens,
+                    response_mode=response_mode,
                 )
                 logger.warning(
                     "ProofFormalizationAgent tactic-script attempt %s failed for %s: %s",

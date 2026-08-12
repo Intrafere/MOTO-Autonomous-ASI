@@ -8,7 +8,10 @@ responses so the rest of MOTO can keep using the shared extraction/logging path.
 from __future__ import annotations
 
 import asyncio
+from email.utils import parsedate_to_datetime
+import json
 import os
+import random
 import time
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +36,38 @@ class SakanaFuguAuthError(SakanaFuguError):
 
 class SakanaFuguRequestError(SakanaFuguError):
     """Raised when Sakana rejects a non-auth request."""
+
+
+class SakanaFuguUsageLimitError(SakanaFuguRequestError):
+    """Raised when Sakana reports a timed subscription usage window."""
+
+    provider = "sakana_fugu"
+    provider_label = "Sakana Fugu"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resets_at: Optional[int] = None,
+        resets_in_seconds: Optional[int] = None,
+        plan_type: str = "",
+    ) -> None:
+        self.resets_at = resets_at
+        self.resets_in_seconds = resets_in_seconds
+        self.plan_type = plan_type
+        detail = message or "The Sakana Fugu usage limit has been reached."
+        if resets_in_seconds is not None:
+            detail = f"{detail} Resets in {resets_in_seconds} seconds."
+        super().__init__(detail)
+
+
+class SakanaFuguEntitlementError(SakanaFuguRequestError):
+    """Raised when the configured subscription is not entitled to the request."""
+
+    def __init__(self, message: str, *, error_code: str = "", status_code: Optional[int] = None) -> None:
+        self.error_code = error_code
+        self.status_code = status_code
+        super().__init__(message or "The Sakana Fugu subscription is not entitled to this request.")
 
 
 class SakanaFuguClient:
@@ -70,6 +105,17 @@ class SakanaFuguClient:
     MAX_RETRIES = 4
     RETRY_DELAY = 2.0
     RETRY_MAX_DELAY = 30.0
+    RETRY_JITTER_RATIO = 0.2
+    USAGE_LIMIT_CODES = {"usage_limit_reached"}
+    HARD_ENTITLEMENT_CODES = {
+        "entitlement_required",
+        "insufficient_entitlement",
+        "insufficient_quota",
+        "model_not_entitled",
+        "not_entitled",
+        "plan_not_eligible",
+        "subscription_required",
+    }
 
     def __init__(self) -> None:
         self._api_key: Optional[str] = None
@@ -122,16 +168,166 @@ class SakanaFuguClient:
 
     @classmethod
     def _retry_delay(cls, attempt: int) -> float:
-        return min(cls.RETRY_DELAY * (2 ** attempt), cls.RETRY_MAX_DELAY)
+        base = min(cls.RETRY_DELAY * (2 ** attempt), cls.RETRY_MAX_DELAY)
+        jitter = random.uniform(0.0, base * cls.RETRY_JITTER_RATIO)
+        return min(base + jitter, cls.RETRY_MAX_DELAY)
 
-    async def _post_with_retry(self, url: str, **kwargs) -> httpx.Response:
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> Optional[int]:
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @classmethod
+    def _iter_error_objects(cls, value: Any, *, max_depth: int = 8, max_nodes: int = 256):
+        """Yield nested OpenAI-compatible error objects without trusting their shape."""
+        seen: set[int] = set()
+        visited = 0
+
+        def visit(item: Any, depth: int):
+            nonlocal visited
+            if depth > max_depth or not isinstance(item, (dict, list)):
+                return
+            identity = id(item)
+            if identity in seen or visited >= max_nodes:
+                return
+            seen.add(identity)
+            visited += 1
+            if isinstance(item, dict):
+                yield item
+                for nested in item.values():
+                    yield from visit(nested, depth + 1)
+            else:
+                for nested in item:
+                    yield from visit(nested, depth + 1)
+
+        yield from visit(value, 0)
+
+    @staticmethod
+    def _response_payload(response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except (json.JSONDecodeError, ValueError, TypeError, UnicodeError):
+            return None
+
+    @classmethod
+    def _header_reset_values(cls, response: httpx.Response) -> tuple[Optional[int], Optional[int]]:
+        now = int(time.time())
+        resets_at: Optional[int] = None
+        resets_in_seconds: Optional[int] = None
+
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            seconds = cls._coerce_positive_int(retry_after)
+            if seconds is None:
+                try:
+                    seconds = max(1, int(parsedate_to_datetime(retry_after).timestamp()) - now)
+                except (TypeError, ValueError, OverflowError):
+                    seconds = None
+            if seconds is not None:
+                resets_in_seconds = seconds
+                resets_at = now + seconds
+
+        for name in (
+            "x-ratelimit-reset",
+            "x-ratelimit-reset-requests",
+            "x-usage-limit-reset",
+            "x-usage-reset",
+        ):
+            raw = response.headers.get(name)
+            parsed = cls._coerce_positive_int(raw)
+            if parsed is None:
+                continue
+            header_resets_at = parsed if parsed > now else now + parsed
+            header_seconds = max(1, header_resets_at - now)
+            if resets_at is None or header_resets_at < resets_at:
+                resets_at = header_resets_at
+                resets_in_seconds = header_seconds
+        return resets_at, resets_in_seconds
+
+    @classmethod
+    def _classify_provider_error(cls, response: httpx.Response) -> Optional[SakanaFuguError]:
+        payload = cls._response_payload(response)
+        matched: Optional[Dict[str, Any]] = None
+        matched_code = ""
+        entitlement = False
+        for item in cls._iter_error_objects(payload):
+            codes = {
+                str(item.get(field) or "").strip().lower()
+                for field in ("type", "code", "error_code")
+                if str(item.get(field) or "").strip()
+            }
+            usage_code = next((code for code in codes if code in cls.USAGE_LIMIT_CODES), "")
+            if usage_code:
+                matched = item
+                matched_code = usage_code
+                break
+            entitlement_code = next((code for code in codes if code in cls.HARD_ENTITLEMENT_CODES), "")
+            if entitlement_code and matched is None:
+                matched = item
+                matched_code = entitlement_code
+                entitlement = True
+
+        if matched_code in cls.USAGE_LIMIT_CODES:
+            resets_at = cls._coerce_positive_int(matched.get("resets_at") if matched else None)
+            resets_in_seconds = cls._coerce_positive_int(
+                matched.get("resets_in_seconds") if matched else None
+            )
+            header_resets_at, header_resets_in = cls._header_reset_values(response)
+            resets_at = resets_at or header_resets_at
+            resets_in_seconds = resets_in_seconds or header_resets_in
+            now = int(time.time())
+            if resets_at is None and resets_in_seconds is not None:
+                resets_at = now + resets_in_seconds
+            elif resets_in_seconds is None and resets_at is not None:
+                resets_in_seconds = max(1, resets_at - now)
+            message = redact_log_text(
+                sanitize_provider_error_text(
+                    str((matched or {}).get("message") or "The Sakana Fugu usage limit has been reached.")
+                )
+            )
+            return SakanaFuguUsageLimitError(
+                message,
+                resets_at=resets_at,
+                resets_in_seconds=resets_in_seconds,
+                plan_type=str((matched or {}).get("plan_type") or "").strip(),
+            )
+
+        if entitlement and matched is not None:
+            message = redact_log_text(
+                sanitize_provider_error_text(
+                    str(matched.get("message") or "The Sakana Fugu subscription is not entitled to this request.")
+                )
+            )
+            return SakanaFuguEntitlementError(
+                message,
+                error_code=matched_code,
+                status_code=response.status_code,
+            )
+        return None
+
+    @classmethod
+    def _retry_after_delay(cls, response: httpx.Response, attempt: int) -> float:
+        _resets_at, resets_in_seconds = cls._header_reset_values(response)
+        if resets_in_seconds is not None:
+            base = min(float(resets_in_seconds), cls.RETRY_MAX_DELAY)
+            jitter = random.uniform(0.0, base * cls.RETRY_JITTER_RATIO)
+            return min(base + jitter, cls.RETRY_MAX_DELAY)
+        return cls._retry_delay(attempt)
+
+    async def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
         for attempt in range(self.MAX_RETRIES):
             try:
-                response = await self.client.post(url, **kwargs)
+                response = await self.client.request(method, url, **kwargs)
+                classified = self._classify_provider_error(response) if response.status_code >= 400 else None
+                if classified is not None:
+                    raise classified
                 if response.status_code >= 400 and response.status_code in self.TRANSIENT_STATUS_CODES:
                     detail = sanitize_provider_error_text(response.text)
                     if attempt < self.MAX_RETRIES - 1:
-                        await asyncio.sleep(self._retry_delay(attempt))
+                        await asyncio.sleep(self._retry_after_delay(response, attempt))
                         continue
                     raise SakanaFuguRequestError(
                         f"Sakana Fugu connection failed after retries: HTTP {response.status_code}: {detail}"
@@ -144,6 +340,12 @@ class SakanaFuguClient:
                     continue
                 raise SakanaFuguRequestError(f"Sakana Fugu connection failed after retries: {detail}") from exc
         raise SakanaFuguRequestError("Sakana Fugu request failed after retries.")
+
+    async def _post_with_retry(self, url: str, **kwargs) -> httpx.Response:
+        return await self._request_with_retry("POST", url, **kwargs)
+
+    async def _get_with_retry(self, url: str, **kwargs) -> httpx.Response:
+        return await self._request_with_retry("GET", url, **kwargs)
 
     @staticmethod
     def _normalize_reasoning_effort(reasoning_effort: Optional[str]) -> Optional[str]:
@@ -302,7 +504,7 @@ class SakanaFuguClient:
     async def list_models(self, api_key: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
             headers = self._headers_for_key(api_key.strip() if api_key is not None else self._load_api_key())
-            response = await self.client.get(f"{self.API_BASE_URL}/models", headers=headers)
+            response = await self._get_with_retry(f"{self.API_BASE_URL}/models", headers=headers)
             if response.status_code >= 400:
                 if response.status_code in {401, 403}:
                     raise SakanaFuguAuthError(f"Sakana Fugu model list failed: {sanitize_provider_error_text(response.text)}")

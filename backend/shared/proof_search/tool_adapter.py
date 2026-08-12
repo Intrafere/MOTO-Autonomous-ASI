@@ -9,6 +9,7 @@ from typing import Any
 
 from backend.shared.config import system_config
 from backend.shared.proof_search.models import (
+    ProofSearchAccessContext,
     ProofSearchCorpus,
     ProofSearchRequest,
     UnifiedProofSearchRecord,
@@ -108,9 +109,15 @@ async def execute_search_lean_proofs(
     *,
     service: ProofSearchService | None = None,
     usage_root: Path | None = None,
+    requesting_run_id: str = "",
+    human_browse: bool = False,
 ) -> dict[str, Any]:
     """Execute one `search_lean_proofs` tool call and return JSON-safe output."""
     active_service = service or proof_search_service
+    access = ProofSearchAccessContext(
+        use_case="human_browse" if human_browse else "model_context",
+        requesting_run_id=requesting_run_id,
+    )
     try:
         args = _coerce_arguments(arguments)
         action = str(args.get("action") or "").strip()
@@ -119,7 +126,7 @@ async def execute_search_lean_proofs(
             return _tool_success(action, overview=overview.model_dump(mode="json"))
         if action == "search":
             request = _build_search_request(args)
-            response = await active_service.search(request)
+            response = await active_service.search(request, access=access)
             return _tool_success(
                 action,
                 results=[_record_to_tool_result(record) for record in response.results],
@@ -130,7 +137,7 @@ async def execute_search_lean_proofs(
                 weak_result_warning=response.weak_result_warning,
             )
         if action == "hydrate":
-            record = await _hydrate_record(active_service, args)
+            record = await _hydrate_record(active_service, args, access=access)
             if record is None:
                 return _tool_error(action, "Proof record not found.")
             return _tool_success(action, results=[_record_to_tool_result(record)])
@@ -180,6 +187,8 @@ def _build_search_request(args: dict[str, Any]) -> ProofSearchRequest:
 async def _hydrate_record(
     service: ProofSearchService,
     args: dict[str, Any],
+    *,
+    access: ProofSearchAccessContext,
 ) -> UnifiedProofSearchRecord | None:
     source = _normalize_corpus(args.get("source") or _first(args.get("corpora")) or "")
     proof_id = _string(args.get("proof_id") or args.get("fingerprint"))
@@ -191,6 +200,7 @@ async def _hydrate_record(
         corpus=source,
         proof_id=proof_id,
         session_id=_optional_string(args.get("session_id")),
+        access=access,
     )
 
 

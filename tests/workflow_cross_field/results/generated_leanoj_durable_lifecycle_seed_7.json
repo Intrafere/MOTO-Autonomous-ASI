@@ -2,11 +2,11 @@
   "action_ids": [
     "start_leanoj",
     "skip_leanoj_brainstorm",
+    "force_leanoj_brainstorm",
     "stop",
     "resume",
-    "force_leanoj_brainstorm",
-    "attempt_conflicting_start",
     "edit_leanoj_master_proof",
+    "attempt_conflicting_start",
     "clear_leanoj_state"
   ],
   "adapter": "model",
@@ -45,11 +45,11 @@
   "replay": [
     "start_leanoj()",
     "skip_leanoj_brainstorm()",
+    "force_leanoj_brainstorm()",
     "stop()",
     "resume()",
-    "force_leanoj_brainstorm()",
-    "start_manual_compiler()",
     "edit_leanoj_master_proof()",
+    "start_manual_compiler()",
     "clear()"
   ],
   "result": "passed",

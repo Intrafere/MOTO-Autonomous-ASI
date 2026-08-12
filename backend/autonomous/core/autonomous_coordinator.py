@@ -3,6 +3,8 @@ Autonomous Coordinator - Main orchestrator for autonomous research mode.
 Manages the Tier 1 -> Tier 2 -> Tier 3 autonomous workflow.
 """
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import re
@@ -12,11 +14,14 @@ from pathlib import Path
 
 import aiofiles
 
-from backend.shared.config import system_config
+from backend.shared.config import rag_config, system_config
 from backend.shared.models import (
+    AutonomousTerminalEvent,
     AutonomousResearchState,
     ProofAttemptFeedback,
+    ProofAttemptResult,
     ProofCandidate,
+    ProofStageResult,
     ProofRoleConfigSnapshot,
     ProofRuntimeConfigSnapshot,
     TopicSelectionSubmission,
@@ -65,6 +70,16 @@ from backend.autonomous.prompts.proof_prompts import (
     build_proof_framing_gate_prompt,
 )
 from backend.autonomous.core.proof_verification_stage import ProofVerificationProviderPause, ProofVerificationStage
+from backend.autonomous.core.proof_pruning_coordinator import ProofPruningCoordinator
+from backend.autonomous.core.proof_round_driver import (
+    AutomaticMultiRoundPolicy,
+    OneRoundPolicy,
+    ProofRoundDriver,
+)
+from backend.shared.proof_search.assistant_coordinator import (
+    assistant_proof_search_coordinator,
+)
+from backend.shared.proof_search.search_service import proof_search_service
 
 # Validation
 from backend.autonomous.validation.paper_redundancy_checker import PaperRedundancyChecker
@@ -90,10 +105,22 @@ from backend.aggregator.core.rag_manager import rag_manager
 
 logger = logging.getLogger(__name__)
 
+
+def _proof_recovery_config_fingerprint(config: Dict[str, Any]) -> str:
+    """Return a stable identity for every proof-route setting that changes recovery."""
+    return hashlib.sha256(
+        json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
 _PARENT_PHASE_SHUTDOWN_TIMEOUT_SECONDS = 60 * 60
 _WORKFLOW_PHASE_UNSET = object()
 _BRAINSTORM_ACCEPTANCE_HARD_LIMIT = 30
 _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF = 7
+_AUTOMATIC_PROOF_NOVELTY_ROLE_IDS = (
+    "autonomous_proof_novelty",
+    "autonomous_proof_novelty_brainstorm",
+    "autonomous_proof_novelty_paper",
+)
 _TIER2_RESUME_PHASES = {
     "outline",
     "body",
@@ -133,9 +160,9 @@ class AutonomousCoordinator:
         self._main_task: Optional[asyncio.Task] = None
         self.top_level_terminal_callback: Optional[Callable[[], Any]] = None
         self._stop_broadcast_sent = False
-        self._fatal_stop_reason: Optional[str] = None
-        self._fatal_stop_message: str = ""
-        self._fatal_stop_payload: Dict[str, Any] = {}
+        self._terminal_event: Optional[AutonomousTerminalEvent] = None
+        self._run_id: str = ""
+        self._lifecycle_generation: int = 0
         self.solution_path_manager = None
         self._ownership_handoff_active = False
         
@@ -237,6 +264,7 @@ class AutonomousCoordinator:
         self._proof_framing_context: str = ""
         self._proof_framing_reasoning: str = ""
         self._proof_verification_stage = ProofVerificationStage()
+        self._proof_pruning_coordinator: Optional[ProofPruningCoordinator] = None
         
         # Tier 3 Final Answer tracking
         self._last_tier3_check_at: int = 0  # Paper count at last Tier 3 check
@@ -267,11 +295,72 @@ class AutonomousCoordinator:
             # broadcast_event expects (event_type, data) as separate arguments
             await self._broadcast_callback(event, data or {})
 
+    def _build_terminal_event(
+        self,
+        *,
+        reason: str,
+        message: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> AutonomousTerminalEvent:
+        details = dict(payload or {})
+        run_id = self._run_id or getattr(session_manager, "session_id", "") or "legacy"
+        event_seed = (
+            f"{run_id}:{self._lifecycle_generation}:{reason}:"
+            f"{self._state.current_tier}:{self._current_topic_id}:{self._current_paper_id}"
+        )
+        accepted_fields = set(AutonomousTerminalEvent.model_fields)
+        canonical_fields = {
+            "terminal_event_id",
+            "run_id",
+            "lifecycle_generation",
+            "reason",
+            "message",
+            "current_tier",
+            "current_topic_id",
+            "current_paper_id",
+        }
+        model_details = {
+            key: value
+            for key, value in details.items()
+            if (
+                key in accepted_fields
+                and key not in canonical_fields
+                and value is not None
+            )
+        }
+        return AutonomousTerminalEvent(
+            **model_details,
+            terminal_event_id=hashlib.sha256(event_seed.encode("utf-8")).hexdigest()[:24],
+            run_id=run_id,
+            lifecycle_generation=self._lifecycle_generation,
+            reason=reason,
+            message=message,
+            current_tier=self._state.current_tier,
+            current_topic_id=self._current_topic_id,
+            current_paper_id=self._current_paper_id,
+        )
+
     def _mark_context_overflow_stop(self, payload: Optional[Dict[str, Any]] = None) -> None:
         """Remember that the next stopped event should explain the fatal overflow."""
-        self._fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
-        self._fatal_stop_message = CONTEXT_OVERFLOW_STOP_MESSAGE
-        self._fatal_stop_payload = dict(payload or {})
+        self._mark_terminal_stop(
+            reason=CONTEXT_OVERFLOW_STOP_REASON,
+            message=CONTEXT_OVERFLOW_STOP_MESSAGE,
+            payload=payload,
+        )
+
+    def _mark_terminal_stop(
+        self,
+        *,
+        reason: str,
+        message: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Set one canonical terminal event for the active lifecycle."""
+        self._terminal_event = self._build_terminal_event(
+            reason=reason,
+            message=message,
+            payload=payload,
+        )
 
     def _track_child_aggregator(self, aggregator: AggregatorCoordinator) -> None:
         """Track local child aggregators so parent phase changes can stop them."""
@@ -339,7 +428,15 @@ class AutonomousCoordinator:
         effective_prompt = self._append_proof_framing(prompt)
         if not self._allow_mathematical_proofs:
             return effective_prompt
-        return proof_database.inject_into_prompt(effective_prompt)
+        requesting_run_id = (
+            self._run_id
+            or getattr(session_manager, "session_id", "")
+            or ""
+        )
+        return proof_database.inject_into_prompt(
+            effective_prompt,
+            requesting_run_id=requesting_run_id,
+        )
 
     def _get_effective_user_research_prompt(self) -> str:
         """Return the current research prompt with all proof context applied."""
@@ -357,14 +454,17 @@ class AutonomousCoordinator:
         # Append a compact summary of known (non-novel) proofs scoped to this
         # brainstorm topic so the system can avoid re-proving standard results.
         # Theorem statements only — no Lean code — to keep token cost low.
-        counts = proof_database.count_proofs()
-        if counts["known"] > 0:
-            known_summary = proof_database.get_known_proofs_summary_for_browsing(
-                source_id=self._current_topic_id or None,
-                limit=15,
-            )
-            if known_summary:
-                effective_prompt = f"{effective_prompt}\n\n{known_summary}"
+        known_summary = proof_database.get_known_proofs_summary_for_browsing(
+            source_id=self._current_topic_id or None,
+            limit=15,
+            requesting_run_id=(
+                self._run_id
+                or getattr(session_manager, "session_id", "")
+                or ""
+            ),
+        )
+        if known_summary:
+            effective_prompt = f"{effective_prompt}\n\n{known_summary}"
         return effective_prompt
 
     def _get_effective_compiler_prompt(self, paper_title: str) -> str:
@@ -411,10 +511,6 @@ class AutonomousCoordinator:
     def _proof_outputs_enabled(self) -> bool:
         """Return whether this run may produce Lean/proof outputs."""
         return bool(self._allow_mathematical_proofs and system_config.lean4_enabled)
-
-    def _automatic_proof_max_rounds(self) -> int:
-        """Return automatic proof-round budget for the current output mode."""
-        return 4 if not self._allow_research_papers else 1
 
     async def _save_proofs_only_next_topic_state(self) -> None:
         """Persist a clean topic-selection boundary after a proofs-only cycle."""
@@ -478,6 +574,87 @@ class AutonomousCoordinator:
             validator=validator_config,
             assistant=assistant_config,
         ).model_dump(mode="json")
+
+    async def _create_proof_pruning_coordinator(
+        self,
+        *,
+        source_type: str,
+        source_id: str,
+        proof_round_index: int,
+    ) -> ProofPruningCoordinator:
+        """Create the bounded automatic-checkpoint pruning owner."""
+        if self._proof_pruning_coordinator is not None:
+            await self._proof_pruning_coordinator.drain(preserve_pending=True)
+        runtime_snapshot = ProofRuntimeConfigSnapshot.model_validate(
+            self._build_proof_runtime_config_snapshot()
+        )
+        proof_run_id = (
+            f"auto-proof-{self._run_id or getattr(session_manager, 'session_id', '')}-"
+            f"{source_type}-{source_id}"
+        )
+
+        async def persist(state: Dict[str, Any]) -> Optional[bool]:
+            saver = getattr(research_metadata, "save_proof_pruning_state", None)
+            if saver is not None:
+                return await saver(
+                    state,
+                    expected_run_id=self._run_id,
+                    expected_generation=self._lifecycle_generation,
+                )
+            return True
+
+        async def load() -> Optional[Dict[str, Any]]:
+            loader = getattr(research_metadata, "get_proof_pruning_state", None)
+            if loader is None:
+                return None
+            return await loader(proof_run_id=proof_run_id)
+
+        async def invalidate(proof_id: str) -> None:
+            assistant_proof_search_coordinator.invalidate_live_context_occurrence(
+                proof_id
+            )
+            try:
+                await proof_search_service.rebuild_index()
+            except Exception as exc:
+                logger.warning(
+                    "Proof-search refresh failed after automatic prune %s: %s",
+                    proof_id[:120],
+                    str(exc)[:240],
+                )
+
+        coordinator = ProofPruningCoordinator(
+            proof_database=proof_database,
+            runtime_snapshot=runtime_snapshot,
+            proof_run_id=proof_run_id,
+            run_mode="one_round",
+            run_id=(
+                getattr(session_manager, "session_id", "")
+                or self._run_id
+                or f"{source_type}:{source_id}"
+            ),
+            lifecycle_generation=max(1, self._lifecycle_generation),
+            scope="autonomous",
+            source_type=source_type,
+            source_id=source_id,
+            canonical_user_prompt=self._base_user_research_prompt,
+            proof_store_id=str(
+                getattr(
+                    proof_database,
+                    "_base_dir",
+                    f"autonomous:{getattr(session_manager, 'session_id', '') or self._run_id}",
+                )
+            ),
+            session_id=getattr(session_manager, "session_id", "") or "",
+            round_index=proof_round_index,
+            broadcast_fn=self._broadcast,
+            persist_fn=persist,
+            load_fn=load,
+            invalidate_fn=invalidate,
+            should_stop=self._stop_event.is_set,
+        )
+        await coordinator.restore()
+        self._proof_pruning_coordinator = coordinator
+        return coordinator
 
     async def _run_proof_framing_gate(self) -> None:
         """Run the one-time proof-framing decision before fresh research begins."""
@@ -548,6 +725,8 @@ class AutonomousCoordinator:
         Dict[str, int],
         Dict[str, List[ProofAttemptFeedback]],
         Dict[str, str],
+        List[Dict[str, Any]],
+        ProofStageResult,
     ]:
         """Return remaining candidates, original indexes, and prior Lean attempts."""
         processed_ids = set(checkpoint.get("processed_candidate_ids") or [])
@@ -595,7 +774,44 @@ class AutonomousCoordinator:
                 if theorem_name
             }
 
-        return candidates, candidate_indexes, attempts_by_candidate, theorem_names_by_candidate
+        truncation_streak = [
+            dict(item)
+            for item in (checkpoint.get("truncation_streak") or [])
+            if isinstance(item, dict)
+        ]
+        checkpoint_results: List[ProofAttemptResult] = []
+        for raw_result in checkpoint.get("results") or []:
+            if not isinstance(raw_result, dict):
+                continue
+            try:
+                checkpoint_results.append(ProofAttemptResult.model_validate(raw_result))
+            except Exception as exc:
+                logger.debug("Skipping invalid proof checkpoint result: %s", exc)
+
+        checkpoint_result = ProofStageResult(
+            source_type=str(checkpoint.get("source_type") or "brainstorm"),
+            source_id=str(checkpoint.get("source_id") or ""),
+            total_candidates=max(
+                int(checkpoint.get("total_candidates") or 0),
+                len(checkpoint.get("candidates") or []),
+            ),
+            verified_count=int(checkpoint.get("verified_count") or 0),
+            novel_count=int(checkpoint.get("novel_count") or 0),
+            results=checkpoint_results,
+            deferred_candidate_ids=[
+                str(candidate_id)
+                for candidate_id in (checkpoint.get("deferred_candidate_ids") or [])
+                if candidate_id
+            ],
+        )
+        return (
+            candidates,
+            candidate_indexes,
+            attempts_by_candidate,
+            theorem_names_by_candidate,
+            truncation_streak,
+            checkpoint_result,
+        )
 
     async def _run_proof_verification(
         self,
@@ -623,8 +839,22 @@ class AutonomousCoordinator:
         submitter_model = self._high_param_model
         submitter_context = self._high_param_context
         submitter_max_tokens = self._high_param_max_tokens
+        proof_role_fingerprint = _proof_recovery_config_fingerprint(
+            {
+                "provider": self._high_param_provider,
+                "model": submitter_model,
+                "openrouter_provider": self._high_param_openrouter_provider,
+                "openrouter_reasoning_effort": self._high_param_openrouter_reasoning_effort,
+                "lm_studio_fallback": self._high_param_lm_studio_fallback,
+                "context": submitter_context,
+                "max_output": submitter_max_tokens,
+                "supercharge_enabled": self._high_param_supercharge_enabled,
+                "recovery_policy_version": "proof-truncation-v1",
+            }
+        )
 
         async def save_proof_checkpoint(checkpoint: Dict[str, Any]) -> None:
+            checkpoint["proof_role_fingerprint"] = proof_role_fingerprint
             await research_metadata.save_proof_checkpoint(checkpoint)
 
         automatic_checkpoint = (
@@ -632,47 +862,55 @@ class AutonomousCoordinator:
             and theorem_candidates is None
             and source_type in {"brainstorm", "paper"}
         )
-        proof_max_rounds = self._automatic_proof_max_rounds() if automatic_checkpoint else 1
-        automatic_followup_rounds = automatic_checkpoint and proof_max_rounds > 1
-        prior_round_summaries: List[str] = []
-
-        def round_trigger_name(round_index: int) -> str:
-            if not automatic_followup_rounds or round_index <= 1:
-                return trigger
-            return f"{trigger}_round_{round_index}"
-
-        def summarize_round_result(round_index: int, proof_result) -> str:
-            if proof_result is None:
-                return f"Round {round_index}: skipped."
-            lines = [
-                (
-                    f"Round {round_index}: {proof_result.verified_count}/"
-                    f"{proof_result.total_candidates} candidates verified, "
-                    f"{proof_result.novel_count} novel."
-                )
-            ]
-            for attempt_result in list(getattr(proof_result, "results", []) or [])[:5]:
-                status = "verified" if attempt_result.success else "failed"
-                lines.append(
-                    f"- {status}: {attempt_result.theorem_statement[:220]}"
-                )
-            return "\n".join(lines)
+        round_policy = (
+            AutomaticMultiRoundPolicy(max_rounds=4)
+            if automatic_checkpoint and not self._allow_research_papers
+            else OneRoundPolicy()
+        )
+        proof_max_rounds = round_policy.max_rounds or 1
+        automatic_followup_rounds = round_policy.holds_source_reservation
+        pruning_coordinator = await self._create_proof_pruning_coordinator(
+            source_type=source_type,
+            source_id=source_id,
+            proof_round_index=1,
+        )
 
         async def run_single_proof_round(
-            *,
-            round_trigger: str,
             proof_round_index: int,
+            round_trigger: str,
             prior_round_results: str,
+            source_reservation_token: str,
         ):
             checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
             proof_candidate_indexes: Dict[str, int] = {}
             checkpoint_attempts: Dict[str, List[ProofAttemptFeedback]] = {}
             checkpoint_theorem_names: Dict[str, str] = {}
+            checkpoint_truncation_streak: List[Dict[str, Any]] = []
+            checkpoint_result: Optional[ProofStageResult] = None
             retry_candidates = theorem_candidates if proof_round_index == 1 else None
 
             if checkpoint:
                 completed_triggers = set(checkpoint.get("completed_triggers") or [])
                 same_round_checkpoint = checkpoint.get("trigger") == round_trigger
+                fatal_config_matches = (
+                    checkpoint.get("proof_role_fingerprint") == proof_role_fingerprint
+                    and checkpoint.get("recovery_policy_version") == "proof-truncation-v1"
+                )
+                if (
+                    same_round_checkpoint
+                    and checkpoint.get("fatal_stop_reason")
+                    and fatal_config_matches
+                ):
+                    self._mark_terminal_stop(
+                        reason=str(checkpoint.get("fatal_stop_reason")),
+                        message=(
+                            "Autonomous research remains stopped because proof output-truncation "
+                            "recovery was exhausted. Change the proof model settings before restarting."
+                        ),
+                        payload=dict(checkpoint.get("fatal_stop_payload") or {}),
+                    )
+                    self._stop_event.set()
+                    return "fatal_stop", None
                 if round_trigger in completed_triggers:
                     logger.info(
                         "Skipping completed proof checkpoint for %s %s trigger=%s",
@@ -701,6 +939,8 @@ class AutonomousCoordinator:
                         proof_candidate_indexes,
                         checkpoint_attempts,
                         checkpoint_theorem_names,
+                        checkpoint_truncation_streak,
+                        checkpoint_result,
                     ) = self._deserialize_proof_checkpoint(checkpoint)
                     if checkpoint_candidates:
                         retry_candidates = checkpoint_candidates
@@ -734,16 +974,43 @@ class AutonomousCoordinator:
                         role_suffix_override=role_suffix_override,
                         trigger=round_trigger,
                         source_reserved=automatic_followup_rounds,
+                        source_reservation_token=source_reservation_token,
                         release_source_on_exit=not automatic_followup_rounds,
                         should_stop=self._stop_event.is_set,
                         proof_candidate_indexes=proof_candidate_indexes,
                         checkpoint_attempts_by_candidate=checkpoint_attempts,
                         checkpoint_theorem_names_by_candidate=checkpoint_theorem_names,
+                        checkpoint_truncation_streak=checkpoint_truncation_streak,
+                        checkpoint_result=checkpoint_result,
                         checkpoint_callback=save_proof_checkpoint,
                         proof_round_index=proof_round_index,
                         proof_max_rounds=proof_max_rounds,
                         prior_round_results=prior_round_results,
+                        proof_pruning_registered_callback=(
+                            pruning_coordinator.notify_proof_registered
+                        ),
+                        proof_pruning_pressure_callback=(
+                            pruning_coordinator.notify_context_pressure
+                        ),
+                        proof_pruning_route_fingerprint=(
+                            pruning_coordinator.route_config_fingerprint(
+                                pruning_coordinator.runtime_snapshot
+                            )
+                        ),
                     )
+                    if getattr(proof_result, "fatal_stop_reason", ""):
+                        self._mark_terminal_stop(
+                            reason=proof_result.fatal_stop_reason,
+                            message=(
+                                "Autonomous research stopped because two distinct proof candidates "
+                                "exhausted all bounded output-truncation recovery attempts. Lean 4 "
+                                "was not run for those truncated attempts."
+                            ),
+                            payload=dict(proof_result.fatal_stop_payload or {}),
+                        )
+                        self._stop_event.set()
+                        await self._save_workflow_state(phase=f"{source_type}_proof_verification")
+                        return "fatal_stop", proof_result
                     has_deferred = bool(getattr(proof_result, "deferred_candidate_ids", []))
                     if (
                         not self._stop_event.is_set()
@@ -784,6 +1051,8 @@ class AutonomousCoordinator:
                             proof_candidate_indexes,
                             checkpoint_attempts,
                             checkpoint_theorem_names,
+                            checkpoint_truncation_streak,
+                            checkpoint_result,
                         ) = self._deserialize_proof_checkpoint(checkpoint)
                         retry_candidates = checkpoint_candidates or retry_candidates
                     message = str(exc)
@@ -831,6 +1100,8 @@ class AutonomousCoordinator:
                             proof_candidate_indexes,
                             checkpoint_attempts,
                             checkpoint_theorem_names,
+                            checkpoint_truncation_streak,
+                            checkpoint_result,
                         ) = self._deserialize_proof_checkpoint(checkpoint)
                         retry_candidates = checkpoint_candidates or retry_candidates
                     message = str(exc)
@@ -883,6 +1154,8 @@ class AutonomousCoordinator:
                             proof_candidate_indexes,
                             checkpoint_attempts,
                             checkpoint_theorem_names,
+                            checkpoint_truncation_streak,
+                            checkpoint_result,
                         ) = self._deserialize_proof_checkpoint(checkpoint)
                         retry_candidates = checkpoint_candidates or retry_candidates
                     message = str(exc)
@@ -924,42 +1197,31 @@ class AutonomousCoordinator:
                     )
             return "stopped", None
 
-        source_reserved_for_rounds = False
-        if automatic_followup_rounds:
-            await ProofVerificationStage.reserve_source(source_type, source_id)
-            source_reserved_for_rounds = True
+        async def release_source(
+            reserved_source_type: str,
+            reserved_source_id: str,
+            owner_token: str,
+        ) -> None:
+            await ProofVerificationStage.release_source(
+                reserved_source_type,
+                reserved_source_id,
+                owner_token=owner_token,
+            )
 
+        driver = ProofRoundDriver(
+            policy=round_policy,
+            source_type=source_type,
+            source_id=source_id,
+            base_trigger=trigger,
+            execute_round=run_single_proof_round,
+            should_stop=self._stop_event.is_set,
+            reserve_source=ProofVerificationStage.reserve_source,
+            release_source=release_source,
+        )
         try:
-            for proof_round_index in range(1, proof_max_rounds + 1):
-                if self._stop_event.is_set():
-                    return "stopped"
-                round_trigger = round_trigger_name(proof_round_index)
-                prior_round_results = "\n".join(prior_round_summaries[-3:])
-                round_status, proof_result = await run_single_proof_round(
-                    round_trigger=round_trigger,
-                    proof_round_index=proof_round_index,
-                    prior_round_results=prior_round_results,
-                )
-                if round_status in {"stopped", "no_candidates_skipped"}:
-                    return "complete" if round_status == "no_candidates_skipped" else "stopped"
-                if round_status == "deferred":
-                    # Candidate-local overflow is nonfatal to the parent workflow.
-                    # Keep the checkpoint so a later Start with changed proof
-                    # settings retries only deferred/unprocessed candidates.
-                    return "complete"
-                if proof_result is None:
-                    continue
-                if self._stop_event.is_set() or getattr(proof_result, "had_error", False):
-                    return "stopped" if self._stop_event.is_set() else "error_preserved"
-                prior_round_summaries.append(
-                    summarize_round_result(proof_round_index, proof_result)
-                )
-                if getattr(proof_result, "total_candidates", 0) == 0:
-                    return "complete"
-            return "complete"
+            return await driver.run()
         finally:
-            if source_reserved_for_rounds:
-                await ProofVerificationStage.release_source(source_type, source_id)
+            await pruning_coordinator.drain(preserve_pending=True)
 
     async def _run_brainstorm_completion_proofs(self) -> str:
         """Run proof verification for the current completed brainstorm."""
@@ -1657,20 +1919,25 @@ class AutonomousCoordinator:
             )
         )
 
-        api_client_manager.configure_role(
-            "autonomous_proof_novelty",
-            ModelConfig(
-                provider=validator_provider,
-                model_id=validator_model,
-                openrouter_model_id=validator_model if validator_provider == "openrouter" else None,
-                openrouter_provider=validator_openrouter_provider,
-                openrouter_reasoning_effort=validator_openrouter_reasoning_effort,
-                lm_studio_fallback_id=validator_lm_studio_fallback,
-                context_window=validator_context_window,
-                max_output_tokens=validator_max_tokens,
-                supercharge_enabled=validator_supercharge_enabled
-            )
+        proof_novelty_config = ModelConfig(
+            provider=validator_provider,
+            model_id=validator_model,
+            openrouter_model_id=validator_model if validator_provider == "openrouter" else None,
+            openrouter_provider=validator_openrouter_provider,
+            openrouter_reasoning_effort=validator_openrouter_reasoning_effort,
+            lm_studio_fallback_id=validator_lm_studio_fallback,
+            context_window=validator_context_window,
+            max_output_tokens=validator_max_tokens,
+            supercharge_enabled=validator_supercharge_enabled,
         )
+        # ProofVerificationStage scopes automatic validator calls by source type.
+        # Configure every ID it can emit so a scoped call cannot silently fall
+        # through to the API router's unconfigured-role LM Studio default.
+        for proof_novelty_role_id in _AUTOMATIC_PROOF_NOVELTY_ROLE_IDS:
+            api_client_manager.configure_role(
+                proof_novelty_role_id,
+                proof_novelty_config,
+            )
 
         api_client_manager.configure_role(
             "autonomous_proof_identification_manual_brainstorm",
@@ -2477,6 +2744,8 @@ class AutonomousCoordinator:
         
         state = {
             "is_running": self._running,
+            "run_id": self._run_id,
+            "lifecycle_generation": self._lifecycle_generation,
             "current_tier": current_tier,
             "current_topic_id": self._current_topic_id,
             "current_paper_id": self._current_paper_id,
@@ -2569,10 +2838,36 @@ class AutonomousCoordinator:
         payload = {
             "final_stats": stats
         }
-        if self._fatal_stop_reason:
-            payload.update(self._fatal_stop_payload)
-            payload["reason"] = self._fatal_stop_reason
-            payload["message"] = self._fatal_stop_message or CONTEXT_OVERFLOW_STOP_MESSAGE
+        if self._terminal_event is not None:
+            terminal_payload = self._terminal_event.model_dump(mode="json")
+            payload.update(terminal_payload)
+            await research_metadata.save_terminal_event(
+                terminal_payload,
+                expected_run_id=self._terminal_event.run_id,
+                expected_generation=self._terminal_event.lifecycle_generation,
+            )
+            if self._terminal_event.reason == "proof_output_truncation_recovery_exhausted":
+                from backend.shared.provider_notification_store import record_provider_notification
+
+                run_id = self._terminal_event.run_id or "current"
+                notification_key = f"proof-truncation:{run_id}"
+                stored = await asyncio.to_thread(
+                    record_provider_notification,
+                    "auto_research_stopped",
+                    {
+                        **payload,
+                        "notification_key": notification_key,
+                        "notification_kind": "model_error",
+                        "run_id": run_id,
+                        "provider": "proof_model",
+                        "role_id": "autonomous_proof_formalization",
+                        "reason": self._terminal_event.reason,
+                        "title": "Proof model output repeatedly truncated",
+                        "recoverable": True,
+                        "terminal_guidance": self._terminal_event.terminal_guidance or "",
+                    },
+                )
+                payload["notification_key"] = stored.get("notification_key", notification_key)
         await self._broadcast("auto_research_stopped", payload)
 
     async def _initialize_solution_path_manager(self) -> None:
@@ -2672,15 +2967,17 @@ class AutonomousCoordinator:
         self._running = True
         self._stop_event.clear()
         self._state.is_running = True
+        self._run_id = getattr(session_manager, "session_id", "") or "legacy"
         api_client_manager.set_assistant_memory_suppressed(
             "autonomous_allowed_outputs",
             not self._allow_mathematical_proofs,
         )
         self._stop_broadcast_sent = False
-        self._fatal_stop_reason = None
-        self._fatal_stop_message = ""
-        self._fatal_stop_payload = {}
+        self._terminal_event = None
         try:
+            self._lifecycle_generation = await research_metadata.begin_lifecycle(
+                self._run_id
+            )
             free_model_manager.reset()
 
             async def log_callback(task_id, role_id, model, provider, prompt, response,
@@ -3405,6 +3702,15 @@ class AutonomousCoordinator:
                 "autonomous_allowed_outputs",
                 False,
             )
+            if self._proof_pruning_coordinator is not None:
+                try:
+                    await self._proof_pruning_coordinator.drain(
+                        preserve_pending=True
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to drain proof pruning during terminal cleanup"
+                    )
             self._running = False
             self._state.is_running = False
             if self.solution_path_manager is not None:
@@ -3528,6 +3834,8 @@ class AutonomousCoordinator:
         self._state.is_running = False
         if self.solution_path_manager is not None:
             await self.solution_path_manager.stop()
+        if self._proof_pruning_coordinator is not None:
+            await self._proof_pruning_coordinator.drain(preserve_pending=True)
         await self._broadcast_stopped_once()
 
         async def _run_shutdown_step(label: str, awaitable, timeout: float = 5.0) -> bool:
@@ -3934,6 +4242,15 @@ class AutonomousCoordinator:
             logger.error(f"Error in resumed research loop: {e}")
             await self._save_workflow_state()
         finally:
+            if self._proof_pruning_coordinator is not None:
+                try:
+                    await self._proof_pruning_coordinator.drain(
+                        preserve_pending=True
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to drain proof pruning during resumed-run cleanup"
+                    )
             self._running = False
             self._state.is_running = False
             token_tracker.stop_timer()
@@ -4055,6 +4372,9 @@ class AutonomousCoordinator:
                 creativity_emphasis_boost_enabled=self._creativity_emphasis_boost_enabled,
                 enable_cleanup_review=False,
                 proof_database_store=proof_database,
+                proof_context_requesting_run_id=(
+                    self._run_id or getattr(session_manager, "session_id", "") or ""
+                ),
                 solution_path_manager=self.solution_path_manager,
                 solution_path_acceptance_count_owner=False,
                 local_rejection_log_dir=str(brainstorm_memory._base_dir),
@@ -4076,7 +4396,17 @@ class AutonomousCoordinator:
             
             while self._running and not self._stop_event.is_set():
                 status = await exploration_aggregator.get_status()
-                if getattr(exploration_aggregator, "fatal_error_type", None) == "context_overflow":
+                child_fatal_type = getattr(exploration_aggregator, "fatal_error_type", None)
+                if child_fatal_type == "provider_repair_required":
+                    payload = getattr(exploration_aggregator, "fatal_error_payload", None) or {}
+                    self._mark_terminal_stop(
+                        reason="provider_repair_required",
+                        message=str(payload.get("message") or "Research stopped for provider repair."),
+                        payload=payload,
+                    )
+                    self._stop_event.set()
+                    return ""
+                if child_fatal_type == "context_overflow":
                     logger.error(
                         "Topic exploration stopped for context overflow: %s",
                         getattr(exploration_aggregator, "fatal_error_message", ""),
@@ -4855,6 +5185,9 @@ class AutonomousCoordinator:
                 allow_trusted_context_files=True,
                 trusted_context_texts=reference_brainstorm_contexts,
                 proof_database_store=proof_database,
+                proof_context_requesting_run_id=(
+                    self._run_id or getattr(session_manager, "session_id", "") or ""
+                ),
                 solution_path_manager=self.solution_path_manager,
                 solution_path_acceptance_count_owner=False,
                 local_rejection_log_dir=str(brainstorm_memory._base_dir),
@@ -4974,7 +5307,17 @@ class AutonomousCoordinator:
 
                 # Get current aggregator stats
                 status = await self._brainstorm_aggregator.get_status()
-                if getattr(self._brainstorm_aggregator, "fatal_error_type", None) == "context_overflow":
+                child_fatal_type = getattr(self._brainstorm_aggregator, "fatal_error_type", None)
+                if child_fatal_type == "provider_repair_required":
+                    payload = getattr(self._brainstorm_aggregator, "fatal_error_payload", None) or {}
+                    self._mark_terminal_stop(
+                        reason="provider_repair_required",
+                        message=str(payload.get("message") or "Research stopped for provider repair."),
+                        payload=payload,
+                    )
+                    self._stop_event.set()
+                    return
+                if child_fatal_type == "context_overflow":
                     logger.error(
                         "Brainstorm aggregation stopped for context overflow: %s",
                         getattr(self._brainstorm_aggregator, "fatal_error_message", ""),
@@ -5951,6 +6294,9 @@ class AutonomousCoordinator:
                     creativity_emphasis_boost_enabled=self._creativity_emphasis_boost_enabled,
                     enable_cleanup_review=False,
                     proof_database_store=proof_database,
+                    proof_context_requesting_run_id=(
+                        self._run_id or getattr(session_manager, "session_id", "") or ""
+                    ),
                     solution_path_manager=self.solution_path_manager,
                     solution_path_acceptance_count_owner=False,
                     local_rejection_log_dir=str(brainstorm_memory._base_dir),
@@ -5977,7 +6323,17 @@ class AutonomousCoordinator:
                 
                 while self._running and not self._stop_event.is_set():
                     status = await exploration_aggregator.get_status()
-                    if getattr(exploration_aggregator, "fatal_error_type", None) == "context_overflow":
+                    child_fatal_type = getattr(exploration_aggregator, "fatal_error_type", None)
+                    if child_fatal_type == "provider_repair_required":
+                        payload = getattr(exploration_aggregator, "fatal_error_payload", None) or {}
+                        self._mark_terminal_stop(
+                            reason="provider_repair_required",
+                            message=str(payload.get("message") or "Research stopped for provider repair."),
+                            payload=payload,
+                        )
+                        self._stop_event.set()
+                        return ""
+                    if child_fatal_type == "context_overflow":
                         logger.error(
                             "Paper title exploration stopped for context overflow: %s",
                             getattr(exploration_aggregator, "fatal_error_message", ""),
@@ -6177,7 +6533,10 @@ class AutonomousCoordinator:
                 validator_supercharge_enabled=self._validator_supercharge_enabled,
                 writer_supercharge_enabled=self._writer_supercharge_enabled,
                 high_param_supercharge_enabled=self._high_param_supercharge_enabled,
-                critique_submitter_supercharge_enabled=self._critique_submitter_supercharge_enabled
+                critique_submitter_supercharge_enabled=self._critique_submitter_supercharge_enabled,
+                proof_context_requesting_run_id=(
+                    self._run_id or getattr(session_manager, "session_id", "") or ""
+                ),
             )
             
             # Set WebSocket broadcaster for compiler events
@@ -7879,7 +8238,10 @@ class AutonomousCoordinator:
                 validator_supercharge_enabled=self._validator_supercharge_enabled,
                 writer_supercharge_enabled=self._writer_supercharge_enabled,
                 high_param_supercharge_enabled=self._high_param_supercharge_enabled,
-                critique_submitter_supercharge_enabled=self._critique_submitter_supercharge_enabled
+                critique_submitter_supercharge_enabled=self._critique_submitter_supercharge_enabled,
+                proof_context_requesting_run_id=(
+                    self._run_id or getattr(session_manager, "session_id", "") or ""
+                ),
             )
             
             # Set WebSocket broadcaster
@@ -8119,6 +8481,12 @@ class AutonomousCoordinator:
         # Check both internal flag and state object
         if self._running or self._state.is_running:
             raise RuntimeError("Cannot clear data while running")
+        if self._proof_pruning_coordinator is not None:
+            await self._proof_pruning_coordinator.clear(
+                max(1, self._lifecycle_generation + 1)
+            )
+            self._proof_pruning_coordinator = None
+        await research_metadata.clear_proof_pruning_state()
         if self.solution_path_manager is not None:
             from backend.shared.solution_path import solution_path_registry
             await solution_path_registry.clear_manager(self.solution_path_manager)
@@ -8379,6 +8747,9 @@ class AutonomousCoordinator:
         
         # Step 9: Reset state object
         self._state = AutonomousResearchState()
+        self._terminal_event = None
+        self._run_id = ""
+        self._lifecycle_generation = 0
         
         # Report results with graceful degradation
         success_count = len(successes)

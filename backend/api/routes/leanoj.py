@@ -305,6 +305,9 @@ async def start_leanoj(request: LeanOJStartRequest):
                 raise
             if not leanoj_coordinator.is_active:
                 release_leanoj_workflow_lease()
+            else:
+                from backend.shared.lean4_client import start_lean4_workspace_bootstrap
+                start_lean4_workspace_bootstrap()
             return {
                 "success": True,
                 "message": "Proof Solver resumed" if resumed else "Proof Solver started",

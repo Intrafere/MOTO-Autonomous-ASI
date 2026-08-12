@@ -33,7 +33,7 @@ from backend.api.routes import (
 from backend.shared.build_info import get_build_info
 from backend.shared.lm_studio_client import lm_studio_client
 from backend.shared.config import rag_config, system_config
-from backend.shared.lean4_client import clear_lean4_client, close_lean4_client, initialize_lean4_client
+from backend.shared.lean4_client import clear_lean4_client, close_lean4_client
 from backend.shared.runtime_settings import apply_persisted_runtime_settings
 from backend.shared.workflow_start_guard import workflow_start_guard
 from backend.aggregator.core.coordinator import coordinator
@@ -186,6 +186,8 @@ async def _application_lifespan(app: FastAPI):
     Path(system_config.logs_dir).mkdir(parents=True, exist_ok=True)
     Path(system_config.user_uploads_dir).mkdir(parents=True, exist_ok=True)
     apply_persisted_runtime_settings()
+    from backend.autonomous.core.proof_run_manager import proof_run_manager
+    await proof_run_manager.purge_legacy_state(Path(system_config.data_dir))
 
     from backend.aggregator.core.rag_manager import rag_manager
     await rag_manager.prepare_process_generation_cache()
@@ -285,43 +287,12 @@ async def _application_lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Failed to restore LeanOJ session state on startup: %s", exc)
 
-    # Lean 4 warm start must NEVER block the FastAPI lifespan. A cold Mathlib
-    # workspace can spend many minutes inside `lake update` / `lake exe cache
-    # get`, during which the backend would otherwise refuse every HTTP request
-    # (including `/api/openrouter/api-key-status`). Users then see the UI
-    # report "no OpenRouter key" even though the key is persisted in the OS
-    # keyring, until they happen to poll again after the bootstrap finishes.
-    # We fire-and-forget the warm start on a background task so the rest of
-    # the API is reachable the moment uvicorn is ready to accept connections.
-    lean4_warm_start_task: Optional[asyncio.Task] = None
-    if system_config.lean4_enabled:
-        try:
-            lean4_client = initialize_lean4_client()
-        except Exception as exc:
-            logger.warning("Lean 4 client initialization failed: %s", exc)
-        else:
-            async def _warm_start_lean4() -> None:
-                try:
-                    await lean4_client.warm_start()
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("Lean 4 client warm start failed: %s", exc)
-
-            lean4_warm_start_task = asyncio.create_task(_warm_start_lean4())
-
     logger.info("ASI Aggregator System ready")
 
     yield
     
     # Shutdown
     logger.info("Shutting down ASI Aggregator System...")
-    if lean4_warm_start_task is not None and not lean4_warm_start_task.done():
-        lean4_warm_start_task.cancel()
-        try:
-            await lean4_warm_start_task
-        except asyncio.CancelledError:
-            logger.debug("Lean 4 warm start task cancelled during shutdown")
-        except Exception as exc:
-            logger.debug("Lean 4 warm start task failed during shutdown: %s", exc)
     try:
         for label, stop in (
             ("Aggregator", coordinator.stop),
@@ -335,6 +306,10 @@ async def _application_lifespan(app: FastAPI):
                 logger.exception("%s shutdown cleanup failed", label)
     finally:
         workflow_start_guard.release_all()
+    try:
+        await proof_run_manager.shutdown_all()
+    except Exception:
+        logger.exception("Manual proof-run shutdown cleanup failed")
     try:
         await rag_manager.close()
     except Exception:

@@ -326,11 +326,16 @@ def _format_proof_round_context(
 ) -> str:
     """Return extra instructions for autonomous follow-up proof rounds."""
     safe_round = max(1, int(proof_round_index or 1))
-    safe_max = max(safe_round, int(proof_max_rounds or safe_round))
+    configured_max = int(proof_max_rounds or 0)
+    round_position = (
+        f"proof round {safe_round} in an unbounded continuous run"
+        if configured_max <= 0
+        else f"proof round {safe_round} of {max(safe_round, configured_max)}"
+    )
     if safe_round <= 1:
         return f"""
 PROOF ROUND CONTEXT:
-This is proof round {safe_round} of {safe_max}. Prioritize candidates that directly solve the user's prompt or substantially advance a solution path. Later rounds may ask again after newly verified proofs are available.
+This is {round_position}. Prioritize candidates that directly solve the user's prompt or substantially advance a solution path. Later rounds may ask again after newly verified proofs are available.
 """
 
     prior_summary = (prior_round_results or "").strip()
@@ -341,7 +346,7 @@ This is proof round {safe_round} of {safe_max}. Prioritize candidates that direc
     )
     return f"""
 PROOF FOLLOW-UP ROUND CONTEXT:
-This is proof round {safe_round} of {safe_max}. You are re-checking the same source after the previous proof round completed and newly verified proofs may now appear in VERIFIED PROOF LIBRARY CONTEXT.
+This is {round_position}. You are re-checking the same source after the previous proof round completed and newly verified proofs may now appear in VERIFIED PROOF LIBRARY CONTEXT.
 
 Strictly ask and answer this question before extracting candidates:
 Are there any proofs here to solve that directly solve the users prompt, or get us substantially closer to solving the users prompt.
@@ -651,6 +656,24 @@ PRIOR ATTEMPT HISTORY:
 """
 
 
+def build_compact_proof_formalization_prompt(**kwargs) -> str:
+    """Build recovery-only formalization context with a minimal terminal contract."""
+    normal_prompt = build_proof_formalization_prompt(**kwargs)
+    contract_start = normal_prompt.rfind("\nRespond with ONLY valid JSON")
+    if contract_start >= 0:
+        normal_prompt = normal_prompt[:contract_start].rstrip()
+    example_json = """{
+  "lean_code": "import Mathlib\\n\\ntheorem ... := by ..."
+}"""
+    return f"""{normal_prompt}
+
+OUTPUT-LENGTH RECOVERY MODE:
+A prior generation reached the provider output limit. Return the smallest faithful complete Lean 4 program for the same selected theorem. Omit commentary and optional metadata.
+
+{_json_only_footer(example_json)}
+"""
+
+
 def build_proof_tactic_script_prompt(
     user_prompt: str,
     source_type: str,
@@ -763,6 +786,29 @@ Use retrieved proofs only as optional proof-pattern/dependency guidance for the 
 
 PRIOR ATTEMPT HISTORY:
 {attempt_history}
+
+{_json_only_footer(example_json)}
+"""
+
+
+def build_compact_proof_tactic_script_prompt(**kwargs) -> str:
+    """Build recovery-only tactic context with compact string tactics."""
+    normal_prompt = build_proof_tactic_script_prompt(**kwargs)
+    contract_start = normal_prompt.rfind("\nRespond with ONLY valid JSON")
+    if contract_start >= 0:
+        normal_prompt = normal_prompt[:contract_start].rstrip()
+    normal_prompt = normal_prompt.replace(
+        "- Each tactic entry must include the Lean tactic string and one short reasoning note.\n",
+        "- Return each tactic as a Lean tactic string with no explanation.\n",
+    )
+    example_json = """{
+  "theorem_header": "theorem optional_lean_identifier : target_statement",
+  "tactics": ["exact proof_term"]
+}"""
+    return f"""{normal_prompt}
+
+OUTPUT-LENGTH RECOVERY MODE:
+A prior generation reached the provider output limit. Return only the minimal faithful theorem header and ordered tactic strings. Omit commentary and optional metadata.
 
 {_json_only_footer(example_json)}
 """

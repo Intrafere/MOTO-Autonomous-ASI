@@ -1,0 +1,23 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {
+    "reason": "Focused manager and driver tests observe no-candidate continuation, detailed round activity, Stop cleanup, and non-resumable state separately; no bounded real adapter currently observes the complete continuous route lifecycle as one interaction."
+  },
+  "evidence": [],
+  "fields": [
+    "continuous_proof_loop",
+    "runtime_exclusivity",
+    "workflow_filesystem_state"
+  ],
+  "invariants": [
+    "proof_loop.continuous_explicit_ownership"
+  ],
+  "replay": [],
+  "result": "blocked",
+  "scenario_id": "real_continuous_loop_stop_terminal_zero_policy",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
+}

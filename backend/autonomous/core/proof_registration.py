@@ -214,6 +214,7 @@ async def register_verified_lean_proof(
     run_id: str = "",
     artifact_purpose: ProofArtifactPurpose | None = None,
     ownership_predicate: Optional[Callable[[], bool]] = None,
+    novelty_classification: Optional[tuple[str, str]] = None,
 ) -> RegisteredProof:
     """
     Classify and store Lean-verified proof code using the shared novelty tiers.
@@ -222,17 +223,20 @@ async def register_verified_lean_proof(
     Historical theorem/code matches are evidence for the validator, not a
     shortcut that can suppress or pre-classify the current-run occurrence.
     """
-    novelty_tier, novelty_reasoning = await assess_proof_novelty(
-        user_prompt=user_prompt,
-        theorem_statement=theorem_statement,
-        lean_code=lean_code,
-        validator_model=validator_model,
-        validator_context=validator_context,
-        validator_max_tokens=validator_max_tokens,
-        existing_novel_proofs="",
-        task_id=task_id,
-        role_id=role_id,
-    )
+    if novelty_classification is None:
+        novelty_tier, novelty_reasoning = await assess_proof_novelty(
+            user_prompt=user_prompt,
+            theorem_statement=theorem_statement,
+            lean_code=lean_code,
+            validator_model=validator_model,
+            validator_context=validator_context,
+            validator_max_tokens=validator_max_tokens,
+            existing_novel_proofs="",
+            task_id=task_id,
+            role_id=role_id,
+        )
+    else:
+        novelty_tier, novelty_reasoning = novelty_classification
     independent_novelty_tier = novelty_tier
     independent_novelty_reasoning = novelty_reasoning
 

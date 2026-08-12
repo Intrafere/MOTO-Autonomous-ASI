@@ -276,6 +276,9 @@ class ResearchMetadata:
             "current_paper_title": None,
             "paper_phase": None,  # "body", "conclusion", "introduction", "abstract"
             "proof_checkpoint": None,
+            "proof_pruning_state": None,
+            "lifecycle_generation": 0,
+            "terminal_event": None,
             "base_user_research_prompt": "",
             "proof_framing_active": False,
             "proof_framing_context": "",
@@ -308,25 +311,158 @@ class ResearchMetadata:
             },
             "last_updated": datetime.now().isoformat()
         }
+
+    async def _write_workflow_state_locked(self) -> None:
+        """Atomically publish the in-memory workflow state while holding `_lock`."""
+        self._workflow_state_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self._workflow_state_path.with_name(
+            f".{self._workflow_state_path.name}.tmp"
+        )
+        payload = json.dumps(self._workflow_state, indent=2)
+        async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
+            await f.write(payload)
+        await asyncio.to_thread(temp_path.replace, self._workflow_state_path)
     
     async def save_workflow_state(self, state: Dict[str, Any]) -> None:
         """Save workflow state for crash recovery / resume."""
         async with self._lock:
             existing_checkpoint = None
+            existing_pruning_state = None
+            existing_terminal_event = None
+            existing_generation = 0
             if self._workflow_state:
                 existing_checkpoint = self._workflow_state.get("proof_checkpoint")
+                existing_pruning_state = self._workflow_state.get(
+                    "proof_pruning_state"
+                )
+                existing_terminal_event = self._workflow_state.get("terminal_event")
+                existing_generation = int(
+                    self._workflow_state.get("lifecycle_generation") or 0
+                )
             if "proof_checkpoint" not in state:
                 state["proof_checkpoint"] = existing_checkpoint
+            if "proof_pruning_state" not in state:
+                state["proof_pruning_state"] = existing_pruning_state
+            if "terminal_event" not in state:
+                state["terminal_event"] = existing_terminal_event
+            if "lifecycle_generation" not in state:
+                state["lifecycle_generation"] = existing_generation
             self._workflow_state = state
             self._workflow_state["last_updated"] = datetime.now().isoformat()
-            async with aiofiles.open(self._workflow_state_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(self._workflow_state, indent=2))
+            await self._write_workflow_state_locked()
     
     async def get_workflow_state(self) -> Dict[str, Any]:
         """Get current workflow state."""
         if self._workflow_state is None:
             await self._load_workflow_state()
         return self._workflow_state.copy()
+
+    async def begin_lifecycle(self, run_id: str) -> int:
+        """Advance the durable lifecycle generation before model work starts."""
+        async with self._lock:
+            if self._workflow_state is None:
+                await self._load_workflow_state()
+            if self._workflow_state is None:
+                self._workflow_state = self._get_default_workflow_state()
+            generation = int(self._workflow_state.get("lifecycle_generation") or 0) + 1
+            self._workflow_state["run_id"] = run_id
+            self._workflow_state["lifecycle_generation"] = generation
+            self._workflow_state["terminal_event"] = None
+            self._workflow_state["last_updated"] = datetime.now().isoformat()
+            await self._write_workflow_state_locked()
+            return generation
+
+    async def save_terminal_event(
+        self,
+        terminal_event: Dict[str, Any],
+        *,
+        expected_run_id: str,
+        expected_generation: int,
+    ) -> bool:
+        """Persist a terminal event unless lifecycle ownership has moved on."""
+        async with self._lock:
+            if self._workflow_state is None:
+                await self._load_workflow_state()
+            if self._workflow_state is None:
+                self._workflow_state = self._get_default_workflow_state()
+            current_run_id = str(self._workflow_state.get("run_id") or "")
+            current_generation = int(
+                self._workflow_state.get("lifecycle_generation") or 0
+            )
+            if (
+                current_run_id != expected_run_id
+                or current_generation != expected_generation
+            ):
+                logger.warning(
+                    "Ignoring stale terminal event write for run=%s generation=%s "
+                    "(current run=%s generation=%s)",
+                    expected_run_id,
+                    expected_generation,
+                    current_run_id,
+                    current_generation,
+                )
+                return False
+            self._workflow_state["is_running"] = False
+            self._workflow_state["terminal_event"] = dict(terminal_event)
+            self._workflow_state["last_updated"] = datetime.now().isoformat()
+            await self._write_workflow_state_locked()
+            return True
+
+    async def get_terminal_event(self) -> Optional[Dict[str, Any]]:
+        """Return the latest durable Autonomous terminal event."""
+        if self._workflow_state is None:
+            await self._load_workflow_state()
+        terminal_event = (self._workflow_state or {}).get("terminal_event")
+        return dict(terminal_event) if isinstance(terminal_event, dict) else None
+
+    async def save_proof_pruning_state(
+        self,
+        state: Dict[str, Any],
+        *,
+        expected_run_id: str,
+        expected_generation: int,
+    ) -> bool:
+        """Persist pruning state only while Autonomous lifecycle ownership matches."""
+        async with self._lock:
+            if self._workflow_state is None:
+                await self._load_workflow_state()
+            if self._workflow_state is None:
+                self._workflow_state = self._get_default_workflow_state()
+            if (
+                str(self._workflow_state.get("run_id") or "") != expected_run_id
+                or int(self._workflow_state.get("lifecycle_generation") or 0)
+                != int(expected_generation)
+            ):
+                return False
+            self._workflow_state["proof_pruning_state"] = dict(state)
+            self._workflow_state["last_updated"] = datetime.now().isoformat()
+            await self._write_workflow_state_locked()
+            return True
+
+    async def get_proof_pruning_state(
+        self,
+        *,
+        proof_run_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Return compatible session-local pruning orchestration state."""
+        if self._workflow_state is None:
+            await self._load_workflow_state()
+        state = (self._workflow_state or {}).get("proof_pruning_state")
+        if not isinstance(state, dict):
+            return None
+        if proof_run_id and state.get("proof_run_id") != proof_run_id:
+            return None
+        return dict(state)
+
+    async def clear_proof_pruning_state(self) -> None:
+        async with self._lock:
+            if self._workflow_state is None:
+                await self._load_workflow_state()
+            if self._workflow_state is None:
+                return
+            self._workflow_state["proof_pruning_state"] = None
+            self._workflow_state["last_updated"] = datetime.now().isoformat()
+            await self._write_workflow_state_locked()
 
     async def save_proof_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         """Persist the active proof-verification cursor inside workflow state."""
@@ -341,16 +477,40 @@ class ResearchMetadata:
                 isinstance(existing, dict)
                 and existing.get("source_type") == checkpoint.get("source_type")
                 and existing.get("source_id") == checkpoint.get("source_id")
+                and existing.get("trigger") == checkpoint.get("trigger")
             )
+            if same_source:
+                existing_revision = int(existing.get("checkpoint_revision") or 0)
+                existing_is_fatal = bool(existing.get("fatal_stop_reason"))
+                same_recovery_configuration = (
+                    existing.get("proof_role_fingerprint")
+                    == checkpoint.get("proof_role_fingerprint")
+                    and existing.get("recovery_policy_version")
+                    == checkpoint.get("recovery_policy_version")
+                )
+                if (
+                    existing_is_fatal
+                    and not checkpoint.get("fatal_stop_reason")
+                    and same_recovery_configuration
+                ):
+                    logger.warning("Ignoring proof checkpoint write that would overwrite fatal state")
+                    return
+                # Revisions are storage-owned. A resumed stage starts its local
+                # counter at one, so comparing that local value with a durable
+                # prior-run revision would reject every legitimate resume write.
+                checkpoint["checkpoint_revision"] = existing_revision + 1
+            else:
+                checkpoint["checkpoint_revision"] = max(
+                    1,
+                    int(checkpoint.get("checkpoint_revision") or 0),
+                )
             completed_triggers = set(existing.get("completed_triggers") or []) if same_source else set()
             completed_triggers.update(checkpoint.get("completed_triggers") or [])
             checkpoint["completed_triggers"] = sorted(completed_triggers)
             checkpoint["updated_at"] = datetime.now().isoformat()
             self._workflow_state["proof_checkpoint"] = checkpoint
             self._workflow_state["last_updated"] = datetime.now().isoformat()
-            self._workflow_state_path.parent.mkdir(parents=True, exist_ok=True)
-            async with aiofiles.open(self._workflow_state_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(self._workflow_state, indent=2))
+            await self._write_workflow_state_locked()
 
     async def get_proof_checkpoint(
         self,
@@ -432,8 +592,7 @@ class ResearchMetadata:
                 return
             self._workflow_state["proof_checkpoint"] = None
             self._workflow_state["last_updated"] = datetime.now().isoformat()
-            async with aiofiles.open(self._workflow_state_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(self._workflow_state, indent=2))
+            await self._write_workflow_state_locked()
     
     async def clear_workflow_state(self) -> None:
         """Clear workflow state (called on clean stop)."""

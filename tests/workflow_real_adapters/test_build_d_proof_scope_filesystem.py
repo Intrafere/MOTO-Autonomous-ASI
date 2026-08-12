@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import Response
 
 from backend.api.routes import autonomous as autonomous_route
 from backend.api.routes import leanoj as leanoj_route
@@ -79,7 +80,7 @@ async def test_autonomous_current_and_library_routes_do_not_read_manual_scope(mo
     monkeypatch.setattr(proofs_route, "proof_database", autonomous)
     monkeypatch.setattr(proofs_route, "manual_proof_database", manual)
 
-    current = await proofs_route.list_proofs(scope="autonomous")
+    current = await proofs_route.list_proofs(Response(), scope="autonomous")
     library = await proofs_route.get_proof_library(scope="autonomous")
     current_statements = {item["theorem_statement"] for item in current["proofs"]}
     library_statements = {item["theorem_statement"] for item in library["proofs"]}
@@ -108,13 +109,13 @@ async def test_manual_clear_archive_moves_active_proofs_to_history_only(monkeypa
     monkeypatch.setattr(proofs_route, "manual_proof_database", manual)
     monkeypatch.setattr(proofs_route, "proof_database", autonomous)
 
-    before = await proofs_route.list_proofs(scope="manual")
+    before = await proofs_route.list_proofs(Response(), scope="manual")
     metadata = await manual.archive_current_run(
         history_root,
         user_prompt="Archived manual prompt.",
         reason="build_d_clear",
     )
-    after = await proofs_route.list_proofs(scope="manual")
+    after = await proofs_route.list_proofs(Response(), scope="manual")
     history = await proofs_route.get_proof_library(scope="manual")
 
     assert metadata is not None

@@ -21,7 +21,12 @@ from backend.shared.proof_search.assistant_models import (
     AssistantTargetSnapshot,
 )
 from backend.shared.proof_search.assistant_ranker import ranked_candidates_to_cache_rows, score_assistant_proof_candidates, select_assistant_proof_supports
-from backend.shared.proof_search.models import ProofSearchRequest, UnifiedProofSearchRecord, default_proof_search_corpora
+from backend.shared.proof_search.models import (
+    ProofSearchAccessContext,
+    ProofSearchRequest,
+    UnifiedProofSearchRecord,
+    default_proof_search_corpora,
+)
 from backend.shared.proof_search.search_service import ProofSearchService, proof_search_service
 from backend.shared.response_extraction import extract_response_text
 
@@ -76,25 +81,66 @@ class AssistantProofSearchCoordinator:
         self._task_sequence = 0
         self._latest_pack_target_hash = ""
         self._latest_pack_consumption_count = _ASSISTANT_PACK_REFRESH_RECEIVER_READS
+        self._target_requesting_runs: dict[str, str] = {}
 
     @property
     def enabled(self) -> bool:
         return bool(system_config.agent_conversation_memory_enabled)
 
+    def invalidate_live_context_occurrence(self, proof_id: str) -> None:
+        """Immediately remove packs containing a mutated canonical occurrence."""
+        try:
+            self._cache.invalidate_proof_occurrence(proof_id)
+        except Exception as exc:
+            logger.warning(
+                "Assistant derived-cache invalidation failed for proof %s: %s",
+                str(proof_id)[:120],
+                str(exc)[:240],
+            )
+        affected = []
+        for target_hash, pack in self._packs.items():
+            if any(
+                support.proof_id == proof_id
+                or any(
+                    occurrence.get("proof_id") == proof_id
+                    for occurrence in support.occurrence_provenance
+                )
+                for support in pack.results
+            ):
+                affected.append(target_hash)
+        for target_hash in affected:
+            self._packs.pop(target_hash, None)
+            self._target_requesting_runs.pop(target_hash, None)
+            if self._latest_pack_target_hash == target_hash:
+                self._latest_pack_target_hash = ""
+                self._latest_pack_consumption_count = (
+                    _ASSISTANT_PACK_REFRESH_RECEIVER_READS
+                )
+
     def get_latest_pack(self, target_hash: str | None = None) -> AssistantProofPack | None:
         if target_hash:
-            return _drop_current_run_supports_from_pack(self._packs.get(target_hash))
+            return _drop_current_run_supports_from_pack(
+                self._packs.get(target_hash),
+                requesting_run_id=self._target_requesting_runs.get(target_hash, ""),
+            )
         if not self._packs:
             return None
         return _drop_current_run_supports_from_pack(next(reversed(self._packs.values())))
 
-    def get_latest_reusable_pack(self) -> AssistantProofPack | None:
+    def get_latest_reusable_pack(
+        self,
+        *,
+        requesting_run_id: str = "",
+    ) -> AssistantProofPack | None:
         """Return the latest in-memory pack without scheduling an Assistant refresh."""
         if self._latest_pack_target_hash:
             latest = self.get_latest_pack(self._latest_pack_target_hash)
             if latest is not None:
                 return latest
-        return self.get_latest_pack()
+        return _drop_current_run_supports_from_pack(
+            self.get_latest_pack(),
+            requesting_run_id=requesting_run_id,
+        )
 
     def get_status(self) -> dict[str, Any]:
         latest_pack = self.get_latest_pack()
@@ -179,6 +225,7 @@ class AssistantProofSearchCoordinator:
     def submit_target(self, snapshot: AssistantTargetSnapshot) -> str:
         target_hash = snapshot.stable_hash()
         snapshot = snapshot.model_copy(update={"target_hash": target_hash})
+        self._target_requesting_runs[target_hash] = snapshot.run_id
         if not self.enabled:
             self._packs.pop(target_hash, None)
             logger.info(
@@ -525,16 +572,29 @@ class AssistantProofSearchCoordinator:
                         exclude_corpus_scopes=sorted(_CURRENT_RUN_CORPUS_SCOPES),
                         exclude_session_ids=excluded_session_ids,
                         exclude_run_ids=excluded_run_ids,
+                        access=ProofSearchAccessContext(
+                            use_case="model_context",
+                            requesting_run_id=snapshot.run_id,
+                        ),
                     )
                 except TypeError as exc:
-                    if "exclude_run_ids" not in str(exc):
+                    if "access" in str(exc):
+                        found = await self._service.search_candidate_pool(
+                            request,
+                            pool_limit=_ASSISTANT_CANDIDATE_POOL_TARGET - len(records),
+                            exclude_corpus_scopes=sorted(_CURRENT_RUN_CORPUS_SCOPES),
+                            exclude_session_ids=excluded_session_ids,
+                            exclude_run_ids=excluded_run_ids,
+                        )
+                    elif "exclude_run_ids" not in str(exc):
                         raise
-                    found = await self._service.search_candidate_pool(
-                        request,
-                        pool_limit=_ASSISTANT_CANDIDATE_POOL_TARGET - len(records),
-                        exclude_corpus_scopes=sorted(_CURRENT_RUN_CORPUS_SCOPES),
-                        exclude_session_ids=excluded_session_ids,
-                    )
+                    else:
+                        found = await self._service.search_candidate_pool(
+                            request,
+                            pool_limit=_ASSISTANT_CANDIDATE_POOL_TARGET - len(records),
+                            exclude_corpus_scopes=sorted(_CURRENT_RUN_CORPUS_SCOPES),
+                            exclude_session_ids=excluded_session_ids,
+                        )
                 found = _filter_current_run_records(found, excluded_run_ids=excluded_run_ids)
             except Exception as exc:
                 logger.debug("Assistant %s lane query failed: %s", lane_name, exc)
@@ -554,7 +614,7 @@ class AssistantProofSearchCoordinator:
             await self._publish_pack(snapshot, [], warnings=warnings, selection_mode="unavailable", assistant_role_id=assistant_role_id, assistant_model_id="", candidate_count=candidate_count, shortlist_count=len(shortlist), selection_reasoning="Configured Assistant role was unavailable.", retrieval_observability=retrieval_observability)
             return
 
-        if _assistant_oauth_provider_is_cooling_down(assistant_role_id):
+        if _assistant_provider_is_cooling_down(assistant_role_id):
             latest_pack = _filter_pack_for_snapshot(
                 next(reversed(self._packs.values()), None),
                 snapshot,
@@ -566,14 +626,14 @@ class AssistantProofSearchCoordinator:
                     supports,
                     warnings=[
                         *warnings,
-                        "Assistant OAuth provider is in usage-limit cooldown; reusing latest cached proof pack.",
+                        "Assistant provider is in usage-limit cooldown; reusing latest cached proof pack.",
                     ],
                     selection_mode="cached_oauth_cooldown",
                     assistant_role_id=assistant_role_id,
                     assistant_model_id=assistant_model_id,
                     candidate_count=candidate_count,
                     shortlist_count=len(shortlist),
-                    selection_reasoning="Reused latest cached Assistant pack while OAuth provider cooldown is active.",
+                    selection_reasoning="Reused latest cached Assistant pack while provider cooldown is active.",
                     retrieval_observability=retrieval_observability,
                 )
                 return
@@ -584,14 +644,14 @@ class AssistantProofSearchCoordinator:
                     selected_supports,
                     warnings=[
                         *warnings,
-                        "Assistant OAuth provider is in usage-limit cooldown; using deterministic shortlist without Assistant LLM selection.",
+                        "Assistant provider is in usage-limit cooldown; using deterministic shortlist without Assistant LLM selection.",
                     ],
                     selection_mode="deterministic_oauth_cooldown",
                     assistant_role_id=assistant_role_id,
                     assistant_model_id=assistant_model_id,
                     candidate_count=candidate_count,
                     shortlist_count=len(shortlist),
-                    selection_reasoning="Used deterministic proof-support shortlist while OAuth provider cooldown is active.",
+                    selection_reasoning="Used deterministic proof-support shortlist while provider cooldown is active.",
                     retrieval_observability=retrieval_observability,
                 )
                 return
@@ -847,6 +907,7 @@ def _artifact_key(record: UnifiedProofSearchRecord) -> str:
 def _occurrence(record: UnifiedProofSearchRecord) -> dict[str, str]:
     occurrence = {
         "search_id": record.search_id,
+        "proof_id": record.proof_id,
         "corpus": record.corpus,
         "corpus_scope": record.corpus_scope or record.release_id,
         "session_id": record.session_id,
@@ -854,6 +915,10 @@ def _occurrence(record: UnifiedProofSearchRecord) -> dict[str, str]:
         "source_type": record.source_type,
         "source_id": record.source_id,
         "source_title": record.source_title,
+        "live_context_status": record.live_context_status,
+        "live_context_owner_run_id": record.live_context_owner_run_id,
+        "live_context_pruned_at": record.live_context_pruned_at,
+        "live_context_pruned_by": record.live_context_pruned_by,
     }
     if _is_standalone_exact_duplicate_emphasis_record(record):
         occurrence[_ASSISTANT_EXCLUDE_EXACT_DUPLICATE_EMPHASIS] = "true"
@@ -983,7 +1048,7 @@ def _assistant_model_id(role_id: str) -> str:
     return config.openrouter_model_id or config.model_id
 
 
-def _assistant_oauth_provider_key(role_id: str) -> str:
+def _assistant_provider_key(role_id: str) -> str:
     try:
         from backend.shared.api_client_manager import api_client_manager
         config = api_client_manager.get_role_config(role_id)
@@ -992,13 +1057,13 @@ def _assistant_oauth_provider_key(role_id: str) -> str:
     if config is None:
         return ""
     provider = str(config.provider or "").strip()
-    if provider in {"openai_codex_oauth", "xai_grok_oauth"}:
+    if provider in {"openai_codex_oauth", "xai_grok_oauth", "sakana_fugu"}:
         return provider
     return ""
 
 
-def _assistant_oauth_provider_is_cooling_down(role_id: str) -> bool:
-    provider = _assistant_oauth_provider_key(role_id)
+def _assistant_provider_is_cooling_down(role_id: str) -> bool:
+    provider = _assistant_provider_key(role_id)
     if not provider:
         return False
     try:
@@ -1006,6 +1071,11 @@ def _assistant_oauth_provider_is_cooling_down(role_id: str) -> bool:
         return api_client_manager.is_provider_cooling_down(provider)
     except Exception:
         return False
+
+
+# Compatibility aliases retained for existing imports.
+_assistant_oauth_provider_key = _assistant_provider_key
+_assistant_oauth_provider_is_cooling_down = _assistant_provider_is_cooling_down
 
 
 async def _generate_assistant_selection_payload(
@@ -1249,11 +1319,27 @@ def _sanitize_duplicate_emphasis_support(
     *,
     excluded_run_ids: set[str] | None = None,
     excluded_session_ids: set[str] | None = None,
+    requesting_run_id: str = "",
 ) -> AssistantProofSupport | None:
     """Remove ineligible occurrences while retaining any eligible fused occurrence."""
     excluded_runs = excluded_run_ids or set()
     excluded_sessions = excluded_session_ids or set()
     occurrences = list(support.occurrence_provenance)
+    def live_context_eligible(occurrence: dict[str, str]) -> bool:
+        raw_status = occurrence.get("live_context_status")
+        if raw_status is None or str(raw_status).strip() == "":
+            return True
+        status = str(raw_status).strip().lower()
+        if status == "active":
+            return True
+        if status != "pruned":
+            return False
+        owner_run_id = str(
+            occurrence.get("live_context_owner_run_id") or ""
+        ).strip()
+        requester = str(requesting_run_id or "").strip()
+        return bool(owner_run_id and requester and owner_run_id != requester)
+
     eligible = [
         occurrence
         for occurrence in occurrences
@@ -1270,6 +1356,7 @@ def _sanitize_duplicate_emphasis_support(
             not occurrence.get("session_id")
             or occurrence.get("session_id") not in excluded_sessions
         )
+        and live_context_eligible(occurrence)
     ]
     if occurrences and not eligible:
         return None
@@ -1305,6 +1392,7 @@ def _drop_current_run_supports_from_pack(
     *,
     excluded_run_ids: list[str] | None = None,
     excluded_session_ids: list[str] | None = None,
+    requesting_run_id: str = "",
 ) -> AssistantProofPack | None:
     if pack is None or not pack.results:
         return pack
@@ -1319,6 +1407,7 @@ def _drop_current_run_supports_from_pack(
             support,
             excluded_run_ids=excluded_runs,
             excluded_session_ids=excluded_sessions,
+            requesting_run_id=requesting_run_id,
         )
         if sanitized is None:
             changed = True
@@ -1348,6 +1437,7 @@ def _filter_pack_for_snapshot(
         pack,
         excluded_run_ids=excluded_ids,
         excluded_session_ids=excluded_ids,
+        requesting_run_id=snapshot.run_id,
     )
 
 

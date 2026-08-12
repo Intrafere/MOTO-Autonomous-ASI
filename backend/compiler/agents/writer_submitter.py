@@ -189,6 +189,15 @@ class WritingSubmitter:
     - construction: Write next portion of paper
     - review: Review paper for errors/improvements (no aggregator DB)
     """
+
+    @property
+    def user_prompt(self) -> str:
+        if self._proof_database_store is None:
+            return self._base_user_prompt
+        return self._proof_database_store.inject_into_prompt(
+            self._base_user_prompt,
+            requesting_run_id=self._proof_context_requesting_run_id,
+        )
     
     def __init__(
         self,
@@ -196,13 +205,12 @@ class WritingSubmitter:
         user_prompt: str,
         websocket_broadcaster: Optional[Callable] = None,
         proof_database_store=None,
+        proof_context_requesting_run_id: str = "",
     ):
         self.model_name = model_name
-        self.user_prompt = (
-            proof_database_store.inject_into_prompt(user_prompt)
-            if proof_database_store is not None
-            else user_prompt
-        )
+        self._base_user_prompt = user_prompt
+        self._proof_database_store = proof_database_store
+        self._proof_context_requesting_run_id = proof_context_requesting_run_id
         self.websocket_broadcaster = websocket_broadcaster
         self._initialized = False
         

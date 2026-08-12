@@ -5,6 +5,7 @@ from unittest import IsolatedAsyncioTestCase, mock
 from backend.shared.api_client_manager import (
     APIClientManager,
     OAuthProviderCooldownError,
+    ProviderCooldownError,
     RetryableProviderError,
 )
 from backend.shared.config import system_config
@@ -12,8 +13,10 @@ from backend.shared.model_error_utils import is_retryable_model_output_error, is
 from backend.shared.models import ModelConfig
 from backend.shared.openai_codex_client import OAuthUsageLimitError, OpenAICodexClient, OpenAICodexRequestError
 from backend.shared.provider_notification_store import record_provider_notification
+from backend.shared.sakana_fugu_client import SakanaFuguUsageLimitError
 from backend.shared.proof_search.assistant_coordinator import (
     _assistant_oauth_provider_is_cooling_down,
+    _assistant_provider_is_cooling_down,
 )
 
 
@@ -119,6 +122,149 @@ class APIClientManagerOAuthCooldownTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.manager._role_fallback_state["agg_sub1"], "openai_codex_oauth")
         self.assertNotIn("agg_sub1", self.manager._oauth_cooldown_fallback_roles)
 
+    async def test_sakana_usage_limit_uses_timed_fallback_and_restores(self) -> None:
+        role_id = "agg_sub1"
+        self.manager.configure_role(
+            role_id,
+            ModelConfig(
+                provider="sakana_fugu",
+                model_id="fugu",
+                lm_studio_fallback_id="local-fallback",
+                context_window=128000,
+                max_output_tokens=8192,
+            ),
+        )
+        usage_error = SakanaFuguUsageLimitError(
+            "usage limit reached",
+            resets_in_seconds=120,
+            plan_type="pro",
+        )
+
+        with (
+            mock.patch(
+                "backend.shared.api_client_manager.sakana_fugu_client.generate_completion",
+                new=mock.AsyncMock(side_effect=usage_error),
+            ),
+            mock.patch(
+                "backend.shared.api_client_manager.lm_studio_client.generate_completion",
+                new=mock.AsyncMock(return_value={"choices": [{"message": {"content": "fallback"}}]}),
+            ),
+        ):
+            await self.manager._generate_completion_once(
+                task_id="agg_sub1_001",
+                role_id=role_id,
+                model="fugu",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        self.assertEqual(self.manager._role_fallback_state[role_id], "lm_studio")
+        self.assertIn(role_id, self.manager._oauth_cooldown_fallback_roles)
+        self.assertTrue(self.manager.is_provider_cooling_down("sakana_fugu"))
+
+        self.manager._oauth_provider_cooldowns["sakana_fugu"]["cooldown_until"] = int(time.time()) - 1
+        with (
+            mock.patch(
+                "backend.shared.api_client_manager.sakana_fugu_client.generate_completion",
+                new=mock.AsyncMock(return_value={"choices": [{"message": {"content": "restored"}}]}),
+            ),
+            mock.patch.object(
+                self.manager,
+                "_broadcast",
+                new=mock.AsyncMock(),
+            ) as broadcast,
+        ):
+            await self.manager._generate_completion_once(
+                task_id="agg_sub1_002",
+                role_id=role_id,
+                model="fugu",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        self.assertEqual(self.manager._role_fallback_state[role_id], "sakana_fugu")
+        self.assertNotIn(role_id, self.manager._oauth_cooldown_fallback_roles)
+        self.assertTrue(any(
+            call.args and call.args[0] == "provider_usage_limit_resumed"
+            for call in broadcast.await_args_list
+        ))
+
+    async def test_sakana_preflight_without_fallback_raises_stoppable_cooldown(self) -> None:
+        role_id = "agg_sub1"
+        self.manager.configure_role(
+            role_id,
+            ModelConfig(
+                provider="sakana_fugu",
+                model_id="fugu",
+                context_window=128000,
+                max_output_tokens=8192,
+            ),
+        )
+        self.manager._oauth_provider_cooldowns["sakana_fugu"] = {
+            "provider": "sakana_fugu",
+            "provider_label": "Sakana Fugu",
+            "cooldown_until": int(time.time()) + 120,
+            "resets_at": int(time.time()) + 120,
+            "resets_in_seconds": 120,
+        }
+
+        with self.assertRaises(ProviderCooldownError) as raised:
+            await self.manager._generate_completion_once(
+                task_id="agg_sub1_001",
+                role_id=role_id,
+                model="fugu",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+        self.assertEqual(raised.exception.provider, "sakana_fugu")
+        self.assertIsInstance(raised.exception, OAuthProviderCooldownError)
+
+    async def test_cooldown_wait_does_not_claim_resume_before_provider_success(self) -> None:
+        reset_at = int(time.time()) - 1
+        self.manager._oauth_provider_cooldowns["sakana_fugu"] = {
+            "provider": "sakana_fugu",
+            "provider_label": "Sakana Fugu",
+            "cooldown_until": reset_at,
+            "resets_at": reset_at,
+            "workflow_mode": "aggregator",
+        }
+        error = ProviderCooldownError(
+            provider="sakana_fugu",
+            provider_label="Sakana Fugu",
+            role_id="agg_sub1",
+            model="fugu",
+            resets_at=reset_at,
+            resets_in_seconds=1,
+        )
+        with (
+            mock.patch.object(
+                self.manager,
+                "is_provider_cooling_down",
+                side_effect=[True, False],
+            ),
+            mock.patch.object(
+                self.manager,
+                "get_provider_cooldown",
+                return_value={
+                    "provider": "sakana_fugu",
+                    "provider_label": "Sakana Fugu",
+                    "cooldown_until": reset_at,
+                    "resets_at": reset_at,
+                    "resets_in_seconds": 1,
+                    "workflow_mode": "aggregator",
+                },
+            ),
+            mock.patch.object(
+                self.manager,
+                "_sleep_with_optional_stop",
+                new=mock.AsyncMock(),
+            ),
+            mock.patch.object(self.manager, "_broadcast", new=mock.AsyncMock()) as broadcast,
+        ):
+            await self.manager.wait_for_provider_cooldown(error, role_id="agg_sub1")
+        self.assertFalse(any(
+            call.args and call.args[0] == "provider_usage_limit_resumed"
+            for call in broadcast.await_args_list
+        ))
+        self.assertIn(("sakana_fugu", "agg_sub1", "fugu"), self.manager._provider_resume_pending)
+
     async def test_codex_output_truncation_bypasses_fallback_and_unrecoverable_notification(self) -> None:
         role_id = "autonomous_proof_formalization_brainstorm"
         self.manager.configure_role(
@@ -209,6 +355,36 @@ class APIClientManagerOAuthCooldownTests(IsolatedAsyncioTestCase):
             mock.call(60, None),
             mock.call(120, None),
         ])
+
+    async def test_retryable_provider_error_reports_wait_and_resume_activity(self) -> None:
+        error = RetryableProviderError(
+            provider="openai_codex_oauth",
+            provider_label="OpenAI Codex",
+            role_id="autonomous_proof_formalization_brainstorm",
+            model="gpt-5.5",
+            reason="transient_provider_error",
+            message="OpenAI Codex transient transport failure",
+        )
+        activity_callback = mock.AsyncMock()
+
+        with mock.patch.object(
+            self.manager,
+            "_sleep_with_optional_stop",
+            new=mock.AsyncMock(),
+        ):
+            await self.manager.wait_for_retryable_provider_error(
+                error,
+                activity_callback=activity_callback,
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in activity_callback.await_args_list],
+            ["waiting", "resuming"],
+        )
+        waiting_payload = activity_callback.await_args_list[0].args[1]
+        self.assertEqual(waiting_payload["retry_attempt"], 1)
+        self.assertEqual(waiting_payload["retry_after_seconds"], 60)
+        self.assertEqual(waiting_payload["provider_label"], "OpenAI Codex")
 
     async def test_retryable_provider_backoff_clears_after_success_with_display_role_override(self) -> None:
         error = RetryableProviderError(
@@ -332,3 +508,26 @@ class AssistantOAuthCooldownReuseTests(IsolatedAsyncioTestCase):
             self.assertTrue(_assistant_oauth_provider_is_cooling_down("aggregator_assistant"))
         finally:
             api_client_manager._oauth_provider_cooldowns.pop("openai_codex_oauth", None)
+
+    def test_assistant_sakana_cooling_down_reflects_manager_state(self) -> None:
+        from backend.shared.api_client_manager import api_client_manager
+
+        api_client_manager.configure_role(
+            "aggregator_assistant",
+            ModelConfig(
+                provider="sakana_fugu",
+                model_id="fugu",
+                context_window=128000,
+                max_output_tokens=8192,
+            ),
+        )
+        api_client_manager._oauth_provider_cooldowns["sakana_fugu"] = {
+            "provider": "sakana_fugu",
+            "cooldown_until": int(time.time()) + 120,
+            "resets_at": int(time.time()) + 120,
+        }
+        try:
+            self.assertTrue(_assistant_provider_is_cooling_down("aggregator_assistant"))
+            self.assertTrue(_assistant_oauth_provider_is_cooling_down("aggregator_assistant"))
+        finally:
+            api_client_manager._oauth_provider_cooldowns.pop("sakana_fugu", None)

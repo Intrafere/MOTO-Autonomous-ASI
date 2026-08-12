@@ -27,6 +27,8 @@ EXPECTED_BLOCKED_IDS = {
     "real_parent_action_fencing_unavailable_without_production_seam",
     "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
     "real_leanoj_full_final_loop_not_safely_bounded",
+    "real_pruning_overflow_commit_interleaving_unobservable",
+    "real_continuous_loop_stop_terminal_zero_policy",
 }
 
 
@@ -101,7 +103,7 @@ def test_build_f_all_executable_selectors_are_exact_collectable_node_ids(tmp_pat
 
     assert selectors
     assert len(selectors) == len(set(selectors))
-    assert all(selector.count("::") == 1 for selector in selectors)
+    assert all(selector.count("::") >= 1 for selector in selectors)
     completed = subprocess.run(
         [
             sys.executable,

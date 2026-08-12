@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
 from backend.shared.openai_codex_client import OpenAICodexAuthError, openai_codex_client
 from backend.shared.provider_notification_store import list_provider_notifications
@@ -461,7 +462,12 @@ async def exchange_openai_codex_oauth(request: CodexOAuthExchangeRequest) -> Dic
         await _stop_codex_callback_server_if_idle()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _stop_codex_callback_server_if_idle()
-    return {"success": True, "provider": "openai_codex_oauth", "status": status}
+    await api_client_manager.reset_provider_fallbacks("openai_codex_oauth")
+    return {
+        "success": True,
+        "provider": "openai_codex_oauth",
+        "status": status,
+    }
 
 
 @router.get("/openai-codex/status")
@@ -552,7 +558,12 @@ async def exchange_xai_grok_oauth(request: XAIGrokOAuthExchangeRequest) -> Dict[
         await _stop_xai_grok_callback_server_if_idle()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _stop_xai_grok_callback_server_if_idle()
-    return {"success": True, "provider": "xai_grok_oauth", "status": status}
+    await api_client_manager.reset_provider_fallbacks("xai_grok_oauth")
+    return {
+        "success": True,
+        "provider": "xai_grok_oauth",
+        "status": status,
+    }
 
 
 @router.get("/xai-grok/status")
@@ -600,6 +611,7 @@ async def set_sakana_fugu_api_key(request: SakanaFuguApiKeyRequest) -> Dict[str,
         sakana_fugu_client.set_api_key(key)
     except (ValueError, SakanaFuguAuthError, SakanaFuguError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await api_client_manager.reset_provider_fallbacks("sakana_fugu")
     return {
         "success": True,
         "provider": "sakana_fugu",

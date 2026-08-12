@@ -1,0 +1,46 @@
+{
+  "actions": [
+    "exercise_proof_pruning_and_continuous_contracts"
+  ],
+  "adapter": "model",
+  "artifact_type": "scenario",
+  "expected_result": "passed",
+  "fields": [
+    "proof_pruning",
+    "continuous_proof_loop",
+    "proof_scope_isolation",
+    "workflow_filesystem_state",
+    "assistant_memory",
+    "prompt_context",
+    "provider_pause_resume",
+    "proof_runtime_gating",
+    "websocket_api_contracts",
+    "runtime_exclusivity"
+  ],
+  "invariants": [
+    "proof_pruning.artifacts_and_future_memory_preserved",
+    "proof_pruning.owning_run_context_excludes_pruned",
+    "proof_pruning.validator_gates_automatic_mutation",
+    "proof_pruning.no_prune_is_valid",
+    "proof_pruning.review_non_blocking",
+    "proof_pruning.commit_lifecycle_fenced",
+    "proof_pruning.context_overflow_truthful",
+    "proof_loop.continuous_explicit_ownership",
+    "proof_loop.automatic_round_policy_preserved",
+    "proof_pruning.occurrence_scope_isolated"
+  ],
+  "must_exercise": [
+    "pruned_artifact_preserved",
+    "owning_context_excluded",
+    "validator_gate",
+    "no_prune",
+    "non_blocking_pruning",
+    "stale_commit_fenced",
+    "overflow_truthful",
+    "continuous_ownership",
+    "automatic_round_policy",
+    "occurrence_scope"
+  ],
+  "scenario_id": "model_proof_pruning_continuous_contracts",
+  "schema_version": 1
+}

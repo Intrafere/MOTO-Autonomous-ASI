@@ -1,4 +1,4 @@
-"""Best-effort desktop sleep inhibition for active top-level workflows."""
+"""Best-effort Windows Power Requests for active MOTO work."""
 from __future__ import annotations
 
 import ctypes
@@ -6,48 +6,199 @@ import logging
 import sys
 import threading
 import time
-from typing import Callable, Hashable, Optional
+from ctypes import wintypes
+from typing import Hashable, Optional, Protocol
 
 from backend.shared.config import system_config
 
 logger = logging.getLogger(__name__)
 
-ES_SYSTEM_REQUIRED = 0x00000001
-ES_CONTINUOUS = 0x80000000
+POWER_REQUEST_CONTEXT_VERSION = 0
+POWER_REQUEST_CONTEXT_SIMPLE_STRING = 0x00000001
+POWER_REQUEST_SYSTEM_REQUIRED = 1
+POWER_REQUEST_EXECUTION_REQUIRED = 3
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+POWER_REQUEST_REASON = "MOTO has active autonomous or proof work"
+
+
+class _ReasonContextDetailed(ctypes.Structure):
+    _fields_ = [
+        ("LocalizedReasonModule", wintypes.HMODULE),
+        ("LocalizedReasonId", wintypes.ULONG),
+        ("ReasonStringCount", wintypes.ULONG),
+        ("ReasonStrings", ctypes.POINTER(wintypes.LPWSTR)),
+    ]
+
+
+class _ReasonContextUnion(ctypes.Union):
+    _fields_ = [
+        ("Detailed", _ReasonContextDetailed),
+        ("SimpleReasonString", wintypes.LPWSTR),
+    ]
+
+
+class REASON_CONTEXT(ctypes.Structure):
+    _anonymous_ = ("Reason",)
+    _fields_ = [
+        ("Version", wintypes.ULONG),
+        ("Flags", wintypes.DWORD),
+        ("Reason", _ReasonContextUnion),
+    ]
+
+
+class PowerRequestApi(Protocol):
+    def create(self, reason: str) -> Optional[int]: ...
+
+    def set(self, handle: int, request_type: int) -> bool: ...
+
+    def clear(self, handle: int, request_type: int) -> bool: ...
+
+    def close(self, handle: int) -> bool: ...
+
+    def last_error(self) -> int: ...
+
+
+class WindowsPowerRequestApi:
+    """Typed ctypes adapter for process-scoped Windows Power Requests."""
+
+    def __init__(self) -> None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.PowerCreateRequest.argtypes = [ctypes.POINTER(REASON_CONTEXT)]
+        kernel32.PowerCreateRequest.restype = wintypes.HANDLE
+        kernel32.PowerSetRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+        kernel32.PowerSetRequest.restype = wintypes.BOOL
+        kernel32.PowerClearRequest.argtypes = [wintypes.HANDLE, ctypes.c_int]
+        kernel32.PowerClearRequest.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        self._kernel32 = kernel32
+        self._last_error = 0
+
+    def _capture_result(self, succeeded: bool) -> bool:
+        self._last_error = 0 if succeeded else int(ctypes.get_last_error())
+        return succeeded
+
+    def create(self, reason: str) -> Optional[int]:
+        reason_text = ctypes.c_wchar_p(reason)
+        context = REASON_CONTEXT(
+            Version=POWER_REQUEST_CONTEXT_VERSION,
+            Flags=POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+        )
+        context.SimpleReasonString = reason_text
+        raw_handle = self._kernel32.PowerCreateRequest(ctypes.byref(context))
+        handle = ctypes.cast(raw_handle, ctypes.c_void_p).value
+        if handle is None or handle == INVALID_HANDLE_VALUE:
+            self._last_error = int(ctypes.get_last_error())
+            return None
+        self._last_error = 0
+        return handle
+
+    def set(self, handle: int, request_type: int) -> bool:
+        return self._capture_result(
+            bool(self._kernel32.PowerSetRequest(wintypes.HANDLE(handle), request_type))
+        )
+
+    def clear(self, handle: int, request_type: int) -> bool:
+        return self._capture_result(
+            bool(self._kernel32.PowerClearRequest(wintypes.HANDLE(handle), request_type))
+        )
+
+    def close(self, handle: int) -> bool:
+        return self._capture_result(bool(self._kernel32.CloseHandle(wintypes.HANDLE(handle))))
+
+    def last_error(self) -> int:
+        return self._last_error
 
 
 class SleepInhibitor:
     """Keep Windows awake while logical workflow owners are active.
 
-    The public methods only update in-memory desired state. One persistent
-    worker owns all Windows calls, preserving SetThreadExecutionState's
-    thread-affinity without blocking the FastAPI event loop.
+    Public methods update desired state only. A persistent worker serializes
+    create/set/clear/close operations so FastAPI callers never wait on native
+    power APIs and stale activation cannot survive a last-owner release.
     """
 
     def __init__(
         self,
         *,
         platform: Optional[str] = None,
-        execution_state_setter: Optional[Callable[[int], int]] = None,
+        power_api: Optional[PowerRequestApi] = None,
     ) -> None:
         self._platform = sys.platform if platform is None else platform
-        self._execution_state_setter = execution_state_setter
+        self._power_api = power_api
         self._owners: set[Hashable] = set()
         self._lock = threading.Lock()
         self._state_changed = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._desired_active = False
-        self._native_active = False
+        self._handle: Optional[int] = None
+        self._system_required = False
+        self._execution_required = False
+        self._last_error = 0
         self._worker_generation = 0
 
     def _is_enabled(self) -> bool:
         return self._platform == "win32" and not system_config.generic_mode
 
-    def _set_execution_state(self, flags: int) -> int:
-        setter = self._execution_state_setter
-        if setter is None:
-            setter = ctypes.windll.kernel32.SetThreadExecutionState
-        return int(setter(flags))
+    def _get_power_api(self) -> PowerRequestApi:
+        if self._power_api is None:
+            self._power_api = WindowsPowerRequestApi()
+        return self._power_api
+
+    @staticmethod
+    def _cleanup_request(
+        api: PowerRequestApi,
+        handle: int,
+        *,
+        system_required: bool,
+        execution_required: bool,
+    ) -> int:
+        last_error = 0
+        if execution_required and not api.clear(handle, POWER_REQUEST_EXECUTION_REQUIRED):
+            last_error = api.last_error()
+            logger.warning(
+                "Unable to clear Windows execution-required request (error=%s)",
+                last_error,
+            )
+        if system_required and not api.clear(handle, POWER_REQUEST_SYSTEM_REQUIRED):
+            last_error = api.last_error()
+            logger.warning(
+                "Unable to clear Windows system-required request (error=%s)",
+                last_error,
+            )
+        if not api.close(handle):
+            last_error = api.last_error()
+            logger.warning("Unable to close Windows Power Request handle (error=%s)", last_error)
+        return last_error
+
+    def _create_request(self) -> tuple[Optional[int], bool, bool, int]:
+        api = self._get_power_api()
+        handle = api.create(POWER_REQUEST_REASON)
+        if handle is None:
+            return None, False, False, api.last_error()
+
+        system_required = api.set(handle, POWER_REQUEST_SYSTEM_REQUIRED)
+        if not system_required:
+            error = api.last_error()
+            self._cleanup_request(
+                api,
+                handle,
+                system_required=False,
+                execution_required=False,
+            )
+            return None, False, False, error
+
+        execution_required = api.set(handle, POWER_REQUEST_EXECUTION_REQUIRED)
+        if not execution_required:
+            error = api.last_error()
+            self._cleanup_request(
+                api,
+                handle,
+                system_required=True,
+                execution_required=False,
+            )
+            return None, False, False, error
+        return handle, True, True, 0
 
     def _run_worker(self, generation: int) -> None:
         while True:
@@ -57,39 +208,79 @@ class SleepInhibitor:
                 if generation != self._worker_generation:
                     return
                 desired_active = self._desired_active
-                native_active = self._native_active
-            if desired_active == native_active:
-                continue
+                handle = self._handle
+                system_required = self._system_required
+                execution_required = self._execution_required
 
-            flags = (
-                ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-                if desired_active
-                else ES_CONTINUOUS
-            )
-            try:
-                succeeded = self._set_execution_state(flags) != 0
-            except Exception:
-                succeeded = False
-                logger.exception("Unable to update Windows sleep inhibition")
+            if desired_active and handle is None:
+                try:
+                    new_handle, new_system, new_execution, error = self._create_request()
+                except Exception:
+                    new_handle, new_system, new_execution, error = None, False, False, 0
+                    logger.exception("Unable to establish Windows Power Request")
 
-            with self._lock:
-                if generation != self._worker_generation:
-                    return
-                if succeeded:
-                    self._native_active = desired_active
-            if succeeded:
-                logger.info(
-                    "Windows automatic sleep inhibition %s",
-                    "active" if desired_active else "released",
+                with self._lock:
+                    still_desired = (
+                        generation == self._worker_generation and self._desired_active
+                    )
+                    if still_desired and new_handle is not None:
+                        self._handle = new_handle
+                        self._system_required = new_system
+                        self._execution_required = new_execution
+                        self._last_error = 0
+                    elif still_desired:
+                        self._last_error = error
+                if new_handle is not None and not still_desired:
+                    self._cleanup_request(
+                        self._get_power_api(),
+                        new_handle,
+                        system_required=new_system,
+                        execution_required=new_execution,
+                    )
+                if still_desired and new_handle is not None:
+                    logger.info("Windows idle-sleep and execution inhibition active")
+                    continue
+                if not still_desired:
+                    self._state_changed.set()
+                    continue
+                logger.warning(
+                    "Windows Power Request setup failed (error=%s); inhibition will be retried",
+                    error,
                 )
+                time.sleep(1)
+                self._state_changed.set()
                 continue
 
-            logger.warning(
-                "Windows SetThreadExecutionState failed; %s will be retried",
-                "sleep inhibition" if desired_active else "sleep-state restoration",
-            )
-            time.sleep(1)
-            self._state_changed.set()
+            if not desired_active and handle is not None:
+                with self._lock:
+                    if generation != self._worker_generation:
+                        return
+                    if self._handle != handle:
+                        continue
+                    self._handle = None
+                    self._system_required = False
+                    self._execution_required = False
+                try:
+                    error = self._cleanup_request(
+                        self._get_power_api(),
+                        handle,
+                        system_required=system_required,
+                        execution_required=execution_required,
+                    )
+                except Exception:
+                    error = 0
+                    logger.exception("Unable to release Windows Power Request cleanly")
+                with self._lock:
+                    self._last_error = error
+                    reactivation_needed = (
+                        generation == self._worker_generation and self._desired_active
+                    )
+                logger.info(
+                    "Windows idle-sleep and execution inhibition released"
+                )
+                if reactivation_needed:
+                    self._state_changed.set()
+                continue
 
     def _ensure_worker_locked(self) -> None:
         if self._worker and self._worker.is_alive():
@@ -146,7 +337,7 @@ class SleepInhibitor:
         with self._lock:
             self._owners.clear()
             self._desired_active = False
-            if self._native_active:
+            if self._handle is not None:
                 self._ensure_worker_locked()
                 self._state_changed.set()
 
@@ -158,7 +349,26 @@ class SleepInhibitor:
     @property
     def native_active(self) -> bool:
         with self._lock:
-            return self._native_active
+            return (
+                self._handle is not None
+                and self._system_required
+                and self._execution_required
+            )
+
+    @property
+    def system_required_active(self) -> bool:
+        with self._lock:
+            return self._system_required
+
+    @property
+    def execution_required_active(self) -> bool:
+        with self._lock:
+            return self._execution_required
+
+    @property
+    def last_error(self) -> int:
+        with self._lock:
+            return self._last_error
 
 
 sleep_inhibitor = SleepInhibitor()

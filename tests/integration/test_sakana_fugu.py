@@ -2,6 +2,7 @@ import tempfile
 from unittest import IsolatedAsyncioTestCase, mock
 
 from fastapi import HTTPException
+import httpx
 
 from backend.api.routes import cloud_access as cloud_access_route
 from backend.api.routes import features as features_route
@@ -10,10 +11,25 @@ from backend.shared import secret_store
 from backend.shared.config import system_config
 from backend.shared.model_error_utils import is_retryable_model_output_error
 from backend.shared.models import ModelConfig
-from backend.shared.sakana_fugu_client import SakanaFuguAuthError, SakanaFuguClient, SakanaFuguRequestError
+from backend.shared.sakana_fugu_client import (
+    SakanaFuguAuthError,
+    SakanaFuguClient,
+    SakanaFuguEntitlementError,
+    SakanaFuguRequestError,
+    SakanaFuguUsageLimitError,
+)
 
 
 class SakanaFuguClientTests(IsolatedAsyncioTestCase):
+    @staticmethod
+    def _response(status_code: int, payload: dict, headers: dict | None = None) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            json=payload,
+            headers=headers,
+            request=httpx.Request("POST", "https://api.sakana.ai/v1/test"),
+        )
+
     def test_normalize_reasoning_effort_filters_invalid_values(self) -> None:
         self.assertEqual(SakanaFuguClient._normalize_reasoning_effort("auto"), "xhigh")
         self.assertEqual(SakanaFuguClient._normalize_reasoning_effort("xhigh"), "xhigh")
@@ -69,6 +85,155 @@ class SakanaFuguClientTests(IsolatedAsyncioTestCase):
                 tools=[{"type": "function", "function": {"name": "tool"}}],
             )
         chat_mock.assert_awaited_once()
+
+    async def test_responses_usage_limit_is_typed_and_not_retried(self) -> None:
+        client = SakanaFuguClient()
+        client._api_key = "test-key"
+        response = self._response(
+            429,
+            {
+                "error": {
+                    "response": {
+                        "error": {
+                            "type": "usage_limit_reached",
+                            "message": "Window exhausted for sk-or-v1-secret-token",
+                            "plan_type": "pro",
+                            "resets_in_seconds": 120,
+                        }
+                    }
+                }
+            },
+        )
+        with (
+            mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
+            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+        ):
+            with self.assertRaises(SakanaFuguUsageLimitError) as ctx:
+                await client.generate_completion(
+                    model="fugu",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+
+        self.assertEqual(request.await_count, 1)
+        sleep.assert_not_awaited()
+        self.assertEqual(ctx.exception.plan_type, "pro")
+        self.assertEqual(ctx.exception.resets_in_seconds, 120)
+        self.assertIsNotNone(ctx.exception.resets_at)
+        self.assertEqual(ctx.exception.provider, "sakana_fugu")
+        self.assertEqual(ctx.exception.provider_label, "Sakana Fugu")
+        self.assertNotIn("sk-or-v1-secret-token", str(ctx.exception))
+
+    async def test_usage_limit_code_is_not_hidden_by_generic_error_type(self) -> None:
+        client = SakanaFuguClient()
+        client._api_key = "test-key"
+        response = self._response(
+            429,
+            {
+                "error": {
+                    "type": "rate_limit_error",
+                    "code": "usage_limit_reached",
+                    "message": "Timed quota reached",
+                    "resets_in_seconds": 30,
+                }
+            },
+        )
+        with (
+            mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
+            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+        ):
+            with self.assertRaises(SakanaFuguUsageLimitError):
+                await client.generate_completion(
+                    model="fugu",
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+        self.assertEqual(request.await_count, 1)
+        sleep.assert_not_awaited()
+
+    async def test_chat_completions_usage_limit_reads_retry_after_header(self) -> None:
+        client = SakanaFuguClient()
+        client._api_key = "test-key"
+        response = self._response(
+            429,
+            {"error": {"code": "usage_limit_reached", "message": "Timed quota reached"}},
+            headers={"Retry-After": "45"},
+        )
+        with (
+            mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
+            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+        ):
+            with self.assertRaises(SakanaFuguUsageLimitError) as ctx:
+                await client.generate_completion(
+                    model="fugu",
+                    messages=[{"role": "user", "content": "hello"}],
+                    tools=[{"type": "function", "function": {"name": "lookup"}}],
+                )
+
+        self.assertEqual(request.await_count, 1)
+        sleep.assert_not_awaited()
+        self.assertEqual(ctx.exception.resets_in_seconds, 45)
+
+    async def test_models_hard_entitlement_error_is_typed_and_not_retried(self) -> None:
+        client = SakanaFuguClient()
+        client._api_key = "test-key"
+        response = self._response(
+            403,
+            {
+                "error": {
+                    "details": [
+                        {
+                            "code": "subscription_required",
+                            "message": "Upgrade is required for this model.",
+                        }
+                    ]
+                }
+            },
+        )
+        with (
+            mock.patch.object(client.client, "request", mock.AsyncMock(return_value=response)) as request,
+            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+        ):
+            with self.assertRaises(SakanaFuguEntitlementError) as ctx:
+                await client.list_models()
+
+        self.assertEqual(request.await_count, 1)
+        sleep.assert_not_awaited()
+        self.assertEqual(ctx.exception.error_code, "subscription_required")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    async def test_ordinary_429_honors_retry_after_then_succeeds(self) -> None:
+        client = SakanaFuguClient()
+        client._api_key = "test-key"
+        rate_limited = self._response(
+            429,
+            {"error": {"code": "rate_limit_exceeded", "message": "Slow down"}},
+            headers={"Retry-After": "7"},
+        )
+        success = self._response(
+            200,
+            {
+                "id": "resp_ok",
+                "model": "fugu",
+                "output_text": "ok",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+        with (
+            mock.patch.object(
+                client.client,
+                "request",
+                mock.AsyncMock(side_effect=[rate_limited, success]),
+            ) as request,
+            mock.patch("backend.shared.sakana_fugu_client.random.uniform", return_value=0.5),
+            mock.patch("backend.shared.sakana_fugu_client.asyncio.sleep", new=mock.AsyncMock()) as sleep,
+        ):
+            result = await client.generate_completion(
+                model="fugu",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        self.assertEqual(request.await_count, 2)
+        sleep.assert_awaited_once_with(7.5)
+        self.assertEqual(result["choices"][0]["message"]["content"], "ok")
 
 
 class SakanaFuguSecretStoreTests(IsolatedAsyncioTestCase):

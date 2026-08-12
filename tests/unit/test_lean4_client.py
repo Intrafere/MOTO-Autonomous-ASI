@@ -83,6 +83,53 @@ class Lean4ClientWorkspaceTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
+    async def test_workspace_status_is_observational_and_bootstrap_is_single_flight(self) -> None:
+        client = Lean4Client(lean_path="", workspace_dir=tempfile.gettempdir())
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def fake_ensure() -> bool:
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            client._workspace_ready = True
+            return True
+
+        client._ensure_workspace_locked = fake_ensure  # type: ignore[method-assign]
+        self.assertEqual(client.get_workspace_status()["state"], "not_started")
+        first = client.start_workspace_bootstrap()
+        second = client.start_workspace_bootstrap()
+        self.assertIs(first, second)
+        await started.wait()
+        self.assertEqual(client.get_workspace_status()["state"], "starting")
+        release.set()
+        self.assertEqual(await asyncio.gather(first, second), [True, True])
+        self.assertEqual(calls, 1)
+        self.assertEqual(client.get_workspace_status()["state"], "ready")
+
+    async def test_cancelled_waiter_does_not_cancel_shared_bootstrap(self) -> None:
+        client = Lean4Client(lean_path="", workspace_dir=tempfile.gettempdir())
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_ensure() -> bool:
+            started.set()
+            await release.wait()
+            client._workspace_ready = True
+            return True
+
+        client._ensure_workspace_locked = fake_ensure  # type: ignore[method-assign]
+        waiter = asyncio.create_task(client.await_workspace_ready())
+        await started.wait()
+        waiter.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+        self.assertFalse(client.start_workspace_bootstrap().cancelled())
+        release.set()
+        self.assertTrue(await client.await_workspace_ready())
+
 
 class Lean4ExtractionTests(unittest.IsolatedAsyncioTestCase):
     def _client(self) -> Lean4Client:

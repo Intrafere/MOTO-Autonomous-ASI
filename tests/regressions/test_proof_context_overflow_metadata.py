@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,8 @@ from backend.autonomous.core.proof_verification_stage import (
     ProofVerificationStage,
     _LeanVerificationOutcome,
 )
+from backend.autonomous.core import proof_verification_stage as stage_module
+from backend.shared.lean_proof_integrity import LeanProofIntegrityResult
 from backend.compiler.core.compiler_coordinator import CompilerCoordinator
 from backend.shared.models import ProofAttemptFeedback, ProofCandidate
 from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
@@ -193,6 +196,70 @@ async def test_local_preflight_overflow_reports_token_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_overflow_pressure_callback_uses_run_id_without_candidate_error(monkeypatch):
+    feedback = ProofAttemptFeedback(
+        attempt=1,
+        theorem_id="candidate-1",
+        error_output="MANDATORY FULL SOURCE CONTEXT OVERFLOW",
+        overflow_origin="local_preflight",
+        prompt_tokens=12_345,
+        max_input_tokens=10_000,
+    )
+
+    async def fake_prove(self, *args, attempt_callback=None, **kwargs):
+        await attempt_callback(feedback)
+        return False, "", "", [feedback]
+
+    class FakeProofDatabase:
+        def __init__(self):
+            self.requested_run_ids = []
+
+        def get_novel_proofs_for_injection(self, run_id=""):
+            self.requested_run_ids.append(run_id)
+            return "prior proof context"
+
+        async def get_proof_set_revision(self):
+            return 42
+
+    monkeypatch.setattr(ProofFormalizationAgent, "prove_candidate", fake_prove)
+    stage = ProofVerificationStage()
+    monkeypatch.setattr(stage, "_prepare_candidate", AsyncMock(return_value=_candidate()))
+    monkeypatch.setattr(stage, "_run_smt_check", AsyncMock(return_value=None))
+    broadcast = AsyncMock()
+    proof_db = FakeProofDatabase()
+    pressures = []
+
+    async def pressure_callback(pressure, **kwargs):
+        pressures.append((pressure, kwargs))
+
+    await stage._run_lean_pipeline_for_candidate(
+        theorem_candidate=_candidate(),
+        base_event={"source_type": "paper", "source_id": "paper-1", "run_id": "run-123"},
+        proof_label="A",
+        user_prompt="Prove the claim.",
+        source_type="paper",
+        source_id="paper-1",
+        source_content="A short source.",
+        source_title="Paper",
+        submitter_model="configured/model",
+        submitter_context=32_000,
+        submitter_max_tokens=2_000,
+        role_suffix="paper",
+        trigger="automatic",
+        novel_proofs_db=proof_db,
+        broadcast_fn=broadcast,
+        proof_pruning_pressure_callback=pressure_callback,
+        run_id="run-123",
+    )
+
+    assert proof_db.requested_run_ids == ["run-123"]
+    assert len(pressures) == 1
+    pressure, kwargs = pressures[0]
+    assert pressure.proof_set_revision == 42
+    assert kwargs["proof_set_revision"] == 42
+
+
+@pytest.mark.asyncio
 async def test_overflow_candidate_is_deferred_while_sibling_continues(monkeypatch):
     overflow_candidate = ProofCandidate(theorem_id="overflow", statement="True")
     sibling_candidate = ProofCandidate(theorem_id="sibling", statement="False")
@@ -263,6 +330,106 @@ async def test_overflow_candidate_is_deferred_while_sibling_continues(monkeypatc
     assert [item.theorem_id for item in result.results] == ["sibling"]
     assert checkpoints[-1]["status"] == "deferred"
     assert checkpoints[-1]["processed_candidate_ids"] == ["sibling"]
+
+
+@pytest.mark.asyncio
+async def test_manual_novelty_provider_failure_preserves_lean_verified_artifact(monkeypatch):
+    candidate = ProofCandidate(
+        theorem_id="verified-before-novelty",
+        statement="True",
+        formal_sketch="Trivial verified theorem.",
+    )
+    lean_code = "import Mathlib\n\ntheorem verified_before_novelty : True := by trivial\n"
+    feedback = ProofAttemptFeedback(
+        attempt=1,
+        theorem_id=candidate.theorem_id,
+        lean_code=lean_code,
+        success=True,
+    )
+    events = []
+    classifications = []
+
+    async def fake_resolve(**_kwargs):
+        return [candidate]
+
+    async def fake_pipeline(**kwargs):
+        return _LeanVerificationOutcome(
+            candidate=candidate,
+            proof_label=kwargs["proof_label"],
+            success=True,
+            theorem_name="verified_before_novelty",
+            lean_code=lean_code,
+            attempts=[feedback],
+        )
+
+    async def fake_integrity(**_kwargs):
+        return LeanProofIntegrityResult(
+            valid=True,
+            actual_theorem_statement="True",
+            actual_theorem_name="verified_before_novelty",
+        )
+
+    class Stored:
+        proof_id = "proof-preserved"
+        novel = False
+        novelty_tier = "not_novel"
+        novelty_reasoning = "classification unavailable"
+
+    async def fake_register(**kwargs):
+        classifications.append(kwargs.get("novelty_classification"))
+        if kwargs.get("novelty_classification") is None:
+            raise stage_module.RetryableProviderError(
+                provider="openrouter",
+                provider_label="OpenRouter",
+                role_id="autonomous_proof_novelty",
+                model="validator",
+                reason="transient_provider_error",
+                message="upstream timeout",
+            )
+        return SimpleNamespace(record=Stored(), duplicate=False)
+
+    async def broadcast(event_type, payload):
+        events.append((event_type, payload))
+
+    old_enabled = stage_module.system_config.lean4_enabled
+    stage_module.system_config.lean4_enabled = True
+    stage = ProofVerificationStage()
+    monkeypatch.setattr(stage, "_resolve_candidates", fake_resolve)
+    monkeypatch.setattr(stage, "_run_lean_pipeline_for_candidate", fake_pipeline)
+    monkeypatch.setattr(stage_module, "validate_full_lean_proof_integrity", fake_integrity)
+    monkeypatch.setattr(stage_module, "register_verified_lean_proof", fake_register)
+    monkeypatch.setattr(stage._dependency_extractor, "extract_dependencies", AsyncMock(return_value=[]))
+    try:
+        result = await stage.run(
+            content="Source",
+            source_type="brainstorm",
+            source_id="topic-1",
+            user_prompt="Prove True",
+            submitter_model="model",
+            submitter_context=20_000,
+            submitter_max_tokens=2_000,
+            validator_model="validator",
+            validator_context=20_000,
+            validator_max_tokens=2_000,
+            broadcast_fn=broadcast,
+            novel_proofs_db=AsyncMock(),
+            theorem_candidates=[candidate],
+            trigger="manual",
+            append_to_source=False,
+        )
+    finally:
+        stage_module.system_config.lean4_enabled = old_enabled
+
+    assert result.verified_count == 1
+    assert result.novel_count == 0
+    assert result.results[0].lean_code == lean_code
+    assert result.results[0].proof_id == "proof-preserved"
+    assert classifications[0] is None
+    assert classifications[1][0] == "not_novel"
+    assert "transient failure" in classifications[1][1]
+    assert any(event == "proof_verified" for event, _payload in events)
+    completion = next(payload for event, payload in events if event == "proof_check_complete")
+    assert completion["verified_count"] == 1
 
 
 @pytest.mark.asyncio

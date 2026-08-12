@@ -1,23 +1,120 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { autonomousAPI } from '../services/api';
+import {
+  API_ERROR_KINDS,
+  autonomousAPI,
+  buildProofSourceKey,
+  normalizeProofRunSnapshot,
+} from '../services/api';
 import { websocket } from '../services/websocket';
 import {
   getStoredAutonomousSettings,
   settingsToAutonomousConfig,
 } from '../utils/autonomousProfiles';
+import {
+  MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
+  MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
+} from '../utils/manualProofSources';
 import { isCloudAccessProvider } from '../utils/oauthProviders';
 
 const DEVELOPER_MODE_STORAGE_KEY = 'developerModeSettingsEnabled';
-export const MANUAL_AGGREGATOR_PROOF_SOURCE_ID = 'manual_aggregator';
-export const MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID = 'manual_compiler_current';
+export {
+  MANUAL_AGGREGATOR_PROOF_SOURCE_ID,
+  MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID,
+};
 const PROOF_STATUS_STARTUP_POLL_MS = 30000;
 
 function isDeveloperModeEnabled() {
   return localStorage.getItem(DEVELOPER_MODE_STORAGE_KEY) === 'true';
 }
 
-function buildSourceKey(sourceType, sourceId) {
-  return `${sourceType}:${sourceId}`;
+function inferProofScope(sourceType, sourceId, requestedScope = null) {
+  if (requestedScope) return requestedScope;
+  if (
+    (sourceType === 'brainstorm' && sourceId === MANUAL_AGGREGATOR_PROOF_SOURCE_ID)
+    || (sourceType === 'paper' && sourceId === MANUAL_COMPILER_CURRENT_PROOF_SOURCE_ID)
+  ) {
+    return 'manual';
+  }
+  return 'autonomous';
+}
+
+function buildSourceKey(sourceType, sourceId, scope = null) {
+  return buildProofSourceKey(inferProofScope(sourceType, sourceId, scope), sourceType, sourceId);
+}
+
+const TERMINAL_PROOF_RUN_STATUSES = new Set(['completed', 'error', 'stopped', 'repair_required']);
+const NON_BUSY_PROOF_RUN_STATUSES = new Set([
+  'completed',
+  'error',
+  'stopped',
+  'repair_required',
+]);
+const PROOF_RUN_EVENTS = [
+  'proof_run_queued',
+  'proof_run_round_started',
+  'proof_run_round_complete',
+  'proof_run_provider_paused',
+  'proof_run_provider_resumed',
+  'proof_run_repair_required',
+  'proof_run_terminal',
+  'proof_prune_review_queued',
+  'proof_prune_review_started',
+  'proof_prune_proposed',
+  'proof_prune_validation_started',
+  'proof_prune_provider_paused',
+  'proof_prune_repair_required',
+  'proof_prune_applied',
+  'proof_prune_no_change',
+  'proof_prune_rejected',
+  'proof_prune_stale',
+  'proof_prune_error',
+  'proof_check_started',
+  'proof_check_candidates_found',
+  'proof_check_no_candidates',
+  'proof_check_complete',
+];
+
+export function proofRunStatusLabel(run) {
+  if (!run) return '';
+  if (run.status === 'provider_paused') return 'Provider paused';
+  if (run.status === 'repair_required') return 'Settings repair required';
+  if (run.status === 'stopping') return 'Stopping';
+  if (run.status === 'queued') return 'Queued';
+  if (run.status === 'running') {
+    return run.pruning_status && !['disabled', 'idle'].includes(run.pruning_status)
+      ? `Running · pruning ${String(run.pruning_status).replaceAll('_', ' ')}`
+      : 'Running';
+  }
+  return String(run.status || 'unknown').replaceAll('_', ' ');
+}
+
+export function mergeProofRun(current, incoming) {
+  if (!incoming) return current;
+  if (!current) return incoming;
+  const currentGeneration = Number(current.lifecycle_generation || 0);
+  const incomingGeneration = Number(incoming.lifecycle_generation || 0);
+  if (incomingGeneration < currentGeneration) return current;
+  return { ...current, ...incoming };
+}
+
+export function isProofRunBusy(run) {
+  return Boolean(run && !NON_BUSY_PROOF_RUN_STATUSES.has(String(run.status || 'unknown')));
+}
+
+export function selectSourceProofRun(runs, sourceKey, preferredProofRunId = null) {
+  const matchingRuns = Object.values(runs || {})
+    .filter((run) => run?.source_key === sourceKey)
+    .sort((a, b) => (
+      Number(b.lifecycle_generation || 0) - Number(a.lifecycle_generation || 0)
+      || String(b.updated_at || '').localeCompare(String(a.updated_at || ''))
+    ));
+  if (preferredProofRunId) {
+    const preferred = matchingRuns.find((run) => run.proof_run_id === preferredProofRunId);
+    if (preferred) return preferred;
+  }
+  return matchingRuns.find((run) => !TERMINAL_PROOF_RUN_STATUSES.has(run.status))
+    || matchingRuns[0]
+    || null;
 }
 
 function normalizeProvider(provider) {
@@ -221,7 +318,6 @@ function getLeanRuntimeUnavailableMessage(proofStatus) {
 
   const version = (proofStatus.lean4_version || proofStatus.lean_version || '').trim().toLowerCase();
   const versionUnavailable = (
-    !version ||
     version.includes('not found') ||
     version.includes('no such file') ||
     version.includes('not recognized')
@@ -229,8 +325,8 @@ function getLeanRuntimeUnavailableMessage(proofStatus) {
   if (versionUnavailable) {
     return 'Lean 4 executable is not available.';
   }
-  if (!proofStatus.workspace_ready) {
-    return 'Lean 4 is still starting up.';
+  if (proofStatus.workspace_state === 'failed') {
+    return proofStatus.workspace_error || 'Lean 4 workspace preparation failed.';
   }
   return '';
 }
@@ -247,6 +343,62 @@ export function useProofCheckRuntime() {
   const [runtimeError, setRuntimeError] = useState('');
   const [activeChecks, setActiveChecks] = useState({});
   const [queuedChecks, setQueuedChecks] = useState({});
+  const [proofRuns, setProofRuns] = useState({});
+  const [runDiscoveryError, setRunDiscoveryError] = useState('');
+
+  const rememberRun = useCallback((runLike, fallback = {}) => {
+    let incoming;
+    try {
+      incoming = normalizeProofRunSnapshot(runLike, fallback);
+    } catch {
+      return null;
+    }
+    setProofRuns((previous) => ({
+      ...previous,
+      [incoming.proof_run_id]: mergeProofRun(previous[incoming.proof_run_id], incoming),
+    }));
+    return incoming;
+  }, []);
+
+  const discoverProofRuns = useCallback(async () => {
+    try {
+      const response = await autonomousAPI.listProofRuns();
+      setProofRuns((previous) => {
+        const discovered = {};
+        response.runs.forEach((run) => {
+          discovered[run.proof_run_id] = mergeProofRun(previous[run.proof_run_id], run);
+        });
+        return discovered;
+      });
+      setRunDiscoveryError('');
+      return response.runs;
+    } catch (error) {
+      const message = error.kind === API_ERROR_KINDS.OLD_CONTRACT
+        ? 'Proof-run controls require a newer backend contract. Update MOTO, then reload.'
+        : (error.message || 'Failed to discover proof runs');
+      setRunDiscoveryError(message);
+      return [];
+    }
+  }, []);
+
+  const discoverSourceProofRuns = useCallback(async (sourceType, sourceId, scope = null) => {
+    const resolvedScope = inferProofScope(sourceType, sourceId, scope);
+    const response = await autonomousAPI.listProofRuns({
+      scope: resolvedScope,
+      sourceType,
+      sourceId,
+    });
+    response.runs.forEach((run) => rememberRun(run));
+    if (response.ambiguous && !response.preferred_proof_run_id) {
+      throw new Error(
+        'Multiple proof runs match this source and no authoritative run could be selected. Refresh proof runs before starting another.',
+      );
+    }
+    const preferred = response.preferred_proof_run_id
+      ? response.runs.find((run) => run.proof_run_id === response.preferred_proof_run_id)
+      : response.runs[0];
+    return preferred || null;
+  }, [rememberRun]);
 
   const refreshProofStatus = useCallback(async () => {
     try {
@@ -262,21 +414,26 @@ export function useProofCheckRuntime() {
 
   useEffect(() => {
     refreshProofStatus();
-  }, [refreshProofStatus]);
+    discoverProofRuns();
+  }, [discoverProofRuns, refreshProofStatus]);
 
   useEffect(() => {
     const handleRefresh = () => {
       refreshProofStatus();
+      discoverProofRuns();
     };
+    const handleOnline = () => discoverProofRuns();
 
     window.addEventListener('focus', handleRefresh);
+    window.addEventListener('online', handleOnline);
     document.addEventListener('visibilitychange', handleRefresh);
 
     return () => {
       window.removeEventListener('focus', handleRefresh);
+      window.removeEventListener('online', handleOnline);
       document.removeEventListener('visibilitychange', handleRefresh);
     };
-  }, [refreshProofStatus]);
+  }, [discoverProofRuns, refreshProofStatus]);
 
   useEffect(() => {
     const shouldPollProofStatus = (
@@ -292,8 +449,62 @@ export function useProofCheckRuntime() {
   }, [proofStatus, refreshProofStatus]);
 
   useEffect(() => {
+    const reconcileRunEvent = (data = {}) => {
+      const proofRunId = data.proof_run_id;
+      if (!proofRunId) return;
+      if (data.source_type && data.source_id) {
+        const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
+        if (data.status && data.status !== 'queued') {
+          setQueuedChecks((previous) => {
+            if (!previous[sourceKey]) return previous;
+            const next = { ...previous };
+            delete next[sourceKey];
+            return next;
+          });
+        }
+        if (NON_BUSY_PROOF_RUN_STATUSES.has(data.status)) {
+          setActiveChecks((previous) => {
+            if (!previous[sourceKey]) return previous;
+            const next = { ...previous };
+            delete next[sourceKey];
+            return next;
+          });
+        }
+      }
+      setProofRuns((previous) => {
+        const current = previous[proofRunId];
+        const eventGeneration = Number(data.lifecycle_generation || 0);
+        if (
+          current
+          && eventGeneration
+          && eventGeneration < Number(current.lifecycle_generation || 0)
+        ) {
+          return previous;
+        }
+        const next = mergeProofRun(current, {
+          ...(current || {}),
+          ...data,
+          proof_run_id: proofRunId,
+          lifecycle_generation: eventGeneration || current?.lifecycle_generation || 1,
+          status: data.status || current?.status || 'running',
+        });
+        return { ...previous, [proofRunId]: next };
+      });
+      autonomousAPI.getProofRun(proofRunId)
+        .then((run) => rememberRun(run))
+        .catch(() => {
+          // The compact event remains useful if detail hydration races cleanup.
+        });
+    };
+    PROOF_RUN_EVENTS.forEach((eventName) => websocket.on(eventName, reconcileRunEvent));
+    return () => {
+      PROOF_RUN_EVENTS.forEach((eventName) => websocket.off(eventName, reconcileRunEvent));
+    };
+  }, [rememberRun]);
+
+  useEffect(() => {
     const unsubscribeStarted = websocket.on('proof_check_started', (data) => {
-      const sourceKey = buildSourceKey(data.source_type, data.source_id);
+      const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
       setActiveChecks((prev) => ({
         ...prev,
         [sourceKey]: {
@@ -312,7 +523,7 @@ export function useProofCheckRuntime() {
     });
 
     const unsubscribeCandidates = websocket.on('proof_check_candidates_found', (data) => {
-      const sourceKey = buildSourceKey(data.source_type, data.source_id);
+      const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
       setActiveChecks((prev) => ({
         ...prev,
         [sourceKey]: {
@@ -323,7 +534,7 @@ export function useProofCheckRuntime() {
     });
 
     const unsubscribeNoCandidates = websocket.on('proof_check_no_candidates', (data) => {
-      const sourceKey = buildSourceKey(data.source_type, data.source_id);
+      const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
       setActiveChecks((prev) => ({
         ...prev,
         [sourceKey]: {
@@ -334,7 +545,7 @@ export function useProofCheckRuntime() {
     });
 
     const unsubscribeComplete = websocket.on('proof_check_complete', (data) => {
-      const sourceKey = buildSourceKey(data.source_type, data.source_id);
+      const sourceKey = buildSourceKey(data.source_type, data.source_id, data.scope);
       setActiveChecks((prev) => {
         if (!prev[sourceKey]) {
           return prev;
@@ -362,8 +573,14 @@ export function useProofCheckRuntime() {
     };
   }, [refreshProofStatus]);
 
-  const queueManualProofCheck = useCallback(async ({ sourceType, sourceId }) => {
-    const sourceKey = buildSourceKey(sourceType, sourceId);
+  const queueManualProofCheck = useCallback(async ({
+    sourceType,
+    sourceId,
+    scope = null,
+    runMode = 'one_round',
+  }) => {
+    const resolvedScope = inferProofScope(sourceType, sourceId, scope);
+    const sourceKey = buildSourceKey(sourceType, sourceId, resolvedScope);
     setQueuedChecks((prev) => ({
       ...prev,
       [sourceKey]: true,
@@ -371,12 +588,22 @@ export function useProofCheckRuntime() {
 
     try {
       const proofRuntimeConfig = buildProofRuntimeConfigForSource(sourceType, sourceId);
-      return await autonomousAPI.runProofCheck({
+      const run = await autonomousAPI.runProofCheck({
         sourceType,
         sourceId,
+        scope: resolvedScope,
+        runMode,
         proofRuntimeConfig: isProofRuntimeConfigComplete(proofRuntimeConfig) ? proofRuntimeConfig : null,
       });
+      rememberRun(run);
+      return run;
     } catch (err) {
+      if (err?.kind === API_ERROR_KINDS.AMBIGUOUS_TRANSPORT) {
+        const recovered = await discoverSourceProofRuns(sourceType, sourceId, resolvedScope);
+        if (recovered) return recovered;
+      }
+      throw err;
+    } finally {
       setQueuedChecks((prev) => {
         if (!prev[sourceKey]) {
           return prev;
@@ -385,12 +612,19 @@ export function useProofCheckRuntime() {
         delete next[sourceKey];
         return next;
       });
-      throw err;
     }
-  }, []);
+  }, [discoverSourceProofRuns, rememberRun]);
 
-  const getSourceState = useCallback((sourceType, sourceId) => {
-    const sourceKey = buildSourceKey(sourceType, sourceId);
+  const getSourceState = useCallback((sourceType, sourceId, scope = null) => {
+    const sourceKey = buildSourceKey(sourceType, sourceId, scope);
+    const run = selectSourceProofRun(proofRuns, sourceKey);
+    if (run) {
+      return {
+        ...run,
+        candidateCount: run.candidateCount ?? null,
+        statusLabel: proofRunStatusLabel(run),
+      };
+    }
     if (activeChecks[sourceKey]) {
       return activeChecks[sourceKey];
     }
@@ -401,11 +635,37 @@ export function useProofCheckRuntime() {
       };
     }
     return null;
-  }, [activeChecks, queuedChecks]);
+  }, [activeChecks, proofRuns, queuedChecks]);
 
   const isSourceBusy = useCallback((sourceType, sourceId) => {
-    return Boolean(getSourceState(sourceType, sourceId));
+    const state = getSourceState(sourceType, sourceId);
+    return isProofRunBusy(state);
   }, [getSourceState]);
+
+  const controlProofRun = useCallback(async (action, runOrId, generation = null) => {
+    const run = typeof runOrId === 'string' ? proofRuns[runOrId] : runOrId;
+    const proofRunId = typeof runOrId === 'string' ? runOrId : runOrId?.proof_run_id;
+    const expectedGeneration = generation ?? run?.lifecycle_generation;
+    if (!proofRunId || !expectedGeneration) {
+      throw new Error('Proof run identity or lifecycle generation is missing. Refresh and try again.');
+    }
+    try {
+      if (action !== 'stop') throw new Error(`Unsupported proof run action: ${action}`);
+      const next = await autonomousAPI.stopProofRun(proofRunId, expectedGeneration);
+      rememberRun(next);
+      return next;
+    } catch (error) {
+      if (error?.kind === API_ERROR_KINDS.CONFLICT || error?.status === 409) {
+        try {
+          const authoritative = await autonomousAPI.getProofRun(proofRunId);
+          rememberRun(authoritative);
+        } catch {
+          await discoverProofRuns();
+        }
+      }
+      throw error;
+    }
+  }, [discoverProofRuns, proofRuns, rememberRun]);
 
   const currentProofRuntimeConfig = buildCurrentProofRuntimeConfig();
   const hasCurrentProofRuntimeConfig = isProofRuntimeConfigComplete(currentProofRuntimeConfig);
@@ -458,8 +718,14 @@ export function useProofCheckRuntime() {
   return {
     proofStatus,
     runtimeError,
+    runDiscoveryError,
+    proofRuns: Object.values(proofRuns),
     refreshProofStatus,
+    discoverProofRuns,
+    discoverSourceProofRuns,
     queueManualProofCheck,
+    controlProofRun,
+    stopProofRun: (run, generation) => controlProofRun('stop', run, generation),
     getSourceState,
     isSourceBusy,
     canQueueManualProofCheck,
