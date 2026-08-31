@@ -46,11 +46,14 @@ def test_build_f_maturity_registry_preserves_deep_and_blocked_cases() -> None:
     validate_maturity_registry(workspace_root=WORKSPACE_ROOT)
     blocked = descriptors_for(AdapterMaturity.BLOCKED)
     assert len(DEEP_DESCRIPTORS) >= 6
-    assert {descriptor.scenario_id for descriptor in blocked} == {
+    # This deep-runner smoke check protects the original safety-blocked cases
+    # without duplicating the registry's authoritative complete partition.
+    # The dedicated maturity-registry tests enforce exact membership.
+    assert {
         "real_parent_action_fencing_unavailable_without_production_seam",
         "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
         "real_leanoj_full_final_loop_not_safely_bounded",
-    }
+    }.issubset({descriptor.scenario_id for descriptor in blocked})
 
 
 def _write_network_blocker(fake_root: Path) -> None:

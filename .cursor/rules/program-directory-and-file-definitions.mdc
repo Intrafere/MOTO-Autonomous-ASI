@@ -136,14 +136,15 @@ project-root/
 │   │
 │   ├── autonomous/                      # AUTONOMOUS RESEARCH (Phase 3)
 │   │   ├── __init__.py                  # Package initialization
+│   │   ├── proof_pruning_evidence.py    # Pure deterministic semantic-pruning evidence ranking, projection, token estimation, and evidence/dependency/descriptor fingerprints
 │   │   ├── core/
 │   │   │   ├── __init__.py              # Package initialization
 │   │   │   ├── autonomous_coordinator.py # Orchestrates the Tier 1 → Tier 2 → Tier 3 autonomous workflow (invokes proof verification checkpoints after brainstorm/Tier 2 paper completion when `lean4_enabled`)
 │   │   │   ├── autonomous_rag_manager.py # Autonomous-specific RAG wrapper
 │   │   │   ├── proof_round_driver.py # Shared one-round, bounded automatic multi-round, and unbounded continuous-pruning policies; candidate and Lean execution stay in ProofVerificationStage
-│   │   │   ├── proof_verification_stage.py # Orchestrates impact-first proof identification → Lean 4 attempts (3 full + 2 tactic) → shared integrity/downshift gate → novelty check → proof storage; optional SMT hints + Mathlib lemma search; per-source reservation lock
+│   │   │   ├── proof_verification_stage.py # Orchestrates impact-first identification → Lean attempts (3 full + 2 tactic) → integrity/downshift → post-Lean novelty/storage; optional SMT/Mathlib; per-source lock
 │   │   │   ├── proof_run_manager.py # Owns one-round and continuous manual proof-run lifecycle/status, Stop, terminal cleanup, source reservations, and sleep ownership
-│   │   │   ├── proof_pruning_coordinator.py # Run-scoped non-blocking pruning review scheduling, coalescing, durable state, provider-local pause, stale-fenced commit, and lifecycle drain
+│   │   │   ├── proof_pruning_coordinator.py # Run-scoped bounded semantic review scheduling, generation-safe coalescing, durable migration, stale-fenced commit, and lifecycle drain
 │   │   │   ├── proof_novelty.py       # Shared proof novelty assessment helper used by autonomous proof verification and compiler rigor
 │   │   │   ├── proof_registration.py     # Shared registration helper for verified Lean proofs from autonomous, compiler, aggregator, and LeanOJ flows
 │   │   │   └── proof_dependency_extractor.py # Parses verified Lean 4 code to extract `ProofDependency` records (imports, Mathlib lemmas, MOTO-origin refs)
@@ -155,8 +156,9 @@ project-root/
 │   │   │   ├── reference_selector.py    # Reference paper selection workflow
 │   │   │   ├── paper_title_selector.py  # Paper title selection
 │   │   │   ├── proof_identification_agent.py # Extracts impact-first theorem candidates with expected novelty/prompt-relevance/anti-known-result rationale; skips not_novel or missing-tier candidates before Lean cost
+│   │   │   ├── proof_candidate_list_validator.py # Independent identity-complete pre-Lean Validator for whole candidate lists and the 75% novelty gate
 │   │   │   ├── proof_formalization_agent.py  # Generates Lean 4 proof scripts for candidates with mandatory full source context plus novelty metadata, Mathlib hints, and SMT hints when enabled
-│   │   │   ├── proof_pruning_agent.py # Fail-closed Rigor & Proofs proposer + independent Validator over immutable proof-set snapshots; returns non-mutating commit intent
+│   │   │   ├── proof_pruning_agent.py # Fail-closed semantic proposer/Validator over bounded candidate-centered or conservatively arbitrated section evidence; returns fenced non-mutating commit intent
 │   │   │   ├── lemma_search_agent.py    # Mathlib lemma search agent (Build 2) — surfaces relevant existing lemmas for formalization prompts
 │   │   │   └── final_answer/            # TIER 3 - Final Answer Generation Agents
 │   │   │       ├── __init__.py          # Package initialization
@@ -269,7 +271,7 @@ project-root/
 │   │   │       ├── brainstorms/                           # Tier 1 brainstorm databases
 │   │   │       ├── papers/                                # Tier 2 completed papers plus pruned/ preserved context-excluded papers
 │   │   │       ├── final_answer/                          # Tier 3 final answer data
-│   │   │       ├── proofs/                                # Lean 4 verified-proof records (proofs_index.json, proof_<id>.json, proof_<id>_lean.lean)
+│   │   │       ├── proofs/                                # Lean 4 verified-proof records (`proofs_index.json`, `proof_{proof_id}.json`, `proof_{proof_id}_lean.lean`; generated IDs currently include the `proof_` prefix)
 │   │   │       ├── session_metadata.json                  # Session info (prompt, created_at, status)
 │   │   │       ├── session_stats.json                     # Session statistics
 │   │   │       └── workflow_state.json                    # Workflow state for crash recovery
@@ -299,7 +301,7 @@ project-root/
 │   │   │   │   └── LiveResults.jsx          # Real-time accepted submissions view
 │   │   │   │
 │   │   │   ├── compiler/                # COMPILER
-│   │   │   │   ├── CompilerInterface.jsx    # Replace placeholder: prompt input, start/stop, status
+│   │   │   │   ├── CompilerInterface.jsx    # Manual Compiler prompt, allowed-output controls, start/stop, and status
 │   │   │   │   ├── CompilerSettings.jsx     # Compiler role selections (Validator, Writing, Rigor & Proofs, Assistant), capability-gated LM/OpenRouter UI; deprecated critique fields mirror Rigor & Proofs
 │   │   │   │   ├── CompilerLogs.jsx         # Metrics: construction vs rigor, miniscule edits
 │   │   │   │   └── LivePaper.jsx            # Real-time paper viewing, save draft, word count
@@ -322,7 +324,7 @@ project-root/
 │   │   │       ├── MathematicalProofs.css   # Proof library styles
 │   │   │       ├── ProofCheckModeModal.jsx  # Accessible shared one-round/continuous proof-check chooser used by all six check entry points
 │   │   │       ├── ProofRunStatusControls.jsx # Shared source/run round, pruning, Stop, and terminal status controls
-│   │   │       ├── ProofGraph.jsx           # Proof dependency graph view (hand-rolled SVG; Build 4, may escalate to reactflow in Build 5 if needed)
+│   │   │       ├── ProofGraph.jsx           # Hand-rolled SVG proof dependency graph view
 │   │   │       ├── ProofGraph.css           # Proof graph styles
 │   │   │       ├── ProofNotificationStack.jsx # Persistent popup notifications for novel proof discoveries
 │   │   │       ├── ProofLibrary.jsx         # Historical proof library with novelty filter, collapsed run/prompt groups, full expanded proof content, and read-only persisted live-context prune provenance
@@ -351,6 +353,10 @@ project-root/
 │   │   ├── PaperCritiqueModal.jsx       # Modal for displaying validator paper critiques (ratings, feedback, history)
 │   │   ├── CritiqueNotificationStack.jsx # Persistent popup notifications for high-scoring critiques (≥6.25 avg)
 │   │   ├── CreditExhaustionNotificationStack.jsx # Persistent red notifications for OpenRouter credit exhaustion with "Retry OpenRouter" reset button
+│   │   ├── CodexOAuthNotificationStack.jsx # Persistent desktop Codex OAuth/provider-repair notifications
+│   │   ├── ModelErrorNotificationStack.jsx # Durable workflow-scoped model/configuration repair notifications
+│   │   ├── OpenRouterFreeModelsControl.jsx # Shared free-model filter, looping, and auto-selector controls
+│   │   ├── ApiCallLogs.jsx              # Shared combined API-call log viewer
 │   │   ├── BoostControlModal.jsx        # Modal for boost configuration (next-X, category, always-prefer) with mode-aware copy
 │   │   ├── BoostControlModal.css        # Boost control modal styles
 │   │   ├── WorkflowPanel.jsx            # Boost/token/Assistant panel plus activation-gated, stale-fenced Progressive Solution Path card and lifecycle refresh
@@ -380,7 +386,16 @@ project-root/
 │   │   │   ├── leanojProfiles.js        # LeanOJ-specific recommended/user profile definitions, persistence helpers, and request builder (topic generation uses all submitters; legacy topic_generator/selector is sourced from Brainstorm Submitter 1; legacy path_decider request field is derived from Final Proof Solver)
 │   │   │   ├── safeStorage.js           # Defensive browser-storage readers for small UI preferences
 │   │   │   ├── activityStyles.js        # Shared live-activity formatting/styling helpers
+│   │   │   ├── activityPersistence.js   # Bounded activity persistence helpers
+│   │   │   ├── liveActivityPersistence.js # Instance-prefixed durable live-activity storage and recovery
+│   │   │   ├── workflowLifecycle.js     # Workflow lifecycle identity and stale-event reconciliation helpers
 │   │   │   ├── proofPresentation.js     # Live-context prune classification, risk warnings, and revision/identity-fenced mutation payloads
+│   │   │   ├── manualProofSources.js    # Manual proof-source identity and lookup helpers
+│   │   │   ├── manualLogRouting.js      # Manual workflow proof/activity routing helpers
+│   │   │   ├── solutionPathPresentation.js # Progressive Solution Path UI state and stale-safe presentation helpers
+│   │   │   ├── credentialProviderRefresh.js # Mounted-settings credential/provider refresh coordination
+│   │   │   ├── promptDraftStorage.js    # Durable prompt-draft storage with large-value offload
+│   │   │   ├── oauthProviders.js        # Shared desktop OAuth/subscription provider registry helpers
 │   │   │   ├── runtimeConfig.js         # Frontend runtime helpers (instance storage prefix, active data-root display, instance ID)
 │   │   │   ├── researchRunHistory.js    # Groups Tier 2 papers + final answers into per-run history entries for Stage2PaperHistory/FinalAnswerLibrary
 │   │   │   └── disclaimerHelper.js      # Frontend-only disclaimer injection for brainstorm/paper views
@@ -488,9 +503,10 @@ project-root/
 - `autonomous_coordinator.py`: Three-tier workflow orchestrator (Tier 1→2→3, triggers, crash recovery, invokes `ProofVerificationStage` after brainstorm/Tier 2 paper completion when `lean4_enabled`)
 - `autonomous_rag_manager.py`: Autonomous RAG wrapper
 - `proof_round_driver.py`: Shared policy-driven round orchestration for one-round, bounded automatic multi-round, and unbounded continuous-pruning calls, including trigger naming, bounded prior-round summaries, no-candidate policy, and token-owned source reservation. `ProofVerificationStage.run()` retains candidate, Lean, Phase A/B, registration, checkpoint, and recovery execution. The public proof-check route selects policy through explicit `run_mode`, with `one_round` remaining the compatibility default.
-- `proof_verification_stage.py`: Proof pipeline orchestrator — prompt-relevant candidate identification with bounded source-title/brainstorm-topic metadata → per-candidate Phase A (Mathlib lemma search → optional SMT early-exit → Lean 4 formalization attempts, currently 3 full-script plus 2 tactic-script attempts per candidate) runs across all identified candidates with `proof_max_parallel_candidates` batching (default `6`; `0` = unlimited; positive values = strict batch size) → Phase B (novelty check → `add_proof` → `ProofDependency` extraction → brainstorm/paper `append_proofs_section`) remains strictly serialized in Phase-A completion order. Per-source reservation lock prevents duplicate concurrent checks for the same `{source_type}:{source_id}`; automatic provider interruptions preserve cumulative checkpoint results/counts, while a transient manual post-Lean novelty failure conservatively stores the verified artifact as `not_novel`. Compiler rigor mode remains serial, separate from this parallel proof pipeline, and capped at 5 consecutive rigor cycles.
+- `proof_candidate_list_validator.py`: Independent identity-complete pre-Lean whole-list review; requires at least 75% approved novel candidates and forwards only approved entries.
+- `proof_verification_stage.py`: Proof pipeline orchestrator — prompt-relevant candidate identification → per-candidate Phase A (Mathlib lemma search → optional SMT early-exit → 3 full-script plus 2 tactic-script Lean attempts) with `proof_max_parallel_candidates` batching → serialized Phase B (post-Lean novelty → storage → dependencies → source append). Per-source locking and checkpoint identity fences prevent duplicate or stale work; provider interruptions preserve valid cumulative state. Compiler rigor remains a separate serial loop.
 - `proof_run_manager.py`: Scope-neutral lifecycle owner for one-round and continuous pruning-loop proof checks. Manual runs are process-local, expose Stop, and automatically continue rounds without a no-candidate limit. Stop, backend shutdown, or hard repair terminates the run and requires a fresh later request; no durable idle/restart-resume/next-round state exists. Provider reset may still wake an in-process pause. It owns stable identity, reservation/sleep cleanup, bounded status, detailed per-round lifecycle events, and terminal cleanup.
-- `proof_pruning_coordinator.py`: Build 04 run-scoped asynchronous owner for three-prompt-novel/candidate-overflow pruning reviews. It task-schedules notification accounting so serialized proof registration continues, coalesces one active proposer/Validator job, persists pruning-local state, fences commits against immutable snapshot/run/source/lifecycle facts, drains on terminal ownership cleanup, and rebinds only compatible queued same-run state after discarding transient authority where the owner supports resume.
+- `proof_pruning_coordinator.py`: Run-scoped asynchronous owner for three-prompt-novel or proof-memory-attributable overflow review. It bounds and conservatively arbitrates candidate-centered semantic evidence, preserves newer trigger generations, migrates compatible durable counters/pressure/queued state, protects retained-support provenance, fences commits against snapshot/run/source/lifecycle/evidence/dependency facts, and drains on terminal ownership cleanup.
 - `proof_novelty.py`: Shared novelty classifier for Lean-verified proofs, used by autonomous proof verification and compiler rigor persistence.
 - `proof_registration.py`: Shared verified-proof registration that preserves independent public/current-context novelty, stores every current occurrence, then adds silent cross-run canonical duplicate provenance/overlay across enabled history.
 - `proof_dependency_extractor.py`: Parses verified Lean 4 code into `ProofDependency` records (imports, Mathlib lemmas, MOTO-origin proof ancestry).
@@ -498,7 +514,8 @@ project-root/
 - Tier 3 Agents: `certainty_assessor.py`, `answer_format_selector.py`, `volume_organizer.py`
 - `paper_redundancy_checker.py`: Library quality maintenance (every 3 papers)
 - Prompts: `topic_prompts.py`, `topic_exploration_prompts.py`, `completion_prompts.py`, `paper_reference_prompts.py`, `paper_title_exploration_prompts.py`, `paper_title_prompts.py`, `paper_redundancy_prompts.py`, `paper_continuation_prompts.py`, `proof_prompts.py`, `final_answer_prompts.py`
-- Memory: `brainstorm_memory.py`, `paper_library.py`, `research_metadata.py` (also stores the proof runtime config snapshot), `session_manager.py`, `autonomous_rejection_logs.py`, `topic_exploration_memory.py` (in-memory candidate DB), `paper_model_tracker.py` (per-paper model usage tracking and author attribution), `autonomous_api_logger.py` (API call logging singleton), `proof_database.py` (session-aware occurrence-preserving Lean proof storage, owning-run live-context state, prompt-novel injection filtering, novelty/reverse-Mathlib indexes, and cross-session access), `final_answer_memory.py` (model tracking, archival)
+- `proof_pruning_evidence.py`: Pure deterministic projection layer for bounded semantic pruning evidence. It computes stable semantic ranking signals, context estimates, and decision-relevant evidence/dependency/descriptor fingerprints without importing proof stores or authorizing mutation.
+- Memory: `brainstorm_memory.py`, `paper_library.py`, `research_metadata.py` (also stores the proof runtime config snapshot), `session_manager.py`, `autonomous_rejection_logs.py`, `topic_exploration_memory.py` (in-memory candidate DB), `paper_model_tracker.py` (per-paper model usage tracking and author attribution), `autonomous_api_logger.py` (API call logging singleton), `proof_database.py` (session-aware occurrence-preserving Lean proof storage, owning-run live-context state, bounded revisioned semantic-pruning snapshots and commit fences, prompt-novel injection filtering, novelty/reverse-Mathlib indexes, and cross-session access), `final_answer_memory.py` (model tracking, archival)
 
 ### LeanOJ Components
 

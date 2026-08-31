@@ -54,6 +54,12 @@ from backend.compiler.memory.outline_memory import outline_memory
 from backend.compiler.memory.paper_memory import paper_memory
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.config import system_config
+from backend.shared.context_overflow import (
+    CONTEXT_OVERFLOW_RESOLUTION,
+    CONTEXT_OVERFLOW_STOP_MESSAGE,
+    CONTEXT_OVERFLOW_STOP_REASON,
+    context_overflow_model_payload,
+)
 from backend.shared.lean4_client import (
     clear_lean4_client,
     close_lean4_client,
@@ -681,6 +687,10 @@ def _configure_manual_roles(
     )
     api_client_manager.configure_role(
         f"autonomous_proof_novelty_{suffix}",
+        _build_model_config(snapshot.validator),
+    )
+    api_client_manager.configure_role(
+        f"autonomous_proof_candidate_list_validator_{suffix}",
         _build_model_config(snapshot.validator),
     )
     proposer_role = snapshot.paper
@@ -1353,10 +1363,15 @@ async def _run_manual_proof_check(
             checkpoint_theorem_names: Dict[str, str] = {}
             checkpoint_truncation_streak: List[Dict[str, Any]] = []
             checkpoint_result: Optional[ProofStageResult] = None
+            checkpoint_processed_candidate_ids: List[str] = []
+            checkpoint_candidate_list_state: Dict[str, Any] = {}
             saved_checkpoint = await proof_run_manager.load_candidate_checkpoint(
                 run_control
             )
             if saved_checkpoint:
+                checkpoint_candidate_list_state = dict(
+                    saved_checkpoint.get("candidate_list_review") or {}
+                )
                 (
                     checkpoint_candidates,
                     proof_candidate_indexes,
@@ -1364,6 +1379,7 @@ async def _run_manual_proof_check(
                     checkpoint_theorem_names,
                     checkpoint_truncation_streak,
                     checkpoint_result,
+                    checkpoint_processed_candidate_ids,
                 ) = autonomous_coordinator._deserialize_proof_checkpoint(
                     saved_checkpoint
                 )
@@ -1439,6 +1455,8 @@ async def _run_manual_proof_check(
                     checkpoint_theorem_names_by_candidate=checkpoint_theorem_names,
                     checkpoint_truncation_streak=checkpoint_truncation_streak,
                     checkpoint_result=checkpoint_result,
+                    checkpoint_candidate_list_state=checkpoint_candidate_list_state,
+                    checkpoint_processed_candidate_ids=checkpoint_processed_candidate_ids,
                     checkpoint_callback=save_manual_checkpoint,
                 )
                 if retry_activity_payload is not None:
@@ -1537,6 +1555,57 @@ async def _run_manual_proof_check(
                     return "stopped", None
                 raise
 
+            continuous_context_overflow = (
+                run_control.snapshot.run_mode == "loop_with_pruning"
+                and bool(result.context_overflow_payload)
+            )
+            if continuous_context_overflow:
+                overflow_payload = dict(result.context_overflow_payload or {})
+                overflow_payload.update(
+                    {
+                        "proof_run_id": run_control.snapshot.proof_run_id,
+                        "run_mode": run_control.snapshot.run_mode,
+                        "lifecycle_generation": run_control.snapshot.lifecycle_generation,
+                        "scope": run_control.snapshot.scope,
+                        "source_type": run_control.snapshot.source_type,
+                        "source_id": run_control.snapshot.source_id,
+                        "source_title": source_title,
+                        "run_id": run_control.snapshot.run_id,
+                        "round_index": round_index,
+                        "proof_round_index": round_index,
+                        "workflow_mode": "manual_proof_check",
+                        "fatal": True,
+                        "status": "error",
+                        "terminal_reason": CONTEXT_OVERFLOW_STOP_REASON,
+                        "reason": CONTEXT_OVERFLOW_STOP_REASON,
+                        "message": CONTEXT_OVERFLOW_STOP_MESSAGE,
+                        "resolution": CONTEXT_OVERFLOW_RESOLUTION,
+                        "deferred_candidate_ids": list(
+                            result.deferred_candidate_ids
+                        ),
+                    }
+                )
+                if not any(
+                    overflow_payload.get(key)
+                    for key in (
+                        "configured_model",
+                        "configured_provider",
+                        "effective_model",
+                        "effective_provider",
+                    )
+                ):
+                    overflow_payload.update(
+                        context_overflow_model_payload(
+                            _build_model_config(role_config)
+                        )
+                    )
+                result.fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
+                result.fatal_stop_payload = overflow_payload
+                await proof_run_manager.update(
+                    run_control,
+                    terminal_reason=CONTEXT_OVERFLOW_STOP_REASON,
+                )
+
             summary = summarize_round_result(round_index, result)
             if result.fatal_stop_reason:
                 await proof_run_manager.update(
@@ -1560,6 +1629,16 @@ async def _run_manual_proof_check(
                 proof_set_revision=await scoped_proof_database.get_proof_set_revision(),
             )
             if result.fatal_stop_reason:
+                if result.fatal_stop_reason == CONTEXT_OVERFLOW_STOP_REASON:
+                    await proof_run_manager.error(
+                        run_control,
+                        terminal_reason=CONTEXT_OVERFLOW_STOP_REASON,
+                        reason=CONTEXT_OVERFLOW_STOP_MESSAGE,
+                    )
+                    await broadcast_fn(
+                        "context_overflow_error",
+                        dict(result.fatal_stop_payload),
+                    )
                 return "fatal_stop", result
             if (
                 run_control.snapshot.run_mode == "loop_with_pruning"
@@ -1599,10 +1678,20 @@ async def _run_manual_proof_check(
             )
             return
         if driver_status == "fatal_stop":
+            if run_control.snapshot.status == "error":
+                return
+            terminal_reason = (
+                run_control.snapshot.terminal_reason
+                or "proof_output_truncation_recovery_exhausted"
+            )
+            if terminal_reason == CONTEXT_OVERFLOW_STOP_REASON:
+                reason = CONTEXT_OVERFLOW_STOP_MESSAGE
+            else:
+                reason = "Proof output truncation recovery was exhausted for this manual proof run."
             await proof_run_manager.error(
                 run_control,
-                terminal_reason="proof_output_truncation_recovery_exhausted",
-                reason="Proof output truncation recovery was exhausted for this manual proof run.",
+                terminal_reason=terminal_reason,
+                reason=reason,
             )
             return
         if driver_status == "stopped":
@@ -1720,12 +1809,6 @@ async def _strip_known_proofs_from_files() -> dict:
     (novel or known) remains in ProofDatabase (the JSON index files).
     """
     import re as _re
-    import asyncio as _asyncio
-
-    files_checked = 0
-    files_modified = 0
-    entries_removed = 0
-
     def _clean_content(content: str, proof_header: str) -> tuple[str, int]:
         """Return (cleaned_content, removed_count).  Removes Known entries only."""
         if proof_header not in content:
@@ -1761,45 +1844,56 @@ async def _strip_known_proofs_from_files() -> dict:
 
         return new_content, removed
 
-    # Clean brainstorm files
-    brainstorm_paths = list(brainstorm_memory._base_dir.rglob("brainstorm_*.txt")) if hasattr(brainstorm_memory, '_base_dir') else []
-    for path in brainstorm_paths:
-        try:
-            files_checked += 1
-            text = path.read_text(encoding="utf-8")
-            cleaned, removed = _clean_content(text, "=== PROOFS GENERATED FROM THIS BRAINSTORM (Lean 4 Verified) ===")
-            if removed > 0:
-                path.write_text(cleaned, encoding="utf-8")
-                files_modified += 1
-                entries_removed += removed
-                logger.info(f"Stripped {removed} known proof(s) from brainstorm file: {path.name}")
-        except Exception as exc:
-            logger.warning(f"Skipped brainstorm file {path}: {exc}")
+    def _strip_sync() -> dict:
+        files_checked = 0
+        files_modified = 0
+        entries_removed = 0
+        path_groups = (
+            (
+                list(brainstorm_memory._base_dir.rglob("brainstorm_*.txt"))
+                if hasattr(brainstorm_memory, "_base_dir")
+                else [],
+                "=== PROOFS GENERATED FROM THIS BRAINSTORM (Lean 4 Verified) ===",
+                "brainstorm",
+            ),
+            (
+                list(paper_library._base_dir.rglob("paper_*.txt"))
+                if hasattr(paper_library, "_base_dir")
+                else [],
+                "=== PROOFS GENERATED FROM THIS PAPER (Lean 4 Verified) ===",
+                "paper",
+            ),
+        )
+        for paths, proof_header, source_label in path_groups:
+            for path in paths:
+                try:
+                    files_checked += 1
+                    text = path.read_text(encoding="utf-8")
+                    cleaned, removed = _clean_content(text, proof_header)
+                    if removed > 0:
+                        path.write_text(cleaned, encoding="utf-8")
+                        files_modified += 1
+                        entries_removed += removed
+                        logger.info(
+                            "Stripped %s known proof(s) from %s file: %s",
+                            removed,
+                            source_label,
+                            path.name,
+                        )
+                except Exception as exc:
+                    logger.warning("Skipped %s file %s: %s", source_label, path, exc)
 
-    # Clean paper files
-    paper_paths = list(paper_library._base_dir.rglob("paper_*.txt")) if hasattr(paper_library, '_base_dir') else []
-    for path in paper_paths:
-        try:
-            files_checked += 1
-            text = path.read_text(encoding="utf-8")
-            cleaned, removed = _clean_content(text, "=== PROOFS GENERATED FROM THIS PAPER (Lean 4 Verified) ===")
-            if removed > 0:
-                path.write_text(cleaned, encoding="utf-8")
-                files_modified += 1
-                entries_removed += removed
-                logger.info(f"Stripped {removed} known proof(s) from paper file: {path.name}")
-        except Exception as exc:
-            logger.warning(f"Skipped paper file {path}: {exc}")
+        return {
+            "files_checked": files_checked,
+            "files_modified": files_modified,
+            "entries_removed": entries_removed,
+            "message": (
+                f"Removed {entries_removed} non-novel proof entries from {files_modified} file(s). "
+                "Proof data is retained in ProofDatabase."
+            ),
+        }
 
-    return {
-        "files_checked": files_checked,
-        "files_modified": files_modified,
-        "entries_removed": entries_removed,
-        "message": (
-            f"Removed {entries_removed} non-novel proof entries from {files_modified} file(s). "
-            "Proof data is retained in ProofDatabase."
-        ),
-    }
+    return await asyncio.to_thread(_strip_sync)
 
 
 @router.post("/cleanup-known-from-files")
@@ -1917,8 +2011,8 @@ async def get_proofs_status():
         "z3_version": z3_version,
         "manual_check_ready": manual_check_ready,
         "manual_check_message": manual_check_message,
-        "proof_counts": proof_database.count_proofs(),
-        "manual_proof_counts": manual_proof_database.count_proofs(),
+        "proof_counts": proof_database.count_proofs_cached(),
+        "manual_proof_counts": manual_proof_database.count_proofs_cached(),
     }
 
 

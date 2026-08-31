@@ -90,12 +90,22 @@ export default function HighlightedModelsSidebar() {
             </div>
 
             <div className="model-item model-item--ranked model-item--bronze model-item--oa">
-              <OauthTag />
+              <OauthTag stacked />
               <div className="flex-row-center">
-                <div className="model-item-name">Grok 4.5</div>
+                <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
+                <div className="model-item-name">Grok 4.6</div>
                 <div className="ranking-badge ranking-badge--bronze">🥉 BRONZE</div>
               </div>
               <div className="model-item-badge">Powerful and affordable OAuth</div>
+            </div>
+          </div>
+
+          <div className="models-podium models-podium--free">
+            <div className="models-podium-label">Best Free OpenRouter Model</div>
+            <div className="model-item model-item--ranked model-item--free model-item--os">
+              <OsTag />
+              <div className="model-item-name">NVIDIA Nemotron Ultra</div>
+              <div className="model-item-badge">Highly knowledgeable, free on OpenRouter</div>
             </div>
           </div>
 
@@ -177,7 +187,8 @@ export default function HighlightedModelsSidebar() {
           </div>
 
           <div className="model-item model-item--oa">
-            <OauthTag />
+            <OauthTag stacked />
+            <ProofStrengthBadge variant="leaderboard" className="ps-badge-anchor--model-only" />
             <div className="model-item-name">xAI's Grok</div>
             <div className="model-item-badge">Highly knowledgeable</div>
           </div>

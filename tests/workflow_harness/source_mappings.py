@@ -39,6 +39,12 @@ class WorkflowSourceMapping:
 
 
 BUILD_07_FIELDS = {
+    "proof_runtime.candidate_list_validator_gate": (
+        "proof_runtime_gating",
+        "provider_pause_resume",
+        "workflow_filesystem_state",
+        "websocket_api_contracts",
+    ),
     "proof_pruning.artifacts_and_future_memory_preserved": (
         "proof_pruning",
         "workflow_filesystem_state",
@@ -52,6 +58,12 @@ BUILD_07_FIELDS = {
     "proof_pruning.validator_gates_automatic_mutation": (
         "proof_pruning",
         "provider_pause_resume",
+        "workflow_filesystem_state",
+    ),
+    "proof_pruning.semantic_distinct_review_preserves_unique_routes": (
+        "proof_pruning",
+        "prompt_context",
+        "proof_scope_isolation",
         "workflow_filesystem_state",
     ),
     "proof_pruning.no_prune_is_valid": ("proof_pruning", "provider_pause_resume"),
@@ -89,6 +101,23 @@ BUILD_07_FIELDS = {
 
 
 BUILD_07_SOURCE_MAPPINGS: tuple[WorkflowSourceMapping, ...] = (
+    WorkflowSourceMapping(
+        invariant_id="proof_runtime.candidate_list_validator_gate",
+        scenario_id="real_candidate_list_validator_gate_and_scope",
+        adapter="real_coordinator",
+        result="blocked",
+        production_sources=(
+            "backend/autonomous/agents/proof_candidate_list_validator.py",
+            "backend/autonomous/core/proof_verification_stage.py",
+        ),
+        test_selector=None,
+        blocked_reason=(
+            "Focused stage tests observe exact threshold, approved-only forwarding, "
+            "scope invalidation, and semantic-memory bounds, but no bounded real-coordinator "
+            "adapter yet observes Autonomous restart plus manual process-local ownership "
+            "without synthesizing the lifecycle owner."
+        ),
+    ),
     WorkflowSourceMapping(
         invariant_id="proof_pruning.artifacts_and_future_memory_preserved",
         scenario_id="real_pruned_proof_artifacts_and_future_memory_preserved",
@@ -232,6 +261,23 @@ BUILD_07_SOURCE_MAPPINGS: tuple[WorkflowSourceMapping, ...] = (
             "ProofPruningSnapshotTests::test_same_run_pruned_occurrence_is_not_reviewed"
         ),
         evidence=("same_run_filtered", "occurrence_status"),
+    ),
+    WorkflowSourceMapping(
+        invariant_id="proof_pruning.semantic_distinct_review_preserves_unique_routes",
+        scenario_id="real_semantic_prune_persists_and_protects_retained_support",
+        adapter="real_coordinator",
+        result="blocked",
+        production_sources=(
+            "backend/autonomous/agents/proof_pruning_agent.py",
+            "backend/autonomous/memory/proof_database.py",
+        ),
+        test_selector=None,
+        blocked_reason=(
+            "Focused unit tests cover durable retained-support protection and "
+            "section arbitration, but no bounded real-coordinator adapter yet "
+            "observes canonically distinct semantic routes through proposal, "
+            "validation, commit, and a later support-prune attempt."
+        ),
     ),
 )
 

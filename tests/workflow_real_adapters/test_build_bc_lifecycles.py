@@ -417,6 +417,7 @@ async def test_manual_compiler_real_papers_only_route_start_stop(monkeypatch):
 @pytest.mark.asyncio
 async def test_manual_compiler_proof_only_route_owns_background_task(monkeypatch):
     import asyncio
+    import backend.shared.lean4_client as lean4_client_module
 
     compiler = CompilerCoordinator()
     aggregator = Coordinator()
@@ -437,6 +438,11 @@ async def test_manual_compiler_proof_only_route_owns_background_task(monkeypatch
     )
     monkeypatch.setattr(system_config, "generic_mode", False)
     monkeypatch.setattr(system_config, "lean4_enabled", True)
+    monkeypatch.setattr(
+        lean4_client_module,
+        "start_lean4_workspace_bootstrap",
+        lambda: None,
+    )
     entered = asyncio.Event()
     release = asyncio.Event()
     class Stage:

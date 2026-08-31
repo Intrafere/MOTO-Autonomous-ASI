@@ -17,6 +17,7 @@ from backend.autonomous.agents.proof_pruning_agent import (
 )
 from backend.autonomous.memory.proof_database import is_prompt_injection_novel_tier
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
+from backend.shared.log_redaction import redact_log_text
 from backend.shared.model_error_utils import (
     is_non_retryable_model_error,
     is_transient_model_call_error,
@@ -42,8 +43,8 @@ LoadFn = Optional[Callable[[], Awaitable[Optional[dict[str, Any]]]]]
 InvalidateFn = Optional[Callable[[str], Awaitable[None] | None]]
 ShouldStopFn = Optional[Callable[[], bool]]
 
-PRUNING_STATE_SCHEMA_VERSION = 1
-PRUNING_POLICY_VERSION = "proof-pruning-orchestration-v1"
+PRUNING_STATE_SCHEMA_VERSION = 2
+PRUNING_POLICY_VERSION = "proof-pruning-semantic-v2"
 CADENCE_THRESHOLD = 3
 
 
@@ -573,7 +574,17 @@ class ProofPruningCoordinator:
             self.state.last_reviewed_pressure_revision = snapshot.proof_set_revision
 
     async def _handle_failure(self, exc: Exception, reasons: list[str]) -> bool:
-        summary = str(exc or exc.__class__.__name__)[:1000]
+        summary = redact_log_text(
+            str(exc or exc.__class__.__name__),
+            1000,
+        )
+        logger.error(
+            "Proof pruning review failed for run=%s snapshot=%s: %s",
+            self.proof_run_id,
+            self.state.snapshot_id or "[not captured]",
+            summary,
+            exc_info=exc,
+        )
         async with self._state_lock:
             for reason in reasons:
                 if reason not in self.state.queued_trigger_reasons:
@@ -642,12 +653,30 @@ class ProofPruningCoordinator:
             "proof_prune_error",
             message=(
                 "Proof pruning failed without changing proof context; "
-                "proof solving continues."
+                f"proof solving continues. {exc.__class__.__name__}: {summary}"
             ),
             error_type=exc.__class__.__name__,
+            error_summary=summary,
         )
-        # Contract errors retain pressure but require an explicit later owner.
-        return isinstance(exc, ProofPruningContractError)
+        # Unknown/contract failures must not hot-loop the same trigger. Preserve
+        # durable diagnostics, but require a later proof registration, pressure
+        # change, or explicit owner lifecycle to schedule another review.
+        async with self._state_lock:
+            self.state.queued_trigger_reasons = [
+                reason
+                for reason in self.state.queued_trigger_reasons
+                if reason not in reasons
+            ]
+            if "three_novel_proofs" in reasons:
+                self.state.last_scheduled_acceptance_baseline = max(
+                    0,
+                    self.state.last_scheduled_acceptance_baseline
+                    - CADENCE_THRESHOLD,
+                )
+            self.state.active_trigger_reasons = []
+            self.state.follow_up_required = True
+            await self._persist()
+        return True
 
     async def drain(self, *, preserve_pending: bool = True) -> None:
         """Fence new work, cancel and observe the owned task."""

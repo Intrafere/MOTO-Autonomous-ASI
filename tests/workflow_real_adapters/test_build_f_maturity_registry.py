@@ -24,11 +24,13 @@ EXPECTED_DEEP_IDS = {
     "real_rigor_mandatory_source_overflow_fails_before_model_or_rag",
 }
 EXPECTED_BLOCKED_IDS = {
+    "real_candidate_list_validator_gate_and_scope",
     "real_parent_action_fencing_unavailable_without_production_seam",
     "real_provider_stop_reset_checkpoint_unavailable_without_wait_seam",
     "real_leanoj_full_final_loop_not_safely_bounded",
     "real_pruning_overflow_commit_interleaving_unobservable",
     "real_continuous_loop_stop_terminal_zero_policy",
+    "real_semantic_prune_persists_and_protects_retained_support",
 }
 
 

@@ -1,13 +1,13 @@
 {
   "action_ids": [
-    "start_manual_aggregator",
+    "start_autonomous_proofs_only",
     "emit_context_overflow_contract_events"
   ],
   "adapter": "model",
   "artifact_type": "result",
   "diagnostics": {
-    "final_mode": "manual_aggregator",
-    "final_phase": "manual_aggregation"
+    "final_mode": "autonomous",
+    "final_phase": "topic_exploration"
   },
   "evidence": [
     "context_overflow"
@@ -32,6 +32,7 @@
     "events.proof_context_overflow_nonfatal"
   ],
   "observed_fields": [
+    "allowed_outputs",
     "proof_runtime_gating",
     "provider_pause_resume",
     "runtime_exclusivity",
@@ -39,7 +40,7 @@
     "workflow_filesystem_state"
   ],
   "replay": [
-    "start_manual_aggregator()",
+    "start_autonomous(lean_enabled=True, papers=False, proofs=True)",
     "emit_context_overflow_contract_events()"
   ],
   "result": "passed",

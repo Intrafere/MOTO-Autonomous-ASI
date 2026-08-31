@@ -531,6 +531,7 @@ class AutonomousTerminalEvent(BaseModel):
     occurred_at: datetime = Field(default_factory=datetime.now)
     recoverable: bool = True
     workflow_mode: Literal["autonomous"] = "autonomous"
+    notification_kind: Optional[str] = None
     role_id: Optional[str] = None
     current_tier: Optional[str] = None
     current_topic_id: Optional[str] = None
@@ -686,6 +687,35 @@ class ProofCandidate(BaseModel):
     smt_hint: Optional[SmtHint] = None
 
 
+class ProofCandidateNoveltyDecision(BaseModel):
+    """Independent pre-Lean novelty decision for one proposed candidate."""
+    model_config = ConfigDict(extra="forbid")
+
+    theorem_id: str = Field(min_length=1, max_length=256)
+    decision: Literal["approve_novel", "reject_not_novel"]
+    reasoning: str = Field(min_length=1, max_length=2000)
+
+
+class ProofCandidateListValidation(BaseModel):
+    """Exact whole-list response contract for the pre-Lean Validator."""
+    model_config = ConfigDict(extra="forbid")
+
+    results: List[ProofCandidateNoveltyDecision] = Field(min_length=1)
+    feedback: str = Field(min_length=1, max_length=3000)
+
+
+class ProofCandidateListRejection(BaseModel):
+    """Bounded semantic rejection retained only for one proof round."""
+    model_config = ConfigDict(extra="forbid")
+
+    list_fingerprint: str = Field(min_length=1, max_length=256)
+    generation_attempt: int = Field(ge=1)
+    proposed_count: int = Field(ge=1)
+    approved_count: int = Field(ge=0)
+    rejected_candidate_ids: List[str] = Field(default_factory=list)
+    feedback: str = Field(min_length=1, max_length=3000)
+
+
 class FailedProofCandidate(BaseModel):
     """Persisted failed theorem candidate that can be retried later."""
     source_brainstorm_id: str
@@ -791,7 +821,9 @@ class ProofPruneAggregateEntry(BaseModel):
     dependency_extraction_status: ProofDependencyExtractionStatus = "not_attempted"
     dependency_count: int = Field(default=0, ge=0)
     dependent_count: int = Field(default=0, ge=0)
-    exact_identity_occurrence_count: int = Field(default=1, ge=1)
+    dependency_fingerprint: str = Field(default="", max_length=256)
+    descriptor_fingerprint: str = Field(default="", max_length=256)
+    estimated_context_tokens: int = Field(default=0, ge=0)
     protected_reasons: List[str] = Field(default_factory=list)
     eligible_candidate: bool = False
 
@@ -815,11 +847,21 @@ class ProofPruneProofDescriptor(BaseModel):
     created_at: datetime
     dependencies: List[ProofDependency] = Field(default_factory=list)
     dependency_extraction_status: ProofDependencyExtractionStatus = "not_attempted"
+    dependency_fingerprint: str = Field(default="", max_length=256)
+    descriptor_fingerprint: str = Field(default="", max_length=256)
     protected_reasons: List[str] = Field(default_factory=list)
-    comparator_proof_ids: List[str] = Field(default_factory=list)
     role_in_user_objective: str = Field(default="", max_length=2000)
     lean_code: str = ""
     lean_code_included: bool = False
+
+
+class ProofPruneCoverageClaim(BaseModel):
+    """One material contribution and the retained proofs that preserve it."""
+    model_config = ConfigDict(extra="forbid")
+
+    target_contribution: str = Field(min_length=1, max_length=2000)
+    preserved_by_proof_ids: List[str] = Field(min_length=1, max_length=3)
+    explanation: str = Field(min_length=1, max_length=2000)
 
 
 class ProofPruneProposal(BaseModel):
@@ -830,6 +872,20 @@ class ProofPruneProposal(BaseModel):
     proof_id: Optional[str] = Field(default=None, max_length=256)
     expected_theorem_hash: Optional[str] = Field(default=None, max_length=256)
     expected_lean_hash: Optional[str] = Field(default=None, max_length=256)
+    prune_category: Optional[
+        Literal[
+            "outdated",
+            "contextually_misaligned",
+            "redundant",
+            "superseded",
+            "low_unique_utility",
+        ]
+    ] = None
+    supporting_proof_ids: List[str] = Field(default_factory=list, max_length=3)
+    coverage_claims: List[ProofPruneCoverageClaim] = Field(
+        default_factory=list,
+        max_length=6,
+    )
     reasoning: str = Field(min_length=1, max_length=4000)
 
     @model_validator(mode="after")
@@ -838,15 +894,36 @@ class ProofPruneProposal(BaseModel):
             self.proof_id,
             self.expected_theorem_hash,
             self.expected_lean_hash,
+            self.prune_category,
         )
         if self.action == "no_prune":
-            if any(value is not None for value in target_fields):
-                raise ValueError("no_prune requires all target fields to be null")
+            if (
+                any(value is not None for value in target_fields)
+                or self.supporting_proof_ids
+                or self.coverage_claims
+            ):
+                raise ValueError(
+                    "no_prune requires null target fields and empty semantic evidence"
+                )
             return self
         if any(not str(value or "").strip() for value in target_fields):
             raise ValueError(
-                "propose_prune requires proof_id and both expected hashes"
+                "propose_prune requires proof_id, category, and both expected hashes"
             )
+        if not self.supporting_proof_ids or not self.coverage_claims:
+            raise ValueError(
+                "propose_prune requires retained supporting proofs and coverage claims"
+            )
+        if self.proof_id in self.supporting_proof_ids:
+            raise ValueError("A pruning target cannot support its own removal")
+        if len(set(self.supporting_proof_ids)) != len(self.supporting_proof_ids):
+            raise ValueError("supporting_proof_ids must be unique")
+        allowed_supports = set(self.supporting_proof_ids)
+        if any(
+            not set(claim.preserved_by_proof_ids).issubset(allowed_supports)
+            for claim in self.coverage_claims
+        ):
+            raise ValueError("Coverage claims may cite only declared supporting proofs")
         return self
 
 
@@ -856,6 +933,8 @@ class ProofPruneValidation(BaseModel):
 
     decision: Literal["accept", "reject"]
     proof_id: str = Field(min_length=1, max_length=256)
+    supporting_proof_ids: List[str] = Field(default_factory=list, max_length=3)
+    coverage_confirmed: bool = False
     reasoning: str = Field(min_length=1, max_length=4000)
 
 
@@ -884,10 +963,12 @@ class ProofPruneSnapshot(BaseModel):
     candidate_descriptors: List[ProofPruneProofDescriptor] = Field(
         default_factory=list
     )
-    comparator_descriptors: List[ProofPruneProofDescriptor] = Field(
-        default_factory=list
-    )
     evidence_bounded: bool = False
+    evidence_policy_version: str = Field(
+        default="proof-pruning-semantic-evidence-v1",
+        max_length=128,
+    )
+    evidence_fingerprint: str = Field(default="", max_length=256)
     captured_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -910,6 +991,19 @@ class ProofPruneCommitIntent(BaseModel):
     proof_set_revision: int = Field(ge=0)
     expected_theorem_hash: str
     expected_lean_hash: str
+    prune_category: Literal[
+        "outdated",
+        "contextually_misaligned",
+        "redundant",
+        "superseded",
+        "low_unique_utility",
+    ]
+    supporting_proof_ids: List[str] = Field(min_length=1, max_length=3)
+    supporting_proof_fingerprints: Dict[str, str] = Field(default_factory=dict)
+    target_dependency_fingerprint: str
+    target_descriptor_fingerprint: str
+    evidence_policy_version: str
+    evidence_fingerprint: str
     trigger_reasons: List[str] = Field(default_factory=list)
     proposer_reasoning: str = Field(min_length=1, max_length=4000)
     validator_reasoning: str = Field(min_length=1, max_length=4000)
@@ -1075,6 +1169,7 @@ class ProofRecord(BaseModel):
     live_context_prune_validator_reasoning: str = ""
     live_context_prune_snapshot_revision: Optional[int] = None
     live_context_prune_trigger_reasons: List[str] = Field(default_factory=list)
+    live_context_prune_supporting_proof_ids: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_live_context_state(self):
@@ -1086,6 +1181,7 @@ class ProofRecord(BaseModel):
             self.live_context_prune_validator_reasoning = ""
             self.live_context_prune_snapshot_revision = None
             self.live_context_prune_trigger_reasons = []
+            self.live_context_prune_supporting_proof_ids = []
             return self
         if not self.live_context_owner_run_id.strip():
             raise ValueError("Pruned proofs require an owning run ID")
@@ -1227,6 +1323,7 @@ class ProofStageResult(BaseModel):
     had_error: bool = False
     error_message: str = ""
     deferred_candidate_ids: List[str] = Field(default_factory=list)
+    context_overflow_payload: Dict[str, Any] = Field(default_factory=dict)
     fatal_stop_reason: str = ""
     fatal_stop_payload: Dict[str, Any] = Field(default_factory=dict)
 

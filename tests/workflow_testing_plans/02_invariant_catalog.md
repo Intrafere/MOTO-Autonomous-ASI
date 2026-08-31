@@ -12,9 +12,11 @@ rename or reuse an existing ID.
 
 | Stable ID | Product law | Model scenario | Real-source observation |
 |---|---|---|---|
+| `proof_runtime.candidate_list_validator_gate` | Every proof round validates the complete candidate list before proof cost, accepts exactly 75%, forwards only approved novel entries, and fences the latest five semantic rejections to the owning round. | Direct invariant-catalog scenario | Candidate-list stage and contract coverage. |
 | `proof_pruning.artifacts_and_future_memory_preserved` | Pruning preserves canonical records, visibility, export/certificate and graph access, future-run memory, and SyntheticLib-facing eligibility. | `model_proof_pruning_continuous_contracts` | Proof database and proof-search regression coverage. |
 | `proof_pruning.owning_run_context_excludes_pruned` | Owning-run direct/search/Assistant context excludes a pruned occurrence, including reused packs; future runs may retrieve it. | `model_proof_pruning_continuous_contracts` | Proof database and Assistant cache coverage. |
 | `proof_pruning.validator_gates_automatic_mutation` | Automatic mutation requires a deterministically valid proposal and independent Validator acceptance. | `model_proof_pruning_continuous_contracts` | Pruning contract/agent coverage. |
+| `proof_pruning.semantic_distinct_review_preserves_unique_routes` | Canonically distinct proofs may be suppressed only through bounded semantic evidence citing retained coverage; related but unique routes remain active. | `model_proof_pruning_continuous_contracts` | Semantic snapshot, agent-guard, and commit-fence coverage. |
 | `proof_pruning.no_prune_is_valid` | A valid no-prune response is non-mutating and non-error. | `model_proof_pruning_continuous_contracts` | Held-review coordinator coverage. |
 | `proof_pruning.review_non_blocking` | Proof solving and serialized registration continue while proposer/Validator review is pending. | `model_proof_pruning_continuous_contracts` | Async pruning coordinator coverage. |
 | `proof_pruning.commit_lifecycle_fenced` | Stop, Clear, ownership, generation, revision, hash, dependency, and snapshot mismatches prevent mutation. | `model_proof_pruning_continuous_contracts` | Snapshot commit coverage. |

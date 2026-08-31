@@ -1688,7 +1688,7 @@ def frontend_install_command(npm_cmd: str, frontend_dir: Path, package_lock_path
 
     node_modules_path = frontend_dir / "node_modules"
     if node_modules_path.exists():
-        return [npm_cmd, "install", "--package-lock=false", "--no-save"]
+        return [npm_cmd, "install", "--no-save"]
     return [npm_cmd, "ci"]
 
 

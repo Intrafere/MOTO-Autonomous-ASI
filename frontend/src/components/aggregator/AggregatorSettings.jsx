@@ -84,6 +84,9 @@ function AggregatorModelSelector({
   const reasoningInfo = effectiveProvider === 'openrouter'
     ? getReasoningSupportInfo(modelProviders[modelId], orProvider || null)
     : { hasEndpointMetadata: false, supportsReasoning: false };
+  const selectedModelMissing = Boolean(
+    modelId && !models.some((model) => model.id === modelId)
+  );
 
   return (
     <>
@@ -152,6 +155,9 @@ function AggregatorModelSelector({
           onChange={(e) => onModelChange(e.target.value)}
         >
           <option value="">Select model...</option>
+          {selectedModelMissing && (
+            <option value={modelId}>{modelId} (configured)</option>
+          )}
           {models.map(model => {
             const isFree = effectiveProvider === 'openrouter'
               && model.pricing?.prompt === "0"

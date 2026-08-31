@@ -33,6 +33,14 @@ from backend.shared.models import (
 )
 from backend.shared.path_safety import resolve_filename_within_root, validate_single_path_component
 from backend.shared.proof_identity import canonical_proof_identity
+from backend.autonomous.proof_pruning_evidence import (
+    EVIDENCE_POLICY_VERSION,
+    dependency_fingerprint,
+    descriptor_fingerprint,
+    estimated_context_tokens,
+    evidence_fingerprint,
+    role_in_objective,
+)
 from backend.autonomous.prompts.proof_prompts import format_failure_hints_for_injection
 
 logger = logging.getLogger(__name__)
@@ -533,15 +541,24 @@ class ProofDatabase:
         stored_record: ProofRecord,
         serialized: Dict[str, Any],
     ) -> None:
-        """Persist one proof's metadata and Lean source through validated paths."""
+        """Persist one proof's Lean source before publishing its metadata record."""
         record_path = self._get_record_path(stored_record.proof_id)
         lean_path = self._get_lean_path(stored_record.proof_id)
-        await self._atomic_write_json(record_path, serialized)
-        await asyncio.to_thread(
-            self._atomic_write_text_sync,
-            lean_path,
-            stored_record.lean_code,
-        )
+        lean_existed = await asyncio.to_thread(lean_path.exists)
+        await asyncio.to_thread(self._atomic_write_text_sync, lean_path, stored_record.lean_code)
+        try:
+            await self._atomic_write_json(record_path, serialized)
+        except Exception:
+            if not lean_existed:
+                try:
+                    await asyncio.to_thread(lean_path.unlink, True)
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to roll back unpublished Lean proof source %s: %s",
+                        lean_path,
+                        cleanup_exc,
+                    )
+            raise
 
     async def _increment_proof_set_revision(self) -> int:
         revision = int(self._index_data.get("proof_set_revision", 0)) + 1
@@ -836,14 +853,13 @@ class ProofDatabase:
         trigger_reasons: Optional[List[str]] = None,
         accepted_prompt_novel_total: int = 0,
         context_pressure: Optional[ProofPruneContextPressure] = None,
-        max_candidate_descriptors: int = 12,
     ) -> ProofPruneSnapshot:
         """Atomically capture a deterministic, non-mutating pruning snapshot.
 
         Every active occurrence is represented in ``whole_set``. Detailed
-        descriptors are bounded to deterministically eligible exact-identity
-        candidates and their comparators. This method never calls a model and
-        never changes live-context state.
+        descriptors are bounded deterministically to dependency-safe semantic
+        review candidates. This method never calls a model and never changes
+        live-context state.
         """
         normalized_run_id = str(owning_run_id or "").strip()
         normalized_owning_generation = int(
@@ -854,9 +870,6 @@ class ProofDatabase:
             raise ValueError("A stable owning run ID is required.")
         if not normalized_prompt.strip():
             raise ValueError("The canonical user prompt is required.")
-        if max_candidate_descriptors < 1:
-            raise ValueError("max_candidate_descriptors must be positive.")
-
         async with self._lock:
             if self._index_data is None:
                 await self._load_index()
@@ -879,20 +892,10 @@ class ProofDatabase:
             )
             for record in active_records
         }
-        identity_groups: Dict[tuple[str, str], List[ProofRecord]] = {}
         dependent_counts: Dict[str, int] = {
             record.proof_id: 0 for record in active_records
         }
         for record in active_records:
-            canonical_identity = canonical_identity_by_id[record.proof_id]
-            identity_key = (
-                str(
-                    record.canonical_theorem_statement_hash
-                    or canonical_identity.theorem_statement_hash
-                ),
-                str(record.canonical_lean_code_hash or canonical_identity.lean_code_hash),
-            )
-            identity_groups.setdefault(identity_key, []).append(record)
             for dependency in record.dependencies:
                 if dependency.kind != "moto":
                     continue
@@ -902,8 +905,14 @@ class ProofDatabase:
 
         protected_by_id: Dict[str, List[str]] = {}
         eligible_ids: List[str] = []
-        comparator_ids: List[str] = []
         aggregate: List[ProofPruneAggregateEntry] = []
+        protected_support_ids = {
+            support_id
+            for record in records
+            if record.live_context_status == "pruned"
+            and record.live_context_owner_run_id == normalized_run_id
+            for support_id in record.live_context_prune_supporting_proof_ids
+        }
 
         for record in sorted(active_records, key=lambda item: item.proof_id):
             canonical_identity = canonical_identity_by_id[record.proof_id]
@@ -915,33 +924,17 @@ class ProofDatabase:
                 record.canonical_lean_code_hash
                 or canonical_identity.lean_code_hash
             )
-            identity_key = (
-                theorem_hash,
-                lean_hash,
-            )
-            group = sorted(
-                identity_groups.get(identity_key, []),
-                key=lambda item: (item.created_at, item.proof_id),
-            )
             protected_reasons: List[str] = []
             if record.dependency_extraction_status != "complete":
                 protected_reasons.append("dependency_extraction_incomplete")
             if dependent_counts.get(record.proof_id, 0) > 0:
                 protected_reasons.append("active_dependency_root")
-            if len(group) <= 1:
-                protected_reasons.append("only_active_exact_identity_occurrence")
-            # Exact duplicate occurrences are the only automatically eligible
-            # targets at this layer. Broader supersession needs explicit,
-            # bounded semantic evidence and therefore remains protected.
-            eligible = len(group) > 1 and not protected_reasons
+            if record.proof_id in protected_support_ids:
+                protected_reasons.append("retained_prune_support")
+            eligible = not protected_reasons
             protected_by_id[record.proof_id] = protected_reasons
             if eligible:
                 eligible_ids.append(record.proof_id)
-                comparator_ids.extend(
-                    candidate.proof_id
-                    for candidate in reversed(group)
-                    if candidate.proof_id != record.proof_id
-                )
 
             aggregate.append(
                 ProofPruneAggregateEntry(
@@ -957,62 +950,57 @@ class ProofDatabase:
                     dependency_extraction_status=record.dependency_extraction_status,
                     dependency_count=len(record.dependencies),
                     dependent_count=dependent_counts.get(record.proof_id, 0),
-                    exact_identity_occurrence_count=len(group),
+                    dependency_fingerprint=dependency_fingerprint(record),
+                    descriptor_fingerprint=descriptor_fingerprint(record),
+                    estimated_context_tokens=estimated_context_tokens(record),
                     protected_reasons=protected_reasons,
                     eligible_candidate=eligible,
                 )
             )
 
-        selected_candidate_ids = sorted(set(eligible_ids))[:max_candidate_descriptors]
-        selected_comparator_ids: List[str] = []
-        for proof_id in comparator_ids:
-            if (
-                len(selected_candidate_ids) + len(selected_comparator_ids)
-                >= max_candidate_descriptors
-            ):
-                break
-            if (
-                proof_id in records_by_id
-                and proof_id not in selected_candidate_ids
-                and proof_id not in selected_comparator_ids
-            ):
-                selected_comparator_ids.append(proof_id)
+        selected_candidate_ids = sorted(
+            set(eligible_ids),
+            key=lambda item: (
+                -estimated_context_tokens(records_by_id[item]),
+                records_by_id[item].created_at,
+                item,
+            ),
+        )
+        # Every active proof must be available as retained semantic evidence,
+        # including protected dependency roots that cannot themselves be targets.
+        for record in sorted(active_records, key=lambda item: item.proof_id):
+            if record.proof_id not in selected_candidate_ids:
+                selected_candidate_ids.append(record.proof_id)
 
         def descriptor(record: ProofRecord) -> ProofPruneProofDescriptor:
             canonical_identity = canonical_identity_by_id[record.proof_id]
-            identity_key = (
-                str(
-                    record.canonical_theorem_statement_hash
-                    or canonical_identity.theorem_statement_hash
-                ),
-                str(record.canonical_lean_code_hash or canonical_identity.lean_code_hash),
+            theorem_hash = str(
+                record.canonical_theorem_statement_hash
+                or canonical_identity.theorem_statement_hash
             )
-            comparators = [
-                item.proof_id
-                for item in sorted(
-                    identity_groups.get(identity_key, []),
-                    key=lambda item: (item.created_at, item.proof_id),
-                )
-                if item.proof_id != record.proof_id
-            ]
+            lean_hash = str(
+                record.canonical_lean_code_hash or canonical_identity.lean_code_hash
+            )
             return ProofPruneProofDescriptor(
                 proof_id=record.proof_id,
                 theorem_name=record.theorem_name,
                 theorem_statement=record.theorem_statement,
-                canonical_theorem_hash=identity_key[0],
-                canonical_lean_hash=identity_key[1],
+                canonical_theorem_hash=theorem_hash,
+                canonical_lean_hash=lean_hash,
                 novelty_tier=record.novelty_tier,
                 novelty_reasoning=record.novelty_reasoning,
                 independent_novelty_tier=record.independent_novelty_tier,
                 independent_novelty_reasoning=record.independent_novelty_reasoning,
                 source_type=record.source_type,
                 source_id=record.source_id,
-                source_title=record.source_title,
+                source_title=str(record.source_title or "")[:1000],
                 created_at=record.created_at,
                 dependencies=list(record.dependencies),
                 dependency_extraction_status=record.dependency_extraction_status,
+                dependency_fingerprint=dependency_fingerprint(record),
+                descriptor_fingerprint=descriptor_fingerprint(record),
                 protected_reasons=protected_by_id.get(record.proof_id, []),
-                comparator_proof_ids=comparators,
+                role_in_user_objective=role_in_objective(record),
                 lean_code=record.lean_code,
                 lean_code_included=bool(record.lean_code),
             )
@@ -1021,10 +1009,15 @@ class ProofDatabase:
             descriptor(records_by_id[proof_id])
             for proof_id in selected_candidate_ids
         ]
-        comparator_descriptors = [
-            descriptor(records_by_id[proof_id])
-            for proof_id in selected_comparator_ids
-        ]
+        evidence_digest = evidence_fingerprint(
+            whole_set=[
+                entry.model_dump(mode="json")
+                for entry in aggregate
+            ],
+            descriptor_fingerprints=[
+                item.descriptor_fingerprint for item in candidate_descriptors
+            ],
+        )
         identity_payload = {
             "proof_set_revision": revision,
             "proof_store_id": str(proof_store_id),
@@ -1035,6 +1028,8 @@ class ProofDatabase:
             "proof_ids": [entry.proof_id for entry in aggregate],
             "theorem_hashes": [entry.canonical_theorem_hash for entry in aggregate],
             "lean_hashes": [entry.canonical_lean_hash for entry in aggregate],
+            "evidence_policy_version": EVIDENCE_POLICY_VERSION,
+            "evidence_fingerprint": evidence_digest,
         }
         snapshot_id = hashlib.sha256(
             json.dumps(
@@ -1061,11 +1056,9 @@ class ProofDatabase:
             context_pressure=context_pressure or ProofPruneContextPressure(),
             whole_set=aggregate,
             candidate_descriptors=candidate_descriptors,
-            comparator_descriptors=comparator_descriptors,
-            evidence_bounded=(
-                len(selected_candidate_ids) + len(selected_comparator_ids)
-                < len(set(eligible_ids + comparator_ids))
-            ),
+            evidence_bounded=False,
+            evidence_policy_version=EVIDENCE_POLICY_VERSION,
+            evidence_fingerprint=evidence_digest,
         )
 
     async def get_proof_set_revision(self) -> int:
@@ -1145,6 +1138,7 @@ class ProofDatabase:
                         "live_context_prune_validator_reasoning": "",
                         "live_context_prune_snapshot_revision": None,
                         "live_context_prune_trigger_reasons": [],
+                        "live_context_prune_supporting_proof_ids": [],
                     }
                 )
             else:
@@ -1163,6 +1157,7 @@ class ProofDatabase:
                         ).strip()[:4000],
                         "live_context_prune_snapshot_revision": snapshot_revision,
                         "live_context_prune_trigger_reasons": list(trigger_reasons or []),
+                        "live_context_prune_supporting_proof_ids": [],
                     }
                 )
 
@@ -1179,6 +1174,7 @@ class ProofDatabase:
             except Exception:
                 self._index_data["proofs"][proof_index] = previous_serialized
                 self._index_data["proof_set_revision"] = previous_revision
+                self._rebuild_reverse_indexes()
                 await self._atomic_write_json(record_path, previous_serialized)
                 await asyncio.to_thread(
                     self._save_durable_revision_sync,
@@ -1199,7 +1195,7 @@ class ProofDatabase:
         """Commit one accepted prune after rechecking decision-relevant facts.
 
         Unrelated additions do not stale the decision. The target, its cited
-        exact-identity comparators, dependency/protection state, hashes, store,
+        retained semantic supports, dependency/protection state, hashes, store,
         run and lifecycle must still match the immutable review snapshot.
         """
         if snapshot.proof_store_id != str(expected_proof_store_id):
@@ -1215,6 +1211,10 @@ class ProofDatabase:
             raise RuntimeError("Owning workflow lifecycle changed; refresh and retry.")
         if intent.snapshot_id != snapshot.snapshot_id:
             raise RuntimeError("Pruning snapshot identity changed; refresh and retry.")
+        if intent.evidence_policy_version != snapshot.evidence_policy_version:
+            raise RuntimeError("Pruning evidence policy changed; refresh and retry.")
+        if intent.evidence_fingerprint != snapshot.evidence_fingerprint:
+            raise RuntimeError("Pruning evidence changed; refresh and retry.")
 
         snapshot_entries = {entry.proof_id: entry for entry in snapshot.whole_set}
         snapshot_target = snapshot_entries.get(intent.proof_id)
@@ -1230,6 +1230,10 @@ class ProofDatabase:
         )
         if descriptor is None:
             raise RuntimeError("Pruning target evidence is unavailable.")
+        if descriptor.dependency_fingerprint != intent.target_dependency_fingerprint:
+            raise RuntimeError("Pruning target dependency evidence changed.")
+        if descriptor.descriptor_fingerprint != intent.target_descriptor_fingerprint:
+            raise RuntimeError("Pruning target descriptor evidence changed.")
 
         async with self._lock:
             if self._index_data is None:
@@ -1262,6 +1266,10 @@ class ProofDatabase:
                 raise RuntimeError("Pruning target Lean identity changed.")
             if target.dependency_extraction_status != "complete":
                 raise RuntimeError("Pruning target dependency state is incomplete.")
+            if dependency_fingerprint(target) != intent.target_dependency_fingerprint:
+                raise RuntimeError("Pruning target dependencies changed.")
+            if descriptor_fingerprint(target) != intent.target_descriptor_fingerprint:
+                raise RuntimeError("Pruning target descriptor changed.")
 
             active_dependents = []
             for record in current_records.values():
@@ -1276,36 +1284,41 @@ class ProofDatabase:
             if active_dependents:
                 raise RuntimeError("Pruning target became an active dependency root.")
 
-            comparator_ids = list(descriptor.comparator_proof_ids)
-            matching_comparator = False
-            for comparator_id in comparator_ids:
-                comparator = current_records.get(comparator_id)
-                if comparator is None or not is_live_context_active(
-                    comparator, intent.owning_run_id
+            if not intent.supporting_proof_ids:
+                raise RuntimeError("Semantic pruning requires retained support.")
+            for support_id in intent.supporting_proof_ids:
+                support = current_records.get(support_id)
+                if support is None or not is_live_context_active(
+                    support, intent.owning_run_id
                 ):
-                    continue
-                comparator_identity = canonical_proof_identity(
-                    comparator.theorem_statement,
-                    comparator.lean_code,
+                    raise RuntimeError(
+                        "A retained semantic support changed or is unavailable."
+                    )
+                if support.dependency_extraction_status != "complete":
+                    raise RuntimeError(
+                        "A retained semantic support has incomplete dependencies."
+                    )
+                expected_fingerprint = intent.supporting_proof_fingerprints.get(
+                    support_id
                 )
                 if (
-                    str(
-                        comparator.canonical_theorem_statement_hash
-                        or comparator_identity.theorem_statement_hash
-                    )
-                    == theorem_hash
-                    and str(
-                        comparator.canonical_lean_code_hash
-                        or comparator_identity.lean_code_hash
-                    )
-                    == lean_hash
+                    not expected_fingerprint
+                    or descriptor_fingerprint(support) != expected_fingerprint
                 ):
-                    matching_comparator = True
-                    break
-            if not matching_comparator:
-                raise RuntimeError(
-                    "The stronger active comparator changed or is unavailable."
-                )
+                    raise RuntimeError(
+                        "A retained semantic support descriptor changed."
+                    )
+                if any(
+                    dependency.kind == "moto"
+                    and str(
+                        dependency.source_ref or dependency.name or ""
+                    ).strip()
+                    == target.proof_id
+                    for dependency in support.dependencies
+                ):
+                    raise RuntimeError(
+                        "A retained semantic support depends on the pruning target."
+                    )
 
             proof_index = next(
                 index
@@ -1328,17 +1341,34 @@ class ProofDatabase:
                     "live_context_prune_trigger_reasons": list(
                         intent.trigger_reasons
                     ),
+                    "live_context_prune_supporting_proof_ids": list(
+                        intent.supporting_proof_ids
+                    ),
                 }
             )
             serialized = self._serialize_record(updated)
+            previous_serialized = self._serialize_record(target)
+            previous_revision = current_revision
+            record_path = self._get_record_path(target.proof_id)
             await self._atomic_write_json(
-                self._get_record_path(target.proof_id),
+                record_path,
                 serialized,
             )
             self._index_data["proofs"][proof_index] = serialized
-            new_revision = await self._increment_proof_set_revision()
-            self._rebuild_reverse_indexes()
-            await self._save_index()
+            try:
+                new_revision = await self._increment_proof_set_revision()
+                self._rebuild_reverse_indexes()
+                await self._save_index()
+            except Exception:
+                self._index_data["proofs"][proof_index] = previous_serialized
+                self._index_data["proof_set_revision"] = previous_revision
+                self._rebuild_reverse_indexes()
+                await self._atomic_write_json(record_path, previous_serialized)
+                await asyncio.to_thread(
+                    self._save_durable_revision_sync,
+                    previous_revision,
+                )
+                raise
             logger.info(
                 "Applied proof live-context prune %s from snapshot revision %s "
                 "at current revision %s",
@@ -1538,6 +1568,25 @@ class ProofDatabase:
     def count_proofs(self) -> Dict[str, int]:
         """Return proof counts for display and prompt gating."""
         self._ensure_index_loaded_sync()
+        return self._count_loaded_proofs()
+
+    def count_proofs_cached(self) -> Dict[str, int]:
+        """Return counts from preloaded memory without touching proof storage."""
+        if self._index_data is None:
+            return {
+                "total": 0,
+                "novel": 0,
+                "duplicate_novel": 0,
+                "syntheticlib_novel": 0,
+                "known": 0,
+                "not_novel": 0,
+                "live_context_active": 0,
+                "live_context_pruned": 0,
+            }
+        return self._count_loaded_proofs()
+
+    def _count_loaded_proofs(self) -> Dict[str, int]:
+        """Count proofs in the already-loaded index projection."""
         proofs = self._index_data.get("proofs", []) if self._index_data else []
         duplicate_novel_count = sum(
             1 for proof in proofs if is_duplicate_novel_tier(proof.get("novelty_tier", ""))

@@ -102,7 +102,17 @@ function ModelSelector({
               type="button"
               className={`provider-toggle-btn${provider === 'lm_studio' ? ' active-lm' : ''}`}
               disabled={isRunning}
-              onClick={() => onChange({ ...config, provider: 'lm_studio', openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT })}
+              onClick={() => {
+                if (provider !== 'lm_studio') {
+                  onChange({
+                    ...config,
+                    provider: 'lm_studio',
+                    modelId: '',
+                    openrouterProvider: null,
+                    openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+                  });
+                }
+              }}
             >
               LM Studio
             </button>
@@ -110,7 +120,17 @@ function ModelSelector({
               type="button"
               className={`provider-toggle-btn${provider === 'openrouter' ? ' active-or-orange' : ''}`}
               disabled={isRunning || !hasOpenRouterKey}
-              onClick={() => onChange({ ...config, provider: 'openrouter', openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT })}
+              onClick={() => {
+                if (provider !== 'openrouter') {
+                  onChange({
+                    ...config,
+                    provider: 'openrouter',
+                    modelId: '',
+                    openrouterProvider: null,
+                    openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+                  });
+                }
+              }}
               title={!hasOpenRouterKey ? 'Set OpenRouter API key first' : 'Use OpenRouter'}
             >
               OpenRouter
@@ -166,6 +186,9 @@ function ModelSelector({
           onChange={(event) => onChange({ ...config, provider, modelId: event.target.value, openrouterProvider: null, openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT })}
         >
           <option value="">Select model...</option>
+          {config.modelId && !models.some((model) => model.id === config.modelId) && (
+            <option value={config.modelId}>{config.modelId} (configured)</option>
+          )}
           {models.map((model) => {
             const isFree = provider === 'openrouter' && model.pricing?.prompt === '0' && model.pricing?.completion === '0';
             const contextInfo = model.context_length ? ` (${Math.round(model.context_length / 1000)}K)` : '';
@@ -371,6 +394,43 @@ export default function LeanOJSettings({
       setRawSettingsMessage('');
     }
   }, [developerModeEnabled, editRawSettings]);
+
+  useEffect(() => {
+    if (lmStudioEnabled) {
+      return;
+    }
+
+    const normalizeForOpenRouter = (config = {}) => (
+      config.provider === 'openrouter'
+        ? config
+        : {
+          ...config,
+          provider: 'openrouter',
+          modelId: '',
+          openrouterProvider: null,
+          openrouterReasoningEffort: DEFAULT_OPENROUTER_REASONING_EFFORT,
+          lmStudioFallbackId: null,
+        }
+    );
+    const submitterConfigs = settings.submitterConfigs.map(normalizeForOpenRouter);
+    const roles = Object.fromEntries(
+      Object.entries(settings.roles).map(([roleKey, config]) => [
+        roleKey,
+        normalizeForOpenRouter(config),
+      ])
+    );
+    const changed = submitterConfigs.some(
+      (config, index) => config !== settings.submitterConfigs[index]
+    ) || Object.keys(roles).some((roleKey) => roles[roleKey] !== settings.roles[roleKey]);
+
+    if (changed) {
+      onSettingsChange({
+        ...settings,
+        submitterConfigs,
+        roles,
+      });
+    }
+  }, [lmStudioEnabled, onSettingsChange, settings]);
 
   useEffect(() => {
     const load = async () => {

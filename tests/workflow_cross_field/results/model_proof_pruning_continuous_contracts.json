@@ -30,6 +30,7 @@
     "proof_pruning.artifacts_and_future_memory_preserved",
     "proof_pruning.owning_run_context_excludes_pruned",
     "proof_pruning.validator_gates_automatic_mutation",
+    "proof_pruning.semantic_distinct_review_preserves_unique_routes",
     "proof_pruning.no_prune_is_valid",
     "proof_pruning.review_non_blocking",
     "proof_pruning.commit_lifecycle_fenced",

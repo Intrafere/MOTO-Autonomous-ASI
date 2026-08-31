@@ -718,6 +718,54 @@ class OpenRouterClient:
                         provider=provider,
                         detail=error_detail,
                     )
+
+                # OpenRouter may surface an intermittent upstream host failure as a
+                # generic 404 even though the model and route remain valid. Treat only
+                # that opaque provider-generated shape as transient; explicit
+                # privacy/no-endpoint/model errors retain their dedicated hard paths.
+                opaque_upstream_404 = False
+                if e.response.status_code == 404:
+                    try:
+                        error_payload = e.response.json().get("error", {})
+                    except (AttributeError, TypeError, ValueError):
+                        error_payload = {}
+                    metadata = (
+                        error_payload.get("metadata", {})
+                        if isinstance(error_payload, dict)
+                        else {}
+                    )
+                    opaque_upstream_404 = (
+                        isinstance(error_payload, dict)
+                        and str(error_payload.get("message", "")).strip().lower()
+                        == "provider returned error"
+                        and isinstance(metadata, dict)
+                        and not str(metadata.get("raw", "") or "").strip()
+                        and bool(str(metadata.get("provider_name", "") or "").strip())
+                    )
+                if opaque_upstream_404:
+                    logger.warning(
+                        "OpenRouter upstream provider returned an opaque 404 for model %s "
+                        "(attempt %s/%s).",
+                        redact_log_text(model, 160),
+                        attempt + 1,
+                        self.MAX_RETRIES,
+                    )
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                        continue
+                    route = ProviderRouteIdentity(
+                        provider="openrouter",
+                        model=model,
+                        host_provider=provider or "",
+                    )
+                    raise ProviderRouteError(
+                        "OpenRouter upstream provider temporarily could not serve the request.",
+                        route=route,
+                        cause=httpx.ReadError(
+                            "OpenRouter upstream provider returned an opaque 404",
+                            request=e.request,
+                        ),
+                    ) from e
                 
                 # Check for credit/key-limit-related errors in message
                 if any(keyword in error_detail_lower for keyword in ["credit", "insufficient", "balance", "quota", "key limit", "limit exceeded"]):

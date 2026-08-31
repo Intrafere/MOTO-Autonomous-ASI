@@ -221,6 +221,16 @@ const AutonomousResearchLogs = ({ stats, events }) => {
         const prefix = proofRoundLabel() ? `${proofRoundLabel()} discovery` : 'Proof discovery';
         return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
       }
+      case 'proof_candidate_list_review_started':
+        return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed)`;
+      case 'proof_candidate_list_review_accepted':
+        return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
+      case 'proof_candidate_list_review_rejected':
+        return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (75% required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
+      case 'proof_candidate_list_review_interrupted':
+        return data.message || `Validator proof-list review attempt ${data.list_attempt || 1} was interrupted without a semantic decision.`;
+      case 'proof_candidate_list_regeneration_started':
+        return `Regenerating proof candidates after Validator rejection (attempt ${data.list_attempt || 1})`;
       case 'proof_attempt_started':
         return data.message
           ? `${data.message} Target: ${proofTarget}`
@@ -328,6 +338,9 @@ const AutonomousResearchLogs = ({ stats, events }) => {
       eventName === 'proof_retry_scheduled' ||
       eventName === 'proof_retry_started' ||
       eventName === 'proof_check_no_candidates' ||
+      eventName === 'proof_candidate_list_review_started' ||
+      eventName === 'proof_candidate_list_review_interrupted' ||
+      eventName === 'proof_candidate_list_regeneration_started' ||
       eventName === 'proof_check_candidates_found' ||
       eventName === 'proof_attempt_started'
     ) {

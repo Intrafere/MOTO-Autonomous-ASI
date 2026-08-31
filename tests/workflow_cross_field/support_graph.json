@@ -2130,7 +2130,23 @@
           "real_coordinator"
         ],
         "field": "proof_pruning",
+        "invariant_id": "proof_pruning.semantic_distinct_review_preserves_unique_routes"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_pruning",
         "invariant_id": "proof_pruning.validator_gates_automatic_mutation"
+      },
+      {
+        "declared_adapters": [
+          "model",
+          "real_coordinator"
+        ],
+        "field": "proof_runtime_gating",
+        "invariant_id": "proof_runtime.candidate_list_validator_gate"
       },
       {
         "declared_adapters": [
@@ -2569,6 +2585,12 @@
       {
         "adapter": "real_coordinator",
         "result": "blocked",
+        "scenario_id": "real_candidate_list_validator_gate_and_scope",
+        "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "blocked",
         "scenario_id": "real_continuous_loop_stop_terminal_zero_policy",
         "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
       },
@@ -2763,6 +2785,12 @@
         "result": "passed",
         "scenario_id": "real_route_start_conflicts_preserve_single_workflow",
         "test_file": "tests/workflow_real_adapters/test_route_conflicts.py"
+      },
+      {
+        "adapter": "real_coordinator",
+        "result": "blocked",
+        "scenario_id": "real_semantic_prune_persists_and_protects_retained_support",
+        "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
       },
       {
         "adapter": "real_route",

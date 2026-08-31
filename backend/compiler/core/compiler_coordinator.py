@@ -29,6 +29,7 @@ from backend.shared.context_overflow import (
     CONTEXT_OVERFLOW_STOP_REASON,
     context_overflow_model_payload,
 )
+from backend.shared.provider_errors import ProviderRepairRequiredError
 from backend.compiler.agents.writer_submitter import WritingSubmitter
 from backend.compiler.agents.high_param_submitter import HighParamSubmitter
 from backend.compiler.validation.compiler_validator import CompilerValidator, normalize_unicode_hyphens, find_with_normalized_hyphens
@@ -175,6 +176,7 @@ class CompilerCoordinator:
         # Autonomous mode (for Part 3 integration)
         self.autonomous_mode = False
         self.autonomous_section_phase = None  # "body", "conclusion", "introduction", "abstract"
+        self.autonomous_paper_complete = False
         self._current_topic_id = None  # Set by autonomous coordinator for retroactive brainstorm corrections
         self._current_paper_id: Optional[str] = None  # Set by autonomous coordinator for proof source identity
         self._current_rigor_proof_source_title: Optional[str] = None
@@ -714,6 +716,7 @@ class CompilerCoordinator:
         """Enable autonomous mode with fixed section order (Body → Conclusion → Intro → Abstract)."""
         self.autonomous_mode = True
         self.autonomous_section_phase = "body"
+        self.autonomous_paper_complete = False
         logger.info("Autonomous mode enabled - section order: Body → Conclusion → Intro → Abstract")
 
     def set_rigor_proof_source(self, paper_id: Optional[str], paper_title: Optional[str] = None) -> None:
@@ -951,6 +954,39 @@ class CompilerCoordinator:
             )
             if self.is_running:
                 self._main_task = asyncio.create_task(self._main_workflow())
+        except ProviderRepairRequiredError as e:
+            logger.error("Compiler stopped for provider repair: %s", e)
+            self.is_running = False
+            self.fatal_error_type = "provider_repair_required"
+            self.fatal_error_message = str(e)
+            self.fatal_error_payload = {
+                "workflow_mode": "autonomous" if self.autonomous_mode else "compiler",
+                "notification_kind": "model_error",
+                "role_id": e.role_id,
+                "provider": e.provider,
+                "provider_label": e.provider_label,
+                "model": e.model,
+                "configured_provider": e.configured_provider or e.provider,
+                "configured_model": e.configured_model or e.model,
+                "effective_provider": e.provider,
+                "effective_model": e.model,
+                "effective_host_provider": e.effective_host_provider or None,
+                "route_kind": e.route_kind or None,
+                "reason": e.reason,
+                "recoverable": True,
+                "workflow_continues": False,
+                "message": (
+                    f"Compiler stopped because {e.provider_label} could not serve "
+                    f"model '{e.model or 'the configured model'}' for role "
+                    f"'{e.role_id or 'compiler'}'."
+                ),
+                "error_detail": e.safe_message,
+                "terminal_guidance": e.terminal_guidance,
+            }
+            await self._broadcast(
+                "provider_repair_required",
+                dict(self.fatal_error_payload),
+            )
         except ValueError as e:
             is_context_overflow = (
                 "mandatory full source context" in str(e).lower()
@@ -3878,17 +3914,45 @@ INVALID:
             return False
         
         elif current_phase == "abstract":
-            # VERIFY ABSTRACT ACTUALLY EXISTS BEFORE MARKING PAPER COMPLETE
+            # VERIFY THE COMPLETE REQUIRED STRUCTURE BEFORE MARKING PAPER COMPLETE.
+            # This flag is the authoritative parent-facing completion signal.
             current_paper = await paper_memory.get_paper()
             has_abstract = bool(re.search(
                 r"(?:^|\n)\s*(?:(?:#+\s*)?\*{0,2}Abstract\*{0,2}|\\(?:section|chapter)\*?\{Abstract\}|\\begin\{abstract\})",
                 current_paper, re.IGNORECASE | re.MULTILINE
             ))
-            
-            if not has_abstract:
-                logger.error("Cannot complete paper: No Abstract section found in paper")
+            has_introduction = bool(re.search(
+                r"(?:^|\n)\s*(?:(?:#+\s*)?(?:I\.?\s*)?Introduction|\\(?:section|chapter)\*?\{(?:I\.?\s*)?Introduction\})",
+                current_paper, re.IGNORECASE | re.MULTILINE
+            ))
+            has_conclusion = bool(re.search(
+                r"(?:^|\n)\s*(?:(?:#+\s*)?(?:[IVXLCDM]+\.?\s*)?(?:Conclusion|Summary|Discussion|Final\s*Remarks|Concluding\s*Remarks)|\\(?:section|chapter)\*?\{(?:Conclusion|Summary|Discussion|Final\s*Remarks|Concluding\s*Remarks)\})",
+                current_paper, re.IGNORECASE | re.MULTILINE
+            ))
+            has_body = bool(re.search(
+                r"(?:^|\n)\s*(?:#+\s*)?(?:II|III|IV|V|VI|VII|VIII|IX|X)\.?\s+"
+                r"(?!(?:Conclusion|Summary|Discussion|Final\s*Remarks|Concluding\s*Remarks)\b)\S",
+                current_paper, re.IGNORECASE | re.MULTILINE
+            ))
+            has_placeholder = any(marker in current_paper for marker in (
+                "[HARD CODED PLACEHOLDER FOR THE ABSTRACT SECTION",
+                "[HARD CODED PLACEHOLDER FOR INTRODUCTION SECTION",
+                "[HARD CODED PLACEHOLDER FOR THE CONCLUSION SECTION",
+            ))
+
+            if not all((has_abstract, has_introduction, has_body, has_conclusion)) or has_placeholder:
+                logger.error(
+                    "Cannot complete paper: required structure incomplete "
+                    "(abstract=%s, introduction=%s, body=%s, conclusion=%s, placeholder=%s)",
+                    has_abstract,
+                    has_introduction,
+                    has_body,
+                    has_conclusion,
+                    has_placeholder,
+                )
                 return False  # Block completion
-            
+
+            self.autonomous_paper_complete = True
             logger.info(f"Paper COMPLETE: Abstract phase completed (explicit section_complete). Final word count: {word_count}")
             await self._broadcast("paper_complete", {
                 "trigger": "section_complete",

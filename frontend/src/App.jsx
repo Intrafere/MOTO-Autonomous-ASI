@@ -273,14 +273,38 @@ async function addModelErrorNotification(setNotifications, data = {}) {
   const notification = {
     ...data,
     notification_key: notificationKey,
-    title: data.title || 'Proof model output repeatedly truncated',
-    message: data.message || 'Autonomous research stopped after proof output recovery was exhausted.',
+    title: data.title || 'Model configuration requires repair',
+    message: data.message || 'The workflow stopped because its configured model route could not continue.',
   };
   setNotifications(prev => (
     prev.some(item => item.notification_key === notificationKey)
       ? prev
       : [...prev, notification].slice(-3)
   ));
+}
+
+export function buildTerminalModelErrorNotification(data = {}) {
+  const isModelError = data.notification_kind === 'model_error'
+    || data.reason === 'proof_output_truncation_recovery_exhausted'
+    || (
+      data.reason === 'context_overflow'
+      && data.fatal === true
+      && data.workflow_mode === 'manual_proof_check'
+    );
+  if (!isModelError) return null;
+  return {
+    ...data,
+    notification_kind: 'model_error',
+    provider: data.effective_provider || data.configured_provider || 'model_provider',
+    model: data.effective_model || data.configured_model || '',
+    title: data.reason === 'proof_output_truncation_recovery_exhausted'
+      ? 'Proof model output repeatedly truncated'
+      : (
+        data.reason === 'context_overflow'
+          ? 'Proof context limit reached'
+          : 'Model configuration requires repair'
+      ),
+  };
 }
 
 function truncateOAuthActivityDetail(value, maxChars = 1800) {
@@ -947,6 +971,10 @@ function App() {
           data,
         },
       ].slice(-MAX_LIVE_ACTIVITY_EVENTS));
+      const modelErrorNotification = buildTerminalModelErrorNotification(data);
+      if (modelErrorNotification) {
+        void addModelErrorNotification(setModelErrorNotifications, modelErrorNotification);
+      }
     }
     return true;
   }, []);
@@ -1442,11 +1470,11 @@ function App() {
           ) {
             return;
           }
-          addScopedProviderActivity(notification);
           if (notification.notification_kind === 'model_error') {
             addModelErrorNotification(setModelErrorNotifications, notification);
             return;
           }
+          addScopedProviderActivity(notification);
           if (notification.event_type === 'provider_usage_limit_resumed') {
             return;
           }
@@ -2099,6 +2127,37 @@ function App() {
       });
     }));
 
+    [
+      'proof_candidate_list_review_started',
+      'proof_candidate_list_review_accepted',
+      'proof_candidate_list_review_rejected',
+      'proof_candidate_list_review_interrupted',
+      'proof_candidate_list_regeneration_started',
+    ].forEach((eventName) => {
+      unsubscribers.push(websocket.on(eventName, (data = {}) => {
+        setProofRefreshToken((prev) => prev + 1);
+        if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+        const messages = {
+          proof_candidate_list_review_started:
+            `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed)`,
+          proof_candidate_list_review_accepted:
+            `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`,
+          proof_candidate_list_review_rejected:
+            `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (75% required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`,
+          proof_candidate_list_review_interrupted:
+            data.message || `Validator proof-list review attempt ${data.list_attempt || 1} was interrupted without a semantic decision.`,
+          proof_candidate_list_regeneration_started:
+            `Regenerating proof candidates after Validator rejection (attempt ${data.list_attempt || 1})`,
+        };
+        addActivity({
+          event: eventName,
+          timestamp: getTimestamp(data),
+          message: messages[eventName],
+          data,
+        });
+      }));
+    });
+
     unsubscribers.push(websocket.on('proof_attempt_started', (data) => {
       if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
       addActivity({
@@ -2353,7 +2412,12 @@ function App() {
           data
         });
       }
-      if (data.reason === 'proof_output_truncation_recovery_exhausted') {
+      if (data.notification_kind === 'model_error') {
+        if (data.notification_key) {
+          setCodexOAuthNotifications(previous => previous.filter(
+            notification => notification.notification_key !== data.notification_key
+          ));
+        }
         void addModelErrorNotification(setModelErrorNotifications, data);
       }
     }));
@@ -2600,6 +2664,10 @@ function App() {
         addLeanOJActivityFromGlobalAlert(event);
       } else if (workflowMode === 'autonomous' || shouldAddHungAlertToAutonomousFeed(data)) {
         addActivity(event);
+      }
+      const modelErrorNotification = buildTerminalModelErrorNotification(data);
+      if (modelErrorNotification) {
+        void addModelErrorNotification(setModelErrorNotifications, modelErrorNotification);
       }
     }));
 

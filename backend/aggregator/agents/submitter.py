@@ -856,6 +856,10 @@ class SubmitterAgent:
             
         except ContextAllocationError:
             raise
+        except (FreeModelExhaustedError, RetryableProviderError, ProviderRepairRequiredError):
+            # Provider lifecycle errors belong to the outer run loop, which owns
+            # cooldown waiting, retry backoff, lane disablement, and terminal repair.
+            raise
         except Exception as e:
             logger.error(f"Submitter {self.submitter_id} failed to generate submission: {e}")
             return None

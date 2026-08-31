@@ -1,6 +1,7 @@
 import {
   ASSISTANT_PROOF_PACK_EVENTS,
   REJECTION_FEEDBACK_NOTICE,
+  TENTH_REJECTION_FEEDBACK_NOTICE,
   buildAutonomousProofProviderPauseActivity,
   buildRejectionFeedbackNoticeActivity,
   formatAssistantProofPackEventMessage,
@@ -53,6 +54,51 @@ test('proof context overflow uses fatal activity styling without implying workfl
 test('proof truncation recovery exhaustion uses its dedicated warning activity style', () => {
   expect(getActivityIcon('proof_truncation_recovery_exhausted')).toBe('⚠');
   expect(getActivityClass('proof_truncation_recovery_exhausted')).toBe('activity-reject');
+});
+
+test('proof candidate-list Validator events have visible activity styles', () => {
+  expect(getActivityIcon('proof_candidate_list_review_started')).toBe('?');
+  expect(getActivityIcon('proof_candidate_list_review_accepted')).toBe('✓');
+  expect(getActivityIcon('proof_candidate_list_review_rejected')).toBe('×');
+  expect(getActivityIcon('proof_candidate_list_review_interrupted')).toBe('!');
+  expect(getActivityIcon('proof_candidate_list_regeneration_started')).toBe('↻');
+  expect(getActivityClass('proof_candidate_list_review_accepted')).toBe('activity-success');
+  expect(getActivityClass('proof_candidate_list_review_rejected')).toBe('activity-reject');
+  expect(getActivityClass('proof_candidate_list_review_interrupted')).toBe('activity-reject');
+});
+
+test('candidate-list activity identity preserves each attempt and deduplicates replay only', () => {
+  const base = {
+    scope: 'manual',
+    proof_run_id: 'proof-run-1',
+    lifecycle_generation: 2,
+    proof_round_index: 1,
+  };
+  const first = {
+    ...base,
+    list_attempt: 1,
+    list_fingerprint: 'list-a',
+    manual_event_id: 'event-1',
+  };
+  const second = {
+    ...base,
+    list_attempt: 2,
+    list_fingerprint: 'list-b',
+    manual_event_id: 'event-2',
+  };
+
+  expect(getProofActivityIdentity('proof_candidate_list_review_rejected', first))
+    .not.toBe(getProofActivityIdentity('proof_candidate_list_review_rejected', second));
+  expect(hasRecentProofActivityDuplicate(
+    [{ event: 'proof_candidate_list_review_rejected', data: first }],
+    'proof_candidate_list_review_rejected',
+    first,
+  )).toBe(true);
+  expect(hasRecentProofActivityDuplicate(
+    [{ event: 'proof_candidate_list_review_rejected', data: first }],
+    'proof_candidate_list_review_rejected',
+    second,
+  )).toBe(false);
 });
 
 test('formats durable provider cooldown and confirmed resume activity', () => {
@@ -223,7 +269,7 @@ test('formats clean empty Assistant proof pack as info instead of warning', () =
   expect(message).not.toContain('warning');
 });
 
-test('keeps Assistant warning count when backend reports a real warning', () => {
+test('keeps incidental Assistant pack warnings out of valid zero-selection activity', () => {
   const message = formatAssistantProofPackMessage({
     result_count: 0,
     max_result_count: 7,
@@ -237,7 +283,29 @@ test('keeps Assistant warning count when backend reports a real warning', () => 
     warnings: ['Assistant LLM selection failed: provider unavailable'],
   });
 
-  expect(message).toContain('(1 warning)');
+  expect(message).toBe(
+    'Assistant memory found no useful proofs for brainstorm context during brainstorm via Assistant (openai/gpt-oss-20b): used 0 local and 0 SyntheticLib4'
+  );
+  expect(message).not.toContain('warning');
+});
+
+test('keeps incidental Assistant pack warnings out of successful selection activity', () => {
+  const message = formatAssistantProofPackMessage({
+    result_count: 2,
+    max_result_count: 7,
+    local_result_count: 2,
+    syntheticlib4_result_count: 0,
+    target_kind: 'brainstorm_context',
+    workflow_phase: 'brainstorm',
+    assistant_role_id: 'autonomous_assistant',
+    assistant_model_id: 'openai/gpt-oss-20b',
+    warnings: ['semantic lane query failed.'],
+  });
+
+  expect(message).toBe(
+    'Assistant memory returned 2/7 proofs for brainstorm context during brainstorm via Assistant (openai/gpt-oss-20b): used 2 local and 0 SyntheticLib4'
+  );
+  expect(message).not.toContain('warning');
 });
 
 test('formats Assistant model-output failure as an error activity', () => {
@@ -301,15 +369,28 @@ test('adds rejection feedback notice on first and tenth consecutive rejection on
   expect(shouldAddRejectionFeedbackNotice({}, 10, { tenth: true })).toBe(false);
 });
 
-test('builds a secondary rejection feedback activity after the rejection timestamp', () => {
-  const activity = buildRejectionFeedbackNoticeActivity('2026-06-21T19:27:19.000Z', {
+test('builds first and tenth rejection notices with accurate wording', () => {
+  const firstActivity = buildRejectionFeedbackNoticeActivity('2026-06-21T19:27:19.000Z', {
     total_rejections: 1,
+    consecutive_rejections: 1,
   });
 
-  expect(activity.event).toBe('rejection_feedback_notice');
-  expect(activity.message).toBe(REJECTION_FEEDBACK_NOTICE);
-  expect(activity.timestamp).toBe('2026-06-21T19:27:19.001Z');
-  expect(activity.data.total_rejections).toBe(1);
+  expect(firstActivity.event).toBe('rejection_feedback_notice');
+  expect(firstActivity.message).toBe(REJECTION_FEEDBACK_NOTICE);
+  expect(firstActivity.message).toContain('feedback was provided');
+  expect(firstActivity.message).toContain('rejection streaks can be expected on difficult problems');
+  expect(firstActivity.message).not.toMatch(/\b10\b|\bten(?:th)?\b/i);
+  expect(firstActivity.timestamp).toBe('2026-06-21T19:27:19.001Z');
+  expect(firstActivity.data.total_rejections).toBe(1);
+
+  const tenthActivity = buildRejectionFeedbackNoticeActivity('2026-06-21T19:27:19.000Z', {
+    total_rejections: 14,
+    consecutive_rejections: 10,
+  });
+  expect(tenthActivity.message).toBe(TENTH_REJECTION_FEEDBACK_NOTICE);
+  expect(tenthActivity.message).toContain('feedback was provided');
+  expect(tenthActivity.message).toContain('rejection streaks can be expected on difficult problems');
+  expect(tenthActivity.message).toContain('tenth consecutive rejection');
 });
 
 test('does not treat Assistant skip or cooldown events as displayable live activity', () => {

@@ -115,6 +115,9 @@ const ModelSelector = ({
   const reasoningInfo = effectiveProvider === 'openrouter'
     ? getReasoningSupportInfo(modelProviders[modelId], openrouterProv || null)
     : { hasEndpointMetadata: false, supportsReasoning: false };
+  const selectedModelMissing = Boolean(
+    modelId && !currentModels.some((model) => model.id === modelId)
+  );
 
   return (
     <>
@@ -186,6 +189,9 @@ const ModelSelector = ({
           disabled={isRunning}
         >
           <option value="">Select model...</option>
+          {selectedModelMissing && (
+            <option value={modelId}>{modelId} (configured)</option>
+          )}
           {currentModels.map(m => {
             const isFree = effectiveProvider === 'openrouter' && 
                           m.pricing?.prompt === "0" && 

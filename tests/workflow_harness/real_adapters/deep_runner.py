@@ -114,9 +114,15 @@ def snapshot_paths(paths: Iterable[Path], *, max_depth: int | None = None) -> di
             if any(part in _IGNORED_NAMES for part in path.parts) or not path.is_file():
                 continue
             digest = hashlib.sha256()
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except PermissionError:
+                # Windows may hold runtime lock/database files exclusively open.
+                # Presence is still observed; content cannot be safely inspected.
+                snapshot[str(path)] = "<locked>"
+                continue
             snapshot[str(path)] = digest.hexdigest()
     return snapshot
 

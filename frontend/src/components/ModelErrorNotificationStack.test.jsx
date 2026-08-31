@@ -41,4 +41,25 @@ describe('ModelErrorNotificationStack', () => {
     );
     expect(container.firstChild).toHaveStyle({ position: 'static' });
   });
+
+  it('displays provider model repair failures with the affected route', () => {
+    render(
+      <ModelErrorNotificationStack
+        embedded
+        notifications={[{
+          notification_key: 'model-repair:run-a:proof-id:retired-model',
+          title: 'Model configuration requires repair',
+          message: "Research stopped because OpenRouter could not serve model 'retired/model'.",
+          terminal_guidance: 'Choose an available model or configure a fallback, then retry.',
+          model: 'retired/model',
+          provider: 'openrouter',
+        }]}
+        onDismiss={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent('Model configuration requires repair');
+    expect(screen.getByRole('status')).toHaveTextContent('retired/model');
+    expect(screen.getByRole('status')).toHaveTextContent('Choose an available model');
+  });
 });

@@ -473,7 +473,6 @@ export default function ProofLibrary({
   const novelCount = proofCounts.novel ?? proofs.filter((p) => classifyProofNovelty(p).group === 'novel').length;
   const duplicateNovelCount = proofCounts.duplicate_novel ?? proofs.filter((p) => classifyProofNovelty(p).group === 'duplicate_novel').length;
   const notNovelCount = proofCounts.not_novel ?? proofs.filter((p) => classifyProofNovelty(p).group === 'not_novel').length;
-  const totalCount = proofs.length;
 
   if (loading) {
     return (
@@ -506,10 +505,10 @@ export default function ProofLibrary({
         <h2>{title}</h2>
         <p>{description}</p>
         <div className="library-stats">
-          <span className="stat-badge">{totalCount} Listed Proof{totalCount !== 1 ? 's' : ''}</span>
           <span className="stat-badge">{novelCount} Novel</span>
           <span className="stat-badge">{duplicateNovelCount} Duplicate Novel</span>
           <span className="stat-badge">{notNovelCount} Not Novel</span>
+          <span className="stat-badge">{proofSearchOverview?.total_records ?? 0} Proofs In All Libraries</span>
         </div>
       </div>
 

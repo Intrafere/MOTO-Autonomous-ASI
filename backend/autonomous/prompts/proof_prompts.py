@@ -364,6 +364,7 @@ def build_proof_identification_prompt(
     proof_round_index: int = 1,
     proof_max_rounds: int = 1,
     prior_round_results: str = "",
+    candidate_list_rejection_feedback: str = "",
 ) -> str:
     """Identify prompt-relevant theorem candidates from a brainstorm or paper."""
     source_title_block = _format_source_title_block(source_type, source_title)
@@ -371,6 +372,14 @@ def build_proof_identification_prompt(
         proof_round_index=proof_round_index,
         proof_max_rounds=proof_max_rounds,
         prior_round_results=prior_round_results,
+    )
+    list_feedback_block = (
+        "\nCURRENT ROUND CANDIDATE-LIST VALIDATOR FEEDBACK:\n"
+        f"{candidate_list_rejection_feedback.strip()}\n"
+        "Regenerate the complete theorem list. Correct the cited novelty failures; "
+        "do not merely rename rejected candidates.\n"
+        if candidate_list_rejection_feedback.strip()
+        else ""
     )
     user_prompt, verified_proof_context_block = _prepare_user_prompt_context(user_prompt)
     example_json = """{
@@ -393,6 +402,7 @@ This is NOT a known-knowledge-base construction task. Do not collect standard fa
 
 Above all, list first any claims that aggressively attempt to solve the USER RESEARCH PROMPT itself. A BRAINSTORM TOPIC, when present, is source metadata that helps interpret context; it must never broaden eligibility to proofs that are merely brainstorm-related. Do not extract supporting subgoals as proof targets; a candidate must itself be a high-impact prompt-solving theorem.
 {proof_round_context}
+{list_feedback_block}
 
 MOTO's goal is to push the frontier of mathematical knowledge in service of the user's stated problem. You are the gatekeeper that decides which theorems are worth the cost of formal verification. Be ambitious, but do not chase unrelated mathematical curiosities: a proof candidate must be useful for the user's prompt, not merely non-trivial in isolation.
 
@@ -436,6 +446,45 @@ SOURCE ID: {source_id}
 SOURCE CONTENT:
 {source_content}
 
+
+{_json_only_footer(example_json)}
+"""
+
+
+def build_proof_candidate_list_validation_prompt(
+    *,
+    user_prompt: str,
+    source_type: str,
+    source_id: str,
+    source_title: str,
+    candidates_json: str,
+) -> str:
+    """Build the independent pre-Lean whole-list novelty review prompt."""
+    example_json = """{
+  "results": [
+    {
+      "theorem_id": "thm_1",
+      "decision": "approve_novel",
+      "reasoning": "specific public-novelty assessment"
+    }
+  ],
+  "feedback": "actionable aggregate guidance for regenerating the complete list if needed"
+}"""
+    return f"""You are the independent Validator for a proposed list of Lean 4 proof targets.
+
+Review novelty without using private MOTO proof history or treating program-local firsts as novel. Assess every proposed theorem independently against public, standard, textbook, and Mathlib knowledge. A theorem is approvable only when its mathematical content is plausibly new or novel and it directly solves or substantially advances the user's objective. Reject standard results, routine helpers, minor reformulations, local formalizations, and proof-engineering glue.
+
+Return exactly one result for every theorem_id below, in the same order, with no duplicate, missing, or extra IDs. Use decision "approve_novel" or "reject_not_novel". Give a specific novelty reason for each result. The feedback must concisely explain what a regenerated complete list should fix; if all entries are approved, state why the list is suitable for proof attempts. Do not decide the aggregate 75% threshold in prose; deterministic code owns that decision.
+
+USER RESEARCH PROMPT:
+{user_prompt}
+
+SOURCE TYPE: {source_type}
+SOURCE ID: {source_id}
+SOURCE TITLE: {source_title or "[Not provided]"}
+
+PROPOSED THEOREM LIST:
+{candidates_json}
 
 {_json_only_footer(example_json)}
 """

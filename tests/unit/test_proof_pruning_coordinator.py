@@ -54,6 +54,16 @@ class HeldReviewService:
         )
 
 
+class FailingReviewService:
+    async def review(self, snapshot, *, event_callback=None):
+        raise RuntimeError("reproduced pruning failure")
+
+
+class SecretFailingReviewService:
+    async def review(self, snapshot, *, event_callback=None):
+        raise RuntimeError("Bearer sk-secret-value")
+
+
 class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -147,6 +157,61 @@ class ProofPruningCoordinatorTests(IsolatedAsyncioTestCase):
         await self.coordinator.on_proof_registered(self.proof("p1"))
         self.assertEqual(self.coordinator.state.accepted_prompt_novel_total, 1)
         self.assertIsNone(self.coordinator.active_task)
+
+    async def test_failure_event_exposes_safe_diagnostic(self):
+        self.coordinator.review_service = FailingReviewService()
+        pressure = ProofPruneContextPressure(
+            trigger="context_pressure",
+            prompt_tokens=9000,
+            available_input_tokens=8000,
+            active_proof_tokens=1200,
+            active_proof_context_tokens=1200,
+            configured_context_window=9000,
+            proof_set_revision=0,
+        )
+        await self.coordinator.on_context_pressure(
+            pressure,
+            urgent=True,
+            proof_set_revision=0,
+        )
+        await asyncio.wait_for(self.coordinator.active_task, timeout=1)
+        event, payload = next(
+            item for item in self.events if item[0] == "proof_prune_error"
+        )
+        self.assertEqual(event, "proof_prune_error")
+        self.assertEqual(payload["error_type"], "RuntimeError")
+        self.assertEqual(payload["error_summary"], "reproduced pruning failure")
+        self.assertIn("RuntimeError: reproduced pruning failure", payload["message"])
+
+    async def test_failed_cadence_review_restores_threshold(self):
+        self.coordinator.review_service = FailingReviewService()
+        for proof_id in ("p1", "p2", "p3"):
+            await self.coordinator.on_proof_registered(self.proof(proof_id))
+        await asyncio.wait_for(self.coordinator.active_task, timeout=1)
+
+        self.assertEqual(
+            self.coordinator.state.last_scheduled_acceptance_baseline,
+            0,
+        )
+        self.assertTrue(self.coordinator.state.follow_up_required)
+
+    async def test_failure_event_redacts_secret_like_exception_text(self):
+        self.coordinator.review_service = SecretFailingReviewService()
+        pressure = ProofPruneContextPressure(
+            trigger="context_pressure",
+            active_proof_tokens=1200,
+            active_proof_context_tokens=1200,
+        )
+        await self.coordinator.on_context_pressure(
+            pressure,
+            urgent=True,
+            proof_set_revision=0,
+        )
+        await asyncio.wait_for(self.coordinator.active_task, timeout=1)
+        _event, payload = next(
+            item for item in self.events if item[0] == "proof_prune_error"
+        )
+        self.assertNotIn("sk-secret-value", payload["error_summary"])
 
     async def test_triggers_during_active_review_coalesce_one_follow_up(self):
         for proof_id in ("p1", "p2", "p3"):

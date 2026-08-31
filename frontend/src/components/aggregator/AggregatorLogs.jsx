@@ -27,6 +27,11 @@ const MAX_EVENT_LOG_ENTRIES = 5000;
 const AGGREGATOR_LIVE_ACTIVITY_STORAGE_KEY = 'aggregator_live_activity_manual_events';
 const MANUAL_PROOF_EVENTS = [
   'proof_check_started',
+  'proof_candidate_list_review_started',
+  'proof_candidate_list_review_accepted',
+  'proof_candidate_list_review_rejected',
+  'proof_candidate_list_review_interrupted',
+  'proof_candidate_list_regeneration_started',
   'proof_check_no_candidates',
   'proof_check_candidates_found',
   'proof_attempt_started',
@@ -536,6 +541,16 @@ export default function AggregatorLogs({ providerActivity = [] }) {
         return 'Proof check started for the manual Aggregator database';
       case 'proof_check_no_candidates':
         return formatEmptyProofDiscoveryMessage(proofRoundPrefix(data));
+      case 'proof_candidate_list_review_started':
+        return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed)`;
+      case 'proof_candidate_list_review_accepted':
+        return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
+      case 'proof_candidate_list_review_rejected':
+        return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (75% required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
+      case 'proof_candidate_list_review_interrupted':
+        return data.message || `Validator proof-list review attempt ${data.list_attempt || 1} was interrupted without a semantic decision.`;
+      case 'proof_candidate_list_regeneration_started':
+        return `Regenerating proof candidates after Validator rejection (attempt ${data.list_attempt || 1})`;
       case 'proof_check_candidates_found': {
         const count = Number(data.count || 0);
         const subject = count === 1 ? 'proof candidate' : 'proof candidates';

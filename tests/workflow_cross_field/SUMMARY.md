@@ -35,7 +35,9 @@ Schema version: 1.
 | `proof_pruning.occurrence_scope_isolated` | passed | uncovered | passed | uncovered |
 | `proof_pruning.owning_run_context_excludes_pruned` | passed | uncovered | passed | uncovered |
 | `proof_pruning.review_non_blocking` | passed | uncovered | passed | uncovered |
+| `proof_pruning.semantic_distinct_review_preserves_unique_routes` | passed | uncovered | blocked (Focused unit tests cover durable retained-support protection and section arbitration, but no bounded real-coordinator adapter yet observes canonically distinct semantic routes through proposal, validation, commit, and a later support-prune attempt.) | uncovered |
 | `proof_pruning.validator_gates_automatic_mutation` | passed | uncovered | passed | uncovered |
+| `proof_runtime.candidate_list_validator_gate` | uncovered | uncovered | blocked (Focused stage tests observe exact threshold, approved-only forwarding, scope invalidation, and semantic-memory bounds, but no bounded real-coordinator adapter yet observes Autonomous restart plus manual process-local ownership without synthesizing the lifecycle owner.) | uncovered |
 | `proof_runtime.hosted_proof_settings_unavailable` | uncovered | passed | uncovered | uncovered |
 | `proof_runtime.no_lean_when_disabled` | passed | uncovered | passed | uncovered |
 | `proof_runtime.no_smt_when_disabled` | passed | uncovered | uncovered | uncovered |

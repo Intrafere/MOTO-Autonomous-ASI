@@ -15,6 +15,10 @@ from typing import Any, Awaitable, Callable, Optional
 from backend.autonomous.agents.lemma_search_agent import MathlibLemmaSearchAgent
 from backend.autonomous.agents.proof_formalization_agent import ProofFormalizationAgent
 from backend.autonomous.agents.proof_identification_agent import ProofIdentificationAgent
+from backend.autonomous.agents.proof_candidate_list_validator import (
+    ProofCandidateListContextError,
+    ProofCandidateListValidator,
+)
 from backend.autonomous.agents.proof_pruning_agent import proof_run_role_suffix
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
 from backend.autonomous.memory.paper_library import paper_library
@@ -37,11 +41,14 @@ from backend.shared.models import (
     ProofAttemptFeedback,
     ProofAttemptResult,
     ProofCandidate,
+    ProofCandidateListRejection,
+    ProofCandidateListValidation,
     ProofPruneContextPressure,
     ProofStageResult,
     SmtHint,
 )
 from backend.shared.openrouter_client import FreeModelExhaustedError
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.shared.provider_pause import is_provider_credit_pause_error
 from backend.shared.smt_client import get_smt_client
 from backend.shared.utils import count_tokens
@@ -71,9 +78,154 @@ def _candidate_fingerprint(candidate: ProofCandidate, source_type: str, source_i
             source_id.strip().lower(),
             " ".join((candidate.statement or "").split()).lower(),
             " ".join((candidate.formal_sketch or "").split()).lower(),
+            candidate.theorem_id.strip(),
+            candidate.expected_novelty_tier.strip().lower(),
+            " ".join((candidate.prompt_relevance_rationale or "").split()).lower(),
+            " ".join((candidate.novelty_rationale or "").split()).lower(),
+            " ".join((candidate.why_not_standard_known_result or "").split()).lower(),
         ]
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _candidate_list_fingerprint(
+    candidates: list[ProofCandidate],
+    source_type: str,
+    source_id: str,
+) -> str:
+    material = "\n".join(
+        _candidate_fingerprint(candidate, source_type, source_id)
+        for candidate in candidates
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _candidate_list_review_scope(
+    *,
+    source_type: str,
+    source_id: str,
+    run_id: str,
+    trigger: str,
+    proof_round_index: int,
+    proof_run_context: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return the exact ownership fence for one candidate-list review round."""
+    context = dict(proof_run_context or {})
+    return {
+        "source_type": source_type,
+        "source_id": source_id,
+        "run_id": run_id,
+        "trigger": trigger,
+        "proof_round_index": proof_round_index,
+        "proof_run_id": str(context.get("proof_run_id") or ""),
+    }
+
+
+def _normalize_candidate_list_checkpoint(
+    raw_state: Optional[dict[str, Any]],
+    *,
+    expected_scope: dict[str, Any],
+    source_type: str,
+    source_id: str,
+) -> dict[str, Any]:
+    """Validate candidate-list checkpoint authority atomically or discard it."""
+    if not isinstance(raw_state, dict) or not raw_state:
+        return {}
+    if raw_state.get("review_scope") != expected_scope:
+        return {}
+    status = str(raw_state.get("status") or "")
+    if status not in {"reviewing", "approved", "rejected"}:
+        return {}
+    try:
+        generation_attempt = int(raw_state.get("generation_attempt") or 1)
+    except (TypeError, ValueError):
+        return {}
+    if generation_attempt < 1:
+        return {}
+    raw_proposed = raw_state.get("proposed_candidates")
+    if not isinstance(raw_proposed, list):
+        return {}
+    proposed: list[ProofCandidate] = []
+    try:
+        proposed = [
+            ProofCandidate.model_validate(item)
+            for item in raw_proposed
+            if isinstance(item, dict)
+        ]
+    except Exception:
+        return {}
+    if len(proposed) != len(raw_proposed):
+        return {}
+    proposed_ids = [candidate.theorem_id for candidate in proposed]
+    if len(set(proposed_ids)) != len(proposed_ids):
+        return {}
+    expected_fingerprint = (
+        _candidate_list_fingerprint(proposed, source_type, source_id)
+        if proposed
+        else ""
+    )
+    if str(raw_state.get("list_fingerprint") or "") != expected_fingerprint:
+        return {}
+    raw_approved_ids = raw_state.get("approved_candidate_ids")
+    if not isinstance(raw_approved_ids, list):
+        return {}
+    approved_ids = [str(item) for item in raw_approved_ids]
+    if len(set(approved_ids)) != len(approved_ids):
+        return {}
+    if any(theorem_id not in proposed_ids for theorem_id in approved_ids):
+        return {}
+    raw_rejections = raw_state.get("semantic_rejections")
+    if not isinstance(raw_rejections, list):
+        return {}
+    try:
+        semantic_rejections = [
+            ProofCandidateListRejection.model_validate(item)
+            for item in raw_rejections
+            if isinstance(item, dict)
+        ]
+    except Exception:
+        return {}
+    if len(semantic_rejections) != len(raw_rejections):
+        return {}
+    normalized = {
+        **raw_state,
+        "status": status,
+        "review_scope": dict(expected_scope),
+        "generation_attempt": generation_attempt,
+        "list_fingerprint": expected_fingerprint,
+        "proposed_candidates": [
+            candidate.model_dump(mode="json") for candidate in proposed
+        ],
+        "approved_candidate_ids": approved_ids,
+        "semantic_rejections": [
+            item.model_dump(mode="json") for item in semantic_rejections[-5:]
+        ],
+    }
+    if status == "approved":
+        raw_validation = raw_state.get("validation")
+        if not isinstance(raw_validation, dict):
+            return {}
+        try:
+            validation = ProofCandidateListValidation.model_validate(raw_validation)
+        except Exception:
+            return {}
+        result_ids = [item.theorem_id for item in validation.results]
+        if result_ids != proposed_ids:
+            return {}
+        validated_approved_ids = [
+            item.theorem_id
+            for item in validation.results
+            if item.decision == "approve_novel"
+        ]
+        if validated_approved_ids != approved_ids:
+            return {}
+        if not ProofCandidateListValidator.threshold_met(
+            approved_count=len(approved_ids),
+            proposed_count=len(proposed_ids),
+        ):
+            return {}
+        normalized["validation"] = validation.model_dump(mode="json")
+    return normalized
 
 
 def _truncation_chain_exhausted(attempts: list[ProofAttemptFeedback]) -> bool:
@@ -92,6 +244,7 @@ class _LeanVerificationOutcome:
     theorem_name: str
     lean_code: str
     attempts: list[ProofAttemptFeedback] = field(default_factory=list)
+    context_overflow_payload: dict[str, Any] = field(default_factory=dict)
 
 
 class ProofVerificationProviderPause(Exception):
@@ -567,6 +720,8 @@ class ProofVerificationStage:
         checkpoint_theorem_names_by_candidate: Optional[dict[str, str]] = None,
         checkpoint_truncation_streak: Optional[list[dict[str, Any]]] = None,
         checkpoint_result: Optional[ProofStageResult] = None,
+        checkpoint_candidate_list_state: Optional[dict[str, Any]] = None,
+        checkpoint_processed_candidate_ids: Optional[list[str]] = None,
         checkpoint_callback: ProofCheckpointCallback = None,
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
@@ -587,7 +742,11 @@ class ProofVerificationStage:
         )
         resolved_candidates: list[ProofCandidate] = []
         candidate_indexes: dict[str, int] = dict(proof_candidate_indexes or {})
-        processed_candidate_ids: set[str] = set()
+        processed_candidate_ids: set[str] = {
+            str(candidate_id)
+            for candidate_id in (checkpoint_processed_candidate_ids or [])
+            if candidate_id
+        }
         attempts_by_candidate: dict[str, list[ProofAttemptFeedback]] = {
             theorem_id: list(attempts or [])
             for theorem_id, attempts in (checkpoint_attempts_by_candidate or {}).items()
@@ -601,17 +760,43 @@ class ProofVerificationStage:
         checkpoint_state_lock = asyncio.Lock()
         abort_event = asyncio.Event()
         checkpoint_revision = 0
+        candidate_list_review_active = False
+        candidate_list_review_attempt = 0
+        candidate_list_review_count = 0
+        candidate_list_scope = _candidate_list_review_scope(
+            source_type=source_type,
+            source_id=source_id,
+            run_id=run_id,
+            trigger=trigger,
+            proof_round_index=proof_round_index,
+            proof_run_context=proof_run_context,
+        )
+        candidate_list_state = _normalize_candidate_list_checkpoint(
+            checkpoint_candidate_list_state,
+            expected_scope=candidate_list_scope,
+            source_type=source_type,
+            source_id=source_id,
+        )
 
         async def save_checkpoint(status: str) -> None:
             nonlocal checkpoint_revision
             if checkpoint_callback is None:
                 return
             async with checkpoint_state_lock:
-                if not resolved_candidates and status not in {"complete", "error", "no_candidates"}:
+                if not resolved_candidates and status not in {
+                    "complete",
+                    "error",
+                    "no_candidates",
+                    "candidate_list_rejected",
+                    "stopped",
+                }:
                     return
                 checkpoint_revision += 1
                 payload = {
                     "checkpoint_revision": checkpoint_revision,
+                    "lifecycle_generation": int(
+                        (proof_run_context or {}).get("lifecycle_generation") or 0
+                    ),
                     "recovery_policy_version": PROOF_TRUNCATION_POLICY_VERSION,
                     "source_type": source_type,
                     "source_id": source_id,
@@ -630,6 +815,7 @@ class ProofVerificationStage:
                     ],
                     "processed_candidate_ids": sorted(processed_candidate_ids),
                     "deferred_candidate_ids": list(result.deferred_candidate_ids),
+                    "context_overflow_payload": dict(result.context_overflow_payload),
                     "attempts_by_candidate": {
                         theorem_id: [
                             attempt.model_dump(mode="json")
@@ -648,6 +834,7 @@ class ProofVerificationStage:
                     "truncation_streak": list(truncation_streak),
                     "fatal_stop_reason": result.fatal_stop_reason,
                     "fatal_stop_payload": dict(result.fatal_stop_payload),
+                    "candidate_list_review": dict(candidate_list_state),
                 }
                 # Keep persistence in the same critical section as snapshot
                 # creation so a slower older write cannot land after a newer
@@ -663,6 +850,31 @@ class ProofVerificationStage:
                 return bool(should_stop())
             except Exception:
                 return False
+
+        async def broadcast_candidate_list_interrupted(
+            *,
+            error_kind: str,
+            error_message: str,
+        ) -> None:
+            nonlocal candidate_list_review_active
+            if not candidate_list_review_active:
+                return
+            candidate_list_review_active = False
+            await self._broadcast(
+                broadcast_fn,
+                "proof_candidate_list_review_interrupted",
+                {
+                    **base_event,
+                    "list_attempt": candidate_list_review_attempt,
+                    "proposed_count": candidate_list_review_count,
+                    "error_kind": error_kind,
+                    "message": (
+                        "Validator proof-list review was interrupted without an "
+                        "acceptance or semantic rejection. "
+                        f"{self._summarize_error(error_message, limit=600)}"
+                    ),
+                },
+            )
         owned_reservation_token = source_reservation_token
         if not source_reserved:
             owned_reservation_token = uuid.uuid4().hex
@@ -708,6 +920,13 @@ class ProofVerificationStage:
                 proof_run_context,
             )
             novelty_role_id = f"autonomous_proof_novelty_{role_suffix}"
+            list_validator = ProofCandidateListValidator(
+                model_id=validator_model,
+                context_window=validator_context,
+                max_output_tokens=validator_max_tokens,
+                role_id=f"autonomous_proof_candidate_list_validator_{role_suffix}",
+            )
+            candidate_list_validation_prompt = canonical_user_prompt or user_prompt
             identification_agent = ProofIdentificationAgent(
                 model_id=submitter_model,
                 context_window=submitter_context,
@@ -716,18 +935,320 @@ class ProofVerificationStage:
                 solution_path_manager=self.solution_path_manager,
             )
 
-            resolved_candidates = await self._resolve_candidates(
-                theorem_candidates=theorem_candidates,
-                identification_agent=identification_agent,
-                user_prompt=user_prompt,
-                source_type=source_type,
-                source_id=source_id,
-                source_title=source_title,
-                content=content,
-                proof_round_index=proof_round_index,
-                proof_max_rounds=proof_max_rounds,
-                prior_round_results=prior_round_results,
+            resume_requires_regeneration = (
+                candidate_list_state.get("status") == "rejected"
+                and bool(candidate_list_state.get("semantic_rejections"))
             )
+            resolved_candidates = (
+                []
+                if resume_requires_regeneration
+                else await self._resolve_candidates(
+                    theorem_candidates=theorem_candidates,
+                    identification_agent=identification_agent,
+                    user_prompt=user_prompt,
+                    source_type=source_type,
+                    source_id=source_id,
+                    source_title=source_title,
+                    content=content,
+                    proof_round_index=proof_round_index,
+                    proof_max_rounds=proof_max_rounds,
+                    prior_round_results=prior_round_results,
+                )
+            )
+            generation_attempt = max(
+                1,
+                int(candidate_list_state.get("generation_attempt", 1) or 1),
+            )
+            semantic_rejections = [
+                ProofCandidateListRejection.model_validate(item)
+                for item in candidate_list_state.get("semantic_rejections", [])
+                if isinstance(item, dict)
+            ][-5:]
+
+            async def regenerate_candidate_list(feedback_text: str) -> list[ProofCandidate]:
+                nonlocal generation_attempt, candidate_list_state
+                generation_attempt += 1
+                await self._broadcast(
+                    broadcast_fn,
+                    "proof_candidate_list_regeneration_started",
+                    {
+                        **base_event,
+                        "list_attempt": generation_attempt,
+                        "prior_rejection_count": len(semantic_rejections),
+                        "feedback": feedback_text,
+                    },
+                )
+                feedback = "\n\n".join(
+                    f"Attempt {item.generation_attempt}: {item.feedback}"
+                    for item in semantic_rejections
+                )
+                has_candidates, regenerated = (
+                    await identification_agent.identify_candidates(
+                        user_research_prompt=user_prompt,
+                        source_type=source_type,
+                        source_id=source_id,
+                        source_content=content,
+                        source_title=source_title,
+                        proof_round_index=proof_round_index,
+                        proof_max_rounds=proof_max_rounds,
+                        prior_round_results=prior_round_results,
+                        candidate_list_rejection_feedback=feedback,
+                    )
+                )
+                candidate_list_state["generation_attempt"] = generation_attempt
+                return regenerated if has_candidates else []
+
+            if (
+                candidate_list_state.get("status") == "rejected"
+                and semantic_rejections
+            ):
+                resolved_candidates = await regenerate_candidate_list(
+                    semantic_rejections[-1].feedback
+                )
+                while not resolved_candidates and not _stop_requested():
+                    candidate_list_state = {
+                        **candidate_list_state,
+                        "status": "rejected",
+                        "list_fingerprint": "",
+                        "proposed_candidates": [],
+                        "approved_candidate_ids": [],
+                    }
+                    await save_checkpoint("candidate_list_rejected")
+                    resolved_candidates = await regenerate_candidate_list(
+                        semantic_rejections[-1].feedback
+                    )
+                if _stop_requested():
+                    await save_checkpoint("stopped")
+                    return result
+
+            while resolved_candidates:
+                if _stop_requested():
+                    await save_checkpoint("stopped")
+                    return result
+                list_fingerprint = _candidate_list_fingerprint(
+                    resolved_candidates,
+                    source_type,
+                    source_id,
+                )
+                restored_fingerprint = str(
+                    candidate_list_state.get("list_fingerprint", "")
+                )
+                restored_status = str(candidate_list_state.get("status", ""))
+                restored_proposed: list[ProofCandidate] = []
+                for raw_candidate in candidate_list_state.get(
+                    "proposed_candidates", []
+                ):
+                    if not isinstance(raw_candidate, dict):
+                        restored_proposed = []
+                        break
+                    try:
+                        restored_proposed.append(
+                            ProofCandidate.model_validate(raw_candidate)
+                        )
+                    except Exception:
+                        restored_proposed = []
+                        break
+                restored_proposed_fingerprint = (
+                    _candidate_list_fingerprint(
+                        restored_proposed,
+                        source_type,
+                        source_id,
+                    )
+                    if restored_proposed
+                    else ""
+                )
+                restored_by_id = {
+                    candidate.theorem_id: candidate
+                    for candidate in restored_proposed
+                }
+                approved_sequence = [
+                    str(item)
+                    for item in candidate_list_state.get(
+                        "approved_candidate_ids", []
+                    )
+                ]
+                current_matches_approved_checkpoint = (
+                    [candidate.theorem_id for candidate in resolved_candidates]
+                    == [
+                        theorem_id
+                        for theorem_id in approved_sequence
+                        if theorem_id not in processed_candidate_ids
+                    ]
+                    and all(
+                        candidate.theorem_id in restored_by_id
+                        and _candidate_fingerprint(candidate, source_type, source_id)
+                        == _candidate_fingerprint(
+                            restored_by_id[candidate.theorem_id],
+                            source_type,
+                            source_id,
+                        )
+                        for candidate in resolved_candidates
+                    )
+                )
+                if (
+                    restored_status == "approved"
+                    and restored_fingerprint == restored_proposed_fingerprint
+                    and (
+                        restored_fingerprint == list_fingerprint
+                        or current_matches_approved_checkpoint
+                    )
+                ):
+                    approved_ids = {
+                        str(item)
+                        for item in candidate_list_state.get(
+                            "approved_candidate_ids", []
+                        )
+                    }
+                    resolved_candidates = [
+                        candidate
+                        for candidate in resolved_candidates
+                        if candidate.theorem_id in approved_ids
+                    ]
+                    break
+                candidate_list_state = {
+                    "status": "reviewing",
+                    "review_scope": candidate_list_scope,
+                    "list_fingerprint": list_fingerprint,
+                    "generation_attempt": generation_attempt,
+                    "proposed_candidates": [
+                        candidate.model_dump(mode="json")
+                        for candidate in resolved_candidates
+                    ],
+                    "approved_candidate_ids": [],
+                    "semantic_rejections": [
+                        item.model_dump(mode="json") for item in semantic_rejections
+                    ],
+                }
+                await save_checkpoint("candidate_list_reviewing")
+                await self._broadcast(
+                    broadcast_fn,
+                    "proof_candidate_list_review_started",
+                    {
+                        **base_event,
+                        "list_attempt": generation_attempt,
+                        "proposed_count": len(resolved_candidates),
+                        "threshold_percent": 75,
+                        "candidate_ids": [
+                            candidate.theorem_id for candidate in resolved_candidates
+                        ],
+                    },
+                )
+                candidate_list_review_active = True
+                candidate_list_review_attempt = generation_attempt
+                candidate_list_review_count = len(resolved_candidates)
+                validation = await list_validator.validate(
+                    user_prompt=candidate_list_validation_prompt,
+                    source_type=source_type,
+                    source_id=source_id,
+                    source_title=source_title,
+                    candidates=resolved_candidates,
+                )
+                approved_candidates = list_validator.approved_candidates(
+                    resolved_candidates,
+                    validation,
+                )
+                approved_ids = [
+                    candidate.theorem_id for candidate in approved_candidates
+                ]
+                candidate_list_state = {
+                    "status": (
+                        "approved"
+                        if list_validator.threshold_met(
+                            approved_count=len(approved_candidates),
+                            proposed_count=len(resolved_candidates),
+                        )
+                        else "rejected"
+                    ),
+                    "review_scope": candidate_list_scope,
+                    "list_fingerprint": list_fingerprint,
+                    "generation_attempt": generation_attempt,
+                    "proposed_candidates": [
+                        candidate.model_dump(mode="json")
+                        for candidate in resolved_candidates
+                    ],
+                    "approved_candidate_ids": approved_ids,
+                    "validation": validation.model_dump(mode="json"),
+                    "semantic_rejections": [
+                        item.model_dump(mode="json") for item in semantic_rejections
+                    ],
+                }
+                if candidate_list_state["status"] == "approved":
+                    candidate_list_review_active = False
+                    resolved_candidates = approved_candidates
+                    await save_checkpoint("candidate_list_approved")
+                    await self._broadcast(
+                        broadcast_fn,
+                        "proof_candidate_list_review_accepted",
+                        {
+                            **base_event,
+                            "list_attempt": generation_attempt,
+                            "proposed_count": len(validation.results),
+                            "approved_count": len(approved_candidates),
+                            "threshold_percent": 75,
+                            "candidate_ids": approved_ids,
+                            "candidate_reasons": [
+                                item.model_dump(mode="json")
+                                for item in validation.results
+                            ],
+                            "feedback": validation.feedback,
+                        },
+                    )
+                    break
+                rejected_ids = [
+                    item.theorem_id
+                    for item in validation.results
+                    if item.decision == "reject_not_novel"
+                ]
+                rejection = ProofCandidateListRejection(
+                    list_fingerprint=list_fingerprint,
+                    generation_attempt=generation_attempt,
+                    proposed_count=len(resolved_candidates),
+                    approved_count=len(approved_candidates),
+                    rejected_candidate_ids=rejected_ids,
+                    feedback=validation.feedback,
+                )
+                semantic_rejections = [*semantic_rejections, rejection][-5:]
+                candidate_list_review_active = False
+                candidate_list_state["semantic_rejections"] = [
+                    item.model_dump(mode="json") for item in semantic_rejections
+                ]
+                await save_checkpoint("candidate_list_rejected")
+                await self._broadcast(
+                    broadcast_fn,
+                    "proof_candidate_list_review_rejected",
+                    {
+                        **base_event,
+                        "list_attempt": generation_attempt,
+                        "proposed_count": len(resolved_candidates),
+                        "approved_count": len(approved_candidates),
+                        "threshold_percent": 75,
+                        "candidate_ids": [
+                            candidate.theorem_id for candidate in resolved_candidates
+                        ],
+                        "rejected_candidate_ids": rejected_ids,
+                        "candidate_reasons": [
+                            item.model_dump(mode="json")
+                            for item in validation.results
+                        ],
+                        "feedback": validation.feedback,
+                    },
+                )
+                resolved_candidates = await regenerate_candidate_list(validation.feedback)
+                while not resolved_candidates and not _stop_requested():
+                    candidate_list_state = {
+                        **candidate_list_state,
+                        "status": "rejected",
+                        "list_fingerprint": "",
+                        "proposed_candidates": [],
+                        "approved_candidate_ids": [],
+                    }
+                    await save_checkpoint("candidate_list_rejected")
+                    resolved_candidates = await regenerate_candidate_list(
+                        validation.feedback
+                    )
+                if _stop_requested():
+                    await save_checkpoint("stopped")
+                    return result
             for index, candidate in enumerate(resolved_candidates, start=1):
                 candidate_indexes.setdefault(candidate.theorem_id, index)
 
@@ -768,6 +1289,15 @@ class ProofVerificationStage:
                 {
                     **base_event,
                     "count": len(resolved_candidates),
+                    "proposed_count": len(
+                        candidate_list_state.get("proposed_candidates", [])
+                    ),
+                    "approved_count": len(resolved_candidates),
+                    "message": (
+                        f"Validator approved {len(resolved_candidates)} of "
+                        f"{len(candidate_list_state.get('proposed_candidates', []))} "
+                        "proposed candidates for Lean."
+                    ),
                     "theorems_preview": [
                         f"Proof {self._proof_label_for_index(candidate_indexes.get(candidate.theorem_id, index))}: {candidate.statement[:180]}"
                         for index, candidate in enumerate(resolved_candidates, start=1)
@@ -1034,6 +1564,13 @@ class ProofVerificationStage:
                                 # eligible after proof-model/context settings change.
                                 if candidate.theorem_id not in result.deferred_candidate_ids:
                                     result.deferred_candidate_ids.append(candidate.theorem_id)
+                                if (
+                                    not result.context_overflow_payload
+                                    and outcome.context_overflow_payload
+                                ):
+                                    result.context_overflow_payload = dict(
+                                        outcome.context_overflow_payload
+                                    )
                                 ordered_outcomes[candidate_indexes.get(candidate.theorem_id, 0)] = (
                                     "neutral",
                                     {},
@@ -1446,19 +1983,92 @@ class ProofVerificationStage:
                 },
             )
             return result
+        except asyncio.CancelledError:
+            await broadcast_candidate_list_interrupted(
+                error_kind="cancelled",
+                error_message="The proof run stopped before list review completed.",
+            )
+            raise
         except ProofVerificationProviderPause:
+            await broadcast_candidate_list_interrupted(
+                error_kind="provider_pause",
+                error_message="The configured provider paused before list review completed.",
+            )
             raise
-        except RetryableProviderError:
+        except RetryableProviderError as exc:
+            await broadcast_candidate_list_interrupted(
+                error_kind="retryable_provider_error",
+                error_message=str(exc),
+            )
             await save_checkpoint("provider_paused")
             raise
-        except FreeModelExhaustedError:
+        except FreeModelExhaustedError as exc:
+            await broadcast_candidate_list_interrupted(
+                error_kind="provider_exhausted",
+                error_message=str(exc),
+            )
             await save_checkpoint("provider_paused")
             raise
+        except (ProofCandidateListContextError, ProviderContextLengthError) as exc:
+            await broadcast_candidate_list_interrupted(
+                error_kind="context_overflow",
+                error_message=str(exc),
+            )
+            role_suffix = self._role_suffix(
+                source_type,
+                role_suffix_override,
+                proof_run_context,
+            )
+            role_id = f"autonomous_proof_candidate_list_validator_{role_suffix}"
+            route = exc.route if isinstance(exc, ProviderContextLengthError) else None
+            overflow_payload = {
+                **base_event,
+                "workflow_mode": self._proof_workflow_mode(trigger),
+                "overflow_origin": (
+                    "provider"
+                    if isinstance(exc, ProviderContextLengthError)
+                    else "local_preflight"
+                ),
+                "role_id": role_id,
+                **context_overflow_model_payload(
+                    api_client_manager.get_role_config(role_id),
+                    route=route,
+                ),
+                "reason": CONTEXT_OVERFLOW_STOP_REASON,
+                "message": (
+                    "Proof candidate-list validation cannot continue because its mandatory "
+                    "review context exceeds the configured Validator context budget. "
+                    "Choose a larger-context Validator model or reduce the proof source context."
+                ),
+                "resolution": CONTEXT_OVERFLOW_RESOLUTION,
+                "error_detail": self._summarize_error(str(exc), limit=1000),
+            }
+            result.context_overflow_payload = overflow_payload
+            result.had_error = True
+            result.error_message = str(exc)
+            await save_checkpoint("error")
+            await self._broadcast(
+                broadcast_fn,
+                "proof_context_overflow",
+                {
+                    **overflow_payload,
+                    "fatal": False,
+                },
+            )
+            return result
         except Exception as exc:
             if is_non_retryable_model_error(exc):
+                await broadcast_candidate_list_interrupted(
+                    error_kind="provider_repair_required",
+                    error_message=str(exc),
+                )
                 await save_checkpoint("provider_paused")
                 raise
             if is_transient_model_call_error(exc):
+                await broadcast_candidate_list_interrupted(
+                    error_kind="transient_provider_error",
+                    error_message=str(exc),
+                )
                 await save_checkpoint("provider_paused")
                 logger.warning(
                     "Proof verification transient provider failure for %s %s; preserving checkpoint: %s",
@@ -1479,6 +2089,14 @@ class ProofVerificationStage:
                     reason="transient_provider_error",
                     message=format_transient_provider_error(exc),
                 ) from exc
+            await broadcast_candidate_list_interrupted(
+                error_kind=(
+                    "context_error"
+                    if "context" in str(exc).lower()
+                    else "contract_error"
+                ),
+                error_message=str(exc),
+            )
             await save_checkpoint("error")
             result.had_error = True
             result.error_message = str(exc)
@@ -1604,6 +2222,7 @@ class ProofVerificationStage:
             )
 
         active_attempts: list[ProofAttemptFeedback] = list(prior_attempts or [])
+        context_overflow_payload: dict[str, Any] = {}
         prior_success = next((attempt for attempt in active_attempts if attempt.success), None)
         if prior_success:
             theorem_name = prior_theorem_name or self._extract_theorem_name_from_lean(prior_success.lean_code)
@@ -1752,6 +2371,26 @@ class ProofVerificationStage:
                         "retry_origin_source_id": current_candidate.origin_source_id,
                     },
                 )
+                context_overflow_payload = {
+                        **base_event,
+                        "workflow_mode": self._proof_workflow_mode(trigger),
+                        "overflow_origin": overflow_origin,
+                        "role_id": formalization_agent.role_id,
+                        **configured_payload,
+                        **route_payload,
+                        "reason": CONTEXT_OVERFLOW_STOP_REASON,
+                        "message": message,
+                        "resolution": CONTEXT_OVERFLOW_RESOLUTION,
+                        "error_detail": feedback.error_output,
+                        "theorem_id": current_candidate.theorem_id,
+                        "theorem_statement": current_candidate.statement,
+                        "proof_label": proof_label,
+                        "attempt": feedback.attempt,
+                        "strategy": feedback.strategy,
+                        "prompt_tokens": feedback.prompt_tokens,
+                        "max_input_tokens": feedback.max_input_tokens,
+                        "retry_origin_source_id": current_candidate.origin_source_id,
+                }
                 if (
                     proof_pruning_pressure_callback is not None
                     and novel_proofs_db is not None
@@ -1943,6 +2582,12 @@ class ProofVerificationStage:
             theorem_name=theorem_name,
             lean_code=lean_code,
             attempts=attempts,
+            context_overflow_payload=(
+                context_overflow_payload
+                if attempts
+                and ProofFormalizationAgent.is_context_overflow_feedback(attempts[-1])
+                else {}
+            ),
         )
 
     async def run_manual(
@@ -1982,6 +2627,8 @@ class ProofVerificationStage:
         checkpoint_theorem_names_by_candidate: Optional[dict[str, str]] = None,
         checkpoint_truncation_streak: Optional[list[dict[str, Any]]] = None,
         checkpoint_result: Optional[ProofStageResult] = None,
+        checkpoint_candidate_list_state: Optional[dict[str, Any]] = None,
+        checkpoint_processed_candidate_ids: Optional[list[str]] = None,
         checkpoint_callback: ProofCheckpointCallback = None,
     ) -> ProofStageResult:
         """Run a user-triggered proof check using manual proof role IDs."""
@@ -2023,5 +2670,7 @@ class ProofVerificationStage:
             checkpoint_theorem_names_by_candidate=checkpoint_theorem_names_by_candidate,
             checkpoint_truncation_streak=checkpoint_truncation_streak,
             checkpoint_result=checkpoint_result,
+            checkpoint_candidate_list_state=checkpoint_candidate_list_state,
+            checkpoint_processed_candidate_ids=checkpoint_processed_candidate_ids,
             checkpoint_callback=checkpoint_callback,
         )

@@ -1153,6 +1153,9 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
             }}
           >
             <option value="">Select model...</option>
+            {model && !models.some((availableModel) => availableModel.id === model) && (
+              <option value={model}>{model} (configured)</option>
+            )}
             {models.map(m => {
               const isFree = effectiveProvider === 'openrouter' && 
                             m.pricing?.prompt === "0" && 

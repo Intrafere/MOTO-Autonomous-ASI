@@ -30,6 +30,11 @@ export const COMPILER_ACTIVITY_STORAGE_KEY = getNamespacedStorageKey('compiler_e
 
 const MANUAL_PROOF_EVENTS = [
   'proof_check_started',
+  'proof_candidate_list_review_started',
+  'proof_candidate_list_review_accepted',
+  'proof_candidate_list_review_rejected',
+  'proof_candidate_list_review_interrupted',
+  'proof_candidate_list_regeneration_started',
   'proof_check_no_candidates',
   'proof_check_candidates_found',
   'proof_attempt_started',
@@ -578,6 +583,21 @@ function CompilerLogs({ providerActivity = [] }) {
         : 'Proof discovery';
       const subject = count === 1 ? 'proof candidate' : 'proof candidates';
       return `${prefix} found ${count} ${subject}; ${count} will be attempted`;
+    }
+    if (type === 'proof_candidate_list_review_started') {
+      return `Validator review started for proof-list attempt ${data.list_attempt || 1} (${data.proposed_count || 0} proposed)`;
+    }
+    if (type === 'proof_candidate_list_review_accepted') {
+      return `Validator accepted proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel candidates approved for Lean`;
+    }
+    if (type === 'proof_candidate_list_review_rejected') {
+      return `Validator rejected proof-list attempt ${data.list_attempt || 1}: ${data.approved_count || 0}/${data.proposed_count || 0} novel (75% required). Feedback: ${data.feedback || 'Regenerate more novel proof targets.'}`;
+    }
+    if (type === 'proof_candidate_list_review_interrupted') {
+      return data.message || `Validator proof-list review attempt ${data.list_attempt || 1} was interrupted without a semantic decision.`;
+    }
+    if (type === 'proof_candidate_list_regeneration_started') {
+      return `Regenerating proof candidates after Validator rejection (attempt ${data.list_attempt || 1})`;
     }
     if (type === 'proof_attempt_started') {
       return `Lean proof attempt started: ${proofTargetLabel(data)}`;

@@ -90,6 +90,7 @@ class ProofIdentificationAgent:
         theorem_candidates: List[ProofCandidate] = []
         malformed_candidate_count = 0
         non_novel_candidate_count = 0
+        seen_theorem_ids: set[str] = set()
         for index, theorem in enumerate(raw_theorems_value, start=1):
             if not isinstance(theorem, dict):
                 malformed_candidate_count += 1
@@ -98,7 +99,11 @@ class ProofIdentificationAgent:
             if not statement:
                 malformed_candidate_count += 1
                 continue
-            theorem_id = theorem.get("theorem_id") or theorem.get("id") or f"thm_{index}"
+            theorem_id = str(theorem.get("theorem_id") or theorem.get("id") or "").strip()
+            if not theorem_id or theorem_id in seen_theorem_ids:
+                malformed_candidate_count += 1
+                continue
+            seen_theorem_ids.add(theorem_id)
             expected_novelty_tier = str(theorem.get("expected_novelty_tier", "")).strip().lower()
             if expected_novelty_tier == "not_novel":
                 non_novel_candidate_count += 1
@@ -144,9 +149,9 @@ class ProofIdentificationAgent:
                 )
             )
 
-        if has_candidates and not theorem_candidates and malformed_candidate_count:
+        if has_candidates and malformed_candidate_count:
             raise ValueError(
-                "Proof identification claimed provable theorems but returned no valid theorem candidates "
+                "Proof identification claimed provable theorems but returned no valid theorem candidates as a complete list "
                 f"({malformed_candidate_count} malformed, {non_novel_candidate_count} not_novel)."
             )
 
@@ -326,6 +331,7 @@ class ProofIdentificationAgent:
         proof_round_index: int = 1,
         proof_max_rounds: int = 1,
         prior_round_results: str = "",
+        candidate_list_rejection_feedback: str = "",
     ) -> Tuple[bool, List[ProofCandidate]]:
         """Return whether proof candidates exist and the extracted theorem list."""
         prompt = build_proof_identification_prompt(
@@ -337,6 +343,7 @@ class ProofIdentificationAgent:
             proof_round_index=proof_round_index,
             proof_max_rounds=proof_max_rounds,
             prior_round_results=prior_round_results,
+            candidate_list_rejection_feedback=candidate_list_rejection_feedback,
         )
         max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
         from backend.shared.solution_path.integration import with_budgeted_solver_plan
