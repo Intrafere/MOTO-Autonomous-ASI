@@ -17,6 +17,7 @@ import {
   shouldIncludeCompilerSolutionPathEvent,
 } from '../utils/manualLogRouting';
 import { formatContextOverflowActivityMessage } from '../utils/activityStyles';
+import { buildTerminalModelErrorNotification } from '../App';
 
 describe('context overflow activity behavior', () => {
   beforeEach(() => {
@@ -267,5 +268,59 @@ describe('context overflow activity behavior', () => {
     expect(compacted[0].data.configured_model).toBe('configured-model');
     expect(compacted[0].data.effective_host_provider).toBe('anthropic');
     expect(compacted[0].data.error_output.length).toBeLessThan(1300);
+  });
+});
+
+describe('terminal model error recovery', () => {
+  test('adapts provider repair terminal state for the popup', () => {
+    expect(buildTerminalModelErrorNotification({
+      terminal_event_id: 'terminal-1',
+      reason: 'invalid_model',
+      notification_kind: 'model_error',
+      role_id: 'compiler_writer',
+      configured_provider: 'openrouter',
+      configured_model: 'configured/model',
+      effective_provider: 'lm_studio',
+      effective_model: 'fallback/model',
+      message: 'Research stopped.',
+    })).toMatchObject({
+      notification_kind: 'model_error',
+      provider: 'lm_studio',
+      model: 'fallback/model',
+      title: 'Model configuration requires repair',
+    });
+  });
+
+  test('does not turn ordinary user stops into model errors', () => {
+    expect(buildTerminalModelErrorNotification({
+      reason: 'user_stop',
+      message: 'Research stopped.',
+    })).toBeNull();
+  });
+
+  test('turns fatal manual continuous proof overflow into a model repair popup', () => {
+    expect(buildTerminalModelErrorNotification({
+      proof_run_id: 'proof-run-overflow',
+      workflow_mode: 'manual_proof_check',
+      reason: 'context_overflow',
+      fatal: true,
+      configured_provider: 'openai_codex_oauth',
+      configured_model: 'gpt-5.6-sol',
+      message: 'Research stopped.',
+    })).toMatchObject({
+      notification_kind: 'model_error',
+      provider: 'openai_codex_oauth',
+      model: 'gpt-5.6-sol',
+      title: 'Proof context limit reached',
+    });
+  });
+
+  test('keeps nonfatal candidate proof overflow out of model repair popups', () => {
+    expect(buildTerminalModelErrorNotification({
+      workflow_mode: 'manual_proof_check',
+      reason: 'context_overflow',
+      fatal: false,
+      message: 'Proof candidate deferred.',
+    })).toBeNull();
   });
 });

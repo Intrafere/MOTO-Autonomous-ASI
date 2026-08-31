@@ -58,6 +58,7 @@ function renderSettings({
   config = baseConfig,
   lmStudioEnabled = true,
   memoryEnabled = true,
+  isRunning = false,
 } = {}) {
   return render(
     <AutonomousResearchSettings
@@ -72,7 +73,7 @@ function renderSettings({
           },
         },
       }}
-      isRunning={false}
+      isRunning={isRunning}
     />
   );
 }
@@ -136,6 +137,19 @@ test('prefetches OpenRouter provider metadata for Assistant model', async () => 
   await waitFor(() => {
     expect(openRouterAPI.getProviders).toHaveBeenCalledWith('openrouter/assistant');
   });
+});
+
+test('keeps configured models visible while running when discovery returns no models', async () => {
+  openRouterAPI.getModels.mockResolvedValueOnce({ models: [] });
+  renderSettings({ isRunning: true });
+
+  const configuredOptions = await screen.findAllByRole('option', {
+    name: 'openrouter/validator (configured)',
+  });
+
+  expect(configuredOptions.length).toBeGreaterThan(0);
+  expect(configuredOptions[0].parentElement).toHaveValue('openrouter/validator');
+  expect(configuredOptions[0].parentElement).toBeDisabled();
 });
 
 test('does not call desktop OAuth endpoints in hosted OpenRouter-only mode', async () => {

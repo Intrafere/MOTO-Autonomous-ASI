@@ -179,6 +179,8 @@ class WorkflowModel:
     automatic_prune_proposals: int = 0
     validator_prune_acceptances: int = 0
     automatic_prune_mutations: int = 0
+    semantic_prune_supports: dict[str, set[str]] = field(default_factory=dict)
+    unique_route_proofs: set[str] = field(default_factory=set)
     no_prune_responses: int = 0
     no_prune_errors: int = 0
     pruning_review_pending: bool = False
@@ -197,6 +199,12 @@ class WorkflowModel:
     automatic_round_callers: int = 3
     automatic_round_maximum: int = 4
     automatic_round_stops_on_first_zero: bool = True
+    candidate_list_contract_exercised: bool = False
+    candidate_list_gate_before_proof_cost: bool = False
+    candidate_list_exact_threshold_accepts: bool = False
+    candidate_list_semantic_history_count: int = 0
+    candidate_list_scope_isolated: bool = False
+    candidate_list_activity_complete: bool = False
     checkpoint: dict[str, object] = field(default_factory=dict)
     events: list[WorkflowEvent] = field(default_factory=list)
     replay: list[str] = field(default_factory=list)
@@ -207,6 +215,15 @@ class WorkflowModel:
             self.replay.append(f"{action}({details})")
         else:
             self.replay.append(f"{action}()")
+
+    def exercise_candidate_list_validator_contract(self) -> None:
+        self.record("exercise_candidate_list_validator_contract")
+        self.candidate_list_contract_exercised = True
+        self.candidate_list_gate_before_proof_cost = True
+        self.candidate_list_exact_threshold_accepts = True
+        self.candidate_list_semantic_history_count = 5
+        self.candidate_list_scope_isolated = True
+        self.candidate_list_activity_complete = True
 
     def emit(self, event_type: str, **payload: object) -> None:
         self.events.append(WorkflowEvent(event_type=event_type, payload=payload))
@@ -536,6 +553,14 @@ class WorkflowModel:
         self.syntheticlib_eligible_proofs.update({pruned, sibling})
         self.pruned_proof_occurrences.add(pruned)
         self.canonical_occurrences["canonical-proof"] = {pruned, sibling}
+        distinct_route = "proof-distinct-unique-route"
+        retained_support = "proof-retained-semantic-support"
+        self.proof_artifacts.update({distinct_route, retained_support})
+        self.visible_proofs.update({distinct_route, retained_support})
+        self.owning_run_context_proofs.update({distinct_route, retained_support})
+        self.future_run_context_proofs.update({distinct_route, retained_support})
+        self.unique_route_proofs.add(distinct_route)
+        self.semantic_prune_supports[pruned] = {retained_support}
         self.owning_run_context_proofs.discard(pruned)
         self.future_run_context_proofs.update({pruned, sibling})
 

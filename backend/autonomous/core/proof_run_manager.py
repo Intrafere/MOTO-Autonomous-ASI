@@ -679,13 +679,24 @@ class ProofRunManager:
             return control.snapshot.model_copy(deep=True)
         control.stop_event.set()
         control.wake_event.set()
-        return await self.update(
+        snapshot = await self.update(
             control,
             expected_generation=expected_lifecycle_generation,
             status="stopping",
             stop_requested=True,
             wake_generation=control.snapshot.wake_generation + 1,
         )
+        # Cooperative stop checks only run between proof stages.  Actively
+        # cancel the driver so an in-flight provider request is interrupted
+        # immediately instead of making Stop wait for the model to return.
+        task = control.task
+        if (
+            task is not None
+            and not task.done()
+            and task is not asyncio.current_task()
+        ):
+            task.cancel()
+        return snapshot
 
     async def shutdown_all(self) -> None:
         """Stop and fully drain every current-process manual proof run."""

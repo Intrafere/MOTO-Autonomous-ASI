@@ -96,6 +96,25 @@ test('renders Assistant role and greys it out when Session History Memory is dis
   expect(assistantSection.querySelector('input')).toBeDisabled();
 });
 
+test('keeps a configured model visible when discovery returns no models', async () => {
+  localStorage.setItem(
+    'compiler_settings',
+    JSON.stringify({
+      validatorProvider: 'openrouter',
+      validatorModel: 'openrouter/configured-validator',
+    })
+  );
+  openRouterAPI.getModels.mockResolvedValueOnce({ models: [] });
+  renderSettings();
+
+  const configuredOptions = await screen.findAllByRole('option', {
+    name: 'openrouter/configured-validator (configured)',
+  });
+
+  expect(configuredOptions.length).toBeGreaterThan(0);
+  expect(configuredOptions[0].parentElement).toHaveValue('openrouter/configured-validator');
+});
+
 test('hydrates omitted Assistant settings from Validator and preserves explicit Assistant settings', async () => {
   localStorage.setItem(
     'compiler_settings',

@@ -9,12 +9,31 @@ import time
 from typing import Any, Dict
 
 from fastapi import APIRouter
+from pydantic import BaseModel, ConfigDict
 
 from backend.shared.build_info import get_build_info
 from backend.shared.config import system_config
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+class FeaturesResponse(BaseModel):
+    """Stable public build identity and deployment capability contract."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    version: str
+    build_commit: str
+    update_channel: str
+    api_contract_version: str
+    generic_mode: bool
+    lm_studio_enabled: bool
+    pdf_download_available: bool
+    openai_codex_oauth_available: bool
+    xai_grok_oauth_available: bool
+    sakana_fugu_available: bool
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _UPDATE_NOTICE_PATH = _REPO_ROOT / ".moto_update_notice.json"
@@ -30,7 +49,7 @@ class _UpdateNoticeRefreshState:
 _update_notice_refresh_state = _UpdateNoticeRefreshState()
 
 
-@router.get("/api/features")
+@router.get("/api/features", response_model=FeaturesResponse)
 async def get_features() -> Dict[str, Any]:
     """
     Return the public build-identity and capability contract.

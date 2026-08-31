@@ -1,6 +1,8 @@
 export const CONTEXT_OVERFLOW_STOP_MESSAGE = 'Research stopped. Some required source content must be injected directly to preserve answer quality, and it reached the maximum context size for the selected model. Start a new session with a condensed prompt, or choose a model with a higher context limit.';
 
-export const REJECTION_FEEDBACK_NOTICE = 'Rejections are normal and provide feedback to the model. Extended rejection streaks can be expected on difficult problems. Above is 10 submissions your validator thought were not worth your time!';
+export const REJECTION_FEEDBACK_NOTICE = 'Validator feedback was provided for this rejection. Rejections are normal, and extended rejection streaks can be expected on difficult problems.';
+
+export const TENTH_REJECTION_FEEDBACK_NOTICE = `${REJECTION_FEEDBACK_NOTICE} This is the tenth consecutive rejection in the current streak.`;
 
 export const formatContextOverflowActivityMessage = (data = {}) => {
   const message = data.message || CONTEXT_OVERFLOW_STOP_MESSAGE;
@@ -51,7 +53,9 @@ export const buildRejectionFeedbackNoticeActivity = (timestamp, data = {}) => ({
   event: 'rejection_feedback_notice',
   type: 'rejection_feedback_notice',
   timestamp: timestampAfter(timestamp),
-  message: REJECTION_FEEDBACK_NOTICE,
+  message: Number(data.consecutive_rejections ?? data.consecutive) === 10
+    ? TENTH_REJECTION_FEEDBACK_NOTICE
+    : REJECTION_FEEDBACK_NOTICE,
   data: {
     total_rejections: data.total_rejections,
     consecutive_rejections: data.consecutive_rejections ?? data.consecutive,
@@ -89,6 +93,11 @@ export const isProofRunActivityEvent = (event = '') => (
   PROOF_RUN_EVENT_PREFIXES.some((prefix) => String(event).startsWith(prefix))
   || [
     'proof_check_started',
+    'proof_candidate_list_review_started',
+    'proof_candidate_list_review_accepted',
+    'proof_candidate_list_review_rejected',
+    'proof_candidate_list_review_interrupted',
+    'proof_candidate_list_regeneration_started',
     'proof_check_no_candidates',
     'proof_check_candidates_found',
     'proof_check_complete',
@@ -120,7 +129,7 @@ export const getProofActivityIdentity = (event = '', data = {}) => {
   if (!runId) return '';
   const round = data.proof_round_index || data.round_index || data.current_round || '';
   const generation = data.lifecycle_generation || '';
-  const eventInstance = data.event_id || data.sequence || '';
+  const eventInstance = data.manual_event_id || data.event_id || data.sequence || '';
   const subject = (
     data.proposal_id
     || data.candidate_id
@@ -129,7 +138,14 @@ export const getProofActivityIdentity = (event = '', data = {}) => {
     || data.proof_label
     || ''
   );
-  const attempt = data.attempt || data.attempt_index || '';
+  const attempt = (
+    data.list_attempt
+    || data.generation_attempt
+    || data.attempt
+    || data.attempt_index
+    || ''
+  );
+  const listIdentity = data.list_fingerprint || data.candidate_list_fingerprint || '';
   return [
     'proof-run',
     getProofActivityScope(data),
@@ -138,6 +154,7 @@ export const getProofActivityIdentity = (event = '', data = {}) => {
     `generation-${generation}`,
     `round-${round}`,
     `subject-${subject}`,
+    `list-${listIdentity}`,
     `attempt-${attempt}`,
     `instance-${eventInstance}`,
   ].join(':');
@@ -424,6 +441,16 @@ export const getActivityIcon = (event = '') => {
       return '↻';
     case 'proof_check_candidates_found':
       return '#';
+    case 'proof_candidate_list_review_started':
+      return '?';
+    case 'proof_candidate_list_review_accepted':
+      return '✓';
+    case 'proof_candidate_list_review_rejected':
+      return '×';
+    case 'proof_candidate_list_review_interrupted':
+      return '!';
+    case 'proof_candidate_list_regeneration_started':
+      return '↻';
     case 'proof_check_no_candidates':
       return '-';
     case 'smt_check_started':
@@ -645,6 +672,7 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'proof_attempt_failed' ||
     event === 'proof_attempts_exhausted' ||
     event === 'proof_truncation_recovery_exhausted' ||
+    event === 'proof_candidate_list_review_interrupted' ||
     event === 'assistant_proof_pack_failed' ||
     event === 'proof_integrity_rejected' ||
     event === 'smt_check_error' ||
@@ -697,6 +725,9 @@ export const getActivityClass = (event = '', item = {}) => {
     event === 'proof_framing_decided' ||
     event === 'proof_retry_scheduled' ||
     event === 'proof_retry_started' ||
+    event === 'proof_candidate_list_review_started' ||
+    event === 'proof_candidate_list_review_interrupted' ||
+    event === 'proof_candidate_list_regeneration_started' ||
     event === 'proof_check_candidates_found' ||
     event === 'proof_check_no_candidates' ||
     event === 'proof_attempt_started' ||
@@ -740,8 +771,6 @@ export const formatAssistantProofPackMessage = (data = {}) => {
   const target = String(data.target_kind || '').replace(/_/g, ' ') || 'current target';
   const phase = String(data.workflow_phase || '').replace(/_/g, ' ').trim();
   const phaseText = phase ? ` during ${phase}` : '';
-  const warningCount = Array.isArray(data.warnings) ? data.warnings.filter(Boolean).length : 0;
-  const warningText = warningCount ? ` (${warningCount} warning${warningCount === 1 ? '' : 's'})` : '';
   const rawSelectionMode = String(data.selection_mode || '').trim();
   const selectionMode = rawSelectionMode.replace(/_/g, ' ').trim();
   const assistantModel = String(data.assistant_model_id || '').trim();
@@ -758,11 +787,11 @@ export const formatAssistantProofPackMessage = (data = {}) => {
     ? `: reviewed ${reviewedLocal} local and ${reviewedSynthetic} SyntheticLib4; used ${local} local and ${synthetic} SyntheticLib4`
     : `: used ${local} local and ${synthetic} SyntheticLib4`;
 
-  if (total === 0 && warningCount === 0) {
+  if (total === 0) {
     return `Assistant memory found no useful proofs for ${target}${phaseText}${selectorText}${countsText}`;
   }
 
-  return `Assistant memory returned ${total}/${max} proofs for ${target}${phaseText}${selectorText}${countsText}${warningText}`;
+  return `Assistant memory returned ${total}/${max} proofs for ${target}${phaseText}${selectorText}${countsText}`;
 };
 
 export const ASSISTANT_PROOF_PACK_EVENTS = new Set([

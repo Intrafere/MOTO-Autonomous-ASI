@@ -14,6 +14,7 @@ from tests.workflow_harness.actions import (
     emit_context_overflow_contract_events,
     emit_frontend_scoped_event,
     emit_registered_proof_verified,
+    exercise_candidate_list_validator_contract,
     exercise_proof_pruning_and_continuous_contracts,
     force_paper_writing,
     prepare_prompt_context,
@@ -68,6 +69,7 @@ PLAN2_INVARIANT_IDS = {
     "proof_runtime.no_smt_when_disabled",
     "proof_runtime.hosted_proof_settings_unavailable",
     "proof_runtime.truncation_is_attempt_failure",
+    "proof_runtime.candidate_list_validator_gate",
     "outputs.at_least_one_output_enabled",
     "outputs.proofs_only_no_paper_phase",
     "outputs.papers_only_skips_proof_work",
@@ -102,6 +104,7 @@ PLAN2_INVARIANT_IDS = {
     "proof_pruning.artifacts_and_future_memory_preserved",
     "proof_pruning.owning_run_context_excludes_pruned",
     "proof_pruning.validator_gates_automatic_mutation",
+    "proof_pruning.semantic_distinct_review_preserves_unique_routes",
     "proof_pruning.no_prune_is_valid",
     "proof_pruning.review_non_blocking",
     "proof_pruning.commit_lifecycle_fenced",
@@ -132,6 +135,9 @@ SCENARIOS_BY_INVARIANT = {
     ],
     "proof_runtime.hosted_proof_settings_unavailable": [try_hosted_desktop_only_route],
     "proof_runtime.truncation_is_attempt_failure": [simulate_provider_output_truncation],
+    "proof_runtime.candidate_list_validator_gate": [
+        exercise_candidate_list_validator_contract,
+    ],
     "outputs.at_least_one_output_enabled": [start_autonomous_no_outputs],
     "outputs.proofs_only_no_paper_phase": [
         start_autonomous_proofs_only,
@@ -236,6 +242,9 @@ SCENARIOS_BY_INVARIANT = {
     "proof_pruning.validator_gates_automatic_mutation": [
         exercise_proof_pruning_and_continuous_contracts
     ],
+    "proof_pruning.semantic_distinct_review_preserves_unique_routes": [
+        exercise_proof_pruning_and_continuous_contracts
+    ],
     "proof_pruning.no_prune_is_valid": [exercise_proof_pruning_and_continuous_contracts],
     "proof_pruning.review_non_blocking": [exercise_proof_pruning_and_continuous_contracts],
     "proof_pruning.commit_lifecycle_fenced": [
@@ -273,6 +282,9 @@ def _make_invariant_violation(model: WorkflowModel, invariant_id: str) -> None:
         model.hosted_desktop_route_unavailable = False
     elif invariant_id == "proof_runtime.truncation_is_attempt_failure":
         model.truncation_failures = model.provider_pause_from_truncation = 1
+    elif invariant_id == "proof_runtime.candidate_list_validator_gate":
+        model.candidate_list_contract_exercised = True
+        model.candidate_list_gate_before_proof_cost = False
     elif invariant_id == "outputs.at_least_one_output_enabled":
         model.allow_mathematical_proofs = model.allow_research_papers = False
     elif invariant_id == "outputs.proofs_only_no_paper_phase":
@@ -353,6 +365,8 @@ def _make_invariant_violation(model: WorkflowModel, invariant_id: str) -> None:
         model.pruned_proof_occurrences = model.owning_run_context_proofs = {"proof-1"}
     elif invariant_id == "proof_pruning.validator_gates_automatic_mutation":
         model.automatic_prune_mutations = 1
+    elif invariant_id == "proof_pruning.semantic_distinct_review_preserves_unique_routes":
+        model.pruned_proof_occurrences = model.owning_run_context_proofs = {"proof-1"}
     elif invariant_id == "proof_pruning.no_prune_is_valid":
         model.no_prune_responses = model.no_prune_errors = 1
     elif invariant_id == "proof_pruning.review_non_blocking":

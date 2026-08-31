@@ -11,7 +11,12 @@ from backend.autonomous.core.autonomous_coordinator import AutonomousCoordinator
 from backend.autonomous.memory.research_metadata import ResearchMetadata
 from backend.leanoj.core.leanoj_coordinator import LeanOJCoordinator
 from backend.shared.config import system_config
-from backend.shared.models import CompilerStartRequest, LeanOJRoleConfig, LeanOJStartRequest
+from backend.shared.models import (
+    CompilerStartRequest,
+    LeanOJRoleConfig,
+    LeanOJStartRequest,
+    ModelConfig,
+)
 from backend.shared.models import ProofCandidate
 from backend.shared.provider_pause import resume_provider_pauses
 from tests.workflow_real_adapters.coverage_records import PROOF_ROUTE_COVERAGE
@@ -30,6 +35,27 @@ from tests.workflow_harness.real_adapters import (
 )
 
 coordinator_module = import_module("backend.autonomous.core.autonomous_coordinator")
+
+
+def _configure_automatic_brainstorm_proof_roles() -> None:
+    coordinator_module.api_client_manager.configure_role(
+        "autonomous_proof_identification_brainstorm",
+        ModelConfig(
+            provider="lm_studio",
+            model_id="rigor-model",
+            context_window=3000,
+            max_output_tokens=300,
+        ),
+    )
+    coordinator_module.api_client_manager.configure_role(
+        "autonomous_proof_candidate_list_validator_brainstorm",
+        ModelConfig(
+            provider="lm_studio",
+            model_id="validator-model",
+            context_window=2000,
+            max_output_tokens=200,
+        ),
+    )
 
 
 def _compiler_request(**overrides) -> CompilerStartRequest:
@@ -278,6 +304,7 @@ async def test_autonomous_provider_credit_pause_preserves_checkpoint_and_resumes
         lambda: type("Tier3State", (), {"is_active": False})(),
     )
     monkeypatch.setattr(coordinator_module.final_answer_memory, "get_answer_format", lambda: None)
+    _configure_automatic_brainstorm_proof_roles()
     system_config.lean4_enabled = True
     try:
         status = await coordinator._run_proof_verification(
@@ -518,6 +545,7 @@ async def test_autonomous_provider_pause_stop_reset_restart_uses_real_event_and_
         lambda: type("Tier3State", (), {"is_active": False})(),
     )
     monkeypatch.setattr(coordinator_module.final_answer_memory, "get_answer_format", lambda: None)
+    _configure_automatic_brainstorm_proof_roles()
     old_lean_enabled = system_config.lean4_enabled
     system_config.lean4_enabled = True
     resume_provider_pauses()

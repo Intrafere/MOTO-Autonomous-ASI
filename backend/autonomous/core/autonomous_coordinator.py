@@ -46,6 +46,7 @@ from backend.shared.provider_pause import (
     mark_provider_paused,
     wait_for_provider_resume,
 )
+from backend.shared.provider_errors import ProviderRepairRequiredError
 
 # Memory managers
 from backend.autonomous.memory.brainstorm_memory import brainstorm_memory
@@ -69,6 +70,7 @@ from backend.autonomous.prompts.proof_prompts import (
     PROOF_FRAMING_CONTEXT,
     build_proof_framing_gate_prompt,
 )
+from backend.autonomous.agents.proof_pruning_agent import proof_run_role_suffix
 from backend.autonomous.core.proof_verification_stage import ProofVerificationProviderPause, ProofVerificationStage
 from backend.autonomous.core.proof_pruning_coordinator import ProofPruningCoordinator
 from backend.autonomous.core.proof_round_driver import (
@@ -120,6 +122,10 @@ _AUTOMATIC_PROOF_NOVELTY_ROLE_IDS = (
     "autonomous_proof_novelty",
     "autonomous_proof_novelty_brainstorm",
     "autonomous_proof_novelty_paper",
+)
+_AUTOMATIC_PROOF_LIST_VALIDATOR_ROLE_IDS = (
+    "autonomous_proof_candidate_list_validator_brainstorm",
+    "autonomous_proof_candidate_list_validator_paper",
 )
 _TIER2_RESUME_PHASES = {
     "outline",
@@ -362,6 +368,35 @@ class AutonomousCoordinator:
             payload=payload,
         )
 
+    def _mark_provider_repair_stop(
+        self,
+        error: ProviderRepairRequiredError,
+    ) -> None:
+        """Preserve a definitive model-route failure for UI and reconnect recovery."""
+        model = error.model or "the configured model"
+        role_id = error.role_id or "the active model role"
+        message = (
+            f"Research stopped because {error.provider_label} could not serve "
+            f"model '{model}' for role '{role_id}'."
+        )
+        self._mark_terminal_stop(
+            reason=error.reason or "provider_repair_required",
+            message=message,
+            payload={
+                "notification_kind": "model_error",
+                "role_id": role_id,
+                "configured_model": error.configured_model or model,
+                "configured_provider": error.configured_provider or error.provider,
+                "effective_model": model,
+                "effective_provider": error.provider,
+                "effective_host_provider": error.effective_host_provider or None,
+                "route_kind": error.route_kind or None,
+                "resolution": error.terminal_guidance,
+                "terminal_guidance": error.terminal_guidance,
+                "error_detail": error.safe_message,
+            },
+        )
+
     def _track_child_aggregator(self, aggregator: AggregatorCoordinator) -> None:
         """Track local child aggregators so parent phase changes can stop them."""
         if aggregator not in self._active_child_aggregators:
@@ -468,8 +503,13 @@ class AutonomousCoordinator:
         return effective_prompt
 
     def _get_effective_compiler_prompt(self, paper_title: str) -> str:
-        """Return the compiler prompt with proof context applied."""
+        """Return the Tier 2 compiler context with the original objective."""
+        original_objective = (
+            self._base_user_research_prompt or self._user_research_prompt
+        ).strip()
         return self._apply_proof_context(
+            f"Original User Research Objective:\n{original_objective}\n\n"
+            f"Paper Title and Instructions:\n"
             f"Write a rigorous solution paper titled: {paper_title}\n\n"
             "Aggressively pursue the strongest credible and genuinely novel solution "
             "to the user's exact objective. Use the solution form and verification "
@@ -727,6 +767,7 @@ class AutonomousCoordinator:
         Dict[str, str],
         List[Dict[str, Any]],
         ProofStageResult,
+        List[str],
     ]:
         """Return remaining candidates, original indexes, and prior Lean attempts."""
         processed_ids = set(checkpoint.get("processed_candidate_ids") or [])
@@ -803,6 +844,9 @@ class AutonomousCoordinator:
                 for candidate_id in (checkpoint.get("deferred_candidate_ids") or [])
                 if candidate_id
             ],
+            context_overflow_payload=dict(
+                checkpoint.get("context_overflow_payload") or {}
+            ),
         )
         return (
             candidates,
@@ -811,6 +855,7 @@ class AutonomousCoordinator:
             theorem_names_by_candidate,
             truncation_streak,
             checkpoint_result,
+            sorted(str(item) for item in processed_ids if item),
         )
 
     async def _run_proof_verification(
@@ -881,12 +926,50 @@ class AutonomousCoordinator:
             prior_round_results: str,
             source_reservation_token: str,
         ):
+            automatic_role_base = (
+                "brainstorm" if source_type == "brainstorm" else "paper"
+            )
+            automatic_role_suffix = (
+                f"{automatic_role_base}_"
+                f"{proof_run_role_suffix('autonomous', self._run_id)}"
+            )
+            proof_submitter_config = api_client_manager.get_role_config(
+                f"autonomous_proof_identification_{automatic_role_base}"
+            )
+            proof_validator_config = api_client_manager.get_role_config(
+                f"autonomous_proof_candidate_list_validator_{automatic_role_base}"
+            )
+            if proof_submitter_config is None or proof_validator_config is None:
+                raise RuntimeError(
+                    "Automatic proof roles are missing configured submitter or Validator models."
+                )
+            for role_name in (
+                "identification",
+                "lemma_search",
+                "formalization",
+            ):
+                api_client_manager.configure_role(
+                    f"autonomous_proof_{role_name}_{automatic_role_suffix}",
+                    proof_submitter_config,
+                )
+            api_client_manager.configure_role(
+                f"autonomous_proof_lemma_search_{automatic_role_suffix}_dep",
+                proof_submitter_config,
+            )
+            for role_name in ("novelty", "candidate_list_validator"):
+                api_client_manager.configure_role(
+                    f"autonomous_proof_{role_name}_{automatic_role_suffix}",
+                    proof_validator_config,
+                )
+
             checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
             proof_candidate_indexes: Dict[str, int] = {}
             checkpoint_attempts: Dict[str, List[ProofAttemptFeedback]] = {}
             checkpoint_theorem_names: Dict[str, str] = {}
             checkpoint_truncation_streak: List[Dict[str, Any]] = []
             checkpoint_result: Optional[ProofStageResult] = None
+            checkpoint_processed_candidate_ids: List[str] = []
+            checkpoint_candidate_list_state: Dict[str, Any] = {}
             retry_candidates = theorem_candidates if proof_round_index == 1 else None
 
             if checkpoint:
@@ -934,6 +1017,9 @@ class AutonomousCoordinator:
                     return "skipped", None
 
                 if same_round_checkpoint and checkpoint.get("status") != "trigger_complete":
+                    checkpoint_candidate_list_state = dict(
+                        checkpoint.get("candidate_list_review") or {}
+                    )
                     (
                         checkpoint_candidates,
                         proof_candidate_indexes,
@@ -941,6 +1027,7 @@ class AutonomousCoordinator:
                         checkpoint_theorem_names,
                         checkpoint_truncation_streak,
                         checkpoint_result,
+                        checkpoint_processed_candidate_ids,
                     ) = self._deserialize_proof_checkpoint(checkpoint)
                     if checkpoint_candidates:
                         retry_candidates = checkpoint_candidates
@@ -982,10 +1069,19 @@ class AutonomousCoordinator:
                         checkpoint_theorem_names_by_candidate=checkpoint_theorem_names,
                         checkpoint_truncation_streak=checkpoint_truncation_streak,
                         checkpoint_result=checkpoint_result,
+                        checkpoint_processed_candidate_ids=checkpoint_processed_candidate_ids,
+                        checkpoint_candidate_list_state=checkpoint_candidate_list_state,
                         checkpoint_callback=save_proof_checkpoint,
                         proof_round_index=proof_round_index,
                         proof_max_rounds=proof_max_rounds,
                         prior_round_results=prior_round_results,
+                        proof_run_context={
+                            "proof_run_id": self._run_id,
+                            "lifecycle_generation": self._lifecycle_generation,
+                            "scope": "autonomous",
+                            "round_index": proof_round_index,
+                            "round_trigger": round_trigger,
+                        },
                         proof_pruning_registered_callback=(
                             pruning_coordinator.notify_proof_registered
                         ),
@@ -1046,6 +1142,9 @@ class AutonomousCoordinator:
                     retry_candidates = exc.remaining_candidates or retry_candidates
                     checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
                     if checkpoint and checkpoint.get("trigger") == round_trigger:
+                        checkpoint_candidate_list_state = dict(
+                            checkpoint.get("candidate_list_review") or {}
+                        )
                         (
                             checkpoint_candidates,
                             proof_candidate_indexes,
@@ -1053,6 +1152,7 @@ class AutonomousCoordinator:
                             checkpoint_theorem_names,
                             checkpoint_truncation_streak,
                             checkpoint_result,
+                            checkpoint_processed_candidate_ids,
                         ) = self._deserialize_proof_checkpoint(checkpoint)
                         retry_candidates = checkpoint_candidates or retry_candidates
                     message = str(exc)
@@ -1095,6 +1195,9 @@ class AutonomousCoordinator:
                 except RetryableProviderError as exc:
                     checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
                     if checkpoint and checkpoint.get("trigger") == round_trigger:
+                        checkpoint_candidate_list_state = dict(
+                            checkpoint.get("candidate_list_review") or {}
+                        )
                         (
                             checkpoint_candidates,
                             proof_candidate_indexes,
@@ -1102,6 +1205,7 @@ class AutonomousCoordinator:
                             checkpoint_theorem_names,
                             checkpoint_truncation_streak,
                             checkpoint_result,
+                            checkpoint_processed_candidate_ids,
                         ) = self._deserialize_proof_checkpoint(checkpoint)
                         retry_candidates = checkpoint_candidates or retry_candidates
                     message = str(exc)
@@ -1149,6 +1253,9 @@ class AutonomousCoordinator:
                         raise
                     checkpoint = await research_metadata.get_proof_checkpoint(source_type, source_id)
                     if checkpoint and checkpoint.get("trigger") == round_trigger:
+                        checkpoint_candidate_list_state = dict(
+                            checkpoint.get("candidate_list_review") or {}
+                        )
                         (
                             checkpoint_candidates,
                             proof_candidate_indexes,
@@ -1156,6 +1263,7 @@ class AutonomousCoordinator:
                             checkpoint_theorem_names,
                             checkpoint_truncation_streak,
                             checkpoint_result,
+                            checkpoint_processed_candidate_ids,
                         ) = self._deserialize_proof_checkpoint(checkpoint)
                         retry_candidates = checkpoint_candidates or retry_candidates
                     message = str(exc)
@@ -1936,6 +2044,11 @@ class AutonomousCoordinator:
         for proof_novelty_role_id in _AUTOMATIC_PROOF_NOVELTY_ROLE_IDS:
             api_client_manager.configure_role(
                 proof_novelty_role_id,
+                proof_novelty_config,
+            )
+        for proof_list_validator_role_id in _AUTOMATIC_PROOF_LIST_VALIDATOR_ROLE_IDS:
+            api_client_manager.configure_role(
+                proof_list_validator_role_id,
                 proof_novelty_config,
             )
 
@@ -2846,11 +2959,26 @@ class AutonomousCoordinator:
                 expected_run_id=self._terminal_event.run_id,
                 expected_generation=self._terminal_event.lifecycle_generation,
             )
-            if self._terminal_event.reason == "proof_output_truncation_recovery_exhausted":
+            is_provider_repair = (
+                self._terminal_event.notification_kind == "model_error"
+                and self._terminal_event.reason
+                != "proof_output_truncation_recovery_exhausted"
+            )
+            if (
+                self._terminal_event.reason == "proof_output_truncation_recovery_exhausted"
+                or is_provider_repair
+            ):
                 from backend.shared.provider_notification_store import record_provider_notification
 
                 run_id = self._terminal_event.run_id or "current"
-                notification_key = f"proof-truncation:{run_id}"
+                notification_key = (
+                    f"{self._terminal_event.effective_provider or self._terminal_event.configured_provider or 'model_provider'}:"
+                    f"{self._terminal_event.role_id or 'autonomous'}:"
+                    f"{self._terminal_event.reason}:"
+                    f"{self._terminal_event.effective_model or self._terminal_event.configured_model or '*'}"
+                    if is_provider_repair
+                    else f"proof-truncation:{run_id}"
+                )
                 stored = await asyncio.to_thread(
                     record_provider_notification,
                     "auto_research_stopped",
@@ -2859,14 +2987,34 @@ class AutonomousCoordinator:
                         "notification_key": notification_key,
                         "notification_kind": "model_error",
                         "run_id": run_id,
-                        "provider": "proof_model",
-                        "role_id": "autonomous_proof_formalization",
+                        "provider": (
+                            self._terminal_event.effective_provider
+                            or self._terminal_event.configured_provider
+                            or "model_provider"
+                            if is_provider_repair
+                            else "proof_model"
+                        ),
+                        "role_id": (
+                            self._terminal_event.role_id
+                            if is_provider_repair
+                            else "autonomous_proof_formalization"
+                        ),
+                        "model": (
+                            self._terminal_event.effective_model
+                            or self._terminal_event.configured_model
+                            or ""
+                        ),
                         "reason": self._terminal_event.reason,
-                        "title": "Proof model output repeatedly truncated",
+                        "title": (
+                            "Model configuration requires repair"
+                            if is_provider_repair
+                            else "Proof model output repeatedly truncated"
+                        ),
                         "recoverable": True,
                         "terminal_guidance": self._terminal_event.terminal_guidance or "",
                     },
                 )
+                payload.update(stored)
                 payload["notification_key"] = stored.get("notification_key", notification_key)
         await self._broadcast("auto_research_stopped", payload)
 
@@ -3693,6 +3841,11 @@ class AutonomousCoordinator:
                 )
                 continue
 
+        except ProviderRepairRequiredError as e:
+            logger.error("AutonomousCoordinator stopped for provider repair: %s", e)
+            self._mark_provider_repair_stop(e)
+            await self._save_workflow_state()
+            raise
         except Exception as e:
             logger.error(f"AutonomousCoordinator error: {e}")
             await self._save_workflow_state()
@@ -4238,6 +4391,10 @@ class AutonomousCoordinator:
                 })
                 await asyncio.sleep(120)  # Wait before retrying (all models exhausted)
 
+        except ProviderRepairRequiredError as e:
+            logger.error("Resumed Autonomous research stopped for provider repair: %s", e)
+            self._mark_provider_repair_stop(e)
+            await self._save_workflow_state()
         except Exception as e:
             logger.error(f"Error in resumed research loop: {e}")
             await self._save_workflow_state()
@@ -4505,6 +4662,8 @@ class AutonomousCoordinator:
                     logger.warning("Error stopping topic exploration aggregator after free-model exhaustion: %s", stop_exc)
             raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"Topic exploration phase error: {e}")
             if exploration_aggregator:
                 try:
@@ -4808,6 +4967,8 @@ class AutonomousCoordinator:
             except FreeModelExhaustedError:
                 raise
             except Exception as e:
+                if api_client_manager.is_provider_failure(e):
+                    raise
                 logger.error(f"Error in continuation decision attempt {attempt}: {e}")
                 await asyncio.sleep(3)
         
@@ -6428,6 +6589,8 @@ class AutonomousCoordinator:
                     logger.warning("Error stopping paper title exploration aggregator after free-model exhaustion: %s", stop_exc)
             raise
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"Paper title exploration phase error: {e}")
             if exploration_aggregator:
                 try:
@@ -6695,23 +6858,33 @@ class AutonomousCoordinator:
                     last_tracked_phase = compiler_phase
                     await self._save_workflow_state(tier="tier2_paper_writing", phase=compiler_phase)
                 
-                # Check if abstract has been written
-                # Abstract is the LAST section written, so its presence signals completion
-                if current_paper and self._has_abstract(current_paper):
-                    logger.info("Abstract detected - paper compilation complete")
+                # Stop only after the child accepts abstract completion and verifies
+                # the required final structure. A heading can appear before that.
+                if self._child_compiler_confirmed_completion(current_paper):
+                    logger.info("Child compiler confirmed paper completion")
                     abstract_written = True
                     break
                 
                 # Check if compiler has stopped (error or other reason)
                 if not self._paper_compiler.is_running:
-                    if getattr(self._paper_compiler, "fatal_error_type", None) == CONTEXT_OVERFLOW_STOP_REASON:
+                    child_fatal_type = getattr(self._paper_compiler, "fatal_error_type", None)
+                    child_payload = getattr(self._paper_compiler, "fatal_error_payload", None) or {}
+                    if child_fatal_type == "provider_repair_required":
+                        self._mark_terminal_stop(
+                            reason=str(child_payload.get("reason") or "provider_repair_required"),
+                            message=str(
+                                child_payload.get("message")
+                                or "Research stopped for compiler provider repair."
+                            ),
+                            payload=child_payload,
+                        )
+                        self._stop_event.set()
+                    elif child_fatal_type == CONTEXT_OVERFLOW_STOP_REASON:
                         logger.error(
                             "Paper compiler stopped for context overflow: %s",
                             getattr(self._paper_compiler, "fatal_error_message", ""),
                         )
-                        self._mark_context_overflow_stop(
-                            getattr(self._paper_compiler, "fatal_error_payload", None)
-                        )
+                        self._mark_context_overflow_stop(child_payload)
                         self._stop_event.set()
                     logger.warning("Compiler stopped unexpectedly")
                     break
@@ -6735,6 +6908,8 @@ class AutonomousCoordinator:
             return final_paper
             
         except Exception as e:
+            if api_client_manager.is_provider_failure(e):
+                raise
             logger.error(f"Error during paper compilation: {e}")
             if self._paper_compiler:
                 await self._paper_compiler.stop()
@@ -6757,6 +6932,14 @@ class AutonomousCoordinator:
                 return True
         
         return False
+
+    def _child_compiler_confirmed_completion(self, paper_content: str) -> bool:
+        """Return whether the child accepted and structurally verified completion."""
+        return bool(
+            paper_content
+            and self._paper_compiler
+            and self._paper_compiler.autonomous_paper_complete
+        )
     
     def _extract_abstract(self, paper_content: str) -> str:
         """Extract abstract text from paper."""
@@ -8287,24 +8470,34 @@ class AutonomousCoordinator:
             await self._paper_compiler.start()
             logger.info(f"Tier 3 compiler started for {paper_id}")
             
-            # Monitor for completion (same as Tier 2)
+            # Monitor for authoritative child completion (same as Tier 2).
             abstract_written = False
             while self._running and not self._stop_event.is_set():
                 current_paper = await compiler_paper_memory.get_paper()
                 
-                if current_paper and self._has_abstract(current_paper):
+                if self._child_compiler_confirmed_completion(current_paper):
                     abstract_written = True
                     break
                 
                 if not self._paper_compiler.is_running:
-                    if getattr(self._paper_compiler, "fatal_error_type", None) == CONTEXT_OVERFLOW_STOP_REASON:
+                    child_fatal_type = getattr(self._paper_compiler, "fatal_error_type", None)
+                    child_payload = getattr(self._paper_compiler, "fatal_error_payload", None) or {}
+                    if child_fatal_type == "provider_repair_required":
+                        self._mark_terminal_stop(
+                            reason=str(child_payload.get("reason") or "provider_repair_required"),
+                            message=str(
+                                child_payload.get("message")
+                                or "Research stopped for compiler provider repair."
+                            ),
+                            payload=child_payload,
+                        )
+                        self._stop_event.set()
+                    elif child_fatal_type == CONTEXT_OVERFLOW_STOP_REASON:
                         logger.error(
                             "Tier 3 compiler stopped for context overflow: %s",
                             getattr(self._paper_compiler, "fatal_error_message", ""),
                         )
-                        self._mark_context_overflow_stop(
-                            getattr(self._paper_compiler, "fatal_error_payload", None)
-                        )
+                        self._mark_context_overflow_stop(child_payload)
                         self._stop_event.set()
                     break
                 

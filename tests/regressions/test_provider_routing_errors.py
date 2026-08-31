@@ -6,10 +6,12 @@ import httpx
 import backend.shared.api_client_manager as api_manager_module
 from backend.shared.api_client_manager import (
     APIClientManager,
+    ProviderCooldownError,
     RetryableProviderError,
     _is_retryable_codex_completion_error,
     _typed_provider_context_error,
 )
+from backend.aggregator.agents.submitter import SubmitterAgent
 from backend.shared.boost_manager import boost_manager
 from backend.shared.config import system_config
 from backend.shared.lm_studio_client import LMStudioClient
@@ -181,6 +183,69 @@ class ProviderClientTypedErrorTests(unittest.IsolatedAsyncioTestCase):
                     max_tokens=10,
                 )
             self.assertIsInstance(raised.exception.cause, httpx.TimeoutException)
+        finally:
+            await client.close()
+
+    async def test_openrouter_opaque_upstream_404_is_transient_after_internal_retries(self):
+        client = OpenRouterClient("test-key")
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        response = httpx.Response(
+            404,
+            request=request,
+            json={
+                "error": {
+                    "message": "Provider returned error",
+                    "code": 404,
+                    "metadata": {"raw": "", "provider_name": "Nvidia"},
+                }
+            },
+        )
+        client.client.post = AsyncMock(return_value=response)
+        client.MAX_RETRIES = 3
+        try:
+            with patch(
+                "backend.shared.openrouter_client.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                with self.assertRaises(ProviderRouteError) as raised:
+                    await client.generate_completion(
+                        model="nvidia/model:free",
+                        messages=[{"role": "user", "content": "hello"}],
+                        max_tokens=10,
+                    )
+            self.assertEqual(client.client.post.await_count, 3)
+            self.assertTrue(is_transient_model_call_error(raised.exception))
+            self.assertFalse(is_non_retryable_model_error(raised.exception))
+        finally:
+            await client.close()
+
+    async def test_openrouter_provider_wrapper_with_specific_detail_is_not_marked_transient(self):
+        client = OpenRouterClient("test-key")
+        request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        response = httpx.Response(
+            404,
+            request=request,
+            json={
+                "error": {
+                    "message": "Provider returned error",
+                    "code": 404,
+                    "metadata": {
+                        "raw": "invalid model deployment",
+                        "provider_name": "Nvidia",
+                    },
+                }
+            },
+        )
+        client.client.post = AsyncMock(return_value=response)
+        client.MAX_RETRIES = 1
+        try:
+            with self.assertRaises(ProviderRouteError) as raised:
+                await client.generate_completion(
+                    model="nvidia/model:free",
+                    messages=[{"role": "user", "content": "hello"}],
+                    max_tokens=10,
+                )
+            self.assertFalse(is_transient_model_call_error(raised.exception))
         finally:
             await client.close()
 
@@ -370,6 +435,41 @@ class APIClientManagerRouteContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, expected)
         routed_completion.assert_awaited_once()
+
+    async def test_aggregator_submitter_waits_on_provider_cooldown_in_outer_loop(self):
+        submitter = SubmitterAgent(
+            submitter_id=3,
+            model_name="fugu",
+            user_prompt="test",
+            user_files_content={},
+        )
+        cooldown = ProviderCooldownError(
+            provider="sakana_fugu",
+            provider_label="Sakana Fugu",
+            role_id=submitter.role_id,
+            model="fugu",
+            resets_at=123,
+            resets_in_seconds=3600,
+        )
+        submitter._generate_submission = AsyncMock(side_effect=cooldown)
+        submitter.is_running = True
+
+        async def stop_after_wait(*args, **kwargs):
+            submitter.is_running = False
+
+        with patch.object(
+            api_manager_module.api_client_manager,
+            "wait_for_retryable_provider_error",
+            new=AsyncMock(side_effect=stop_after_wait),
+        ) as wait_for_retry:
+            await submitter._run_loop()
+
+        wait_for_retry.assert_awaited_once()
+        self.assertIs(wait_for_retry.await_args.args[0], cooldown)
+        self.assertEqual(
+            wait_for_retry.await_args.kwargs["role_id"],
+            "aggregator_submitter_3",
+        )
 
     async def test_configured_lm_studio_fallback_state_still_routes(self):
         manager = APIClientManager()

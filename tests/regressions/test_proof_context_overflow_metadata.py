@@ -12,15 +12,41 @@ from backend.autonomous.core.proof_verification_stage import (
     ProofVerificationStage,
     _LeanVerificationOutcome,
 )
+from backend.autonomous.agents.proof_candidate_list_validator import (
+    ProofCandidateListValidator,
+)
 from backend.autonomous.core import proof_verification_stage as stage_module
 from backend.shared.lean_proof_integrity import LeanProofIntegrityResult
 from backend.compiler.core.compiler_coordinator import CompilerCoordinator
-from backend.shared.models import ProofAttemptFeedback, ProofCandidate
+from backend.shared.models import (
+    ProofAttemptFeedback,
+    ProofCandidate,
+    ProofCandidateListValidation,
+    ProofCandidateNoveltyDecision,
+)
 from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
 
 
 def _candidate() -> ProofCandidate:
     return ProofCandidate(theorem_id="candidate-1", statement="True")
+
+
+@pytest.fixture(autouse=True)
+def _approve_candidate_lists(monkeypatch):
+    async def approve(_self, *, candidates, **_kwargs):
+        return ProofCandidateListValidation(
+            results=[
+                ProofCandidateNoveltyDecision(
+                    theorem_id=candidate.theorem_id,
+                    decision="approve_novel",
+                    reasoning="Approved for this proof-stage regression fixture.",
+                )
+                for candidate in candidates
+            ],
+            feedback="All fixture candidates are approved.",
+        )
+
+    monkeypatch.setattr(ProofCandidateListValidator, "validate", approve)
 
 
 @pytest.mark.asyncio

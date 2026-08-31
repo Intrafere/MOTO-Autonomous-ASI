@@ -85,6 +85,12 @@ class InvariantState(Protocol):
     automatic_round_callers: int
     automatic_round_maximum: int
     automatic_round_stops_on_first_zero: bool
+    candidate_list_contract_exercised: bool
+    candidate_list_gate_before_proof_cost: bool
+    candidate_list_exact_threshold_accepts: bool
+    candidate_list_semantic_history_count: int
+    candidate_list_scope_isolated: bool
+    candidate_list_activity_complete: bool
     checkpoint: dict[str, object]
     events: list[WorkflowEvent]
     replay: list[str]
@@ -417,6 +423,27 @@ def _assert_validator_gates_automatic_pruning(model: InvariantState) -> None:
         _fail(model, "Automatic proof pruning mutated state without a valid proposal and Validator acceptance.")
 
 
+def _assert_semantic_pruning_preserves_unique_routes(model: InvariantState) -> None:
+    _assert_validator_gates_automatic_pruning(model)
+    _assert_owning_run_excludes_pruned_proofs(model)
+    lost_unique_routes = model.unique_route_proofs & model.pruned_proof_occurrences
+    if lost_unique_routes:
+        _fail(
+            model,
+            f"Semantic pruning removed unique proof routes: {sorted(lost_unique_routes)!r}.",
+        )
+    for pruned_id in model.pruned_proof_occurrences:
+        supports = model.semantic_prune_supports.get(pruned_id, set())
+        if not supports:
+            _fail(model, f"Semantic prune lacks retained support provenance: {pruned_id!r}.")
+        missing = supports - model.owning_run_context_proofs
+        if missing:
+            _fail(
+                model,
+                f"Retained semantic supports left owning-run context: {sorted(missing)!r}.",
+            )
+
+
 def _assert_no_prune_is_valid(model: InvariantState) -> None:
     if model.no_prune_responses and model.no_prune_errors:
         _fail(model, "A valid no-prune response was treated as an error.")
@@ -464,6 +491,21 @@ def _assert_automatic_round_policy_preserved(model: InvariantState) -> None:
         _fail(model, "Automatic proof caller/count policy changed from x3/current-up-to-four.")
     if not model.automatic_round_stops_on_first_zero:
         _fail(model, "Automatic proof rounds did not stop on the first valid zero-candidate result.")
+
+
+def _assert_candidate_list_validator_gate(model: InvariantState) -> None:
+    if not model.candidate_list_contract_exercised:
+        return
+    if not model.candidate_list_gate_before_proof_cost:
+        _fail(model, "Proof candidates reached proof cost before whole-list validation.")
+    if not model.candidate_list_exact_threshold_accepts:
+        _fail(model, "The exact 75% candidate-list novelty threshold was not accepted.")
+    if model.candidate_list_semantic_history_count > 5:
+        _fail(model, "Candidate-list semantic rejection memory exceeded five entries.")
+    if not model.candidate_list_scope_isolated:
+        _fail(model, "Candidate-list review state leaked across a run, source, or round boundary.")
+    if not model.candidate_list_activity_complete:
+        _fail(model, "Candidate-list review activity omitted review, feedback, or regeneration state.")
 
 
 def _assert_pruning_occurrence_scoped(model: InvariantState) -> None:
@@ -531,6 +573,18 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         adapters=("model",),
         checker=_assert_truncation_is_attempt_failure,
         description="Provider max-output truncation is a proof attempt failure, not a provider pause.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_runtime.candidate_list_validator_gate",
+        field="proof_runtime_gating",
+        crossed_fields=(
+            "provider_pause_resume",
+            "workflow_filesystem_state",
+            "websocket_api_contracts",
+        ),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_candidate_list_validator_gate,
+        description="Every proof round validates the whole candidate list before proof cost with exact-threshold, scoped-memory, and visible-activity guarantees.",
     ),
     InvariantSpec(
         invariant_id="outputs.at_least_one_output_enabled",
@@ -803,6 +857,14 @@ INVARIANT_CATALOG: tuple[InvariantSpec, ...] = (
         adapters=("model", "real_coordinator"),
         checker=_assert_validator_gates_automatic_pruning,
         description="Automatic pruning requires a valid proposal and independent Validator acceptance.",
+    ),
+    InvariantSpec(
+        invariant_id="proof_pruning.semantic_distinct_review_preserves_unique_routes",
+        field="proof_pruning",
+        crossed_fields=("prompt_context", "proof_scope_isolation", "workflow_filesystem_state"),
+        adapters=("model", "real_coordinator"),
+        checker=_assert_semantic_pruning_preserves_unique_routes,
+        description="Distinct proofs are pruned only through bounded semantic evidence and independent validation while unique routes remain protected.",
     ),
     InvariantSpec(
         invariant_id="proof_pruning.no_prune_is_valid",

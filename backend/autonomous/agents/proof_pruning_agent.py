@@ -94,6 +94,7 @@ def parse_proof_prune_validation(
     content: str,
     *,
     expected_proof_id: str,
+    expected_supporting_proof_ids: Optional[list[str]] = None,
 ) -> ProofPruneValidation:
     data = parse_json(content)
     if not isinstance(data, dict):
@@ -101,6 +102,12 @@ def parse_proof_prune_validation(
     result = ProofPruneValidation.model_validate(data)
     if result.proof_id != expected_proof_id:
         raise ValueError("Validator proof_id did not match the proposed proof.")
+    if result.supporting_proof_ids != list(expected_supporting_proof_ids or []):
+        raise ValueError(
+            "Validator supporting_proof_ids did not match the proposal."
+        )
+    if result.decision == "accept" and not result.coverage_confirmed:
+        raise ValueError("Accepted pruning validation must confirm coverage.")
     return result
 
 
@@ -112,6 +119,9 @@ def validate_proposal_against_snapshot(
         return ProofPruneGuardResult(allowed=True)
 
     aggregate = {entry.proof_id: entry for entry in snapshot.whole_set}
+    descriptors = {
+        entry.proof_id: entry for entry in snapshot.candidate_descriptors
+    }
     target = aggregate.get(str(proposal.proof_id or ""))
     reasons = []
     if target is None:
@@ -124,12 +134,34 @@ def validate_proposal_against_snapshot(
             reasons.append("theorem_hash_mismatch")
         if proposal.expected_lean_hash != target.canonical_lean_hash:
             reasons.append("lean_hash_mismatch")
-        if target.exact_identity_occurrence_count < 2:
-            reasons.append("no_stronger_exact_identity_comparator")
         if target.dependency_extraction_status != "complete":
             reasons.append("dependency_extraction_incomplete")
         if target.dependent_count:
             reasons.append("active_dependency_root")
+        if proposal.proof_id not in descriptors:
+            reasons.append("target_evidence_unavailable")
+        for support_id in proposal.supporting_proof_ids:
+            support = aggregate.get(support_id)
+            descriptor = descriptors.get(support_id)
+            if support is None:
+                reasons.append(f"support_not_in_snapshot:{support_id}")
+                continue
+            if descriptor is None:
+                reasons.append(f"support_evidence_unavailable:{support_id}")
+            if support.dependency_extraction_status != "complete":
+                reasons.append(f"support_dependency_incomplete:{support_id}")
+            if support.protected_reasons and any(
+                reason == "dependency_extraction_incomplete"
+                for reason in support.protected_reasons
+            ):
+                reasons.append(f"support_protected:{support_id}")
+            if descriptor and any(
+                dependency.kind == "moto"
+                and str(dependency.source_ref or dependency.name or "").strip()
+                == proposal.proof_id
+                for dependency in descriptor.dependencies
+            ):
+                reasons.append(f"support_depends_on_target:{support_id}")
     return ProofPruneGuardResult(
         allowed=not reasons,
         proof_id=proposal.proof_id,
@@ -244,6 +276,109 @@ class _ProofPruningRole:
 
 
 class ProofPruningProposerAgent(_ProofPruningRole):
+    def _prompt_without_lean(self, snapshot: ProofPruneSnapshot) -> str:
+        return build_proof_pruning_proposer_prompt(snapshot, include_lean=False)
+
+    def _section_snapshots(
+        self,
+        snapshot: ProofPruneSnapshot,
+    ) -> list[ProofPruneSnapshot]:
+        """Build candidate-centered bounded review sections.
+
+        Every eligible target gets its own section with the strongest available
+        semantic contrasts/supports. The compact whole-set ledger remains in
+        every section, so no target is selected merely because it appeared on an
+        earlier chronological page.
+        """
+        max_input = rag_config.get_available_input_tokens(
+            self.role_config.context_window,
+            self.role_config.max_output_tokens,
+        )
+        descriptors = {
+            item.proof_id: item for item in snapshot.candidate_descriptors
+        }
+        aggregate = {item.proof_id: item for item in snapshot.whole_set}
+        eligible_ids = [
+            item.proof_id
+            for item in sorted(
+                snapshot.whole_set,
+                key=lambda item: (item.created_at, item.proof_id),
+            )
+            if item.eligible_candidate and item.proof_id in descriptors
+        ]
+        pages: list[ProofPruneSnapshot] = []
+        for target_id in eligible_ids:
+            target = descriptors[target_id]
+            target_entry = aggregate[target_id]
+            ranked_supports = sorted(
+                (
+                    descriptor
+                    for descriptor in snapshot.candidate_descriptors
+                    if descriptor.proof_id != target_id
+                    and not (
+                        "dependency_extraction_incomplete"
+                        in descriptor.protected_reasons
+                    )
+                ),
+                key=lambda descriptor: (
+                    -int(
+                        target.canonical_theorem_hash
+                        == descriptor.canonical_theorem_hash
+                        and target.canonical_lean_hash
+                        == descriptor.canonical_lean_hash
+                    ),
+                    -int(
+                        target.source_type == descriptor.source_type
+                        and target.source_id == descriptor.source_id
+                    ),
+                    -int(
+                        descriptor.proof_id
+                        in {
+                            dependency.source_ref or dependency.name
+                            for dependency in target.dependencies
+                            if dependency.kind == "moto"
+                        }
+                    ),
+                    -aggregate.get(
+                        descriptor.proof_id,
+                        target_entry,
+                    ).estimated_context_tokens,
+                    descriptor.created_at,
+                    descriptor.proof_id,
+                ),
+            )
+            section_descriptors = [target]
+            single = snapshot.model_copy(
+                update={
+                    "candidate_descriptors": section_descriptors,
+                    "evidence_bounded": True,
+                }
+            )
+            if count_tokens(self._prompt_without_lean(single)) > max_input:
+                raise ProofPruningContextError(
+                    "One candidate-centered semantic proof-pruning section exceeds the "
+                    "configured input budget even with Lean code omitted."
+                )
+            for support in ranked_supports:
+                candidate_descriptors = [*section_descriptors, support]
+                candidate = snapshot.model_copy(
+                    update={
+                        "candidate_descriptors": candidate_descriptors,
+                        "evidence_bounded": True,
+                    }
+                )
+                if count_tokens(self._prompt_without_lean(candidate)) <= max_input:
+                    section_descriptors = candidate_descriptors
+                if len(section_descriptors) >= 9:
+                    break
+            pages.append(snapshot.model_copy(
+                update={
+                    "candidate_descriptors": section_descriptors,
+                    "evidence_bounded": True,
+                }
+            ))
+        return pages
+
     async def propose(self, snapshot: ProofPruneSnapshot) -> ProofPruneProposal:
         prompt = build_proof_pruning_proposer_prompt(snapshot, include_lean=True)
         max_input = rag_config.get_available_input_tokens(
@@ -255,10 +390,103 @@ class ProofPruningProposerAgent(_ProofPruningRole):
                 snapshot,
                 include_lean=False,
             )
+        if count_tokens(prompt) > max_input:
+            proposals: list[ProofPruneProposal] = []
+            for section in self._section_snapshots(snapshot):
+                section_prompt = self._prompt_without_lean(section)
+                result = await self._generate_parse_with_one_repair(
+                    prompt=section_prompt,
+                    contract=proposer_contract_text(),
+                    parser=parse_proof_prune_proposal,
+                )
+                if result.action == "propose_prune":
+                    proposals.append(result)
+            if not proposals:
+                return ProofPruneProposal(
+                    action="no_prune",
+                    proof_id=None,
+                    expected_theorem_hash=None,
+                    expected_lean_hash=None,
+                    prune_category=None,
+                    supporting_proof_ids=[],
+                    coverage_claims=[],
+                    reasoning=(
+                        "All bounded semantic evidence sections declined pruning."
+                    ),
+                )
+            if len(proposals) == 1:
+                return proposals[0]
+            return await self._arbitrate_section_proposals(snapshot, proposals)
         return await self._generate_parse_with_one_repair(
             prompt=prompt,
             contract=proposer_contract_text(),
             parser=parse_proof_prune_proposal,
+        )
+
+    async def _arbitrate_section_proposals(
+        self,
+        snapshot: ProofPruneSnapshot,
+        proposals: list[ProofPruneProposal],
+    ) -> ProofPruneProposal:
+        required_ids = {str(proposal.proof_id) for proposal in proposals}
+        for proposal in proposals:
+            required_ids.update(proposal.supporting_proof_ids)
+        arbitration_snapshot = snapshot.model_copy(
+            update={
+                "candidate_descriptors": [
+                    descriptor
+                    for descriptor in snapshot.candidate_descriptors
+                    if descriptor.proof_id in required_ids
+                ],
+                "evidence_bounded": True,
+            }
+        )
+        evidence_prompt = build_proof_pruning_proposer_prompt(
+            arbitration_snapshot,
+            include_lean=False,
+        )
+        prompt = (
+            "Several bounded semantic proof-pruning sections independently "
+            "nominated targets. Conservatively choose at most one proposal whose "
+            "cited retained supports preserve every material contribution across "
+            "the whole-set ledger. Do not invent or alter proof IDs, hashes, "
+            "categories, supports, or coverage claims. If the proposals conflict "
+            "or the bounded evidence is insufficient, return no_prune.\n\n"
+            f"WHOLE-SET AND CITED EVIDENCE:\n"
+            f"{evidence_prompt}\n\n"
+            "SECTION PROPOSALS:\n"
+            f"{json.dumps([item.model_dump(mode='json') for item in proposals], ensure_ascii=False, sort_keys=True)}"
+        )
+        max_input = rag_config.get_available_input_tokens(
+            self.role_config.context_window,
+            self.role_config.max_output_tokens,
+        )
+        if count_tokens(prompt) > max_input:
+            raise ProofPruningContextError(
+                "Global proof-pruning arbitration exceeds the configured input "
+                "budget; no section proposal can be safely selected."
+            )
+
+        def parse_arbitration(content: str) -> ProofPruneProposal:
+            result = parse_proof_prune_proposal(content)
+            if result.action == "no_prune":
+                return result
+            matching = [
+                proposal
+                for proposal in proposals
+                if result.model_dump(mode="json")
+                == proposal.model_dump(mode="json")
+            ]
+            if not matching:
+                raise ValueError(
+                    "Section arbitration must return one proposal unchanged or no_prune."
+                )
+            return result
+
+        return await self._generate_parse_with_one_repair(
+            prompt=prompt,
+            contract=proposer_contract_text(),
+            parser=parse_arbitration,
         )
 
 
@@ -291,12 +519,34 @@ class ProofPruningValidatorAgent(_ProofPruningRole):
                 guard_summary=guard_summary,
                 include_lean=False,
             )
+        if count_tokens(prompt) > max_input:
+            required_ids = {
+                str(proposal.proof_id),
+                *proposal.supporting_proof_ids,
+            }
+            validation_snapshot = snapshot.model_copy(
+                update={
+                    "candidate_descriptors": [
+                        descriptor
+                        for descriptor in snapshot.candidate_descriptors
+                        if descriptor.proof_id in required_ids
+                    ],
+                    "evidence_bounded": True,
+                }
+            )
+            prompt = build_proof_pruning_validator_prompt(
+                validation_snapshot,
+                proposal,
+                guard_summary=guard_summary,
+                include_lean=False,
+            )
         return await self._generate_parse_with_one_repair(
             prompt=prompt,
             contract=validator_contract_text(),
             parser=lambda content: parse_proof_prune_validation(
                 content,
                 expected_proof_id=str(proposal.proof_id),
+                expected_supporting_proof_ids=proposal.supporting_proof_ids,
             ),
         )
 
@@ -349,6 +599,8 @@ class ProofPruningReviewService:
                 validation=ProofPruneValidation(
                     decision="reject",
                     proof_id=str(proposal.proof_id),
+                    supporting_proof_ids=list(proposal.supporting_proof_ids),
+                    coverage_confirmed=False,
                     reasoning=(
                         "Deterministic proof identity, dependency, or protection "
                         "guards rejected the proposal before semantic validation: "
@@ -381,6 +633,25 @@ class ProofPruningReviewService:
                 proof_set_revision=snapshot.proof_set_revision,
                 expected_theorem_hash=str(proposal.expected_theorem_hash),
                 expected_lean_hash=str(proposal.expected_lean_hash),
+                prune_category=str(proposal.prune_category),
+                supporting_proof_ids=list(proposal.supporting_proof_ids),
+                supporting_proof_fingerprints={
+                    descriptor.proof_id: descriptor.descriptor_fingerprint
+                    for descriptor in snapshot.candidate_descriptors
+                    if descriptor.proof_id in proposal.supporting_proof_ids
+                },
+                target_dependency_fingerprint=next(
+                    descriptor.dependency_fingerprint
+                    for descriptor in snapshot.candidate_descriptors
+                    if descriptor.proof_id == proposal.proof_id
+                ),
+                target_descriptor_fingerprint=next(
+                    descriptor.descriptor_fingerprint
+                    for descriptor in snapshot.candidate_descriptors
+                    if descriptor.proof_id == proposal.proof_id
+                ),
+                evidence_policy_version=snapshot.evidence_policy_version,
+                evidence_fingerprint=snapshot.evidence_fingerprint,
                 trigger_reasons=snapshot.trigger_reasons,
                 proposer_reasoning=proposal.reasoning,
                 validator_reasoning=validation.reasoning,

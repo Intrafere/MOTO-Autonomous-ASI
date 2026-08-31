@@ -16,6 +16,9 @@ from backend.autonomous.agents.final_answer import certainty_assessor as certain
 from backend.autonomous.core import proof_novelty as proof_novelty_module
 from backend.autonomous.core import proof_registration as proof_registration_module
 from backend.autonomous.core.proof_verification_stage import ProofVerificationStage
+from backend.autonomous.agents.proof_candidate_list_validator import (
+    ProofCandidateListValidator,
+)
 from backend.autonomous.memory.brainstorm_memory import BrainstormMemory
 from backend.autonomous.memory.paper_library import PaperLibrary
 from backend.autonomous.memory.proof_database import ProofDatabase
@@ -34,6 +37,8 @@ from backend.shared.config import system_config
 from backend.shared.api_client_manager import RetryableProviderError
 from backend.shared.models import (
     ProofCandidate,
+    ProofCandidateListValidation,
+    ProofCandidateNoveltyDecision,
     ProofCheckRequest,
     ProofRecord,
     ProofRuntimeConfigSnapshot,
@@ -73,6 +78,30 @@ class _FakeActiveProofDatabase:
 
 
 class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+
+        async def approve_candidate_list(_validator, *, candidates, **_kwargs):
+            return ProofCandidateListValidation(
+                results=[
+                    ProofCandidateNoveltyDecision(
+                        theorem_id=candidate.theorem_id,
+                        decision="approve_novel",
+                        reasoning="Approved for this proof-stage regression fixture.",
+                    )
+                    for candidate in candidates
+                ],
+                feedback="All fixture candidates are approved.",
+            )
+
+        self._candidate_list_validator_patch = mock.patch.object(
+            ProofCandidateListValidator,
+            "validate",
+            new=approve_candidate_list,
+        )
+        self._candidate_list_validator_patch.start()
+        self.addAsyncCleanup(self._candidate_list_validator_patch.stop)
+
     async def test_manual_aggregator_runtime_prefers_active_manual_config_over_stale_request_snapshot(self):
         previous_state = {
             "submitter_configs": proofs_route.coordinator.submitter_configs,
@@ -1778,10 +1807,34 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_proof_identification_requires_relevance_novelty_and_standard_rationales(self):
         class FakeApiClientManager:
+            def __init__(self):
+                self.calls = 0
+
             async def prewarm_assistant_memory_context(self, **_kwargs):
                 return ""
 
             async def generate_completion(self, **_kwargs):
+                self.calls += 1
+                theorems = [
+                    {
+                        "theorem_id": "missing_rationales",
+                        "statement": "A theorem with missing rationale.",
+                        "expected_novelty_tier": "mathematical_discovery",
+                        "prompt_relevance_rationale": "",
+                        "novelty_rationale": "Novel.",
+                        "why_not_standard_known_result": "Not standard.",
+                    },
+                    {
+                        "theorem_id": "valid",
+                        "statement": "A theorem that directly solves the prompt.",
+                        "expected_novelty_tier": "mathematical_discovery",
+                        "prompt_relevance_rationale": "This directly solves the user prompt.",
+                        "novelty_rationale": "Novel.",
+                        "why_not_standard_known_result": "Not standard.",
+                    },
+                ]
+                if self.calls > 1:
+                    theorems = theorems[1:]
                 return {
                     "choices": [
                         {
@@ -1789,24 +1842,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
                                 "content": json.dumps(
                                     {
                                         "has_provable_theorems": True,
-                                        "theorems": [
-                                            {
-                                                "theorem_id": "missing_rationales",
-                                                "statement": "A theorem with missing rationale.",
-                                                "expected_novelty_tier": "mathematical_discovery",
-                                                "prompt_relevance_rationale": "",
-                                                "novelty_rationale": "Novel.",
-                                                "why_not_standard_known_result": "Not standard.",
-                                            },
-                                            {
-                                                "theorem_id": "valid",
-                                                "statement": "A theorem that directly solves the prompt.",
-                                                "expected_novelty_tier": "mathematical_discovery",
-                                                "prompt_relevance_rationale": "This directly solves the user prompt.",
-                                                "novelty_rationale": "Novel.",
-                                                "why_not_standard_known_result": "Not standard.",
-                                            },
-                                        ],
+                                        "theorems": theorems,
                                     }
                                 )
                             }
@@ -1815,7 +1851,8 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         old_api_client_manager = proof_identification_module.api_client_manager
-        proof_identification_module.api_client_manager = FakeApiClientManager()
+        fake_api_client_manager = FakeApiClientManager()
+        proof_identification_module.api_client_manager = fake_api_client_manager
         try:
             agent = proof_identification_module.ProofIdentificationAgent(
                 model_id="model",
@@ -1833,6 +1870,7 @@ class ProofContextRegressionTests(unittest.IsolatedAsyncioTestCase):
             proof_identification_module.api_client_manager = old_api_client_manager
 
         self.assertTrue(has_candidates)
+        self.assertEqual(fake_api_client_manager.calls, 2)
         self.assertEqual([candidate.theorem_id for candidate in candidates], ["valid"])
 
     async def test_proof_identification_retries_codex_max_output_truncation(self):

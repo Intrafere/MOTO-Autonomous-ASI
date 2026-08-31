@@ -4,6 +4,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase, mock
 from pydantic import ValidationError
 
 from backend.autonomous.agents.proof_pruning_agent import (
+    ProofPruningProposerAgent,
     ProofPruningReviewService,
     parse_proof_prune_proposal,
     parse_proof_prune_validation,
@@ -32,7 +33,8 @@ def _snapshot() -> ProofPruneSnapshot:
             source_id="paper-1",
             created_at=datetime(2026, 1, 1),
             dependency_extraction_status="complete",
-            exact_identity_occurrence_count=2,
+            dependency_fingerprint="dep-old",
+            descriptor_fingerprint="desc-old",
             eligible_candidate=True,
         ),
         ProofPruneAggregateEntry(
@@ -45,7 +47,8 @@ def _snapshot() -> ProofPruneSnapshot:
             source_id="paper-2",
             created_at=datetime(2026, 1, 2),
             dependency_extraction_status="complete",
-            exact_identity_occurrence_count=2,
+            dependency_fingerprint="dep-new",
+            descriptor_fingerprint="desc-new",
             eligible_candidate=True,
         ),
     ]
@@ -61,9 +64,8 @@ def _snapshot() -> ProofPruneSnapshot:
             source_id=entry.source_id,
             created_at=entry.created_at,
             dependency_extraction_status="complete",
-            comparator_proof_ids=[
-                "proof-new" if entry.proof_id == "proof-old" else "proof-old"
-            ],
+            dependency_fingerprint=entry.dependency_fingerprint,
+            descriptor_fingerprint=entry.descriptor_fingerprint,
             lean_code="theorem t : True := by trivial",
             lean_code_included=True,
         )
@@ -152,7 +154,14 @@ class ProofPruningContractTests(TestCase):
                 proof_id="proof-old",
                 expected_theorem_hash="th",
                 expected_lean_hash="lh",
-                reasoning="Exact redundant occurrence.",
+                prune_category="superseded",
+                supporting_proof_ids=["proof-new"],
+                coverage_claims=[{
+                    "target_contribution": "Truth result",
+                    "preserved_by_proof_ids": ["proof-new"],
+                    "explanation": "The retained proof establishes the stronger result.",
+                }],
+                reasoning="Semantically superseded occurrence.",
             ),
             snapshot,
         )
@@ -163,6 +172,13 @@ class ProofPruningContractTests(TestCase):
                 proof_id="proof-old",
                 expected_theorem_hash="wrong",
                 expected_lean_hash="lh",
+                prune_category="superseded",
+                supporting_proof_ids=["proof-new"],
+                coverage_claims=[{
+                    "target_contribution": "Truth result",
+                    "preserved_by_proof_ids": ["proof-new"],
+                    "explanation": "The retained proof establishes it.",
+                }],
                 reasoning="Wrong identity.",
             ),
             snapshot,
@@ -177,6 +193,110 @@ class ProofPruningContractTests(TestCase):
 
 
 class ProofPruningAgentTests(IsolatedAsyncioTestCase):
+    async def test_oversized_proposer_review_partitions_oldest_first(self) -> None:
+        snapshot = _snapshot()
+        snapshot.candidate_descriptors = [
+            *snapshot.candidate_descriptors,
+            *[
+                snapshot.candidate_descriptors[-1].model_copy(
+                    update={
+                        "proof_id": f"proof-new-{index}",
+                        "descriptor_fingerprint": f"desc-new-{index}",
+                        "created_at": datetime(2026, 1, 3 + index),
+                        "theorem_statement": "True " * 1000,
+                    }
+                )
+                for index in range(3)
+            ],
+        ]
+        agent = ProofPruningProposerAgent(
+            role_id="test_proposer",
+            task_prefix="proof_prune_propose",
+            role_config=_runtime().paper,
+        )
+        seen_sections = []
+
+        async def fake_generate(*, prompt, **_kwargs):
+            seen_sections.append(prompt)
+            return ProofPruneProposal(
+                action="no_prune",
+                proof_id=None,
+                expected_theorem_hash=None,
+                expected_lean_hash=None,
+                reasoning="No removable proof in this section.",
+            )
+
+        with mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent."
+            "rag_config.__class__.get_available_input_tokens",
+            return_value=5000,
+        ), mock.patch.object(
+            agent,
+            "_generate_parse_with_one_repair",
+            side_effect=fake_generate,
+        ):
+            result = await agent.propose(snapshot)
+
+        self.assertEqual(result.action, "no_prune")
+        self.assertGreater(len(seen_sections), 1)
+        self.assertIn("proof-old", seen_sections[0])
+        self.assertIn("proof-new", seen_sections[0])
+        self.assertIn("proof-new-2", seen_sections[-1])
+        self.assertIn("proof-old", seen_sections[-1])
+
+    async def test_multiple_section_proposals_require_global_arbitration(self) -> None:
+        snapshot = _snapshot()
+        agent = ProofPruningProposerAgent(
+            role_id="test_proposer_arbitration",
+            task_prefix="proof_prune_propose",
+            role_config=_runtime().paper,
+        )
+        calls = 0
+        proposals = []
+        for proof_id, support_id in (
+            ("proof-old", "proof-new"),
+            ("proof-new", "proof-old"),
+        ):
+            proposals.append(ProofPruneProposal(
+                action="propose_prune",
+                proof_id=proof_id,
+                expected_theorem_hash="th",
+                expected_lean_hash="lh",
+                prune_category="redundant",
+                supporting_proof_ids=[support_id],
+                coverage_claims=[{
+                    "target_contribution": "Truth result",
+                    "preserved_by_proof_ids": [support_id],
+                    "explanation": "The retained proof preserves the result.",
+                }],
+                reasoning="This section nominates one occurrence.",
+            ))
+
+        async def fake_generate(*, prompt, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return ProofPruneProposal(
+                action="no_prune",
+                proof_id=None,
+                expected_theorem_hash=None,
+                expected_lean_hash=None,
+                reasoning="The section proposals conflict.",
+            )
+
+        with mock.patch(
+            "backend.autonomous.agents.proof_pruning_agent."
+            "rag_config.__class__.get_available_input_tokens",
+            return_value=6000,
+        ), mock.patch.object(
+            agent,
+            "_generate_parse_with_one_repair",
+            side_effect=fake_generate,
+        ):
+            result = await agent._arbitrate_section_proposals(snapshot, proposals)
+
+        self.assertEqual(result.action, "no_prune")
+        self.assertEqual(calls, 1)
+
     async def test_no_prune_skips_validator_and_preserves_role_configs(self) -> None:
         calls = []
 
@@ -224,10 +344,17 @@ class ProofPruningAgentTests(IsolatedAsyncioTestCase):
             (
                 '{"action":"propose_prune","proof_id":"proof-old",'
                 '"expected_theorem_hash":"th","expected_lean_hash":"lh",'
-                '"reasoning":"The newer exact occurrence preserves the contribution."}'
+                '"prune_category":"superseded",'
+                '"supporting_proof_ids":["proof-new"],'
+                '"coverage_claims":[{"target_contribution":"Truth result",'
+                '"preserved_by_proof_ids":["proof-new"],'
+                '"explanation":"The retained proof establishes the stronger result."}],'
+                '"reasoning":"The newer proof preserves the contribution."}'
             ),
             (
                 '{"decision":"accept","proof_id":"proof-old",'
+                '"supporting_proof_ids":["proof-new"],'
+                '"coverage_confirmed":true,'
                 '"reasoning":"No dependency or route is lost."}'
             ),
         ]
@@ -264,6 +391,11 @@ class ProofPruningAgentTests(IsolatedAsyncioTestCase):
                                 '{"action":"propose_prune","proof_id":"proof-old",'
                                 '"expected_theorem_hash":"wrong",'
                                 '"expected_lean_hash":"lh",'
+                                '"prune_category":"superseded",'
+                                '"supporting_proof_ids":["proof-new"],'
+                                '"coverage_claims":[{"target_contribution":"Truth result",'
+                                '"preserved_by_proof_ids":["proof-new"],'
+                                '"explanation":"The retained proof establishes it."}],'
                                 '"reasoning":"Attempt stale target."}'
                             )
                         }

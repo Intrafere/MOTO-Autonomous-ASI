@@ -111,6 +111,10 @@ class ProviderRepairRequiredError(RuntimeError):
         reason: str,
         message: str,
         terminal_guidance: str = "",
+        configured_provider: str = "",
+        configured_model: str = "",
+        effective_host_provider: str = "",
+        route_kind: str = "",
     ) -> None:
         self.provider = redact_log_text(provider or "unknown", 80)
         self.provider_label = redact_log_text(provider_label or provider or "Provider", 120)
@@ -119,6 +123,10 @@ class ProviderRepairRequiredError(RuntimeError):
         self.reason = redact_log_text(reason or "provider_repair_required", 160)
         self.safe_message = redact_log_text(message, 1000)
         self.terminal_guidance = redact_log_text(terminal_guidance, 1800)
+        self.configured_provider = redact_log_text(configured_provider, 80)
+        self.configured_model = redact_log_text(configured_model, 240)
+        self.effective_host_provider = redact_log_text(effective_host_provider, 120)
+        self.route_kind = redact_log_text(route_kind, 40)
         super().__init__(self.safe_message)
 
 

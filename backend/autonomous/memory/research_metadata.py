@@ -473,6 +473,24 @@ class ResearchMetadata:
                 self._workflow_state = self._get_default_workflow_state()
 
             existing = self._workflow_state.get("proof_checkpoint") or {}
+            current_run_id = str(self._workflow_state.get("run_id") or "")
+            current_generation = int(
+                self._workflow_state.get("lifecycle_generation") or 0
+            )
+            checkpoint_run_id = str(checkpoint.get("run_id") or "")
+            checkpoint_generation = int(
+                checkpoint.get("lifecycle_generation") or 0
+            )
+            if checkpoint_run_id and current_run_id and checkpoint_run_id != current_run_id:
+                logger.warning("Ignoring proof checkpoint write from a stale run")
+                return
+            if (
+                checkpoint_generation
+                and current_generation
+                and checkpoint_generation != current_generation
+            ):
+                logger.warning("Ignoring proof checkpoint write from a stale lifecycle")
+                return
             same_source = (
                 isinstance(existing, dict)
                 and existing.get("source_type") == checkpoint.get("source_type")

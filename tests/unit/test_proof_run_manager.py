@@ -210,6 +210,32 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(stale.status, "stopping")
 
+    async def test_stop_cancels_in_flight_worker_without_waiting_for_model(self):
+        worker_started = asyncio.Event()
+        worker_cancelled = asyncio.Event()
+
+        async def worker(_control):
+            worker_started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                worker_cancelled.set()
+                raise
+
+        self.control.cleaned_up = True
+        self.manager._runs["proof-run-1"] = self.control
+        self.control.task = asyncio.create_task(self.manager._drive(self.control, worker))
+        await asyncio.wait_for(worker_started.wait(), timeout=1)
+
+        snapshot = await self.manager.stop("proof-run-1", 1)
+
+        self.assertEqual(snapshot.status, "stopping")
+        await asyncio.wait_for(worker_cancelled.wait(), timeout=1)
+        with self.assertRaises(asyncio.CancelledError):
+            await self.control.task
+        self.assertEqual(self.control.snapshot.status, "stopped")
+        self.assertEqual(self.control.snapshot.terminal_reason, "cancelled")
+
     async def test_terminal_callback_is_exact_once(self):
         events = []
 
@@ -300,6 +326,30 @@ class ProofRunManagerTests(IsolatedAsyncioTestCase):
             status="error",
             terminal_reason="proof_output_truncation_recovery_exhausted",
         )
+        self.assertEqual(events, [])
+
+    async def test_context_overflow_is_a_dedicated_terminal_error(self):
+        events = []
+        callbacks = []
+
+        async def event_callback(event_type, payload):
+            events.append((event_type, payload))
+
+        async def terminal_callback(snapshot):
+            callbacks.append((snapshot.status, snapshot.terminal_reason))
+
+        self.control.event_callback = event_callback
+        self.control.terminal_callback = terminal_callback
+        snapshot = await self.manager.error(
+            self.control,
+            terminal_reason="context_overflow",
+            reason="Mandatory proof context exceeded the configured input budget.",
+        )
+
+        self.assertEqual(snapshot.status, "error")
+        self.assertEqual(snapshot.terminal_reason, "context_overflow")
+        self.assertIn("Mandatory proof context", snapshot.last_error_summary)
+        self.assertEqual(callbacks, [("error", "context_overflow")])
         self.assertEqual(events, [])
 
     async def test_source_invalid_has_typed_terminal_reason(self):

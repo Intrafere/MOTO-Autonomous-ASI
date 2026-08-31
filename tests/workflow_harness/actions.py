@@ -212,3 +212,7 @@ def emit_registered_proof_verified(model: WorkflowModel) -> None:
 def exercise_proof_pruning_and_continuous_contracts(model: WorkflowModel) -> None:
     model.exercise_proof_pruning_and_continuous_contracts()
 
+
+def exercise_candidate_list_validator_contract(model: WorkflowModel) -> None:
+    model.exercise_candidate_list_validator_contract()
+

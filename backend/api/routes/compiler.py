@@ -111,6 +111,10 @@ def _configure_proof_stage_roles(
         f"autonomous_proof_novelty_{role_suffix}",
         validator_config,
     )
+    api_client_manager.configure_role(
+        f"autonomous_proof_candidate_list_validator_{role_suffix}",
+        validator_config,
+    )
 
 
 def _validate_positive_role_limits(role_limits: dict[str, tuple[object, object]]) -> None:

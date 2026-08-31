@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from backend.autonomous.core.autonomous_coordinator import (
+    _AUTOMATIC_PROOF_LIST_VALIDATOR_ROLE_IDS,
     _AUTOMATIC_PROOF_NOVELTY_ROLE_IDS,
     _BRAINSTORM_MIN_ACCEPTANCES_BEFORE_HANDOFF,
     _brainstorm_rejection_handoff_allowed,
@@ -23,7 +24,9 @@ from backend.autonomous.prompts.topic_exploration_prompts import (
     build_exploration_user_prompt,
 )
 from backend.shared.config import system_config
+from backend.shared.api_client_manager import api_client_manager
 from backend.shared.models import (
+    ModelConfig,
     ProofAttemptFeedback,
     ProofAttemptResult,
     ProofCandidate,
@@ -41,6 +44,23 @@ class AutonomousProofRoleRoutingTests(unittest.TestCase):
                 "autonomous_proof_novelty",
                 f"autonomous_proof_novelty_{stage._role_suffix('brainstorm', None, None)}",
                 f"autonomous_proof_novelty_{stage._role_suffix('paper', None, None)}",
+            },
+        )
+
+    def test_automatic_list_validator_roles_cover_stage_source_scopes(self):
+        stage = ProofVerificationStage()
+
+        self.assertEqual(
+            set(_AUTOMATIC_PROOF_LIST_VALIDATOR_ROLE_IDS),
+            {
+                (
+                    "autonomous_proof_candidate_list_validator_"
+                    f"{stage._role_suffix('brainstorm', None, None)}"
+                ),
+                (
+                    "autonomous_proof_candidate_list_validator_"
+                    f"{stage._role_suffix('paper', None, None)}"
+                ),
             },
         )
 
@@ -90,6 +110,7 @@ class ProofTruncationStopPolicyTests(unittest.TestCase):
             _names,
             _truncation,
             result,
+            processed_candidate_ids,
         ) = coordinator._deserialize_proof_checkpoint(checkpoint)
 
         self.assertEqual([candidate.theorem_id for candidate in candidates], ["remaining"])
@@ -98,6 +119,7 @@ class ProofTruncationStopPolicyTests(unittest.TestCase):
         self.assertEqual(result.verified_count, 1)
         self.assertEqual(result.novel_count, 1)
         self.assertEqual([item.proof_id for item in result.results], ["proof-1"])
+        self.assertEqual(processed_candidate_ids, ["done"])
 
     def test_recovery_fingerprint_tracks_every_effective_route_setting(self):
         base = {
@@ -166,7 +188,7 @@ class ProofTruncationStopPolicyTests(unittest.TestCase):
 
         self.assertFalse(_truncation_chain_exhausted(attempts))
 
-    def test_candidate_fingerprint_uses_prompt_content_not_generated_id(self):
+    def test_candidate_fingerprint_uses_complete_validator_visible_identity(self):
         first = ProofCandidate(
             theorem_id="generated-a",
             statement="  The same   theorem statement ",
@@ -175,7 +197,7 @@ class ProofTruncationStopPolicyTests(unittest.TestCase):
         second = first.model_copy(update={"theorem_id": "generated-b"})
         different = first.model_copy(update={"statement": "A different theorem statement"})
 
-        self.assertEqual(
+        self.assertNotEqual(
             _candidate_fingerprint(first, "brainstorm", "source-1"),
             _candidate_fingerprint(second, "brainstorm", "source-1"),
         )
@@ -406,6 +428,27 @@ def _configured_coordinator(fake_stage, *, allow_research_papers=True):
     coordinator._validator_context = 4000
     coordinator._validator_max_tokens = 1000
     coordinator._proof_verification_stage = fake_stage
+    submitter_config = ModelConfig(
+        provider="lm_studio",
+        model_id="rigor-model",
+        context_window=6000,
+        max_output_tokens=1500,
+    )
+    validator_config = ModelConfig(
+        provider="lm_studio",
+        model_id="validator-model",
+        context_window=4000,
+        max_output_tokens=1000,
+    )
+    for source_type in ("brainstorm", "paper"):
+        api_client_manager.configure_role(
+            f"autonomous_proof_identification_{source_type}",
+            submitter_config,
+        )
+        api_client_manager.configure_role(
+            f"autonomous_proof_candidate_list_validator_{source_type}",
+            validator_config,
+        )
     return coordinator
 
 

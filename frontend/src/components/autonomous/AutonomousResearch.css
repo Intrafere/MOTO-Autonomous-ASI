@@ -1324,6 +1324,21 @@
   text-shadow: 0 0 10px rgba(76, 175, 80, 0.16);
 }
 
+.known-models-sidebar .models-podium--free {
+  background: linear-gradient(180deg, rgba(79, 209, 197, 0.14) 0%, rgba(37, 94, 88, 0.08) 100%);
+  border-color: rgba(79, 209, 197, 0.22);
+}
+
+.known-models-sidebar .models-podium--free .models-podium-label {
+  letter-spacing: 0.8px;
+  color: rgba(167, 243, 232, 0.86);
+  text-shadow: 0 0 10px rgba(79, 209, 197, 0.18);
+}
+
+.known-models-sidebar .model-item--free {
+  background: linear-gradient(180deg, rgba(76, 175, 80, 0.14) 0%, rgba(79, 209, 197, 0.1) 100%);
+}
+
 .known-models-sidebar .model-item {
   position: relative;
   background: linear-gradient(180deg, rgba(32, 36, 33, 0.96) 0%, rgba(24, 28, 25, 0.98) 100%);

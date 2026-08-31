@@ -36,10 +36,10 @@ export default function ModelErrorNotificationStack({ notifications, onDismiss, 
           }}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-            <strong>{notification.title || 'Proof model error'}</strong>
+            <strong>{notification.title || 'Model error'}</strong>
             <button
               type="button"
-              aria-label={`Dismiss ${notification.title || 'proof model error'}`}
+              aria-label={`Dismiss ${notification.title || 'model error'}`}
               onClick={() => onDismiss(notification.notification_key)}
               style={{ border: 0, background: 'transparent', color: '#fff', cursor: 'pointer', fontSize: 18 }}
             >

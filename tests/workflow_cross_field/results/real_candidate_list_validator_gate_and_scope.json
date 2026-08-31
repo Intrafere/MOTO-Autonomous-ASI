@@ -1,0 +1,24 @@
+{
+  "adapter": "real_coordinator",
+  "artifact_type": "result",
+  "diagnostics": {
+    "reason": "Focused stage tests observe exact threshold, approved-only forwarding, scope invalidation, and semantic-memory bounds, but no bounded real-coordinator adapter yet observes Autonomous restart plus manual process-local ownership without synthesizing the lifecycle owner."
+  },
+  "evidence": [],
+  "fields": [
+    "proof_runtime_gating",
+    "provider_pause_resume",
+    "workflow_filesystem_state",
+    "websocket_api_contracts"
+  ],
+  "invariants": [
+    "proof_runtime.candidate_list_validator_gate"
+  ],
+  "replay": [],
+  "result": "blocked",
+  "scenario_id": "real_candidate_list_validator_gate_and_scope",
+  "schema_version": 1,
+  "seed": null,
+  "source": "real_adapter",
+  "test_file": "tests/workflow_real_adapters/test_build_07_proof_pruning_mappings.py"
+}

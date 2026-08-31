@@ -527,7 +527,7 @@ class LauncherDependencyVersionTests(TestCase):
 
             self.assertFalse(vulnerability_warning)
             self.assertEqual(run.call_count, 2)
-            self.assertEqual(run.call_args_list[0].args[0], ["npm", "install", "--package-lock=false", "--no-save"])
+            self.assertEqual(run.call_args_list[0].args[0], ["npm", "install", "--no-save"])
             self.assertEqual(run.call_args_list[1].args[0], ["npm", "audit", "--audit-level=high"])
 
     def test_frontend_dependency_install_skips_reinstall_when_lock_marker_matches(self) -> None:
@@ -595,7 +595,7 @@ class LauncherDependencyVersionTests(TestCase):
                                 moto_launcher.install_frontend_dependencies()
 
             run.assert_called_once()
-            self.assertEqual(run.call_args_list[0].args[0], ["npm", "install", "--package-lock=false", "--no-save"])
+            self.assertEqual(run.call_args_list[0].args[0], ["npm", "install", "--no-save"])
 
     def test_frontend_dependency_install_falls_back_when_lockfile_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

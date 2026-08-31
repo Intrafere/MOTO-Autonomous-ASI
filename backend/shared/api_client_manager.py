@@ -684,6 +684,7 @@ class APIClientManager:
         """Normalize a definitive route failure without replaying provider payloads."""
         if isinstance(error, ProviderRepairRequiredError):
             return error
+        route = getattr(error, "route", None)
         return ProviderRepairRequiredError(
             provider=provider,
             provider_label=provider_label,
@@ -698,6 +699,10 @@ class APIClientManager:
                 f"Repair the {provider_label} credential, entitlement, model selection, "
                 "or local service, then retry the workflow."
             ),
+            configured_provider=getattr(route, "configured_provider", "") or provider,
+            configured_model=getattr(route, "configured_model", "") or model,
+            effective_host_provider=getattr(route, "host_provider", ""),
+            route_kind=getattr(route, "route_kind", ""),
         )
 
     @staticmethod

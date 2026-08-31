@@ -32,10 +32,10 @@ def _selector_exists(selector: str) -> bool:
     )
 
 
-def test_build_07_source_mappings_cover_ten_stable_invariants() -> None:
+def test_build_07_source_mappings_cover_twelve_stable_invariants() -> None:
     invariant_ids = [mapping.invariant_id for mapping in BUILD_07_SOURCE_MAPPINGS]
 
-    assert len(invariant_ids) == 10
+    assert len(invariant_ids) == 12
     assert len(invariant_ids) == len(set(invariant_ids))
     assert set(invariant_ids).issubset(INVARIANTS_BY_ID)
     assert all(mapping.production_sources for mapping in BUILD_07_SOURCE_MAPPINGS)

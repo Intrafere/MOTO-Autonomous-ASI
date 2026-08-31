@@ -846,6 +846,7 @@
 
 .model-item--silver { border-left: 5px solid #c0c0c0; }
 .model-item--bronze { border-left: 5px solid #cd7f32; }
+.model-item--free { border-left: 5px solid #4fd1c5; }
 
 /* Modal overlay and content (shared by inline modals) */
 .inline-modal-overlay {
