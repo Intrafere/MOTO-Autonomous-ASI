@@ -315,6 +315,20 @@ describe('terminal model error recovery', () => {
     });
   });
 
+  test('turns fatal autonomous proof overflow into a model repair popup', () => {
+    expect(buildTerminalModelErrorNotification({
+      workflow_mode: 'autonomous',
+      reason: 'context_overflow',
+      fatal: true,
+      configured_provider: 'openai_codex_oauth',
+      configured_model: 'gpt-5.6-sol',
+      message: 'Research stopped.',
+    })).toMatchObject({
+      notification_kind: 'model_error',
+      title: 'Proof context limit reached',
+    });
+  });
+
   test('keeps nonfatal candidate proof overflow out of model repair popups', () => {
     expect(buildTerminalModelErrorNotification({
       workflow_mode: 'manual_proof_check',

@@ -14,7 +14,10 @@ from typing import Any, Awaitable, Callable, Optional
 
 from backend.autonomous.agents.lemma_search_agent import MathlibLemmaSearchAgent
 from backend.autonomous.agents.proof_formalization_agent import ProofFormalizationAgent
-from backend.autonomous.agents.proof_identification_agent import ProofIdentificationAgent
+from backend.autonomous.agents.proof_identification_agent import (
+    ProofIdentificationAgent,
+    ProofIdentificationContextError,
+)
 from backend.autonomous.agents.proof_candidate_list_validator import (
     ProofCandidateListContextError,
     ProofCandidateListValidator,
@@ -763,6 +766,10 @@ class ProofVerificationStage:
         candidate_list_review_active = False
         candidate_list_review_attempt = 0
         candidate_list_review_count = 0
+        autonomous_terminal_context_overflow = (
+            str((proof_run_context or {}).get("scope") or "").strip().lower()
+            == "autonomous"
+        )
         candidate_list_scope = _candidate_list_review_scope(
             source_type=source_type,
             source_id=source_id,
@@ -1489,7 +1496,35 @@ class ProofVerificationStage:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
 
-                    for future in done_tasks:
+                    def completed_task_order(future: asyncio.Task) -> tuple[int, int]:
+                        try:
+                            _batch_index, completed_outcome = future.result()
+                        except BaseException:
+                            return (0, -1)
+                        is_fatal_overflow = bool(
+                            autonomous_terminal_context_overflow
+                            and not completed_outcome.success
+                            and completed_outcome.attempts
+                            and ProofFormalizationAgent.is_context_overflow_feedback(
+                                completed_outcome.attempts[-1]
+                            )
+                        )
+                        return (
+                            0 if is_fatal_overflow else 1,
+                            candidate_indexes.get(
+                                completed_outcome.candidate.theorem_id,
+                                0,
+                            ),
+                        )
+
+                    # A mandatory Autonomous overflow owns the whole completion
+                    # turn. Process it before any sibling that happened to
+                    # finish in the same event-loop tick so Phase B cannot
+                    # nondeterministically commit or discard that sibling based
+                    # on set iteration order. Other completed outcomes retain
+                    # stable candidate order.
+                    ordered_done_tasks = sorted(done_tasks, key=completed_task_order)
+                    for future in ordered_done_tasks:
                         try:
                             batch_index, outcome = future.result()
                         except FreeModelExhaustedError as exc:
@@ -1571,6 +1606,23 @@ class ProofVerificationStage:
                                     result.context_overflow_payload = dict(
                                         outcome.context_overflow_payload
                                     )
+                                if autonomous_terminal_context_overflow:
+                                    result.fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
+                                    result.fatal_stop_payload = {
+                                        **dict(result.context_overflow_payload),
+                                        "fatal": True,
+                                        "notification_kind": "model_error",
+                                        "terminal_reason": CONTEXT_OVERFLOW_STOP_REASON,
+                                    }
+                                    abort_event.set()
+                                    ordered_outcomes[
+                                        candidate_indexes.get(candidate.theorem_id, 0)
+                                    ] = ("neutral", {})
+                                    mark_batch_outcome_processed(batch_index)
+                                    await cancel_and_drain(set(done_tasks) - {future})
+                                    await save_checkpoint("fatal_context_overflow")
+                                    partial_stop = True
+                                    break
                                 ordered_outcomes[candidate_indexes.get(candidate.theorem_id, 0)] = (
                                     "neutral",
                                     {},
@@ -2009,7 +2061,11 @@ class ProofVerificationStage:
             )
             await save_checkpoint("provider_paused")
             raise
-        except (ProofCandidateListContextError, ProviderContextLengthError) as exc:
+        except (
+            ProofCandidateListContextError,
+            ProofIdentificationContextError,
+            ProviderContextLengthError,
+        ) as exc:
             await broadcast_candidate_list_interrupted(
                 error_kind="context_overflow",
                 error_message=str(exc),
@@ -2019,8 +2075,31 @@ class ProofVerificationStage:
                 role_suffix_override,
                 proof_run_context,
             )
-            role_id = f"autonomous_proof_candidate_list_validator_{role_suffix}"
+            identification_overflow = isinstance(
+                exc,
+                ProofIdentificationContextError,
+            )
+            if isinstance(exc, ProviderContextLengthError):
+                route_role_id = str(exc.route.role_id or "")
+                identification_overflow = (
+                    "candidate_list_validator" not in route_role_id
+                )
+            role_id = (
+                f"autonomous_proof_identification_{role_suffix}"
+                if identification_overflow
+                else f"autonomous_proof_candidate_list_validator_{role_suffix}"
+            )
             route = exc.route if isinstance(exc, ProviderContextLengthError) else None
+            role_label = (
+                "proof discovery"
+                if identification_overflow
+                else "candidate-list validation"
+            )
+            role_guidance = (
+                "Choose a larger-context Rigor & Proofs model or reduce the proof source context."
+                if identification_overflow
+                else "Choose a larger-context Validator model or reduce the proof source context."
+            )
             overflow_payload = {
                 **base_event,
                 "workflow_mode": self._proof_workflow_mode(trigger),
@@ -2036,22 +2115,36 @@ class ProofVerificationStage:
                 ),
                 "reason": CONTEXT_OVERFLOW_STOP_REASON,
                 "message": (
-                    "Proof candidate-list validation cannot continue because its mandatory "
-                    "review context exceeds the configured Validator context budget. "
-                    "Choose a larger-context Validator model or reduce the proof source context."
+                    f"Proof {role_label} cannot continue because its mandatory context "
+                    f"exceeds the configured role context budget. {role_guidance}"
                 ),
                 "resolution": CONTEXT_OVERFLOW_RESOLUTION,
                 "error_detail": self._summarize_error(str(exc), limit=1000),
+                "prompt_tokens": getattr(exc, "prompt_tokens", None),
+                "max_input_tokens": getattr(exc, "max_input_tokens", None),
             }
             result.context_overflow_payload = overflow_payload
-            result.had_error = True
             result.error_message = str(exc)
-            await save_checkpoint("error")
+            if autonomous_terminal_context_overflow:
+                result.fatal_stop_reason = CONTEXT_OVERFLOW_STOP_REASON
+                result.fatal_stop_payload = {
+                    **overflow_payload,
+                    "fatal": True,
+                    "notification_kind": "model_error",
+                    "terminal_reason": CONTEXT_OVERFLOW_STOP_REASON,
+                }
+                await save_checkpoint("fatal_context_overflow")
+            else:
+                result.had_error = True
+                await save_checkpoint("error")
             await self._broadcast(
                 broadcast_fn,
                 "proof_context_overflow",
                 {
                     **overflow_payload,
+                    # This event describes the candidate/list interruption. The
+                    # Autonomous parent projects the fatal workflow transition
+                    # through its durable auto_research_stopped terminal event.
                     "fatal": False,
                 },
             )

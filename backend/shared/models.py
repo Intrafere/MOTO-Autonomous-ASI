@@ -530,6 +530,7 @@ class AutonomousTerminalEvent(BaseModel):
     message: str
     occurred_at: datetime = Field(default_factory=datetime.now)
     recoverable: bool = True
+    fatal: bool = False
     workflow_mode: Literal["autonomous"] = "autonomous"
     notification_kind: Optional[str] = None
     role_id: Optional[str] = None

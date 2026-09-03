@@ -48,7 +48,7 @@ class BuildInfoArchiveIdentityTests(TestCase):
         manifest = json.loads(build_info.BUILD_MANIFEST_PATH.read_text(encoding="utf-8"))
         self.assertEqual(
             build_info._DEFAULT_BUILD_INFO["api_contract_version"],
-            "build6-v91",
+            "build6-v92",
         )
         self.assertEqual(
             manifest["api_contract_version"],

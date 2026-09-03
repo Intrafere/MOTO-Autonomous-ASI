@@ -31,6 +31,21 @@ _NOVEL_PROOF_TIERS = {
 }
 
 
+class ProofIdentificationContextError(ValueError):
+    """Mandatory proof-discovery context exceeds the configured local budget."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        prompt_tokens: int,
+        max_input_tokens: int,
+    ) -> None:
+        super().__init__(message)
+        self.prompt_tokens = prompt_tokens
+        self.max_input_tokens = max_input_tokens
+
+
 class ProofIdentificationAgent:
     """Find complete theorem candidates in a brainstorm or paper."""
 
@@ -368,7 +383,11 @@ class ProofIdentificationAgent:
                 "context window or reduce the source size before retrying."
             )
             logger.warning(message)
-            raise ValueError(message)
+            raise ProofIdentificationContextError(
+                message,
+                prompt_tokens=prompt_tokens,
+                max_input_tokens=max_input_tokens,
+            )
 
         self.task_sequence += 1
 
