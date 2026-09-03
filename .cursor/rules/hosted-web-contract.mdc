@@ -95,7 +95,7 @@ Returns a typed capability-only response:
 }
 ```
 
-The current contract includes typed durable Autonomous terminal/provider-repair state, bounded proof-truncation recovery, run-scoped candidate-list review activity, provider usage-limit cooldown/resume activity, nonfatal proof versus fatal workflow context-overflow activity, and process-local manual proof-run discovery/Stop/live-context controls. Manual proof runs have no Resume or Next Round REST authority and are not reconstructed after backend restart. Exact release chronology belongs in release notes, tests, and git history rather than this always-injected rule.
+The current contract includes typed durable Autonomous terminal/provider-repair state, bounded proof-truncation recovery, run-scoped candidate-list review activity, provider usage-limit cooldown/resume activity, nonfatal proof versus fatal workflow context-overflow activity, and process-local manual proof-run discovery/Stop/live-context controls. Mandatory proof Validator/formalization overflow durably stops Autonomous after sibling proof tasks are canceled and drained. Manual proof runs have no Resume or Next Round REST authority and are not reconstructed after backend restart. Exact release chronology belongs in release notes, tests, and git history rather than this always-injected rule.
 
 Must remain capability-only. Must NOT expose per-user or per-instance state (e.g. whether an OpenRouter key or OAuth login is set).
 

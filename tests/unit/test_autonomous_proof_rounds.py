@@ -360,6 +360,32 @@ class _ErrorProofStage(_FakeProofStage):
         )
 
 
+class _FatalContextOverflowProofStage(_FakeProofStage):
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        return ProofStageResult(
+            source_type=kwargs["source_type"],
+            source_id=kwargs["source_id"],
+            total_candidates=2,
+            deferred_candidate_ids=["overflow"],
+            context_overflow_payload={
+                "workflow_mode": "autonomous",
+                "role_id": "autonomous_proof_formalization_paper",
+                "configured_model": "rigor-model",
+                "configured_provider": "lm_studio",
+            },
+            fatal_stop_reason="context_overflow",
+            fatal_stop_payload={
+                "workflow_mode": "autonomous",
+                "role_id": "autonomous_proof_formalization_paper",
+                "configured_model": "rigor-model",
+                "configured_provider": "lm_studio",
+                "fatal": True,
+                "notification_kind": "model_error",
+            },
+        )
+
+
 class _DeferredThenCompleteProofStage:
     def __init__(self):
         self.calls = []
@@ -923,22 +949,43 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_stage.calls[-1]["trigger"], "automatic_round_4")
         self.assertTrue(all(call["proof_max_rounds"] == 4 for call in fake_stage.calls))
 
-    async def test_papers_plus_proofs_automatic_checks_are_single_round(self):
-        for source_type in ("brainstorm", "paper"):
-            fake_stage = _FakeProofStage([1, 1, 1])
-            coordinator = _configured_coordinator(fake_stage, allow_research_papers=True)
+    async def test_papers_plus_proofs_brainstorm_checks_cap_at_two_rounds(self):
+        fake_stage = _FakeProofStage([1, 1, 1])
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=True)
 
-            await coordinator._run_proof_verification(
-                content="Source.",
-                source_type=source_type,
-                source_id=f"{source_type}_001",
-                source_title="Source title",
-            )
+        await coordinator._run_proof_verification(
+            content="Source.",
+            source_type="brainstorm",
+            source_id="brainstorm_001",
+            source_title="Source title",
+        )
 
-            self.assertEqual(len(fake_stage.calls), 1)
-            self.assertEqual(fake_stage.calls[0]["trigger"], "automatic")
-            self.assertEqual(fake_stage.calls[0]["proof_round_index"], 1)
-            self.assertEqual(fake_stage.calls[0]["proof_max_rounds"], 1)
+        self.assertEqual(len(fake_stage.calls), 2)
+        self.assertEqual(
+            [call["trigger"] for call in fake_stage.calls],
+            ["automatic", "automatic_round_2"],
+        )
+        self.assertEqual(
+            [call["proof_round_index"] for call in fake_stage.calls],
+            [1, 2],
+        )
+        self.assertTrue(all(call["proof_max_rounds"] == 2 for call in fake_stage.calls))
+
+    async def test_papers_plus_proofs_paper_checks_remain_single_round(self):
+        fake_stage = _FakeProofStage([1, 1, 1])
+        coordinator = _configured_coordinator(fake_stage, allow_research_papers=True)
+
+        await coordinator._run_proof_verification(
+            content="Source.",
+            source_type="paper",
+            source_id="paper_001",
+            source_title="Source title",
+        )
+
+        self.assertEqual(len(fake_stage.calls), 1)
+        self.assertEqual(fake_stage.calls[0]["trigger"], "automatic")
+        self.assertEqual(fake_stage.calls[0]["proof_round_index"], 1)
+        self.assertEqual(fake_stage.calls[0]["proof_max_rounds"], 1)
 
     async def test_automatic_proof_check_uses_rigor_and_proofs_budget_for_all_sources(self):
         for source_type in ("brainstorm", "paper"):
@@ -1090,6 +1137,210 @@ class AutonomousProofRoundTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status, "error_preserved")
         self.assertEqual(len(fake_stage.calls), 1)
+
+    async def test_autonomous_context_overflow_marks_durable_terminal_stop(self):
+        fake_stage = _FatalContextOverflowProofStage([])
+        coordinator = _configured_coordinator(fake_stage)
+        coordinator._run_id = "autonomous-run"
+        coordinator._lifecycle_generation = 4
+
+        status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_overflow",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(status, "fatal_stop")
+        self.assertTrue(coordinator._stop_event.is_set())
+        self.assertEqual(coordinator._terminal_event.reason, "context_overflow")
+        self.assertEqual(coordinator._terminal_event.workflow_mode, "autonomous")
+        self.assertEqual(coordinator._terminal_event.notification_kind, "model_error")
+        self.assertEqual(
+            coordinator._terminal_event.role_id,
+            "autonomous_proof_formalization_paper",
+        )
+
+    async def test_changed_context_route_retries_fatal_checkpoint_without_stale_overflow_attempt(self):
+        coordinator = _configured_coordinator(_FakeProofStage([1]))
+        fake_metadata = coordinator_module.research_metadata
+        overflow_candidate = ProofCandidate(
+            theorem_id="overflow",
+            statement="Retry this theorem.",
+        )
+        stale_attempt = ProofAttemptFeedback(
+            attempt=1,
+            theorem_id="overflow",
+            error_output="MANDATORY FULL SOURCE CONTEXT OVERFLOW",
+            overflow_origin="local_preflight",
+            prompt_tokens=7000,
+            max_input_tokens=6000,
+        )
+        fake_metadata.checkpoint = {
+            "source_type": "paper",
+            "source_id": "paper_overflow",
+            "source_title": "Paper title",
+            "trigger": "automatic",
+            "status": "fatal_context_overflow",
+            "proof_role_fingerprint": "old-route",
+            "validator_role_fingerprint": "old-validator-route",
+            "recovery_policy_version": "proof-truncation-v1",
+            "fatal_stop_reason": "context_overflow",
+            "fatal_stop_payload": {"fatal": True},
+            "candidates": [
+                {
+                    "index": 1,
+                    "candidate": overflow_candidate.model_dump(mode="json"),
+                }
+            ],
+            "processed_candidate_ids": [],
+            "deferred_candidate_ids": ["overflow"],
+            "context_overflow_payload": {"reason": "context_overflow"},
+            "attempts_by_candidate": {
+                "overflow": [stale_attempt.model_dump(mode="json")],
+            },
+            "theorem_names_by_candidate": {},
+            "results": [],
+            "total_candidates": 1,
+        }
+
+        status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_overflow",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(status, "complete")
+        call = coordinator._proof_verification_stage.calls[0]
+        self.assertEqual(
+            [candidate.theorem_id for candidate in call["theorem_candidates"]],
+            ["overflow"],
+        )
+        self.assertEqual(call["checkpoint_attempts_by_candidate"], {})
+        self.assertEqual(call["checkpoint_result"].deferred_candidate_ids, [])
+        self.assertEqual(call["checkpoint_result"].context_overflow_payload, {})
+
+    async def test_changed_validator_route_retries_candidate_list_overflow_checkpoint(self):
+        coordinator = _configured_coordinator(_FakeProofStage([1]))
+        fake_metadata = coordinator_module.research_metadata
+        candidate = ProofCandidate(theorem_id="validator-overflow", statement="Retry review.")
+        current_proof_fingerprint = _proof_recovery_config_fingerprint(
+            {
+                "provider": coordinator._high_param_provider,
+                "model": coordinator._high_param_model,
+                "openrouter_provider": coordinator._high_param_openrouter_provider,
+                "openrouter_reasoning_effort": coordinator._high_param_openrouter_reasoning_effort,
+                "lm_studio_fallback": coordinator._high_param_lm_studio_fallback,
+                "context": coordinator._high_param_context,
+                "max_output": coordinator._high_param_max_tokens,
+                "supercharge_enabled": coordinator._high_param_supercharge_enabled,
+                "recovery_policy_version": "proof-truncation-v1",
+            }
+        )
+        fake_metadata.checkpoint = {
+            "source_type": "paper",
+            "source_id": "paper_validator_overflow",
+            "source_title": "Paper title",
+            "trigger": "automatic",
+            "status": "fatal_context_overflow",
+            "proof_role_fingerprint": current_proof_fingerprint,
+            "validator_role_fingerprint": "old-validator-route",
+            "recovery_policy_version": "proof-truncation-v1",
+            "fatal_stop_reason": "context_overflow",
+            "fatal_stop_payload": {
+                "role_id": "autonomous_proof_candidate_list_validator_paper",
+                "fatal": True,
+            },
+            "candidates": [
+                {"index": 1, "candidate": candidate.model_dump(mode="json")}
+            ],
+            "processed_candidate_ids": [],
+            "deferred_candidate_ids": [],
+            "context_overflow_payload": {"reason": "context_overflow"},
+            "attempts_by_candidate": {},
+            "theorem_names_by_candidate": {},
+            "results": [],
+            "total_candidates": 1,
+            "candidate_list_review": {
+                "status": "reviewing",
+                "list_fingerprint": "stale-review",
+            },
+        }
+
+        status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_validator_overflow",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(status, "complete")
+        self.assertEqual(len(coordinator._proof_verification_stage.calls), 1)
+        self.assertEqual(
+            coordinator._proof_verification_stage.calls[0][
+                "checkpoint_candidate_list_state"
+            ],
+            {},
+        )
+
+    async def test_unchanged_validator_route_keeps_candidate_list_overflow_stopped(self):
+        coordinator = _configured_coordinator(_FakeProofStage([1]))
+        fake_metadata = coordinator_module.research_metadata
+        proof_fingerprint = _proof_recovery_config_fingerprint(
+            {
+                "provider": coordinator._high_param_provider,
+                "model": coordinator._high_param_model,
+                "openrouter_provider": coordinator._high_param_openrouter_provider,
+                "openrouter_reasoning_effort": coordinator._high_param_openrouter_reasoning_effort,
+                "lm_studio_fallback": coordinator._high_param_lm_studio_fallback,
+                "context": coordinator._high_param_context,
+                "max_output": coordinator._high_param_max_tokens,
+                "supercharge_enabled": coordinator._high_param_supercharge_enabled,
+                "recovery_policy_version": "proof-truncation-v1",
+            }
+        )
+        validator_fingerprint = _proof_recovery_config_fingerprint(
+            {
+                "provider": coordinator._validator_provider,
+                "model": coordinator._validator_model,
+                "openrouter_provider": coordinator._validator_openrouter_provider,
+                "openrouter_reasoning_effort": coordinator._validator_openrouter_reasoning_effort,
+                "lm_studio_fallback": coordinator._validator_lm_studio_fallback,
+                "context": coordinator._validator_context,
+                "max_output": coordinator._validator_max_tokens,
+                "supercharge_enabled": coordinator._validator_supercharge_enabled,
+            }
+        )
+        fake_metadata.checkpoint = {
+            "source_type": "paper",
+            "source_id": "paper_validator_overflow",
+            "trigger": "automatic",
+            "status": "fatal_context_overflow",
+            "proof_role_fingerprint": proof_fingerprint,
+            "validator_role_fingerprint": validator_fingerprint,
+            "recovery_policy_version": "proof-truncation-v1",
+            "fatal_stop_reason": "context_overflow",
+            "fatal_stop_payload": {
+                "role_id": "autonomous_proof_candidate_list_validator_paper",
+                "fatal": True,
+            },
+            "candidates": [],
+            "processed_candidate_ids": [],
+            "results": [],
+            "total_candidates": 1,
+        }
+
+        status = await coordinator._run_proof_verification(
+            content="Paper source.",
+            source_type="paper",
+            source_id="paper_validator_overflow",
+            source_title="Paper title",
+        )
+
+        self.assertEqual(status, "fatal_stop")
+        self.assertTrue(coordinator._stop_event.is_set())
+        self.assertEqual(coordinator._proof_verification_stage.calls, [])
 
     async def test_brainstorm_proof_error_sets_stop_before_paper_handoff(self):
         fake_stage = _ErrorProofStage([])

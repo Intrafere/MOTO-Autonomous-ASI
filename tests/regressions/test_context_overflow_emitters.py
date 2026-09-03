@@ -313,12 +313,60 @@ async def test_autonomous_parent_propagates_once_and_stale_payload_can_be_reset(
     assert events[0][0] == "auto_research_stopped"
     assert events[0][1]["reason"] == "context_overflow"
     assert events[0][1]["configured_model"] == "child-writer"
+    assert events[0][1]["notification_kind"] == "model_error"
+    assert events[0][1]["terminal_guidance"]
 
     coordinator._terminal_event = None
     coordinator._stop_broadcast_sent = False
     await coordinator._broadcast_stopped_once()
     assert "configured_model" not in events[1][1]
     assert "reason" not in events[1][1]
+
+
+@pytest.mark.asyncio
+async def test_autonomous_context_overflow_notification_is_run_scoped(monkeypatch):
+    coordinator = AutonomousCoordinator()
+    coordinator._run_id = "run-context-overflow"
+    coordinator._lifecycle_generation = 3
+    events = []
+    stored_notifications = []
+    coordinator.set_broadcast_callback(lambda event, payload: _capture(events, event, payload))
+
+    async def stats():
+        return {}
+
+    def record(event_type, payload):
+        stored = {**payload, "event_type": event_type}
+        stored_notifications.append(stored)
+        return stored
+
+    monkeypatch.setattr(research_metadata, "get_stats", stats)
+    monkeypatch.setattr(
+        "backend.shared.provider_notification_store.record_provider_notification",
+        record,
+    )
+    coordinator._mark_context_overflow_stop(
+        {
+            "role_id": "autonomous_proof_formalization_brainstorm",
+            "configured_provider": "openai_codex_oauth",
+            "configured_model": "gpt-5.6-sol",
+            "resolution": "Increase the proof context window and restart.",
+        }
+    )
+
+    await coordinator._broadcast_stopped_once()
+
+    assert stored_notifications[0]["notification_key"] == (
+        "proof-context-overflow:run-context-overflow"
+    )
+    assert stored_notifications[0]["provider"] == "openai_codex_oauth"
+    assert stored_notifications[0]["role_id"] == (
+        "autonomous_proof_formalization_brainstorm"
+    )
+    assert stored_notifications[0]["title"] == "Proof context limit reached"
+    assert events[0][1]["notification_key"] == (
+        "proof-context-overflow:run-context-overflow"
+    )
 
 
 @pytest.mark.asyncio

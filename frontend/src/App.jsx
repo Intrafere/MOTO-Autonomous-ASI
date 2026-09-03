@@ -289,7 +289,7 @@ export function buildTerminalModelErrorNotification(data = {}) {
     || (
       data.reason === 'context_overflow'
       && data.fatal === true
-      && data.workflow_mode === 'manual_proof_check'
+      && ['manual_proof_check', 'autonomous'].includes(data.workflow_mode)
     );
   if (!isModelError) return null;
   return {

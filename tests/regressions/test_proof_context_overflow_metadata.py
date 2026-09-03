@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock
 from types import SimpleNamespace
 
@@ -356,6 +357,163 @@ async def test_overflow_candidate_is_deferred_while_sibling_continues(monkeypatc
     assert [item.theorem_id for item in result.results] == ["sibling"]
     assert checkpoints[-1]["status"] == "deferred"
     assert checkpoints[-1]["processed_candidate_ids"] == ["sibling"]
+
+
+@pytest.mark.asyncio
+async def test_autonomous_overflow_cancels_sibling_and_sets_fatal_checkpoint(monkeypatch):
+    overflow_candidate = ProofCandidate(theorem_id="overflow", statement="True")
+    sibling_candidate = ProofCandidate(theorem_id="sibling", statement="False")
+    sibling_cancelled = asyncio.Event()
+
+    async def fake_resolve(**kwargs):
+        return [overflow_candidate, sibling_candidate]
+
+    async def fake_pipeline(**kwargs):
+        candidate = kwargs["theorem_candidate"]
+        if candidate.theorem_id == "sibling":
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+        feedback = ProofAttemptFeedback(
+            attempt=1,
+            theorem_id="overflow",
+            error_output="MANDATORY FULL SOURCE CONTEXT OVERFLOW",
+            overflow_origin="local_preflight",
+            prompt_tokens=11_000,
+            max_input_tokens=10_000,
+        )
+        await kwargs["attempt_checkpoint_callback"](candidate, [feedback])
+        return _LeanVerificationOutcome(
+            candidate=candidate,
+            proof_label=kwargs["proof_label"],
+            success=False,
+            theorem_name="",
+            lean_code="",
+            attempts=[feedback],
+            context_overflow_payload={
+                "role_id": "autonomous_proof_formalization_paper",
+                "configured_model": "model",
+                "configured_provider": "openrouter",
+                "prompt_tokens": 11_000,
+                "max_input_tokens": 10_000,
+            },
+        )
+
+    old_enabled = formalization_module.system_config.lean4_enabled
+    formalization_module.system_config.lean4_enabled = True
+    stage = ProofVerificationStage()
+    monkeypatch.setattr(stage, "_resolve_candidates", fake_resolve)
+    monkeypatch.setattr(stage, "_run_lean_pipeline_for_candidate", fake_pipeline)
+    checkpoints = []
+
+    async def save_checkpoint(payload):
+        checkpoints.append(payload)
+
+    try:
+        result = await stage.run(
+            content="Source",
+            source_type="paper",
+            source_id="paper-1",
+            user_prompt="Prompt",
+            submitter_model="model",
+            submitter_context=20_000,
+            submitter_max_tokens=2_000,
+            validator_model="validator",
+            validator_context=20_000,
+            validator_max_tokens=2_000,
+            broadcast_fn=AsyncMock(),
+            novel_proofs_db=AsyncMock(),
+            checkpoint_callback=save_checkpoint,
+            proof_run_context={
+                "scope": "autonomous",
+                "proof_run_id": "autonomous-run",
+                "lifecycle_generation": 3,
+            },
+        )
+    finally:
+        formalization_module.system_config.lean4_enabled = old_enabled
+
+    assert sibling_cancelled.is_set()
+    assert result.fatal_stop_reason == "context_overflow"
+    assert result.fatal_stop_payload["fatal"] is True
+    assert result.fatal_stop_payload["notification_kind"] == "model_error"
+    assert result.deferred_candidate_ids == ["overflow"]
+    assert checkpoints[-1]["status"] == "fatal_context_overflow"
+    assert checkpoints[-1]["fatal_stop_reason"] == "context_overflow"
+
+
+@pytest.mark.asyncio
+async def test_autonomous_simultaneous_overflow_does_not_commit_completed_sibling(monkeypatch):
+    overflow_candidate = ProofCandidate(theorem_id="overflow", statement="True")
+    sibling_candidate = ProofCandidate(theorem_id="sibling", statement="False")
+    release = asyncio.Event()
+
+    async def fake_resolve(**kwargs):
+        return [overflow_candidate, sibling_candidate]
+
+    async def fake_pipeline(**kwargs):
+        candidate = kwargs["theorem_candidate"]
+        await release.wait()
+        if candidate.theorem_id == "overflow":
+            feedback = ProofAttemptFeedback(
+                attempt=1,
+                theorem_id="overflow",
+                error_output="MANDATORY FULL SOURCE CONTEXT OVERFLOW",
+                overflow_origin="local_preflight",
+                prompt_tokens=11_000,
+                max_input_tokens=10_000,
+            )
+            return _LeanVerificationOutcome(
+                candidate=candidate,
+                proof_label=kwargs["proof_label"],
+                success=False,
+                theorem_name="",
+                lean_code="",
+                attempts=[feedback],
+                context_overflow_payload={
+                    "role_id": "autonomous_proof_formalization_paper",
+                    "configured_model": "model",
+                    "configured_provider": "openrouter",
+                },
+            )
+        return _LeanVerificationOutcome(
+            candidate=candidate,
+            proof_label=kwargs["proof_label"],
+            success=False,
+            theorem_name="",
+            lean_code="",
+            attempts=[],
+        )
+
+    old_enabled = formalization_module.system_config.lean4_enabled
+    formalization_module.system_config.lean4_enabled = True
+    stage = ProofVerificationStage()
+    monkeypatch.setattr(stage, "_resolve_candidates", fake_resolve)
+    monkeypatch.setattr(stage, "_run_lean_pipeline_for_candidate", fake_pipeline)
+    release.set()
+    try:
+        result = await stage.run(
+            content="Source",
+            source_type="paper",
+            source_id="paper-1",
+            user_prompt="Prompt",
+            submitter_model="model",
+            submitter_context=20_000,
+            submitter_max_tokens=2_000,
+            validator_model="validator",
+            validator_context=20_000,
+            validator_max_tokens=2_000,
+            broadcast_fn=AsyncMock(),
+            novel_proofs_db=AsyncMock(),
+            proof_run_context={"scope": "autonomous"},
+        )
+    finally:
+        formalization_module.system_config.lean4_enabled = old_enabled
+
+    assert result.fatal_stop_reason == "context_overflow"
+    assert result.results == []
 
 
 @pytest.mark.asyncio

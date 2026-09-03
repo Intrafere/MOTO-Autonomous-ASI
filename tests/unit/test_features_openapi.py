@@ -40,7 +40,7 @@ def test_features_response_rejects_unknown_fields() -> None:
         "version": "1.0.0",
         "build_commit": "abc123",
         "update_channel": "main",
-        "api_contract_version": "build6-v91",
+        "api_contract_version": "build6-v92",
         "generic_mode": False,
         "lm_studio_enabled": True,
         "pdf_download_available": True,

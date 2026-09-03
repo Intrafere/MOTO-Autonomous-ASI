@@ -38,6 +38,7 @@ from backend.shared.response_extraction import extract_message_text
 from backend.shared.log_redaction import redact_log_text
 from backend.shared.path_safety import resolve_path_within_root, validate_single_path_component
 from backend.shared.context_overflow import (
+    CONTEXT_OVERFLOW_RESOLUTION,
     CONTEXT_OVERFLOW_STOP_MESSAGE,
     CONTEXT_OVERFLOW_STOP_REASON,
 )
@@ -348,10 +349,16 @@ class AutonomousCoordinator:
 
     def _mark_context_overflow_stop(self, payload: Optional[Dict[str, Any]] = None) -> None:
         """Remember that the next stopped event should explain the fatal overflow."""
+        details = dict(payload or {})
+        details.setdefault("notification_kind", "model_error")
+        details.setdefault(
+            "terminal_guidance",
+            str(details.get("resolution") or CONTEXT_OVERFLOW_RESOLUTION),
+        )
         self._mark_terminal_stop(
             reason=CONTEXT_OVERFLOW_STOP_REASON,
             message=CONTEXT_OVERFLOW_STOP_MESSAGE,
-            payload=payload,
+            payload=details,
         )
 
     def _mark_terminal_stop(
@@ -897,9 +904,22 @@ class AutonomousCoordinator:
                 "recovery_policy_version": "proof-truncation-v1",
             }
         )
+        validator_role_fingerprint = _proof_recovery_config_fingerprint(
+            {
+                "provider": self._validator_provider,
+                "model": self._validator_model,
+                "openrouter_provider": self._validator_openrouter_provider,
+                "openrouter_reasoning_effort": self._validator_openrouter_reasoning_effort,
+                "lm_studio_fallback": self._validator_lm_studio_fallback,
+                "context": self._validator_context,
+                "max_output": self._validator_max_tokens,
+                "supercharge_enabled": self._validator_supercharge_enabled,
+            }
+        )
 
         async def save_proof_checkpoint(checkpoint: Dict[str, Any]) -> None:
             checkpoint["proof_role_fingerprint"] = proof_role_fingerprint
+            checkpoint["validator_role_fingerprint"] = validator_role_fingerprint
             await research_metadata.save_proof_checkpoint(checkpoint)
 
         automatic_checkpoint = (
@@ -907,11 +927,12 @@ class AutonomousCoordinator:
             and theorem_candidates is None
             and source_type in {"brainstorm", "paper"}
         )
-        round_policy = (
-            AutomaticMultiRoundPolicy(max_rounds=4)
-            if automatic_checkpoint and not self._allow_research_papers
-            else OneRoundPolicy()
-        )
+        if automatic_checkpoint and not self._allow_research_papers:
+            round_policy = AutomaticMultiRoundPolicy(max_rounds=4)
+        elif automatic_checkpoint and source_type == "brainstorm":
+            round_policy = AutomaticMultiRoundPolicy(max_rounds=2)
+        else:
+            round_policy = OneRoundPolicy()
         proof_max_rounds = round_policy.max_rounds or 1
         automatic_followup_rounds = round_policy.holds_source_reservation
         pruning_coordinator = await self._create_proof_pruning_coordinator(
@@ -975,23 +996,40 @@ class AutonomousCoordinator:
             if checkpoint:
                 completed_triggers = set(checkpoint.get("completed_triggers") or [])
                 same_round_checkpoint = checkpoint.get("trigger") == round_trigger
-                fatal_config_matches = (
+                proof_config_matches = (
                     checkpoint.get("proof_role_fingerprint") == proof_role_fingerprint
                     and checkpoint.get("recovery_policy_version") == "proof-truncation-v1"
+                )
+                fatal_payload = dict(checkpoint.get("fatal_stop_payload") or {})
+                fatal_role_id = str(fatal_payload.get("role_id") or "")
+                validator_config_matches = (
+                    checkpoint.get("validator_role_fingerprint")
+                    == validator_role_fingerprint
+                )
+                fatal_config_matches = (
+                    proof_config_matches
+                    and (
+                        "candidate_list_validator" not in fatal_role_id
+                        or validator_config_matches
+                    )
                 )
                 if (
                     same_round_checkpoint
                     and checkpoint.get("fatal_stop_reason")
                     and fatal_config_matches
                 ):
-                    self._mark_terminal_stop(
-                        reason=str(checkpoint.get("fatal_stop_reason")),
-                        message=(
-                            "Autonomous research remains stopped because proof output-truncation "
-                            "recovery was exhausted. Change the proof model settings before restarting."
-                        ),
-                        payload=dict(checkpoint.get("fatal_stop_payload") or {}),
-                    )
+                    fatal_reason = str(checkpoint.get("fatal_stop_reason"))
+                    if fatal_reason == CONTEXT_OVERFLOW_STOP_REASON:
+                        self._mark_context_overflow_stop(fatal_payload)
+                    else:
+                        self._mark_terminal_stop(
+                            reason=fatal_reason,
+                            message=(
+                                "Autonomous research remains stopped because proof output-truncation "
+                                "recovery was exhausted. Change the proof model settings before restarting."
+                            ),
+                            payload=fatal_payload,
+                        )
                     self._stop_event.set()
                     return "fatal_stop", None
                 if round_trigger in completed_triggers:
@@ -1017,6 +1055,10 @@ class AutonomousCoordinator:
                     return "skipped", None
 
                 if same_round_checkpoint and checkpoint.get("status") != "trigger_complete":
+                    retrying_changed_fatal_checkpoint = bool(
+                        checkpoint.get("fatal_stop_reason")
+                        and not fatal_config_matches
+                    )
                     checkpoint_candidate_list_state = dict(
                         checkpoint.get("candidate_list_review") or {}
                     )
@@ -1031,6 +1073,14 @@ class AutonomousCoordinator:
                     ) = self._deserialize_proof_checkpoint(checkpoint)
                     if checkpoint_candidates:
                         retry_candidates = checkpoint_candidates
+                        if retrying_changed_fatal_checkpoint:
+                            for candidate in checkpoint_candidates:
+                                checkpoint_attempts.pop(candidate.theorem_id, None)
+                            checkpoint_result.deferred_candidate_ids = []
+                            checkpoint_result.context_overflow_payload = {}
+                            checkpoint_result.error_message = ""
+                            if "candidate_list_validator" in fatal_role_id:
+                                checkpoint_candidate_list_state = {}
                         logger.info(
                             "Resuming proof checkpoint for %s %s trigger=%s with %s remaining candidate(s)",
                             source_type,
@@ -1095,15 +1145,19 @@ class AutonomousCoordinator:
                         ),
                     )
                     if getattr(proof_result, "fatal_stop_reason", ""):
-                        self._mark_terminal_stop(
-                            reason=proof_result.fatal_stop_reason,
-                            message=(
-                                "Autonomous research stopped because two distinct proof candidates "
-                                "exhausted all bounded output-truncation recovery attempts. Lean 4 "
-                                "was not run for those truncated attempts."
-                            ),
-                            payload=dict(proof_result.fatal_stop_payload or {}),
-                        )
+                        fatal_payload = dict(proof_result.fatal_stop_payload or {})
+                        if proof_result.fatal_stop_reason == CONTEXT_OVERFLOW_STOP_REASON:
+                            self._mark_context_overflow_stop(fatal_payload)
+                        else:
+                            self._mark_terminal_stop(
+                                reason=proof_result.fatal_stop_reason,
+                                message=(
+                                    "Autonomous research stopped because two distinct proof candidates "
+                                    "exhausted all bounded output-truncation recovery attempts. Lean 4 "
+                                    "was not run for those truncated attempts."
+                                ),
+                                payload=fatal_payload,
+                            )
                         self._stop_event.set()
                         await self._save_workflow_state(phase=f"{source_type}_proof_verification")
                         return "fatal_stop", proof_result
@@ -2959,13 +3013,19 @@ class AutonomousCoordinator:
                 expected_run_id=self._terminal_event.run_id,
                 expected_generation=self._terminal_event.lifecycle_generation,
             )
+            is_context_overflow = (
+                self._terminal_event.reason == CONTEXT_OVERFLOW_STOP_REASON
+            )
             is_provider_repair = (
                 self._terminal_event.notification_kind == "model_error"
-                and self._terminal_event.reason
-                != "proof_output_truncation_recovery_exhausted"
+                and self._terminal_event.reason not in {
+                    "proof_output_truncation_recovery_exhausted",
+                    CONTEXT_OVERFLOW_STOP_REASON,
+                }
             )
             if (
                 self._terminal_event.reason == "proof_output_truncation_recovery_exhausted"
+                or is_context_overflow
                 or is_provider_repair
             ):
                 from backend.shared.provider_notification_store import record_provider_notification
@@ -2977,7 +3037,11 @@ class AutonomousCoordinator:
                     f"{self._terminal_event.reason}:"
                     f"{self._terminal_event.effective_model or self._terminal_event.configured_model or '*'}"
                     if is_provider_repair
-                    else f"proof-truncation:{run_id}"
+                    else (
+                        f"proof-context-overflow:{run_id}"
+                        if is_context_overflow
+                        else f"proof-truncation:{run_id}"
+                    )
                 )
                 stored = await asyncio.to_thread(
                     record_provider_notification,
@@ -2991,12 +3055,12 @@ class AutonomousCoordinator:
                             self._terminal_event.effective_provider
                             or self._terminal_event.configured_provider
                             or "model_provider"
-                            if is_provider_repair
+                            if is_provider_repair or is_context_overflow
                             else "proof_model"
                         ),
                         "role_id": (
                             self._terminal_event.role_id
-                            if is_provider_repair
+                            if is_provider_repair or is_context_overflow
                             else "autonomous_proof_formalization"
                         ),
                         "model": (
@@ -3006,9 +3070,13 @@ class AutonomousCoordinator:
                         ),
                         "reason": self._terminal_event.reason,
                         "title": (
-                            "Model configuration requires repair"
-                            if is_provider_repair
-                            else "Proof model output repeatedly truncated"
+                            "Proof context limit reached"
+                            if is_context_overflow
+                            else (
+                                "Model configuration requires repair"
+                                if is_provider_repair
+                                else "Proof model output repeatedly truncated"
+                            )
                         ),
                         "recoverable": True,
                         "terminal_guidance": self._terminal_event.terminal_guidance or "",
