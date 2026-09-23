@@ -19,6 +19,12 @@ LM Studio and its pre-loaded models can be reached at "http://127.0.0.1:1234" (o
 - Hosted protected request size may be capped with `MOTO_GENERIC_MAX_REQUEST_BYTES` / `GENERIC_MAX_REQUEST_BYTES` (default 16 MiB)
 - Additional local launches may create generated instance folders such as `.moto_instances/{instance_id}/data` and `.moto_instances/{instance_id}/logs`
 
+## Autonomous Competition Source Map
+
+- `backend/autonomous/core/proof_competition.py` owns scoped ordered formalization fallback; `proof_competition_reporting.py` maps safe execution metadata to benchmark records.
+- `backend/autonomous/memory/proof_competition_benchmarks.py` persists session-owned, idempotent competition outcomes independently of API logs; the matching API route module exposes typed paginated reports.
+- `ProofCompetitionBenchmarkReport.jsx` is shared by current Autonomous logs and the fourth Completed Works Benchmarks tab. Autonomous profiles persist ordered secondary routes without duplicating the primary mirror.
+
 ## Current High-Level Project Directory Structure and File Descriptions
 
 This is a maintained source-map for important directories and files, not a strict exhaustive inventory of every generated artifact or test helper.
@@ -36,6 +42,7 @@ project-root/
 │   ├── shared/                          # SHARED RESOURCES
 │   │   ├── __init__.py                  # Package initialization
 │   │   ├── config.py                    # RAGConfig, SystemConfig (instance runtime contract, ports, data/log roots, secret namespace, generic_mode)
+│   │   ├── prompt_feedback_budget.py    # Pure whole-entry newest-suffix model-feedback fitter
 │   │   ├── models.py                    # Pydantic models (includes ModelConfig with per-role supercharge_enabled, BoostConfig, WorkflowTask)
 │   │   ├── lm_studio_client.py          # LM Studio HTTP API client + same-base numeric :# instance sharing
 │   │   ├── openrouter_client.py         # OpenRouter HTTP API client (credit exhaustion detection + model/endpoint metadata)
@@ -192,6 +199,7 @@ project-root/
 │   │       ├── autonomous_api_logger.py # Autonomous API call logger singleton
 │   │       ├── proof_database.py        # Session-aware Lean 4 verified-proof storage (records, Lean sources, novelty/reverse-dependency indexes, owning-run live-context state, revisioned pruning snapshots); cross-session library access via `list_proof_library()` and `get_library_proof()`
 │   │       ├── final_answer_memory.py   # TIER 3 - Final answer state & volume management
+│   │       ├── session_write_authority.py # Canonical-path, task-owned shared serialization for autonomous session writes
 │   │       └── session_manager.py       # Prompt-based session folder organization
 │   │
 │   ├── leanoj/                          # LEANOJ PROOF SOLVER (proof-only top-level mode; no paper writing)
@@ -304,13 +312,14 @@ project-root/
 │   │   │   │   ├── CompilerInterface.jsx    # Manual Compiler prompt, allowed-output controls, start/stop, and status
 │   │   │   │   ├── CompilerSettings.jsx     # Compiler role selections (Validator, Writing, Rigor & Proofs, Assistant), capability-gated LM/OpenRouter UI; deprecated critique fields mirror Rigor & Proofs
 │   │   │   │   ├── CompilerLogs.jsx         # Metrics: construction vs rigor, miniscule edits
-│   │   │   │   └── LivePaper.jsx            # Real-time paper viewing, save draft, word count
+│   │   │   │   └── LivePaper.jsx            # Real-time rendered/raw paper viewing, collapsible proofs, split metrics, save draft
 │   │   │   │
 │   │   │   ├── autonomous/              # AUTONOMOUS RESEARCH
 │   │   │       ├── AutonomousResearchInterface.jsx  # Main control: research prompt, start/stop, current tier, developer-gated Creativity Emphasis Boost
 │   │   │       ├── AutonomousResearch.css     # Autonomous research styles
 │   │   │       ├── BrainstormList.jsx       # List all brainstorm topics with status
-│   │   │       ├── PaperLibrary.jsx         # Grid view of completed papers (title + abstract)
+│   │   │       ├── PaperLibrary.jsx         # Completed-paper grid/detail view with collapsible proofs, split metrics, and bulk prune selection
+│   │   │       ├── PaperBatchPruneControls.jsx # Shared visible-paper selection toolbar and bulk prune confirmation for current/history lists
 │   │   │       ├── AutonomousResearchSettings.jsx  # Autonomous settings: models/providers/profiles, free-model controls, Tier 3 toggle, Wolfram, Lean/SMT proof runtime, developer-only raw/Supercharge UI
 │   │   │       ├── AutonomousResearchLogs.jsx      # Metrics/per-submitter stats, event log, combined API call logs
 │   │   │       ├── LivePaperProgress.jsx    # Real-time Tier 2 paper display (embedded in interface)
@@ -379,7 +388,11 @@ project-root/
 │   │   │   └── useProofCheckRuntime.js  # Shared source-keyed proof-run controller: readiness, queueing, discovery/reload reconciliation, lifecycle events, and generation-fenced controls
 │   │   │
 │   │   ├── utils/
-│   │   │   ├── downloadHelpers.js       # PDF/raw download helpers (Playwright backend PDF)
+│   │   │   ├── latexChunking.js         # Source-preserving math-aware rendering boundaries
+│   │   │   ├── latexConverter.js        # DOM-free shared KaTeX conversion; output requires sanitization
+│   │   │   ├── latexRender.worker.js    # Dedicated conversion worker
+│   │   │   ├── latexRenderService.js    # Bounded cancellable worker scheduling and yielding main-thread publication
+│   │   │   ├── downloadHelpers.js       # Complete asynchronous PDF preparation and raw downloads
 │   │   │   ├── modelCache.js            # Frontend model cache utilities (display_name → api_id lookup)
 │   │   │   ├── openRouterSelection.js   # Shared OpenRouter selector auto-fill helpers (context/output from model + host metadata)
 │   │   │   ├── autonomousProfiles.js    # Shared autonomous recommended-profile definitions and persistence helpers
@@ -535,6 +548,7 @@ project-root/
 ### Frontend Components
 
 - `App.jsx`: Top-level GUI shell. Default mode is `Autonomous S.T.E.M. ASI` for Part 3 screens; `Advanced Manual S.T.E.M. ASI` contains the manual Part 1 Aggregator + Part 2 Compiler workspace; `LeanOJ Proof Solver` is a developer-mode-only proof mode. Shared utility controls (ConnectivityPanel, WorkflowPanel, and BoostControlModal from the panel) remain global, and Build 3C bootstraps `/api/features` here so hosted mode can hide LM Studio/desktop-OAuth UI and copy. Shift + Z + X toggles persisted developer-mode settings, LeanOJ mode, raw JSON editors, and Supercharge controls. Supercharge request payloads must be forced off unless developer mode is active. Active app mode and tab state are in-memory only; a fresh frontend mount starts on the autonomous main interface. **Autonomous tab groups**: main tabs (interface, brainstorms, papers, proofs, optional final-answer) + settings group (Completed Works Library, API Call Logs, Settings). The "Completed Works Library" tab hosts three sub-tabs rendered inside its content area: Stage 2 Papers History, Stage 3 Final Answers History, and Proof Library.
+- `WhatsNewModal.jsx` and `utils/releaseNotes.js` provide curated version-keyed release highlights after waiver acknowledgement, once per version in instance-scoped browser storage. The top-right version button reopens them and the dialog links to GitHub. Backend capabilities supply runtime version identity; update curated highlights with each release, without showing another version's notes.
 - Live activity feeds keep long bounded histories (thousands of entries) and persist in browser storage across tab reloads, backend restarts, stop/start cycles, and crashes; explicit mode clear/reset actions are the user-facing reset point.
 - **Aggregator**: `AggregatorInterface.jsx`, `AggregatorSettings.jsx`, `AggregatorLogs.jsx`, `LiveResults.jsx`
 - **Compiler**: `CompilerInterface.jsx`, `CompilerSettings.jsx`, `CompilerLogs.jsx`, `LivePaper.jsx`

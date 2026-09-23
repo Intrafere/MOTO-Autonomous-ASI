@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any, Dict, Iterable, List, Mapping
 from datetime import datetime
 import aiofiles
 
@@ -107,7 +107,12 @@ class AutonomousRejectionLogs:
     async def format_topic_rejections_for_context(self) -> str:
         """Format topic selection rejections for inclusion in prompt context."""
         rejections = await self.get_topic_selection_rejections()
-        
+        return self.render_topic_rejections(rejections)
+
+    @staticmethod
+    def render_topic_rejections(rejections: Iterable[Mapping[str, Any]]) -> str:
+        """Render a caller-selected whole-entry topic-rejection projection."""
+        rejections = tuple(rejections)
         if not rejections:
             return ""
         
@@ -189,7 +194,12 @@ class AutonomousRejectionLogs:
     async def format_completion_feedback_for_context(self, topic_id: str) -> str:
         """Format completion feedback for inclusion in prompt context."""
         feedbacks = await self.get_completion_feedback(topic_id)
-        
+        return self.render_completion_feedback(feedbacks)
+
+    @staticmethod
+    def render_completion_feedback(feedbacks: Iterable[Mapping[str, Any]]) -> str:
+        """Render a caller-selected whole-entry completion-feedback projection."""
+        feedbacks = tuple(feedbacks)
         if not feedbacks:
             return ""
         
@@ -293,7 +303,12 @@ class AutonomousRejectionLogs:
     ) -> str:
         """Format submitter rejections for inclusion in prompt context."""
         rejections = await self.get_brainstorm_submitter_rejections(topic_id, submitter_id)
-        
+        return self.render_submitter_rejections(rejections)
+
+    @staticmethod
+    def render_submitter_rejections(rejections: Iterable[Mapping[str, Any]]) -> str:
+        """Render a caller-selected whole-entry submitter-rejection projection."""
+        rejections = tuple(rejections)
         if not rejections:
             return ""
         

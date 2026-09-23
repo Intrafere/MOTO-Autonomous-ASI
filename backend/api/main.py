@@ -24,6 +24,7 @@ from backend.api.routes import (
     health,
     proofs,
     proof_search,
+    proof_competition_benchmarks,
     syntheticlib4,
     connectivity,
     update,
@@ -360,6 +361,7 @@ app.include_router(features.router)
 app.include_router(health.router)
 app.include_router(proofs.router)
 app.include_router(proof_search.router)
+app.include_router(proof_competition_benchmarks.router)
 app.include_router(syntheticlib4.router)
 app.include_router(connectivity.router)
 app.include_router(openrouter.router)

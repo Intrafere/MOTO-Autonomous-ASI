@@ -3,6 +3,19 @@ from __future__ import annotations
 from tests.workflow_harness.coverage_metadata import InteractionCoverage
 
 
+# Renderer stress cases exercise real built assets, virtualization, stale-output
+# fencing, raw fallback, and mocked PDF transport, not the workflow state-model
+# invariants in BROWSER_SMOKE_COVERAGE. This is inventory classification only:
+# no pass/evidence claim is made without an actual Playwright run.
+BROWSER_STRESS_SPECS = {
+    "tests/workflow_browser_smoke/renderer-worker.spec.js": (
+        "Seven built-renderer integration/stress cases (including parameters); isolated "
+        "mock API, local Chromium, and fake PDF backend. No workflow-invariant "
+        "coverage, universal performance guarantee, or real PDF validation claimed."
+    ),
+}
+
+
 BROWSER_SMOKE_COVERAGE = (
     InteractionCoverage(
         scenario_id="browser_hosted_startup_respects_desktop_capability_boundaries",

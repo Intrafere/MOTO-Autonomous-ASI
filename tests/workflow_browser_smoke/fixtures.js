@@ -99,6 +99,9 @@ export const test = base.extend({
       autonomousStatus: { ...IDLE_STATUS },
       requests: [],
       unexpectedRequests: [],
+      // Optional test-owned REST responses; never reach a live research backend.
+      responses: new Map(),
+      documentCsp: null,
     };
 
     await page.addInitScript(() => {
@@ -146,6 +149,13 @@ export const test = base.extend({
         return;
       }
       if (!url.pathname.startsWith('/api/')) {
+        if (request.resourceType() === 'document' && state.documentCsp) {
+          const response = await route.fetch();
+          await route.fulfill({ response, headers: {
+            ...response.headers(), 'content-security-policy': state.documentCsp,
+          } });
+          return;
+        }
         await route.continue();
         return;
       }
@@ -156,7 +166,11 @@ export const test = base.extend({
         body: request.postDataJSON?.() ?? null,
       };
       state.requests.push(entry);
-      const response = responseFor(request.method(), url.pathname, state);
+      const key = `${request.method()} ${url.pathname}`;
+      const override = state.responses.get(key);
+      const response = state.responses.has(key)
+        ? (typeof override === 'function' ? await override(entry) : override)
+        : responseFor(request.method(), url.pathname, state);
       if (response === undefined) {
         state.unexpectedRequests.push(`${request.method()} ${url.pathname}`);
         await json(route, { detail: `Unmocked browser-smoke API: ${request.method()} ${url.pathname}` }, 501);
@@ -171,6 +185,9 @@ export const test = base.extend({
         await page.goto('/');
         if (acknowledgeDisclaimer) {
           await page.getByRole('button', { name: 'I Have Read and Acknowledge This Disclaimer' }).click();
+          // The public release dialog opens after acknowledgement and intercepts
+          // the page until dismissed; exercise that UI rather than seeding storage.
+          await page.getByRole('button', { name: "Close What's New", exact: true }).click();
         }
       },
       requests(method, path) {

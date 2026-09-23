@@ -5,7 +5,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { websocket } from '../../services/websocket';
 import ArchiveViewerModal from './ArchiveViewerModal';
-import LatexRenderer from '../LatexRenderer';
+import PaperProofViewer, { PaperProofMetrics } from '../PaperProofViewer';
 import {
   PDF_UNAVAILABLE_MESSAGE,
   downloadRawText,
@@ -28,7 +28,6 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
   const [activeSection, setActiveSection] = useState('overview');
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [showArchiveModal, setShowArchiveModal] = useState(false);
-  const [showLatex, setShowLatex] = useState(true);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const containerRef = useRef(null);
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
@@ -423,9 +422,7 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
           <div className="paper-content-container" ref={containerRef}>
             <div className="paper-meta">
               <span className="paper-id">{shortFormPaper.paper_id}</span>
-              <span className="word-count">
-                {shortFormPaper.word_count?.toLocaleString()} words
-              </span>
+              <PaperProofMetrics content={shortFormPaper.content || ''} metrics={shortFormPaper} />
             </div>
             <h3 className="paper-title-display">{shortFormPaper.title}</h3>
             {finalAnswerData?.sample_label && (
@@ -433,7 +430,7 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
                 {finalAnswerData.sample_label}
               </div>
             )}
-            <LatexRenderer content={shortFormPaper.content} showLatex={showLatex} />
+            <PaperProofViewer documentId={`final:${finalAnswerData?.metadata?.answer_id || status?.session_id || ''}:${shortFormPaper.paper_id || finalAnswerData?.short_form_paper_id || 'short'}`} content={shortFormPaper.content} metrics={shortFormPaper} />
           </div>
         ) : (
           <div className="loading-content">
@@ -457,11 +454,9 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
         {volumeContent && volumeContent.content ? (
           <div className="volume-content-container" ref={containerRef}>
             <div className="volume-meta">
-              <span className="word-count">
-                {volumeContent.word_count?.toLocaleString()} words total
-              </span>
+              <PaperProofMetrics content={volumeContent.content || ''} metrics={volumeContent} />
             </div>
-            <LatexRenderer content={volumeContent.content} showLatex={showLatex} />
+            <PaperProofViewer documentId={`final:${finalAnswerData?.metadata?.answer_id || status?.session_id || ''}:volume`} content={volumeContent.content} metrics={volumeContent} />
           </div>
         ) : (
           <div className="loading-content">
@@ -591,20 +586,6 @@ const FinalAnswerView = ({ api, isRunning, status, capabilities }) => {
                 <div className="content-display-section">
                   {/* View toggle and download buttons */}
                   <div className="content-controls">
-                    <div className="view-toggle">
-                      <button
-                        className={`btn ${showLatex ? '' : 'btn-secondary'}`}
-                        onClick={() => setShowLatex(true)}
-                      >
-                        Rendered View
-                      </button>
-                      <button
-                        className={`btn ${!showLatex ? '' : 'btn-secondary'}`}
-                        onClick={() => setShowLatex(false)}
-                      >
-                        Raw Text
-                      </button>
-                    </div>
                     <div className="download-buttons">
                       <button
                         className="btn-download"

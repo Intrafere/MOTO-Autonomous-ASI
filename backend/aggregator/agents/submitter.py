@@ -270,93 +270,77 @@ class SubmitterAgent:
             # Get context
             shared_training_content = await shared_training_memory.get_all_content()
             local_training_content = ""  # Local training would be added if implemented
-            rejection_log_content = await self.local_memory.get_all_content()
-            
-            # Allocate context
-            allocation = await context_allocator.allocate_submitter_context(
-                user_prompt=self.user_prompt,
-                json_schema=self._get_json_schema(),
-                system_prompt=(
-                    f"{self._get_system_prompt()}\n\n{CREATIVITY_EMPHASIS_BOOST_PROMPT}"
-                    if creativity_emphasized
-                    else self._get_system_prompt()
-                ),
-                shared_training_content=shared_training_content,
-                local_training_content=local_training_content,
-                rejection_log_content=rejection_log_content,
-                user_files_content=self.user_files_content,
-                chunk_size=chunk_size,
-                context_window=self.context_window,
-                max_output_tokens=self.max_output_tokens
-            )
-            
-            # Build prompt
-            rag_evidence = ""
-            if allocation["rag_context"]:
-                rag_evidence = allocation["rag_context"].text
-            
-            prompt = build_submitter_prompt(
-                self.user_prompt,
-                allocation["direct"],
-                rag_evidence,
-                creativity_emphasized=creativity_emphasized,
-                lean4_enabled=system_config.lean4_enabled,
-            )
-            
-            task_id = self.get_current_task_id()
-            await api_client_manager.prewarm_assistant_memory_context(
-                task_id=task_id,
-                role_id=self.role_id,
-                prompt=prompt,
-                workflow_mode_override=self.assistant_workflow_mode_override,
-            )
-
-            # CRITICAL: Verify actual prompt size fits in context window
             from backend.shared.utils import count_tokens
             max_allowed_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
             from backend.shared.solution_path.integration import with_budgeted_solver_plan
-            prompt = with_budgeted_solver_plan(
-                prompt, self.solution_path_manager, max_allowed_tokens
-            )
-            actual_prompt_tokens = count_tokens(prompt)
+            rejection_entries = await self.local_memory.get_rejection_entries()
+            visible_rejections = rejection_entries[-5:]
 
-            if creativity_emphasized and actual_prompt_tokens > max_allowed_tokens:
-                logger.warning(
-                    "Submitter %s skipped creativity emphasis because assembled prompt exceeded context budget "
-                    "(%s > %s tokens). Retrying this turn with the normal submitter prompt.",
-                    self.submitter_id,
-                    actual_prompt_tokens,
-                    max_allowed_tokens,
+            async def assemble_prompt(selected_rejections, use_creativity):
+                rejection_text = (
+                    self.local_memory.render_rejections(selected_rejections)
+                    if selected_rejections
+                    else ""
                 )
-                creativity_emphasized = False
-                allocation = await context_allocator.allocate_submitter_context(
+                allocation_result = await context_allocator.allocate_submitter_context(
                     user_prompt=self.user_prompt,
                     json_schema=self._get_json_schema(),
-                    system_prompt=self._get_system_prompt(),
+                    system_prompt=(
+                        f"{self._get_system_prompt()}\n\n{CREATIVITY_EMPHASIS_BOOST_PROMPT}"
+                        if use_creativity
+                        else self._get_system_prompt()
+                    ),
                     shared_training_content=shared_training_content,
                     local_training_content=local_training_content,
-                    rejection_log_content=rejection_log_content,
+                    rejection_log_content=rejection_text,
                     user_files_content=self.user_files_content,
                     chunk_size=chunk_size,
                     context_window=self.context_window,
-                    max_output_tokens=self.max_output_tokens
+                    max_output_tokens=self.max_output_tokens,
                 )
                 rag_evidence = ""
-                if allocation["rag_context"]:
-                    rag_evidence = allocation["rag_context"].text
-                prompt = build_submitter_prompt(
+                if allocation_result["rag_context"]:
+                    rag_evidence = allocation_result["rag_context"].text
+                assembled = build_submitter_prompt(
                     self.user_prompt,
-                    allocation["direct"],
+                    allocation_result["direct"],
                     rag_evidence,
-                    creativity_emphasized=False,
+                    creativity_emphasized=use_creativity,
                     lean4_enabled=system_config.lean4_enabled,
                 )
-                prompt = with_budgeted_solver_plan(
-                    prompt, self.solution_path_manager, max_allowed_tokens
+                assembled = with_budgeted_solver_plan(
+                    assembled, self.solution_path_manager, max_allowed_tokens
                 )
-                actual_prompt_tokens = count_tokens(prompt)
-            
-            if actual_prompt_tokens > max_allowed_tokens:
+                return allocation_result, assembled, count_tokens(assembled)
+
+            while True:
+                try:
+                    allocation, prompt, actual_prompt_tokens = await assemble_prompt(
+                        visible_rejections,
+                        creativity_emphasized,
+                    )
+                except ContextAllocationError as exc:
+                    actual_prompt_tokens = exc.required_tokens or max_allowed_tokens + 1
+                    if len(visible_rejections) > 1:
+                        visible_rejections = visible_rejections[1:]
+                        continue
+                    raise
+
+                if actual_prompt_tokens <= max_allowed_tokens:
+                    break
+                if creativity_emphasized:
+                    logger.warning(
+                        "Submitter %s skipped creativity emphasis because assembled prompt exceeded context budget "
+                        "(%s > %s tokens). Retrying this turn with the normal submitter prompt.",
+                        self.submitter_id,
+                        actual_prompt_tokens,
+                        max_allowed_tokens,
+                    )
+                    creativity_emphasized = False
+                    continue
+                if len(visible_rejections) > 1:
+                    visible_rejections = visible_rejections[1:]
+                    continue
                 raise ContextAllocationError(
                     f"Submitter {self.submitter_id} context overflow: mandatory direct context requires "
                     f"{actual_prompt_tokens:,} tokens, but the submitter can only accept {max_allowed_tokens:,} "
@@ -368,7 +352,15 @@ class SubmitterAgent:
                     context_window=self.context_window,
                     output_reserve=self.max_output_tokens,
                 )
-            
+
+            task_id = self.get_current_task_id()
+            await api_client_manager.prewarm_assistant_memory_context(
+                task_id=task_id,
+                role_id=self.role_id,
+                prompt=prompt,
+                workflow_mode_override=self.assistant_workflow_mode_override,
+            )
+
             logger.debug(f"Submitter {self.submitter_id} prompt: {actual_prompt_tokens} tokens (max: {max_allowed_tokens})")
             
             # Log RAG usage for transparency
@@ -390,7 +382,7 @@ class SubmitterAgent:
             # Generate completion with retry for 400 errors
             response = None
             call_metadata = {}
-            max_retries = 3  # 400 errors won't fix themselves - fail fast
+            max_retries = max(3, len(visible_rejections))
             
             for attempt in range(max_retries):
                 try:
@@ -408,6 +400,14 @@ class SubmitterAgent:
                     break  # Success
                     
                 except ProviderContextLengthError as e:
+                    if len(visible_rejections) > 1:
+                        visible_rejections = visible_rejections[1:]
+                        allocation, prompt, actual_prompt_tokens = await assemble_prompt(
+                            visible_rejections,
+                            False,
+                        )
+                        creativity_emphasized = False
+                        continue
                     if self.task_tracking_callback:
                         self.task_tracking_callback("completed", task_id)
                     raise ContextAllocationError.from_provider_error(
@@ -744,7 +744,9 @@ class SubmitterAgent:
                     part
                     for part in [
                         allocation.get("direct", ""),
-                        rag_evidence,
+                        allocation["rag_context"].text
+                        if allocation.get("rag_context")
+                        else "",
                         shared_training_content,
                     ]
                     if part

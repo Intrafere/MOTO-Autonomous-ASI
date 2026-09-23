@@ -1,3 +1,4 @@
+import ProofCompetitionBenchmarkReport from './components/autonomous/ProofCompetitionBenchmarkReport';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import AggregatorInterface from './components/aggregator/AggregatorInterface';
 import AggregatorSettings from './components/aggregator/AggregatorSettings';
@@ -47,6 +48,8 @@ import CreditExhaustionNotificationStack from './components/CreditExhaustionNoti
 import CodexOAuthNotificationStack from './components/CodexOAuthNotificationStack';
 import ModelErrorNotificationStack from './components/ModelErrorNotificationStack';
 import UpdateNotificationBanner from './components/UpdateNotificationBanner';
+import WhatsNewModal from './components/WhatsNewModal';
+import useWhatsNew from './hooks/useWhatsNew';
 import PaperCritiqueModal from './components/PaperCritiqueModal';
 import intrafereLogoMark from './assets/brand/intrafere-logo-no-text.png';
 import { websocket } from './services/websocket';
@@ -62,13 +65,14 @@ import {
 } from './services/api';
 import {
   LM_STUDIO_STARTUP_CHOICE,
-  RECOMMENDED_PROFILE_KEY,
   STARTUP_PROVIDER_CHOICE_STORAGE_KEY,
-  applyAutonomousProfileSelection,
+  mergeAutonomousConfig,
+  validateAutonomousConfig,
   applyLmStudioStartupDefaults,
   getStoredAutonomousSettings,
   settingsToAutonomousConfig,
   persistAutonomousSettings,
+  enabledCompetitionSecondaries,
 } from './utils/autonomousProfiles';
 import {
   getStoredLeanOJSettings,
@@ -826,6 +830,10 @@ function App() {
   
   // Disclaimer modal state (shows on every app load)
   const [showDisclaimer, setShowDisclaimer] = useState(true);
+  const { currentVersion, whatsNewVersion, closeWhatsNew, openWhatsNew, startupBlocked } = useWhatsNew({
+    backendVersion: capabilities.version,
+    showDisclaimer,
+  });
   const [showStartupSetupModal, setShowStartupSetupModal] = useState(false);
   const [startupSetupMessage, setStartupSetupMessage] = useState('');
   const [checkingLmStudioStartupChoice, setCheckingLmStudioStartupChoice] = useState(false);
@@ -999,13 +1007,23 @@ function App() {
     return settingsToAutonomousConfig(getStoredAutonomousSettings());
   });
 
+  const handleAutonomousConfigChange = useCallback((update) => {
+    setAutonomousConfig(current => mergeAutonomousConfig(current, update));
+  }, []);
+
   // Save autonomous config to localStorage
   useEffect(() => {
     const existingSettings = getStoredAutonomousSettings();
     persistAutonomousSettings({
       ...existingSettings,
-      numSubmitters: autonomousConfig.submitter_configs?.length || existingSettings.numSubmitters || 3,
-      submitterConfigs: autonomousConfig.submitter_configs || existingSettings.submitterConfigs,
+      numSubmitters: Number.isInteger(autonomousConfig.num_submitters)
+        ? autonomousConfig.num_submitters
+        : (Array.isArray(autonomousConfig.submitter_configs)
+          ? autonomousConfig.submitter_configs.length
+          : existingSettings.numSubmitters),
+      submitterConfigs: Array.isArray(autonomousConfig.submitter_configs)
+        ? autonomousConfig.submitter_configs
+        : existingSettings.submitterConfigs,
       localConfig: {
         ...existingSettings.localConfig,
         validator_provider: autonomousConfig.validator_provider,
@@ -1040,6 +1058,7 @@ function App() {
         high_param_context_window: autonomousConfig.high_param_context_window,
         high_param_max_tokens: autonomousConfig.high_param_max_tokens,
         high_param_supercharge_enabled: autonomousConfig.high_param_supercharge_enabled,
+        proof_competition: autonomousConfig.proof_competition || { enabled: false, secondaries: [] },
         critique_submitter_provider: autonomousConfig.high_param_provider,
         critique_submitter_model: autonomousConfig.high_param_model,
         critique_submitter_openrouter_provider: autonomousConfig.high_param_openrouter_provider,
@@ -2154,6 +2173,18 @@ function App() {
           timestamp: getTimestamp(data),
           message: messages[eventName],
           data,
+        });
+      }));
+    });
+
+    ['proof_competitor_unavailable', 'proof_competition_unavailable'].forEach((event) => {
+      unsubscribers.push(websocket.on(event, (data) => {
+        if (isLeanOJProofEvent(data) || isManualProofEvent(data)) return;
+        addActivity({
+          event,
+          timestamp: getTimestamp(data),
+          message: data.message || 'Secondary proof model unavailable; research continues.',
+          ...data,
         });
       }));
     });
@@ -3316,7 +3347,9 @@ function App() {
   // Autonomous handlers
   const handleAutonomousStart = async (researchPrompt) => {
     const startGeneration = autonomousLifecycleGenerationRef.current;
+    const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled !== false;
     try {
+      validateAutonomousConfig(autonomousConfig, { assistantEnabled: assistantMemoryEnabled && autonomousConfig.allow_mathematical_proofs !== false });
       const lmStudioEnabled = capabilities.lmStudioEnabled;
       const superchargeAllowed = developerModeEnabled;
 
@@ -3333,7 +3366,6 @@ function App() {
         supercharge_enabled: superchargeAllowed && Boolean(cfg.superchargeEnabled || cfg.supercharge_enabled)
       })) || [];
 
-      const assistantMemoryEnabled = connectivityStatus?.skills?.agent_conversation_memory?.enabled !== false;
       await autonomousAPI.start({
         user_research_prompt: researchPrompt,
         submitter_configs: submitterConfigs,
@@ -3380,6 +3412,16 @@ function App() {
         high_param_context_window: coercePositiveIntegerSetting(autonomousConfig.high_param_context_window, DEFAULT_CONTEXT_WINDOW),
         high_param_max_tokens: coercePositiveIntegerSetting(autonomousConfig.high_param_max_tokens, DEFAULT_MAX_OUTPUT_TOKENS),
         high_param_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
+        proof_competition: {
+          enabled: Boolean(autonomousConfig.proof_competition?.enabled),
+          secondaries: enabledCompetitionSecondaries(autonomousConfig.proof_competition).map(({ max_tokens, ...route }) => ({
+            ...route,
+            max_output_tokens: route.max_output_tokens ?? max_tokens,
+            provider: normalizeRuntimeProvider(route.provider, lmStudioEnabled),
+            lm_studio_fallback_id: lmStudioEnabled ? route.lm_studio_fallback_id || null : null,
+            supercharge_enabled: superchargeAllowed && Boolean(route.supercharge_enabled),
+          })),
+        },
         // Deprecated critique fields mirror Rigor & Proofs for compatibility.
         critique_submitter_provider: normalizeRuntimeProvider(
           autonomousConfig.high_param_provider,
@@ -3396,29 +3438,29 @@ function App() {
         critique_submitter_supercharge_enabled: superchargeAllowed && Boolean(autonomousConfig.high_param_supercharge_enabled),
         assistant_provider: assistantMemoryEnabled
           ? normalizeRuntimeProvider(
-              autonomousConfig.assistant_provider || autonomousConfig.validator_provider,
+              autonomousConfig.assistant_provider,
               lmStudioEnabled
             )
           : normalizeRuntimeProvider(autonomousConfig.validator_provider, lmStudioEnabled),
-        assistant_model: assistantMemoryEnabled ? (autonomousConfig.assistant_model || autonomousConfig.validator_model) : '',
+        assistant_model: assistantMemoryEnabled ? (autonomousConfig.assistant_model || '') : '',
         assistant_openrouter_provider: assistantMemoryEnabled
-          ? (autonomousConfig.assistant_openrouter_provider || autonomousConfig.validator_openrouter_provider)
+          ? (autonomousConfig.assistant_openrouter_provider ?? null)
           : null,
         assistant_openrouter_reasoning_effort: assistantMemoryEnabled
-          ? (autonomousConfig.assistant_openrouter_reasoning_effort || autonomousConfig.validator_openrouter_reasoning_effort || 'auto')
+          ? (autonomousConfig.assistant_openrouter_reasoning_effort || 'auto')
           : 'auto',
         assistant_lm_studio_fallback: assistantMemoryEnabled && lmStudioEnabled
-          ? (autonomousConfig.assistant_lm_studio_fallback || autonomousConfig.validator_lm_studio_fallback)
+          ? (autonomousConfig.assistant_lm_studio_fallback ?? null)
           : null,
         assistant_context_window: assistantMemoryEnabled
           ? coercePositiveIntegerSetting(
-              autonomousConfig.assistant_context_window || autonomousConfig.validator_context_window,
+              autonomousConfig.assistant_context_window,
               DEFAULT_CONTEXT_WINDOW
             )
           : 0,
         assistant_max_tokens: assistantMemoryEnabled
           ? coercePositiveIntegerSetting(
-              autonomousConfig.assistant_max_tokens || autonomousConfig.validator_max_tokens,
+              autonomousConfig.assistant_max_tokens,
               DEFAULT_MAX_OUTPUT_TOKENS
             )
           : 0,
@@ -3991,8 +4033,7 @@ function App() {
 
   const handleOpenRouterKeySet = async () => {
     if (STARTUP_CLOUD_ACCESS_REASONS.has(openRouterKeyReason)) {
-      const { config: nextAutonomousConfig } = await applyAutonomousProfileSelection(RECOMMENDED_PROFILE_KEY);
-      setAutonomousConfig(nextAutonomousConfig);
+      // Credential setup must not replace the user's existing role selections.
       setShowStartupSetupModal(false);
       setStartupSetupMessage('');
     }
@@ -4172,6 +4213,14 @@ function App() {
       )}
       
       <div className={`app-header ${workflowPanelCollapsed ? 'panel-collapsed' : ''}`}>
+        <button
+          className="moto-version-button"
+          onClick={openWhatsNew}
+          aria-label={`What's New with MOTO v${currentVersion}`}
+          aria-haspopup="dialog"
+        >
+          MOTO v{currentVersion}
+        </button>
         <ConnectivityPanel
           appMode={appMode}
           developerModeEnabled={developerModeEnabled}
@@ -4332,7 +4381,7 @@ function App() {
               onStop={handleAutonomousStop}
               onClear={handleAutonomousClear}
               config={autonomousConfig}
-              onConfigChange={setAutonomousConfig}
+              onConfigChange={handleAutonomousConfigChange}
               developerModeEnabled={developerModeEnabled}
               capabilities={capabilities}
               api={autonomousAPI}
@@ -4342,10 +4391,7 @@ function App() {
             <BrainstormList
               brainstorms={brainstorms}
               onRefresh={refreshBrainstorms}
-              api={{ 
-                getBrainstorm: autonomousAPI.getBrainstorm,
-                deleteBrainstorm: autonomousAPI.deleteBrainstorm
-              }}
+              api={autonomousAPI}
             />
           )}
           {activeTab === 'auto-papers' && (
@@ -4407,8 +4453,15 @@ function App() {
                 >
                   Proof Library
                 </button>
+                <button
+                  className={`completed-works-sub-tab ${completedWorksSubTab === 'benchmarks' ? 'active' : ''}`}
+                  onClick={() => setCompletedWorksSubTab('benchmarks')}
+                >
+                  Benchmarks
+                </button>
               </div>
               <div className="completed-works-content">
+                {completedWorksSubTab === 'benchmarks' && <ProofCompetitionBenchmarkReport />}
                 {completedWorksSubTab === 'stage2-history' && (
                   <Stage2PaperHistory
                     capabilities={capabilities}
@@ -4562,7 +4615,7 @@ function App() {
         <div className="settings-overlay-safe-area">
           <AutonomousResearchSettings
             config={autonomousConfig}
-            onConfigChange={setAutonomousConfig}
+            onConfigChange={handleAutonomousConfigChange}
             models={models}
             capabilities={capabilities}
             connectivityStatus={connectivityStatus}
@@ -4590,6 +4643,7 @@ function App() {
       {activeTab === 'aggregator-settings' && (
         <div className="settings-overlay-safe-area">
           <AggregatorSettings
+            isRunning={anyWorkflowRunning}
             config={config}
             setConfig={setConfig}
             capabilities={capabilities}
@@ -4603,6 +4657,7 @@ function App() {
       {activeTab === 'compiler-settings' && (
         <div className="settings-overlay-safe-area">
           <CompilerSettings
+            isRunning={anyWorkflowRunning}
             capabilities={capabilities}
             connectivityStatus={connectivityStatus}
             credentialStatusRefreshToken={credentialStatusRefreshToken}
@@ -4716,8 +4771,12 @@ function App() {
         </>
       )}
 
+      {!showDisclaimer && whatsNewVersion && (
+        <WhatsNewModal version={whatsNewVersion} onClose={closeWhatsNew} />
+      )}
+
       <StartupProviderSetupModal
-        isOpen={showStartupSetupModal}
+        isOpen={showStartupSetupModal && !startupBlocked}
         capabilities={capabilities}
         lmStudioAvailable={lmStudioAvailable}
         hasUsableLmStudioChatModel={Boolean(lmStudioStatus.has_usable_chat_model)}
@@ -4890,6 +4949,35 @@ function App() {
             >
               Star Our GitHub!
             </a>
+            <span className="footer-social-divider" aria-hidden="true" />
+            <div className="footer-social-links" aria-label="Follow Intrafere">
+              <a
+                href="https://x.com/IntrafereLLC"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="footer-social-link footer-social-link-x"
+                aria-label="Follow Intrafere Research Group on X"
+                title="Follow us on X"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.657l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25h6.826l4.713 6.231 5.45-6.231Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z" />
+                </svg>
+                <span>X</span>
+              </a>
+              <a
+                href="https://www.youtube.com/@Intrafere"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="footer-social-link footer-social-link-youtube"
+                aria-label="Subscribe to Intrafere on YouTube"
+                title="Watch us on YouTube"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.6 12 3.6 12 3.6s-7.5 0-9.4.5A3 3 0 0 0 .5 6.2 31 31 0 0 0 0 12a31 31 0 0 0 .5 5.8 3 3 0 0 0 2.1 2.1c1.9.5 9.4.5 9.4.5s7.5 0 9.4-.5a3 3 0 0 0 2.1-2.1A31 31 0 0 0 24 12a31 31 0 0 0-.5-5.8ZM9.6 15.6V8.4l6.3 3.6-6.3 3.6Z" />
+                </svg>
+                <span>YouTube</span>
+              </a>
+            </div>
           </div>
         </div>
       </footer>

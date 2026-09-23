@@ -17,6 +17,8 @@ from backend.shared.json_parser import parse_json
 from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.shared.models import CompletionReviewResult
 from backend.autonomous.prompts.completion_prompts import (
     build_completion_review_prompt,
@@ -196,21 +198,26 @@ class CompletionReviewerAgent:
     ) -> Optional[CompletionReviewResult]:
         """Generate the initial completion assessment."""
         try:
-            # Get previous feedback
-            completion_feedback = await autonomous_rejection_logs.format_completion_feedback_for_context(topic_id)
-            
-            # Build prompt with prepared context
-            prompt = build_completion_review_prompt(
-                user_research_prompt=user_research_prompt,
-                topic_prompt=topic_prompt,
-                brainstorm_database=brainstorm_context,
-                submission_count=submission_count,
-                completion_feedback=completion_feedback
-            )
-            
-            # Validate prompt size before sending
-            prompt_tokens = count_tokens(prompt)
             max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+            feedback_entries = await autonomous_rejection_logs.get_completion_feedback(topic_id)
+
+            def build_prompt(entries):
+                return build_completion_review_prompt(
+                    user_research_prompt=user_research_prompt,
+                    topic_prompt=topic_prompt,
+                    brainstorm_database=brainstorm_context,
+                    submission_count=submission_count,
+                    completion_feedback=autonomous_rejection_logs.render_completion_feedback(entries),
+                )
+
+            fit = fit_prompt_with_feedback(
+                feedback_entries,
+                build_prompt=build_prompt,
+                available_tokens=max_input_tokens,
+            )
+            prompt = fit.prompt
+            retained_feedback = fit.retained_entries
+            prompt_tokens = fit.prompt_tokens
             from backend.shared.solution_path.integration import with_budgeted_solver_plan
             prompt = with_budgeted_solver_plan(
                 prompt,
@@ -240,14 +247,22 @@ class CompletionReviewerAgent:
             logger.info(f"CompletionReviewer: Generating assessment with model {self.model_id} "
                        f"(prompt={prompt_tokens}t, RAG={used_rag}, task_id={task_id})")
             
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_id,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_output_tokens,
-                temperature=0.0  # Deterministic generation - evolving context provides diversity
-            )
+            while True:
+                try:
+                    response = await api_client_manager.generate_completion(
+                        task_id=task_id,
+                        role_id=self.role_id,
+                        model=self.model_id,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=self.max_output_tokens,
+                        temperature=0.0
+                    )
+                    break
+                except ProviderContextLengthError:
+                    if len(retained_feedback) <= 1:
+                        raise
+                    retained_feedback = retained_feedback[1:]
+                    prompt = build_prompt(retained_feedback)
             
             if not response:
                 logger.error("CompletionReviewer: Empty response from LLM")

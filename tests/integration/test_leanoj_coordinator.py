@@ -2,6 +2,7 @@ import asyncio
 import unittest
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from backend.leanoj.core import leanoj_context as leanoj_context_module
 from backend.leanoj.core import leanoj_coordinator as leanoj_module
@@ -16,6 +17,7 @@ from backend.shared.boost_manager import BoostManager
 from backend.shared.config import system_config
 from backend.shared.models import DocumentChunk, LeanOJRoleConfig, LeanOJStartRequest, ProofRecord
 from backend.shared.proof_search.assistant_models import AssistantProofPack, AssistantProofSupport
+from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
 
 
 def _role() -> LeanOJRoleConfig:
@@ -69,6 +71,75 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         coordinator._review_final_solution_completion = fake_review  # type: ignore[method-assign]
         return coordinator
+
+    def test_final_feedback_projection_deduplicates_and_preserves_durable_records(self) -> None:
+        coordinator = LeanOJCoordinator()
+        attempt = {
+            "request": "final Proof Solver master proof edit",
+            "error_summary": "Lean error: unsolved goals",
+            "lean_code": "example : True := by sorry",
+        }
+        event = {
+            "event_type": "failure",
+            "request": attempt["request"],
+            "error_summary": attempt["error_summary"],
+            "created_at": "2026-01-01T00:00:00",
+        }
+        coordinator._final_attempts = [attempt]  # type: ignore[attr-defined]
+        coordinator._final_context_events = [event]  # type: ignore[attr-defined]
+        coordinator._failed_feedback = [dict(event)]  # type: ignore[attr-defined]
+
+        projected = coordinator._final_prompt_feedback_entries()  # type: ignore[attr-defined]
+
+        self.assertEqual(projected, [attempt])
+        self.assertIsNot(projected[0], attempt)
+        self.assertEqual(coordinator._final_attempts, [attempt])  # type: ignore[attr-defined]
+        self.assertEqual(coordinator._final_context_events, [event])  # type: ignore[attr-defined]
+
+    def test_working_and_cycle_packets_cap_whole_entries_without_mutation(self) -> None:
+        attempts = [
+            {"request": f"edit {index}", "error_summary": f"Lean error {index}"}
+            for index in range(7)
+        ]
+        packet = {"attempts": attempts, "recent_final_attempts": attempts}
+
+        projected = LeanOJCoordinator._project_feedback_packet(packet, ())  # type: ignore[attr-defined]
+
+        self.assertEqual(projected["attempts"], attempts[-5:])
+        self.assertEqual(projected["recent_final_attempts"], attempts[-5:])
+        self.assertEqual(packet["attempts"], attempts)
+        self.assertIsNot(projected["attempts"][0], attempts[-5])
+
+    async def test_provider_context_rejection_uses_smaller_prompt_projection(self) -> None:
+        coordinator = LeanOJCoordinator()
+        coordinator._running = True  # type: ignore[attr-defined]
+        prompts: list[str] = []
+
+        async def generate_completion(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                raise ProviderContextLengthError(
+                    "too large",
+                    route=ProviderRouteIdentity(provider="test", model="test-model"),
+                )
+            return {"choices": [{"message": {"content": '{"decision": "accept"}'}}]}
+
+        original = leanoj_module.api_client_manager.generate_completion
+        leanoj_module.api_client_manager.generate_completion = generate_completion  # type: ignore[method-assign]
+        try:
+            result = await coordinator._call_json(  # type: ignore[attr-defined]
+                _role(),
+                "leanoj_final",
+                "leanoj_final_solver",
+                "large prompt with old feedback",
+                context_rejection_prompts=["smaller prompt with newest feedback"],
+            )
+        finally:
+            leanoj_module.api_client_manager.generate_completion = original  # type: ignore[method-assign]
+
+        self.assertEqual(result["decision"], "accept")
+        self.assertEqual(prompts, ["large prompt with old feedback", "smaller prompt with newest feedback"])
 
     async def test_solution_path_restores_from_cumulative_acceptance_events(self) -> None:
         coordinator = LeanOJCoordinator()
@@ -2310,7 +2381,16 @@ class LeanOJCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(success=False, error_output="unsolved goals")
 
         old_get_lean4_client = leanoj_module.get_lean4_client
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            LeanOJCoordinator,
+            "_build_final_solver_proof_search_context",
+            new_callable=AsyncMock,
+            return_value="",
+        ), patch.object(
+            leanoj_module.api_client_manager,
+            "prewarm_assistant_memory_context",
+            new_callable=AsyncMock,
+        ):
             try:
                 system_config.data_dir = tmpdir
                 coordinator = await self._initialized_coordinator()

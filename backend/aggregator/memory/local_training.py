@@ -3,8 +3,9 @@ Per-submitter rejection logs.
 Tracks last 5 rejections to help submitters learn from mistakes.
 """
 import aiofiles
+from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Iterable, List, Mapping, Optional, Union
 import asyncio
 import logging
 
@@ -142,22 +143,30 @@ class LocalTrainingMemory:
     
     async def get_all_content(self) -> str:
         """Get all rejection content as a single string."""
+        return self.render_rejections(await self.get_rejection_entries())
+
+    async def get_rejection_entries(self) -> tuple[dict, ...]:
+        """Return an immutable snapshot of chronological rejection entries."""
         async with self._lock:
-            if not self.rejections:
-                return "No rejections yet."
-            
-            entries = []
-            for idx, rejection in enumerate(self.rejections, start=1):
-                entry = (
-                    f"[REJECTION {idx}]\n"
-                    f"[VALIDATOR SUMMARY]\n"
-                    f"{rejection['validator_summary']}\n\n"
-                    f"[SUBMISSION PREVIEW]\n"
-                    f"{rejection['submission_preview']}"
-                )
-                entries.append(entry)
-            
-            return '\n\n---\n\n'.join(entries)
+            return tuple(deepcopy(self.rejections))
+
+    @staticmethod
+    def render_rejections(rejections: Iterable[Mapping[str, str]]) -> str:
+        """Render a caller-selected whole-entry rejection projection."""
+        snapshot = tuple(rejections)
+        if not snapshot:
+            return "No rejections yet."
+
+        entries = []
+        for idx, rejection in enumerate(snapshot, start=1):
+            entries.append(
+                f"[REJECTION {idx}]\n"
+                f"[VALIDATOR SUMMARY]\n"
+                f"{rejection['validator_summary']}\n\n"
+                f"[SUBMISSION PREVIEW]\n"
+                f"{rejection['submission_preview']}"
+            )
+        return '\n\n---\n\n'.join(entries)
     
     async def get_count(self) -> int:
         """Get number of rejections."""

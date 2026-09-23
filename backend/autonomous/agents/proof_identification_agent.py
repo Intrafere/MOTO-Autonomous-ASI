@@ -2,7 +2,7 @@
 Proof identification agent for Lean 4 verification checkpoints.
 """
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 from backend.shared.api_client_manager import RetryableProviderError, api_client_manager
 from backend.shared.json_parser import parse_json, sanitize_model_output_for_retry_context
@@ -16,6 +16,8 @@ from backend.shared.models import ProofCandidate
 from backend.shared.openrouter_client import FreeModelExhaustedError
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.autonomous.prompts.proof_prompts import (
     build_proof_identification_prompt,
     build_smt_translation_prompt,
@@ -347,20 +349,34 @@ class ProofIdentificationAgent:
         proof_max_rounds: int = 1,
         prior_round_results: str = "",
         candidate_list_rejection_feedback: str = "",
+        candidate_list_rejection_feedback_entries: Sequence[str] = (),
     ) -> Tuple[bool, List[ProofCandidate]]:
         """Return whether proof candidates exist and the extracted theorem list."""
-        prompt = build_proof_identification_prompt(
-            user_prompt=user_research_prompt,
-            source_type=source_type,
-            source_id=source_id,
-            source_content=source_content,
-            source_title=source_title,
-            proof_round_index=proof_round_index,
-            proof_max_rounds=proof_max_rounds,
-            prior_round_results=prior_round_results,
-            candidate_list_rejection_feedback=candidate_list_rejection_feedback,
-        )
         max_input_tokens = rag_config.get_available_input_tokens(self.context_window, self.max_output_tokens)
+        feedback_entries = tuple(candidate_list_rejection_feedback_entries)
+        if not feedback_entries and candidate_list_rejection_feedback:
+            feedback_entries = (candidate_list_rejection_feedback,)
+
+        def build_prompt(entries: tuple[str, ...]) -> str:
+            return build_proof_identification_prompt(
+                user_prompt=user_research_prompt,
+                source_type=source_type,
+                source_id=source_id,
+                source_content=source_content,
+                source_title=source_title,
+                proof_round_index=proof_round_index,
+                proof_max_rounds=proof_max_rounds,
+                prior_round_results=prior_round_results,
+                candidate_list_rejection_feedback="\n\n".join(entries),
+            )
+
+        fit = fit_prompt_with_feedback(
+            feedback_entries,
+            build_prompt=build_prompt,
+            available_tokens=max_input_tokens,
+        )
+        prompt = fit.prompt
+        retained_feedback = fit.retained_entries
         from backend.shared.solution_path.integration import with_budgeted_solver_plan
         prompt = with_budgeted_solver_plan(
             prompt, self.solution_path_manager, max_input_tokens
@@ -392,14 +408,22 @@ class ProofIdentificationAgent:
         self.task_sequence += 1
 
         try:
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_id,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_output_tokens,
-                temperature=0.0,
-            )
+            while True:
+                try:
+                    response = await api_client_manager.generate_completion(
+                        task_id=task_id,
+                        role_id=self.role_id,
+                        model=self.model_id,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=self.max_output_tokens,
+                        temperature=0.0,
+                    )
+                    break
+                except ProviderContextLengthError:
+                    if len(retained_feedback) <= 1:
+                        raise
+                    retained_feedback = retained_feedback[1:]
+                    prompt = build_prompt(retained_feedback)
             content = self._extract_response_content(response)
             try:
                 return self._parse_candidate_payload(content)

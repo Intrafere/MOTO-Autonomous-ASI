@@ -28,6 +28,7 @@ import {
   SAKANA_FUGU_PROVIDER,
   XAI_GROK_PROVIDER,
 } from '../../utils/oauthProviders';
+import CodexReasoningControl from '../CodexReasoningControl';
 import HelpTooltip from '../HelpTooltip';
 import HighlightedModelsSidebar from '../HighlightedModelsSidebar';
 import OpenRouterFreeModelsControl from '../OpenRouterFreeModelsControl';
@@ -58,6 +59,7 @@ const readWriterSetting = (settings, suffix) => {
 };
 
 function CompilerSettings({
+  isRunning = false,
   capabilities,
   connectivityStatus,
   credentialStatusRefreshToken = 0,
@@ -267,7 +269,7 @@ function CompilerSettings({
           if (settings.validatorProvider) setValidatorProvider(settings.validatorProvider);
           if (settings.validatorModel) setValidatorModel(settings.validatorModel);
           if (settings.validatorOpenrouterProvider) setValidatorOpenrouterProvider(settings.validatorOpenrouterProvider);
-          if (settings.validatorOpenrouterReasoningEffort) setValidatorOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.validatorOpenrouterReasoningEffort));
+          if (settings.validatorOpenrouterReasoningEffort) setValidatorOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.validatorOpenrouterReasoningEffort, settings.validatorProvider));
           if (settings.validatorLmStudioFallback) setValidatorLmStudioFallback(settings.validatorLmStudioFallback);
           if (settings.validatorContextSize) setValidatorContextSize(settings.validatorContextSize);
           if (settings.validatorMaxOutput) setValidatorMaxOutput(settings.validatorMaxOutput);
@@ -276,7 +278,7 @@ function CompilerSettings({
           setAssistantProvider(settings.assistantProvider || settings.validatorProvider || 'lm_studio');
           setAssistantModel(settings.assistantModel || settings.validatorModel || '');
           setAssistantOpenrouterProvider(settings.assistantOpenrouterProvider || settings.validatorOpenrouterProvider || null);
-          setAssistantOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.assistantOpenrouterReasoningEffort || settings.validatorOpenrouterReasoningEffort));
+          setAssistantOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.assistantOpenrouterReasoningEffort || settings.validatorOpenrouterReasoningEffort, settings.assistantProvider || settings.validatorProvider));
           setAssistantLmStudioFallback(settings.assistantLmStudioFallback || settings.validatorLmStudioFallback || null);
           setAssistantContextSize(settings.assistantContextSize || settings.validatorContextSize || DEFAULT_CONTEXT_WINDOW);
           setAssistantMaxOutput(settings.assistantMaxOutput || settings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS);
@@ -289,7 +291,7 @@ function CompilerSettings({
           if (readWriterSetting(settings, 'Provider')) setWritingProvider(readWriterSetting(settings, 'Provider'));
           if (readWriterSetting(settings, 'Model')) setWritingModel(readWriterSetting(settings, 'Model'));
           if (readWriterSetting(settings, 'OpenrouterProvider')) setWritingOpenrouterProvider(readWriterSetting(settings, 'OpenrouterProvider'));
-          if (readWriterSetting(settings, 'OpenrouterReasoningEffort')) setWritingOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(readWriterSetting(settings, 'OpenrouterReasoningEffort')));
+          if (readWriterSetting(settings, 'OpenrouterReasoningEffort')) setWritingOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(readWriterSetting(settings, 'OpenrouterReasoningEffort'), readWriterSetting(settings, 'Provider')));
           if (readWriterSetting(settings, 'LmStudioFallback')) setWritingLmStudioFallback(readWriterSetting(settings, 'LmStudioFallback'));
           if (readWriterSetting(settings, 'ContextSize')) setWritingContextSize(readWriterSetting(settings, 'ContextSize'));
           if (readWriterSetting(settings, 'MaxOutput')) setWritingMaxOutput(readWriterSetting(settings, 'MaxOutput'));
@@ -298,7 +300,7 @@ function CompilerSettings({
           if (settings.highParamProvider) setHighParamProvider(settings.highParamProvider);
           if (settings.highParamModel) setHighParamModel(settings.highParamModel);
           if (settings.highParamOpenrouterProvider) setHighParamOpenrouterProvider(settings.highParamOpenrouterProvider);
-          if (settings.highParamOpenrouterReasoningEffort) setHighParamOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.highParamOpenrouterReasoningEffort));
+          if (settings.highParamOpenrouterReasoningEffort) setHighParamOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.highParamOpenrouterReasoningEffort, settings.highParamProvider));
           if (settings.highParamLmStudioFallback) setHighParamLmStudioFallback(settings.highParamLmStudioFallback);
           if (settings.highParamContextSize) setHighParamContextSize(settings.highParamContextSize);
           if (settings.highParamMaxOutput) setHighParamMaxOutput(settings.highParamMaxOutput);
@@ -307,7 +309,7 @@ function CompilerSettings({
           if (settings.critiqueSubmitterProvider) setCritiqueSubmitterProvider(settings.critiqueSubmitterProvider);
           if (settings.critiqueSubmitterModel) setCritiqueSubmitterModel(settings.critiqueSubmitterModel);
           if (settings.critiqueSubmitterOpenrouterProvider) setCritiqueSubmitterOpenrouterProvider(settings.critiqueSubmitterOpenrouterProvider);
-          if (settings.critiqueSubmitterOpenrouterReasoningEffort) setCritiqueSubmitterOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.critiqueSubmitterOpenrouterReasoningEffort));
+          if (settings.critiqueSubmitterOpenrouterReasoningEffort) setCritiqueSubmitterOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(settings.critiqueSubmitterOpenrouterReasoningEffort, settings.critiqueSubmitterProvider));
           if (settings.critiqueSubmitterLmStudioFallback) setCritiqueSubmitterLmStudioFallback(settings.critiqueSubmitterLmStudioFallback);
           if (settings.critiqueSubmitterContextSize) setCritiqueSubmitterContextSize(settings.critiqueSubmitterContextSize);
           if (settings.critiqueSubmitterMaxOutput) setCritiqueSubmitterMaxOutput(settings.critiqueSubmitterMaxOutput);
@@ -887,7 +889,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setValidatorProvider(rawSettings.validatorProvider || 'lm_studio');
     setValidatorModel(rawSettings.validatorModel || '');
     setValidatorOpenrouterProvider(rawSettings.validatorOpenrouterProvider || null);
-    setValidatorOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort));
+    setValidatorOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort, rawSettings.validatorProvider));
     setValidatorLmStudioFallback(rawSettings.validatorLmStudioFallback || null);
     setValidatorContextSize(rawSettings.validatorContextSize ?? DEFAULT_CONTEXT_WINDOW);
     setValidatorMaxOutput(rawSettings.validatorMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
@@ -895,7 +897,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setAssistantProvider(rawSettings.assistantProvider || rawSettings.validatorProvider || 'lm_studio');
     setAssistantModel(rawSettings.assistantModel || rawSettings.validatorModel || '');
     setAssistantOpenrouterProvider(rawSettings.assistantOpenrouterProvider || rawSettings.validatorOpenrouterProvider || null);
-    setAssistantOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort));
+    setAssistantOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort, rawSettings.assistantProvider || rawSettings.validatorProvider));
     setAssistantLmStudioFallback(rawSettings.assistantLmStudioFallback || rawSettings.validatorLmStudioFallback || null);
     setAssistantContextSize(rawSettings.assistantContextSize || rawSettings.validatorContextSize || DEFAULT_CONTEXT_WINDOW);
     setAssistantMaxOutput(rawSettings.assistantMaxOutput || rawSettings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS);
@@ -907,7 +909,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setWritingProvider(readWriterSetting(rawSettings, 'Provider') || 'lm_studio');
     setWritingModel(readWriterSetting(rawSettings, 'Model') || '');
     setWritingOpenrouterProvider(readWriterSetting(rawSettings, 'OpenrouterProvider') || null);
-    setWritingOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(readWriterSetting(rawSettings, 'OpenrouterReasoningEffort')));
+    setWritingOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(readWriterSetting(rawSettings, 'OpenrouterReasoningEffort'), readWriterSetting(rawSettings, 'Provider')));
     setWritingLmStudioFallback(readWriterSetting(rawSettings, 'LmStudioFallback') || null);
     setWritingContextSize(readWriterSetting(rawSettings, 'ContextSize') ?? DEFAULT_CONTEXT_WINDOW);
     setWritingMaxOutput(readWriterSetting(rawSettings, 'MaxOutput') ?? DEFAULT_MAX_OUTPUT_TOKENS);
@@ -915,7 +917,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setHighParamProvider(rawSettings.highParamProvider || 'lm_studio');
     setHighParamModel(rawSettings.highParamModel || '');
     setHighParamOpenrouterProvider(rawSettings.highParamOpenrouterProvider || null);
-    setHighParamOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.highParamOpenrouterReasoningEffort));
+    setHighParamOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.highParamOpenrouterReasoningEffort, rawSettings.highParamProvider));
     setHighParamLmStudioFallback(rawSettings.highParamLmStudioFallback || null);
     setHighParamContextSize(rawSettings.highParamContextSize ?? DEFAULT_CONTEXT_WINDOW);
     setHighParamMaxOutput(rawSettings.highParamMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
@@ -923,7 +925,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
     setCritiqueSubmitterProvider(rawSettings.critiqueSubmitterProvider || 'lm_studio');
     setCritiqueSubmitterModel(rawSettings.critiqueSubmitterModel || '');
     setCritiqueSubmitterOpenrouterProvider(rawSettings.critiqueSubmitterOpenrouterProvider || null);
-    setCritiqueSubmitterOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.critiqueSubmitterOpenrouterReasoningEffort));
+    setCritiqueSubmitterOpenrouterReasoningEffort(normalizeOpenRouterReasoningEffort(rawSettings.critiqueSubmitterOpenrouterReasoningEffort, rawSettings.critiqueSubmitterProvider));
     setCritiqueSubmitterLmStudioFallback(rawSettings.critiqueSubmitterLmStudioFallback || null);
     setCritiqueSubmitterContextSize(rawSettings.critiqueSubmitterContextSize ?? DEFAULT_CONTEXT_WINDOW);
     setCritiqueSubmitterMaxOutput(rawSettings.critiqueSubmitterMaxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS);
@@ -941,10 +943,10 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
         ...rawSettings,
         validatorProvider: rawSettings.validatorProvider || 'lm_studio',
         validatorModel: rawSettings.validatorModel || '',
-        validatorOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort),
+        validatorOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.validatorOpenrouterReasoningEffort, rawSettings.validatorProvider),
         assistantProvider: rawSettings.assistantProvider || rawSettings.validatorProvider || 'lm_studio',
         assistantModel: rawSettings.assistantModel || rawSettings.validatorModel || '',
-        assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort),
+        assistantOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.assistantOpenrouterReasoningEffort || rawSettings.validatorOpenrouterReasoningEffort, rawSettings.assistantProvider || rawSettings.validatorProvider),
         assistantContextSize: rawSettings.assistantContextSize || rawSettings.validatorContextSize || DEFAULT_CONTEXT_WINDOW,
         assistantMaxOutput: rawSettings.assistantMaxOutput || rawSettings.validatorMaxOutput || DEFAULT_MAX_OUTPUT_TOKENS,
         assistantSuperchargeEnabled: rawSettings.assistantModel
@@ -952,13 +954,13 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           : Boolean(rawSettings.validatorSuperchargeEnabled),
         writerProvider: readWriterSetting(rawSettings, 'Provider') || 'lm_studio',
         writerModel: readWriterSetting(rawSettings, 'Model') || '',
-        writerOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(readWriterSetting(rawSettings, 'OpenrouterReasoningEffort')),
+        writerOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(readWriterSetting(rawSettings, 'OpenrouterReasoningEffort'), readWriterSetting(rawSettings, 'Provider')),
         highParamProvider: rawSettings.highParamProvider || 'lm_studio',
         highParamModel: rawSettings.highParamModel || '',
-        highParamOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.highParamOpenrouterReasoningEffort),
+        highParamOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.highParamOpenrouterReasoningEffort, rawSettings.highParamProvider),
         critiqueSubmitterProvider: rawSettings.critiqueSubmitterProvider || 'lm_studio',
         critiqueSubmitterModel: rawSettings.critiqueSubmitterModel || '',
-        critiqueSubmitterOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.critiqueSubmitterOpenrouterReasoningEffort),
+        critiqueSubmitterOpenrouterReasoningEffort: normalizeOpenRouterReasoningEffort(rawSettings.critiqueSubmitterOpenrouterReasoningEffort, rawSettings.critiqueSubmitterProvider),
         freeOnly: rawSettings.freeOnly ?? false,
         freeModelLooping: rawSettings.freeModelLooping ?? false,
         freeModelAutoSelector: rawSettings.freeModelAutoSelector ?? false,
@@ -1223,6 +1225,7 @@ Be honest and constructive. Identify both strengths and weaknesses.`;
           </div>
         )}
 
+        {effectiveProvider === 'openai_codex_oauth' && model && <CodexReasoningControl model={models.find(item => item.id === model)} modelId={model} value={openrouterReasoningEffort} disabled={isRunning} onChange={setOpenrouterReasoningEffort} />}
         {effectiveProvider === SAKANA_FUGU_PROVIDER && model && (
           <div className="settings-row">
             <label>Reasoning Effort</label>

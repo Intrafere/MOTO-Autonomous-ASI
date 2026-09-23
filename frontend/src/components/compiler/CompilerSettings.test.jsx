@@ -32,9 +32,11 @@ function renderSettings({
   lmStudioEnabled = true,
   memoryEnabled = true,
   developerModeEnabled = false,
+  isRunning = false,
 } = {}) {
   return render(
     <CompilerSettings
+      isRunning={isRunning}
       capabilities={{ lmStudioEnabled, genericMode: !lmStudioEnabled }}
       connectivityStatus={{
         skills: {
@@ -47,6 +49,18 @@ function renderSettings({
     />
   );
 }
+
+test.each([false, true])('Codex effort survives saved settings and honors running=%s for all compiler roles', async isRunning => {
+  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [{ id: 'codex', supported_reasoning_levels: ['medium', 'max'] }] });
+  const settings = {};
+  for (const prefix of ['validator', 'assistant', 'writer', 'highParam']) Object.assign(settings, { [`${prefix}Provider`]: 'openai_codex_oauth', [`${prefix}Model`]: 'codex', [`${prefix}OpenrouterReasoningEffort`]: 'max' });
+  localStorage.setItem('compiler_settings', JSON.stringify(settings));
+  renderSettings({ isRunning });
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' })).toHaveLength(4));
+  expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.value === 'max')).toBe(true);
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.disabled === isRunning)).toBe(true));
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

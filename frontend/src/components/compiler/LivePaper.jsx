@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { compilerAPI } from '../../services/api';
 import { websocket } from '../../services/websocket';
-import LatexRenderer from '../LatexRenderer';
+import PaperProofViewer, { PaperProofMetrics } from '../PaperProofViewer';
 import {
   PDF_UNAVAILABLE_MESSAGE,
   downloadRawText,
@@ -24,10 +24,10 @@ function LivePaper({ capabilities }) {
   const [paper, setPaper] = useState('');
   const [outline, setOutline] = useState('');
   const [wordCount, setWordCount] = useState(0);
+  const [paperMetrics, setPaperMetrics] = useState({});
   const [version, setVersion] = useState(0);
   const [autoScroll, setAutoScroll] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
-  const [showLatex, setShowLatex] = useState(true);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [proofActionMessage, setProofActionMessage] = useState('');
   const [proofCheckModalOpen, setProofCheckModalOpen] = useState(false);
@@ -89,6 +89,7 @@ function LivePaper({ capabilities }) {
       const response = await compilerAPI.getPaper();
       setPaper(response.data.paper);
       setWordCount(response.data.word_count);
+      setPaperMetrics(response.data);
       setVersion(response.data.version);
       
       // Also load outline for downloads
@@ -257,7 +258,7 @@ function LivePaper({ capabilities }) {
       <div className="paper-header">
         <h2>Live Paper</h2>
         <div className="paper-meta">
-          <span className="word-count">{wordCount.toLocaleString()} words</span>
+          <PaperProofMetrics content={paper} metrics={paperMetrics} />
           <span className="version">v{version}</span>
         </div>
       </div>
@@ -270,15 +271,6 @@ function LivePaper({ capabilities }) {
             onChange={(e) => setAutoScroll(e.target.checked)}
           />
           Auto-scroll
-        </label>
-
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={showLatex}
-            onChange={(e) => setShowLatex(e.target.checked)}
-          />
-          LaTeX Rendering
         </label>
 
         <div className="button-group">
@@ -376,11 +368,10 @@ function LivePaper({ capabilities }) {
 
       <div className="paper-container" ref={paperContainerRef}>
         {paper ? (
-          <LatexRenderer 
+          <PaperProofViewer
             content={prependDisclaimer(paper, 'paper')}
+            metrics={paperMetrics}
             className="paper-content-renderer"
-            defaultRaw={!showLatex}
-            showToggle={true}
           />
         ) : (
           <div className="paper-empty">

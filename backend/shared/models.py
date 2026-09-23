@@ -3,14 +3,36 @@ Pydantic models for the ASI Aggregator System.
 """
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Dict, Optional, Any, Literal
+from typing import Annotated, List, Dict, Optional, Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, AliasChoices, BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 DEFAULT_CONTEXT_WINDOW = 0
 DEFAULT_MAX_OUTPUT_TOKENS = 0
 DEFAULT_OPENROUTER_REASONING_EFFORT = "auto"
-OpenRouterReasoningEffort = Literal["auto", "xhigh", "high", "medium", "low", "minimal", "none"]
+BoostReasoningEffort = Literal["auto", "xhigh", "high", "medium", "low", "minimal", "none"]
+
+
+def _validate_role_reasoning_effort(value: str, info: ValidationInfo) -> str:
+    """Keep legacy field names while reserving literal max for Codex routes.
+
+    Provider fields precede reasoning fields, including their legacy aliases, so
+    validated sibling data is available without inspecting untrusted raw input.
+    """
+    suffix = "openrouter_reasoning_effort"
+    prefix = (info.field_name or "").removesuffix(suffix)
+    provider = (info.data or {}).get(f"{prefix}provider")
+    if value == "max" and provider != "openai_codex_oauth":
+        raise ValueError("Reasoning effort 'max' is supported only by openai_codex_oauth")
+    return value
+
+
+RoleReasoningEffort = Annotated[
+    Literal["auto", "xhigh", "high", "medium", "low", "minimal", "none", "max"],
+    AfterValidator(_validate_role_reasoning_effort),
+]
+# Compatibility name for the existing provider-aware role fields below.
+OpenRouterReasoningEffort = RoleReasoningEffort
 ModelProvider = Literal["lm_studio", "openrouter", "openai_codex_oauth", "xai_grok_oauth", "sakana_fugu"]
 _LEGACY_WRITER_PREFIX = "high" + "_context"
 
@@ -118,7 +140,7 @@ class ModelConfig(BaseModel):
     model_id: str
     openrouter_model_id: Optional[str] = None  # For OpenRouter (different naming)
     openrouter_provider: Optional[str] = None  # Specific OpenRouter provider (e.g., "Anthropic")
-    openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    openrouter_reasoning_effort: RoleReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     lm_studio_fallback_id: Optional[str] = None  # Fallback LM Studio model if OpenRouter fails
     context_window: int = DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
@@ -131,7 +153,7 @@ class BoostConfig(BaseModel):
     openrouter_api_key: str = ""
     boost_model_id: str = ""  # OpenRouter model to use for boost
     boost_provider: Optional[str] = None  # Specific provider, or None to let OpenRouter choose
-    boost_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    boost_reasoning_effort: BoostReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     boost_context_window: int = DEFAULT_CONTEXT_WINDOW
     boost_max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
 
@@ -160,7 +182,7 @@ class SubmitterConfig(BaseModel):
     provider: ModelProvider = "lm_studio"
     model_id: str  # LM Studio model OR OpenRouter model based on provider
     openrouter_provider: Optional[str] = None  # Specific OpenRouter provider (e.g., "Anthropic")
-    openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    openrouter_reasoning_effort: RoleReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
     lm_studio_fallback_id: Optional[str] = None  # Fallback LM Studio model if OpenRouter fails
     context_window: int = DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
@@ -415,6 +437,13 @@ class PaperMetadata(BaseModel):
     title: str
     abstract: str = ""
     word_count: int = 0
+    proof_count: int = 0
+    paper_word_count: int = 0
+    proof_word_count: int = 0
+    total_word_count: int = 0
+    paper_character_count: int = 0
+    proof_character_count: int = 0
+    total_character_count: int = 0
     source_brainstorm_ids: List[str] = Field(default_factory=list)
     referenced_papers: List[str] = Field(default_factory=list)
     status: Literal["in_progress", "complete", "archived", "pruned"] = "complete"
@@ -429,6 +458,34 @@ class PaperMetadata(BaseModel):
     pruned_at: Optional[datetime] = None
     pruned_reason: Optional[str] = None
     pruned_by: Optional[Literal["system", "user", "legacy"]] = None
+
+
+class PaperPruneBatchTarget(BaseModel):
+    """Session-qualified Stage 2 paper selected for user pruning."""
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, max_length=256)
+    paper_id: str = Field(min_length=1, max_length=256)
+
+
+class PaperPruneBatchRequest(BaseModel):
+    """Atomic user request to prune multiple Stage 2 papers."""
+    model_config = ConfigDict(extra="forbid")
+
+    targets: List[PaperPruneBatchTarget] = Field(min_length=1, max_length=100)
+    confirm: Literal[True]
+
+
+class PaperPruneBatchResult(BaseModel):
+    session_id: str
+    paper_id: str
+    pruned: bool = True
+
+
+class PaperPruneBatchResponse(BaseModel):
+    success: bool = True
+    pruned_count: int = Field(ge=0)
+    results: List[PaperPruneBatchResult] = Field(default_factory=list)
 
 
 class TopicSelectionSubmission(BaseModel):
@@ -566,9 +623,40 @@ class AutonomousResearchStatusResponse(BaseModel):
     terminal_event: Optional[AutonomousTerminalEvent] = None
 
 
+class ProofRoleRuntimeConfig(BaseModel):
+    """Explicit formalization-only competitor route; never supplies hidden budgets."""
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ModelProvider
+    model_id: str = Field(min_length=1)
+    openrouter_provider: Optional[str] = None
+    openrouter_reasoning_effort: OpenRouterReasoningEffort = DEFAULT_OPENROUTER_REASONING_EFFORT
+    lm_studio_fallback_id: Optional[str] = None
+    context_window: int = Field(gt=0)
+    max_output_tokens: int = Field(gt=0)
+    supercharge_enabled: bool = False
+
+    @model_validator(mode="after")
+    def validate_input_budget(self):
+        if not self.model_id.strip():
+            raise ValueError("A competitor model is required")
+        if self.max_output_tokens >= self.context_window:
+            raise ValueError("Competitor output budget must be smaller than its context window")
+        return self
+
+
+class ProofCompetitionConfig(BaseModel):
+    """Autonomous-owned ordered fallback routes, disabled for legacy runs."""
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    secondaries: List[ProofRoleRuntimeConfig] = Field(default_factory=list)
+
+
 class AutonomousResearchStartRequest(BaseModel):
     """Request to start autonomous research mode."""
     user_research_prompt: str
+    proof_competition: ProofCompetitionConfig = Field(default_factory=ProofCompetitionConfig)
     submitter_configs: List[SubmitterConfig]  # Per-submitter configs for brainstorm aggregation (1-10)
     creativity_emphasis_boost_enabled: bool = False
     allow_mathematical_proofs: bool = True
@@ -760,6 +848,7 @@ class ProofRuntimeConfigSnapshot(BaseModel):
     paper: ProofRoleConfigSnapshot
     validator: ProofRoleConfigSnapshot
     assistant: ProofRoleConfigSnapshot = Field(default_factory=ProofRoleConfigSnapshot)
+    proof_competition: ProofCompetitionConfig = Field(default_factory=ProofCompetitionConfig)
 
 
 class ProofDependency(BaseModel):
@@ -1190,8 +1279,11 @@ class ProofRecord(BaseModel):
             raise ValueError("Pruned proofs require a prune timestamp")
         if self.live_context_pruned_by is None:
             raise ValueError("Pruned proofs require a prune actor")
-        if not self.live_context_prune_reason.strip():
-            raise ValueError("Pruned proofs require a reason")
+        if (
+            self.live_context_pruned_by == "automatic_proof_pruning"
+            and not self.live_context_prune_reason.strip()
+        ):
+            raise ValueError("Automatically pruned proofs require a reason")
         return self
 
 
@@ -1464,9 +1556,35 @@ class ProofLiveContextMutationRequest(BaseModel):
     actor: Literal["user"] = "user"
     expected_run_id: str = Field(min_length=1, max_length=256)
     expected_proof_set_revision: int = Field(ge=0)
-    reason: str = Field(min_length=1, max_length=2000)
+    reason: str = Field(default="", max_length=2000)
     expected_theorem_hash: str = Field(default="", max_length=256)
     expected_lean_hash: str = Field(default="", max_length=256)
+
+
+class ProofLiveContextBulkMutationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    proof_id: str = Field(min_length=1, max_length=256)
+    status: Literal["active", "pruned"]
+    actor: Literal["user"] = "user"
+    expected_run_id: str = Field(min_length=1, max_length=256)
+    reason: str = Field(default="", max_length=2000)
+    expected_theorem_hash: str = Field(default="", max_length=256)
+    expected_lean_hash: str = Field(default="", max_length=256)
+
+
+class ProofLiveContextBulkMutationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_proof_set_revision: int = Field(ge=0)
+    items: List[ProofLiveContextBulkMutationItem] = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_unique_proof_ids(self):
+        proof_ids = [item.proof_id for item in self.items]
+        if len(proof_ids) != len(set(proof_ids)):
+            raise ValueError("Each proof ID may appear only once in a bulk mutation.")
+        return self
 
 
 class ProofLiveContextMutationResponse(BaseModel):
@@ -1479,6 +1597,23 @@ class ProofLiveContextMutationResponse(BaseModel):
     proof_search_refresh_scheduled: bool = False
     proof_set_revision: int = Field(ge=0)
     warnings: List[str] = Field(default_factory=list)
+
+
+class ProofLiveContextBulkMutationResult(BaseModel):
+    proof_id: str
+    run_id: str
+    live_context_status: Literal["active", "pruned"]
+    live_context_pruned_at: Optional[datetime] = None
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ProofLiveContextBulkMutationResponse(BaseModel):
+    success: bool = True
+    scope: Literal["autonomous", "manual"]
+    results: List[ProofLiveContextBulkMutationResult] = Field(default_factory=list)
+    changed_proof_ids: List[str] = Field(default_factory=list)
+    proof_search_refresh_scheduled: bool = False
+    proof_set_revision: int = Field(ge=0)
 
 
 class ProofCheckRequest(BaseModel):

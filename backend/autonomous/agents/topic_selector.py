@@ -22,6 +22,8 @@ from backend.shared.response_extraction import extract_message_text
 from backend.shared.utils import count_tokens
 from backend.shared.config import rag_config
 from backend.shared.models import TopicSelectionSubmission
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
+from backend.shared.provider_errors import ProviderContextLengthError
 from backend.autonomous.prompts.topic_prompts import (
     build_topic_selection_prompt
 )
@@ -88,21 +90,27 @@ class TopicSelectorAgent:
             TopicSelectionSubmission or None if generation failed
         """
         try:
-            # Get rejection context
-            rejection_context = await autonomous_rejection_logs.format_topic_rejections_for_context()
-            
-            # Build prompt
-            prompt = build_topic_selection_prompt(
-                user_research_prompt=user_research_prompt,
-                brainstorms_summary=brainstorms_summary,
-                papers_summary=papers_summary,
-                rejection_context=rejection_context,
-                candidate_questions=candidate_questions
-            )
-            
-            # Validate prompt size
-            prompt_tokens = count_tokens(prompt)
             max_input_tokens = self._calculate_max_input_tokens()
+            rejection_entries = await autonomous_rejection_logs.get_topic_selection_rejections()
+            active_papers = papers_summary
+
+            def build_prompt(entries):
+                return build_topic_selection_prompt(
+                    user_research_prompt=user_research_prompt,
+                    brainstorms_summary=brainstorms_summary,
+                    papers_summary=active_papers,
+                    rejection_context=autonomous_rejection_logs.render_topic_rejections(entries),
+                    candidate_questions=candidate_questions,
+                )
+
+            fit = fit_prompt_with_feedback(
+                rejection_entries,
+                build_prompt=build_prompt,
+                available_tokens=max_input_tokens,
+            )
+            prompt = fit.prompt
+            retained_rejections = fit.retained_entries
+            prompt_tokens = fit.prompt_tokens
             
             if prompt_tokens > max_input_tokens:
                 # Context too large - truncate paper abstracts to fit
@@ -117,16 +125,15 @@ class TopicSelectorAgent:
                         truncated["abstract"] = truncated["abstract"][:500] + "..."
                     truncated_papers.append(truncated)
                 
-                # Rebuild prompt with truncated papers
-                prompt = build_topic_selection_prompt(
-                    user_research_prompt=user_research_prompt,
-                    brainstorms_summary=brainstorms_summary,
-                    papers_summary=truncated_papers,
-                    rejection_context=rejection_context,
-                    candidate_questions=candidate_questions
+                active_papers = truncated_papers
+                fit = fit_prompt_with_feedback(
+                    retained_rejections,
+                    build_prompt=build_prompt,
+                    available_tokens=max_input_tokens,
                 )
-                
-                prompt_tokens = count_tokens(prompt)
+                prompt = fit.prompt
+                retained_rejections = fit.retained_entries
+                prompt_tokens = fit.prompt_tokens
                 if prompt_tokens > max_input_tokens:
                     logger.error(f"TopicSelector: Even after truncation, prompt ({prompt_tokens}) exceeds limit ({max_input_tokens})")
                     return None
@@ -155,14 +162,22 @@ class TopicSelectorAgent:
             logger.info(f"TopicSelector: Generating topic selection with model {self.model_id} "
                        f"(prompt={prompt_tokens}t, task_id={task_id})")
             
-            response = await api_client_manager.generate_completion(
-                task_id=task_id,
-                role_id=self.role_id,
-                model=self.model_id,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_output_tokens,
-                temperature=0.0  # Deterministic generation - evolving context provides diversity
-            )
+            while True:
+                try:
+                    response = await api_client_manager.generate_completion(
+                        task_id=task_id,
+                        role_id=self.role_id,
+                        model=self.model_id,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=self.max_output_tokens,
+                        temperature=0.0
+                    )
+                    break
+                except ProviderContextLengthError:
+                    if len(retained_rejections) <= 1:
+                        raise
+                    retained_rejections = retained_rejections[1:]
+                    prompt = build_prompt(retained_rejections)
             
             if not response:
                 logger.error("TopicSelector: Empty response from LLM")

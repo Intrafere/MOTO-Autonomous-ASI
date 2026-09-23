@@ -58,6 +58,10 @@ PROMPT_INJECTION_NOVEL_TIERS = frozenset(
 )
 
 
+class ProofPruningMinimumProofsError(RuntimeError):
+    """The atomic pruning snapshot no longer meets its proof-count guard."""
+
+
 def is_duplicate_novel_tier(novelty_tier: str) -> bool:
     return str(novelty_tier or "").strip().lower() == DUPLICATE_NOVEL_TIER
 
@@ -853,6 +857,7 @@ class ProofDatabase:
         trigger_reasons: Optional[List[str]] = None,
         accepted_prompt_novel_total: int = 0,
         context_pressure: Optional[ProofPruneContextPressure] = None,
+        minimum_prompt_novel_proofs: int = 0,
     ) -> ProofPruneSnapshot:
         """Atomically capture a deterministic, non-mutating pruning snapshot.
 
@@ -883,6 +888,18 @@ class ProofDatabase:
                 for record in records
                 if is_live_context_active(record, normalized_run_id)
             ]
+            prompt_novel_count = sum(
+                1
+                for record in active_records
+                if record.novel and (
+                    is_prompt_injection_novel_tier(record.novelty_tier)
+                    or not str(record.novelty_tier or "").strip()
+                )
+            )
+            if prompt_novel_count < max(0, int(minimum_prompt_novel_proofs)):
+                raise ProofPruningMinimumProofsError(
+                    "Too few prompt-injectable live proofs for context-pressure review."
+                )
 
         records_by_id = {record.proof_id: record for record in active_records}
         canonical_identity_by_id = {
@@ -1067,6 +1084,81 @@ class ProofDatabase:
                 await self._load_index()
             return int(self._index_data.get("proof_set_revision", 0))
 
+    def _prepare_live_context_update(
+        self,
+        *,
+        record: ProofRecord,
+        status: str,
+        expected_run_id: str,
+        actor: str,
+        reason: str,
+        validator_reasoning: str = "",
+        snapshot_revision: Optional[int] = None,
+        trigger_reasons: Optional[List[str]] = None,
+        expected_theorem_hash: str = "",
+        expected_lean_hash: str = "",
+    ) -> ProofRecord:
+        """Validate and prepare one live-context update without persistence."""
+        normalized_run_id = str(record.run_id or f"legacy:{record.source_type}:{record.source_id}")
+        if normalized_run_id != str(expected_run_id or "").strip():
+            raise RuntimeError("Proof run changed; refresh and retry.")
+        if expected_theorem_hash and expected_theorem_hash != record.canonical_theorem_statement_hash:
+            raise RuntimeError("Proof theorem identity changed; refresh and retry.")
+        if expected_lean_hash and expected_lean_hash != record.canonical_lean_code_hash:
+            raise RuntimeError("Proof Lean identity changed; refresh and retry.")
+        if status not in {"active", "pruned"}:
+            raise ValueError("Live-context status must be active or pruned.")
+        if actor not in {"user", "automatic_proof_pruning"}:
+            raise ValueError("Unsupported live-context actor.")
+
+        if status == record.live_context_status:
+            if status == "active" or (
+                record.live_context_owner_run_id == normalized_run_id
+                and record.live_context_pruned_by == actor
+            ):
+                return record
+        if (
+            status == "active"
+            and record.live_context_status == "pruned"
+            and record.live_context_owner_run_id == normalized_run_id
+            and record.live_context_pruned_by == "automatic_proof_pruning"
+        ):
+            raise RuntimeError("Validator-approved automatic pruning is immutable in its owning run.")
+
+        if status == "active":
+            return record.model_copy(
+                update={
+                    "live_context_status": "active",
+                    "live_context_owner_run_id": "",
+                    "live_context_pruned_at": None,
+                    "live_context_pruned_by": None,
+                    "live_context_prune_reason": "",
+                    "live_context_prune_validator_reasoning": "",
+                    "live_context_prune_snapshot_revision": None,
+                    "live_context_prune_trigger_reasons": [],
+                    "live_context_prune_supporting_proof_ids": [],
+                }
+            )
+
+        bounded_reason = str(reason or "").strip()[:2000]
+        if actor == "automatic_proof_pruning" and not bounded_reason:
+            raise ValueError("A non-empty automatic prune reason is required.")
+        return record.model_copy(
+            update={
+                "live_context_status": "pruned",
+                "live_context_owner_run_id": normalized_run_id,
+                "live_context_pruned_at": datetime.now(),
+                "live_context_pruned_by": actor,
+                "live_context_prune_reason": bounded_reason,
+                "live_context_prune_validator_reasoning": str(
+                    validator_reasoning or ""
+                ).strip()[:4000],
+                "live_context_prune_snapshot_revision": snapshot_revision,
+                "live_context_prune_trigger_reasons": list(trigger_reasons or []),
+                "live_context_prune_supporting_proof_ids": [],
+            }
+        )
+
     async def set_live_context_status(
         self,
         *,
@@ -1101,65 +1193,20 @@ class ProofDatabase:
             if proof_index is None:
                 raise KeyError(proof_id)
             record = self._deserialize_record(self._index_data["proofs"][proof_index])
-            normalized_run_id = str(record.run_id or f"legacy:{record.source_type}:{record.source_id}")
-            if normalized_run_id != str(expected_run_id or "").strip():
-                raise RuntimeError("Proof run changed; refresh and retry.")
-            if expected_theorem_hash and expected_theorem_hash != record.canonical_theorem_statement_hash:
-                raise RuntimeError("Proof theorem identity changed; refresh and retry.")
-            if expected_lean_hash and expected_lean_hash != record.canonical_lean_code_hash:
-                raise RuntimeError("Proof Lean identity changed; refresh and retry.")
-            if status not in {"active", "pruned"}:
-                raise ValueError("Live-context status must be active or pruned.")
-            if actor not in {"user", "automatic_proof_pruning"}:
-                raise ValueError("Unsupported live-context actor.")
-
-            if status == record.live_context_status:
-                if status == "active" or (
-                    record.live_context_owner_run_id == normalized_run_id
-                    and record.live_context_pruned_by == actor
-                ):
-                    return record, current_revision
-            if (
-                status == "active"
-                and record.live_context_status == "pruned"
-                and record.live_context_owner_run_id == normalized_run_id
-                and record.live_context_pruned_by == "automatic_proof_pruning"
-            ):
-                raise RuntimeError("Validator-approved automatic pruning is immutable in its owning run.")
-
-            if status == "active":
-                updated = record.model_copy(
-                    update={
-                        "live_context_status": "active",
-                        "live_context_owner_run_id": "",
-                        "live_context_pruned_at": None,
-                        "live_context_pruned_by": None,
-                        "live_context_prune_reason": "",
-                        "live_context_prune_validator_reasoning": "",
-                        "live_context_prune_snapshot_revision": None,
-                        "live_context_prune_trigger_reasons": [],
-                        "live_context_prune_supporting_proof_ids": [],
-                    }
-                )
-            else:
-                bounded_reason = str(reason or "").strip()[:2000]
-                if not bounded_reason:
-                    raise ValueError("A non-empty prune reason is required.")
-                updated = record.model_copy(
-                    update={
-                        "live_context_status": "pruned",
-                        "live_context_owner_run_id": normalized_run_id,
-                        "live_context_pruned_at": datetime.now(),
-                        "live_context_pruned_by": actor,
-                        "live_context_prune_reason": bounded_reason,
-                        "live_context_prune_validator_reasoning": str(
-                            validator_reasoning or ""
-                        ).strip()[:4000],
-                        "live_context_prune_snapshot_revision": snapshot_revision,
-                        "live_context_prune_trigger_reasons": list(trigger_reasons or []),
-                        "live_context_prune_supporting_proof_ids": [],
-                    }
-                )
+            updated = self._prepare_live_context_update(
+                record=record,
+                status=status,
+                expected_run_id=expected_run_id,
+                actor=actor,
+                reason=reason,
+                validator_reasoning=validator_reasoning,
+                snapshot_revision=snapshot_revision,
+                trigger_reasons=trigger_reasons,
+                expected_theorem_hash=expected_theorem_hash,
+                expected_lean_hash=expected_lean_hash,
+            )
+            if updated == record:
+                return record, current_revision
 
             serialized = self._serialize_record(updated)
             previous_serialized = self._serialize_record(record)
@@ -1182,6 +1229,130 @@ class ProofDatabase:
                 )
                 raise
             return updated, new_revision
+
+    async def set_live_context_status_bulk(
+        self,
+        *,
+        items: List[Mapping[str, Any]],
+        expected_proof_set_revision: int,
+    ) -> tuple[List[ProofRecord], List[str], int]:
+        """Atomically apply multiple live-context updates with one revision."""
+        async with self._lock:
+            if self._index_data is None:
+                await self._load_index()
+            current_revision = int(self._index_data.get("proof_set_revision", 0))
+            if current_revision != int(expected_proof_set_revision):
+                raise RuntimeError("Proof set changed; refresh and retry.")
+
+            proof_indexes = {
+                str(proof.get("proof_id")): index
+                for index, proof in enumerate(self._index_data.get("proofs", []))
+            }
+            prepared: List[tuple[int, ProofRecord, ProofRecord]] = []
+            seen_ids = set()
+            for item in items:
+                proof_id = self._safe_proof_id(str(item.get("proof_id") or ""))
+                if proof_id in seen_ids:
+                    raise ValueError("Each proof ID may appear only once in a bulk mutation.")
+                seen_ids.add(proof_id)
+                proof_index = proof_indexes.get(proof_id)
+                if proof_index is None:
+                    raise KeyError(proof_id)
+                record = self._deserialize_record(self._index_data["proofs"][proof_index])
+                updated = self._prepare_live_context_update(
+                    record=record,
+                    status=str(item.get("status") or ""),
+                    expected_run_id=str(item.get("expected_run_id") or ""),
+                    actor=str(item.get("actor") or ""),
+                    reason=str(item.get("reason") or ""),
+                    expected_theorem_hash=str(item.get("expected_theorem_hash") or ""),
+                    expected_lean_hash=str(item.get("expected_lean_hash") or ""),
+                )
+                prepared.append((proof_index, record, updated))
+
+            changed = [
+                (proof_index, previous, updated)
+                for proof_index, previous, updated in prepared
+                if updated != previous
+            ]
+            if not changed:
+                return [updated for _, _, updated in prepared], [], current_revision
+
+            previous_revision = current_revision
+            previous_index = {
+                proof_index: self._serialize_record(previous)
+                for proof_index, previous, _ in changed
+            }
+
+            async def commit() -> int:
+                for proof_index, _, updated in changed:
+                    serialized = self._serialize_record(updated)
+                    await self._atomic_write_json(
+                        self._get_record_path(updated.proof_id),
+                        serialized,
+                    )
+                    self._index_data["proofs"][proof_index] = serialized
+                committed_revision = await self._increment_proof_set_revision()
+                self._rebuild_reverse_indexes()
+                await self._save_index()
+                return committed_revision
+
+            async def rollback() -> None:
+                for proof_index, previous, _ in changed:
+                    previous_serialized = previous_index[proof_index]
+                    self._index_data["proofs"][proof_index] = previous_serialized
+                    await self._atomic_write_json(
+                        self._get_record_path(previous.proof_id),
+                        previous_serialized,
+                    )
+                self._index_data["proof_set_revision"] = previous_revision
+                self._rebuild_reverse_indexes()
+                await self._atomic_write_json(self._get_index_path(), self._index_data)
+                await asyncio.to_thread(
+                    self._save_durable_revision_sync,
+                    previous_revision,
+                )
+
+            commit_task = asyncio.create_task(commit(), name="proof-live-context-bulk-commit")
+            try:
+                new_revision = await asyncio.shield(commit_task)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                try:
+                    new_revision = await asyncio.shield(commit_task)
+                except BaseException:
+                    rollback_task = asyncio.create_task(
+                        rollback(),
+                        name="proof-live-context-bulk-rollback",
+                    )
+                    while not rollback_task.done():
+                        try:
+                            await asyncio.shield(rollback_task)
+                        except asyncio.CancelledError:
+                            if current is not None:
+                                current.uncancel()
+                    rollback_task.result()
+                    raise
+            except BaseException:
+                rollback_task = asyncio.create_task(
+                    rollback(),
+                    name="proof-live-context-bulk-rollback",
+                )
+                while not rollback_task.done():
+                    try:
+                        await asyncio.shield(rollback_task)
+                    except asyncio.CancelledError:
+                        if current is not None:
+                            current.uncancel()
+                rollback_task.result()
+                raise
+            return (
+                [updated for _, _, updated in prepared],
+                [updated.proof_id for _, _, updated in changed],
+                new_revision,
+            )
 
     async def commit_pruning_intent(
         self,

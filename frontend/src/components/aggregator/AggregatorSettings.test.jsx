@@ -48,6 +48,7 @@ function renderSettings({
   initialConfig = baseConfig,
   lmStudioEnabled = true,
   memoryEnabled = true,
+  isRunning = false,
   capabilities: capabilityOverrides = {},
 } = {}) {
   let observedConfig = initialConfig;
@@ -65,6 +66,7 @@ function renderSettings({
 
     return (
       <AggregatorSettings
+        isRunning={isRunning}
         config={config}
         setConfig={setConfig}
         capabilities={{
@@ -112,6 +114,16 @@ beforeEach(() => {
   cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [] });
   cloudAccessAPI.getXAIGrokModels.mockResolvedValue({ models: [] });
   cloudAccessAPI.getSakanaFuguModels.mockResolvedValue({ models: [] });
+});
+
+test.each([false, true])('Codex effort covers all Aggregator roles with running=%s', async isRunning => {
+  cloudAccessAPI.getOpenAICodexStatus.mockResolvedValue({ status: { configured: true } });
+  cloudAccessAPI.getOpenAICodexModels.mockResolvedValue({ models: [{ id: 'codex', supported_reasoning_levels: ['high', 'max'] }] });
+  const result = renderSettings({ isRunning, initialConfig: { ...baseConfig, validatorProvider: 'openai_codex_oauth', validatorModel: 'codex', validatorOpenrouterReasoningEffort: 'max', assistantProvider: 'openai_codex_oauth', assistantModel: 'codex', assistantOpenrouterReasoningEffort: 'max', submitterConfigs: [{ ...baseConfig.submitterConfigs[0], provider: 'openai_codex_oauth', modelId: 'codex', openrouterReasoningEffort: 'max' }] } });
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' })).toHaveLength(3));
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.value === 'max')).toBe(true));
+  expect(result.getObservedConfig().assistantOpenrouterReasoningEffort).toBe('max');
+  await waitFor(() => expect(screen.getAllByRole('combobox', { name: 'Codex Reasoning Effort' }).every(node => node.disabled === isRunning)).toBe(true));
 });
 
 test('renders Assistant role and greys it out when Session History Memory is disabled', async () => {

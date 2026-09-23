@@ -23,6 +23,7 @@ from backend.shared.models import (
     ProofCandidate,
     ProofStageResult,
     ProofRoleConfigSnapshot,
+    ProofCompetitionConfig,
     ProofRuntimeConfigSnapshot,
     TopicSelectionSubmission,
     SubmitterConfig,
@@ -258,6 +259,8 @@ class AutonomousCoordinator:
         self._last_redundancy_check_at: int = 0
         self._last_completion_review_at: int = 0  # Acceptance count at last completion review
         self._manual_paper_writing_triggered: bool = False
+        self._manual_paper_writing_task: Optional[asyncio.Task] = None
+        self._brainstorm_start_stop_lock = asyncio.Lock()
         self._brainstorm_hard_limit_triggered: bool = False
         self._resume_paper_phase: Optional[str] = None  # Saved phase for resume (body/conclusion/intro/abstract)
         self._brainstorm_missing_during_paper: bool = False
@@ -280,6 +283,7 @@ class AutonomousCoordinator:
         self._creativity_emphasis_boost_enabled: bool = False
         self._allow_mathematical_proofs: bool = True
         self._allow_research_papers: bool = True
+        self._proof_competition = ProofCompetitionConfig()
         self._force_tier3_after_paper: bool = False  # Force Tier 3 after current paper completes
         self._force_tier3_immediate: bool = False  # Force Tier 3 immediately (skip incomplete work)
         
@@ -350,6 +354,7 @@ class AutonomousCoordinator:
     def _mark_context_overflow_stop(self, payload: Optional[Dict[str, Any]] = None) -> None:
         """Remember that the next stopped event should explain the fatal overflow."""
         details = dict(payload or {})
+        details["fatal"] = True
         details.setdefault("notification_kind", "model_error")
         details.setdefault(
             "terminal_guidance",
@@ -620,6 +625,10 @@ class AutonomousCoordinator:
             paper=rigor_config,
             validator=validator_config,
             assistant=assistant_config,
+            proof_competition=(
+                getattr(self, "_proof_competition", ProofCompetitionConfig())
+                if self._allow_mathematical_proofs else ProofCompetitionConfig()
+            ),
         ).model_dump(mode="json")
 
     async def _create_proof_pruning_coordinator(
@@ -1125,12 +1134,18 @@ class AutonomousCoordinator:
                         proof_round_index=proof_round_index,
                         proof_max_rounds=proof_max_rounds,
                         prior_round_results=prior_round_results,
+                        competition_config=self._proof_competition,
+                        checkpoint_competition_state=(
+                            checkpoint.get("competition_state")
+                            if checkpoint and checkpoint.get("trigger") == round_trigger else None
+                        ),
                         proof_run_context={
                             "proof_run_id": self._run_id,
                             "lifecycle_generation": self._lifecycle_generation,
                             "scope": "autonomous",
                             "round_index": proof_round_index,
                             "round_trigger": round_trigger,
+                            "proof_competition": self._proof_competition.model_dump(mode="json"),
                         },
                         proof_pruning_registered_callback=(
                             pruning_coordinator.notify_proof_registered
@@ -1387,6 +1402,15 @@ class AutonomousCoordinator:
 
     async def _run_brainstorm_completion_proofs(self) -> str:
         """Run proof verification for the current completed brainstorm."""
+        if self._manual_paper_writing_triggered:
+            task = self._manual_paper_writing_task
+            prepared = task is None or await asyncio.shield(task)
+            self._manual_paper_writing_triggered = False
+            self._manual_paper_writing_task = None
+            if not prepared:
+                return "error_preserved"
+            if not self._running or self._stop_event.is_set():
+                return "stopped"
         if not self._current_topic_id:
             return "complete"
 
@@ -1565,6 +1589,7 @@ class AutonomousCoordinator:
         creativity_emphasis_boost_enabled: bool = False,
         allow_mathematical_proofs: bool = True,
         allow_research_papers: bool = True,
+        proof_competition: Optional[ProofCompetitionConfig] = None,
         validator_supercharge_enabled: bool = False,
         writer_supercharge_enabled: bool = False,
         high_param_supercharge_enabled: bool = False,
@@ -1661,6 +1686,10 @@ class AutonomousCoordinator:
             assistant_supercharge_enabled if assistant_model else validator_supercharge_enabled
         )
         self._allow_mathematical_proofs = bool(allow_mathematical_proofs)
+        self._proof_competition = (
+            ProofCompetitionConfig.model_validate(proof_competition or {}).model_copy(deep=True)
+            if self._allow_mathematical_proofs else ProofCompetitionConfig()
+        )
         if not self._allow_mathematical_proofs:
             # The coordinator is a singleton, so a new papers-only run must not
             # inherit proof emphasis from a prior proof-enabled run.
@@ -1758,7 +1787,7 @@ class AutonomousCoordinator:
         # state before any workflow opens it; session resume then lazily indexes
         # the durable sources it needs. A new session also requests an empty
         # in-process cache so no previous active workflow sources remain.
-        autonomous_rag_manager.reset()
+        await autonomous_rag_manager.reset()
         if interrupted_session:
             logger.info("Autonomous session resume will rebuild required RAG sources lazily")
         else:
@@ -4082,6 +4111,14 @@ class AutonomousCoordinator:
             logger.warning("Timed out stopping %s; continuing shutdown", label)
             return False
         
+        # A pending force request owns the child's drain; do not race its queue
+        # cleanup against another stop or leave it alive across a later Start.
+        handoff_task = self._manual_paper_writing_task
+        if handoff_task is not None:
+            await asyncio.shield(handoff_task)
+            self._manual_paper_writing_task = None
+            self._manual_paper_writing_triggered = False
+
         # Stop any running aggregator or compiler to prevent orphan tasks
         await self._stop_active_child_aggregators("autonomous stop", timeout=5.0)
 
@@ -4910,6 +4947,8 @@ class AutonomousCoordinator:
             build_continuation_decision_prompt,
             build_continuation_validation_prompt
         )
+        from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback
+        from backend.shared.provider_errors import ProviderContextLengthError
         
         api_client_manager.set_autonomous_phase("brainstorm_continuation")
         
@@ -4944,29 +4983,44 @@ class AutonomousCoordinator:
             })
         
         attempt = 0
-        rejection_context = ""
+        rejection_history = []
         
         while not self._stop_event.is_set():
             attempt += 1
             
             logger.info(f"Brainstorm continuation decision attempt {attempt}")
             
-            prompt = build_continuation_decision_prompt(
-                user_research_prompt=self._get_effective_user_research_prompt(),
-                topic_prompt=topic_prompt,
-                brainstorm_summary=brainstorm_summary,
-                papers_from_brainstorm=papers_context,
-                papers_written_count=self._brainstorm_paper_count,
-                rejection_context=rejection_context
-            )
-            from backend.shared.solution_path.integration import with_budgeted_solver_plan
             max_input = rag_config.get_available_input_tokens(
                 self._topic_selector.context_window,
                 self._topic_selector.max_output_tokens,
             )
-            prompt = with_budgeted_solver_plan(
-                prompt, self.solution_path_manager, max_input
+            from backend.shared.solution_path.integration import with_budgeted_solver_plan
+
+            def build_prompt(entries):
+                prompt = build_continuation_decision_prompt(
+                    user_research_prompt=self._get_effective_user_research_prompt(),
+                    topic_prompt=topic_prompt,
+                    brainstorm_summary=brainstorm_summary,
+                    papers_from_brainstorm=papers_context,
+                    papers_written_count=self._brainstorm_paper_count,
+                    rejection_context="\n\n".join(entries),
+                )
+                return with_budgeted_solver_plan(
+                    prompt, self.solution_path_manager, max_input
+                )
+
+            fit = fit_prompt_with_feedback(
+                rejection_history,
+                build_prompt=build_prompt,
+                available_tokens=max_input,
             )
+            prompt = fit.prompt
+            retained_rejections = fit.retained_entries
+            if not fit.fits:
+                raise ValueError(
+                    "Brainstorm continuation decision prompt exceeds context limit "
+                    "with newest rejection feedback retained."
+                )
             
             task_id = f"auto_cd_{self._topic_selector.task_sequence:03d}"
             self._topic_selector.task_sequence += 1
@@ -4975,14 +5029,22 @@ class AutonomousCoordinator:
                 self._topic_selector.task_tracking_callback("started", task_id)
             
             try:
-                response = await api_client_manager.generate_completion(
-                    task_id=task_id,
-                    role_id="autonomous_topic_selector",
-                    model=self._topic_selector.model_id,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    max_tokens=self._topic_selector.max_output_tokens
-                )
+                while True:
+                    try:
+                        response = await api_client_manager.generate_completion(
+                            task_id=task_id,
+                            role_id="autonomous_topic_selector",
+                            model=self._topic_selector.model_id,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.0,
+                            max_tokens=self._topic_selector.max_output_tokens
+                        )
+                        break
+                    except ProviderContextLengthError:
+                        if len(retained_rejections) <= 1:
+                            raise
+                        retained_rejections = retained_rejections[1:]
+                        prompt = build_prompt(retained_rejections)
                 
                 msg = response.get("choices", [{}])[0].get("message", {})
                 content = extract_message_text(msg)
@@ -5029,7 +5091,7 @@ class AutonomousCoordinator:
                     })
                     return decision
                 else:
-                    rejection_context = validation.reasoning
+                    rejection_history.append(validation.reasoning)
                     logger.info(f"Continuation decision rejected: {validation.reasoning[:100]}...")
                     
             except FreeModelExhaustedError:
@@ -5312,6 +5374,9 @@ class AutonomousCoordinator:
             True if should write paper, False if should continue
         """
         self._state.current_tier = "tier1_aggregation"
+        # Do not let a force request capture the previous topic's stopped child
+        # while this topic's metadata is still loading.
+        self._brainstorm_aggregator = None
         
         # Set phase for API logging
         api_client_manager.set_autonomous_phase("brainstorm")
@@ -5461,14 +5526,16 @@ class AutonomousCoordinator:
             
             # Check if manual override was triggered during initialization
             # (force_paper_writing() can fire while RAG ingestion is in progress)
+            async with self._brainstorm_start_stop_lock:
+                if not self._manual_paper_writing_triggered and self._running and not self._stop_event.is_set():
+                    await self._brainstorm_aggregator.start()
             if self._manual_paper_writing_triggered:
                 logger.info("Manual override detected during initialization - skipping aggregator start")
-                self._manual_paper_writing_triggered = False
                 proof_status = await self._run_brainstorm_completion_proofs()
                 return proof_status == "complete"
-            
-            # Start aggregator
-            await self._brainstorm_aggregator.start()
+            if not self._running or self._stop_event.is_set():
+                await self._brainstorm_aggregator.stop()
+                return False
             logger.info(f"Aggregator started for brainstorm {self._current_topic_id}")
             
             # Monitor aggregator progress
@@ -5529,8 +5596,6 @@ class AutonomousCoordinator:
 
                 async def handle_manual_override() -> bool:
                     logger.info("Manual override detected - transitioning to paper writing")
-                    self._manual_paper_writing_triggered = False
-                    await self._brainstorm_aggregator.stop()
                     proof_status = await self._run_brainstorm_completion_proofs()
                     return proof_status == "complete"
 
@@ -5556,14 +5621,13 @@ class AutonomousCoordinator:
                     )
                     self._stop_event.set()
                     return False
+                if self._manual_paper_writing_triggered:
+                    return await handle_manual_override()
                 current_acceptances = status.total_acceptances
                 current_rejections = status.total_rejections
                 current_cleanup_removals = status.removals_executed  # Track actual cleanup/pruning removals
 
                 if not status.is_running:
-                    if self._manual_paper_writing_triggered:
-                        return await handle_manual_override()
-
                     total_acceptances = resume_acceptance_base + current_acceptances
                     cap_reached = bool(
                         getattr(self._brainstorm_aggregator, "_acceptance_cap_reached", False)
@@ -5654,6 +5718,8 @@ class AutonomousCoordinator:
                             logger.info("EARLY completion trigger detected - bypassing interval check")
                         
                         write_paper = await self._run_completion_review()
+                        if self._manual_paper_writing_triggered:
+                            return await handle_manual_override()
                         
                         if write_paper:
                             # Stop aggregator
@@ -5804,40 +5870,50 @@ class AutonomousCoordinator:
             
             logger.info(f"MANUAL OVERRIDE: Forcing paper writing for brainstorm {self._current_topic_id}")
             
-            # Broadcast manual override event
-            await self._broadcast("manual_paper_writing_triggered", {
-                "topic_id": self._current_topic_id,
-                "submission_count": self._acceptance_count
-            })
-            
-            # Stop the aggregator
-            await self._brainstorm_aggregator.stop()
-            logger.info("Brainstorm aggregator stopped by manual override")
-            
-            # Mark brainstorm complete
-            await brainstorm_memory.mark_complete(self._current_topic_id)
-            await research_metadata.mark_brainstorm_complete(self._current_topic_id)
-            
-            # Parent/user action wins immediately: stop child aggregation now,
-            # then let the owning workflow loop transition into Tier 2.
+            # Publish ownership before any await: stop() exposes is_running=False
+            # before it finishes draining tasks and clearing the shared queue.
+            if self._manual_paper_writing_triggered:
+                return await asyncio.shield(self._manual_paper_writing_task)
             self._manual_paper_writing_triggered = True
-            self._state.current_tier = "tier2_paper_writing"
-            await self._save_workflow_state(tier="tier2_paper_writing")
-            try:
-                if await self._await_parent_phase_shutdown(
-                    "brainstorm aggregator shutdown for manual paper-writing override",
-                    self._brainstorm_aggregator.stop(),
-                ):
-                    logger.info("Brainstorm aggregator stopped by manual paper-writing override")
-            except Exception as stop_exc:
-                logger.warning(f"Error stopping aggregator during manual paper-writing override: {stop_exc}")
-            
-            return True
+            self._manual_paper_writing_task = asyncio.create_task(
+                self._prepare_manual_paper_handoff(
+                    self._brainstorm_aggregator, self._current_topic_id
+                )
+            )
+            return await asyncio.shield(self._manual_paper_writing_task)
             
         except Exception as e:
             logger.error(f"Error forcing paper writing: {e}")
             return False
     
+    async def _prepare_manual_paper_handoff(self, aggregator, topic_id: str) -> bool:
+        """Drain the captured child before publishing the durable proof handoff."""
+        try:
+            async with self._brainstorm_start_stop_lock:
+                await aggregator.stop()
+            if (
+                not self._running or self._stop_event.is_set()
+                or self._brainstorm_aggregator is not aggregator
+                or self._current_topic_id != topic_id
+            ):
+                return False
+            await brainstorm_memory.mark_complete(topic_id)
+            await research_metadata.mark_brainstorm_complete(topic_id)
+            if not self._running or self._stop_event.is_set():
+                return False
+            self._state.current_tier = "tier2_paper_writing"
+            await self._save_workflow_state(
+                tier="tier2_paper_writing", phase="brainstorm_proof_verification"
+            )
+            await self._broadcast("manual_paper_writing_triggered", {
+                "topic_id": topic_id,
+                "submission_count": self._acceptance_count,
+            })
+            return True
+        except Exception:
+            logger.exception("Failed to prepare manual paper-writing handoff")
+            return False
+
     async def force_tier3_final_answer(self, mode: str = "complete_current") -> dict:
         """
         Force transition to Tier 3 final answer generation.
@@ -6768,6 +6844,9 @@ class AutonomousCoordinator:
                 proof_context_requesting_run_id=(
                     self._run_id or getattr(session_manager, "session_id", "") or ""
                 ),
+                allow_mathematical_proofs=self._allow_mathematical_proofs,
+                proof_competition=self._proof_competition,
+                autonomous_proof_owner=True,
             )
             
             # Set WebSocket broadcaster for compiler events
@@ -8493,6 +8572,9 @@ class AutonomousCoordinator:
                 proof_context_requesting_run_id=(
                     self._run_id or getattr(session_manager, "session_id", "") or ""
                 ),
+                allow_mathematical_proofs=self._allow_mathematical_proofs,
+                proof_competition=self._proof_competition,
+                autonomous_proof_owner=True,
             )
             
             # Set WebSocket broadcaster
@@ -8963,7 +9045,7 @@ class AutonomousCoordinator:
             # Wait a moment for any pending RAG operations to complete
             await asyncio.sleep(0.5)
             
-            autonomous_rag_manager.reset()
+            await autonomous_rag_manager.reset()
             await rag_manager.clear_all_documents_async()
             successes.append("Cleared RAG state")
             logger.info("Cleared RAG state (ChromaDB collections)")

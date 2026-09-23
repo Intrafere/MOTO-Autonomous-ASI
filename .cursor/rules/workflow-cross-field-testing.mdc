@@ -31,7 +31,9 @@ support graph.
   as a real-code pass.
 - Run focused tests while developing and `npm run test:workflows` after workflow-test or
   deterministic-artifact changes.
-- Run `npm run test:deep` after every major build and after substantial orchestration,
+- Deep workflow suites are local/manual-only; never enable them in automatic GitHub
+ Actions runs (push, pull request, or schedule). Normal CI must keep deep-test opt-ins disabled.
+- Run `npm run test:deep` locally after every major build and after substantial orchestration,
   persistence, provider, proof, prompt/RAG, event-contract, runtime-root, or cross-mode
   change. It is additive: run `npm test` separately for normal backend/frontend coverage.
 - Regenerate deterministic cross-field artifacts with

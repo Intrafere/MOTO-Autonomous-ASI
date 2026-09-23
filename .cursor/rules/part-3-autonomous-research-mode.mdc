@@ -413,7 +413,7 @@ Runs after each configured interval of accepted submissions (default 10). Cleanu
 - Does NOT require self-validation (user decision is final)
 - Brainstorm is marked complete regardless of acceptance count
 - Subsequent paper compilation proceeds normally with all selected reference papers when research-paper output is enabled; proofs-only runs skip paper/title work after brainstorm proof work and return to topic exploration.
-- **Race condition guard**: `_brainstorm_aggregation_loop()` checks `_manual_paper_writing_triggered` before calling `start()` on the aggregator (catches override during async init). The monitoring loop must also treat a user-stopped child aggregator as manual override ownership, not as an unexpected child stop.
+- **Race condition guard**: Force requests claim ownership before awaiting child shutdown. Child start and forced stop are serialized; the parent awaits the same completed drain and durable proof-handoff preparation before proof/title work, and never treats that intentional child stop as unexpected. Top-level Stop drains pending handoff work before a later Start.
 
 ### Purpose
 Assess whether the current brainstorm has been sufficiently explored relative to THIS MODEL'S internal knowledge (weights) and decide whether to continue brainstorming or begin writing a paper.
@@ -672,12 +672,17 @@ The autonomous RAG manager follows the same "no truncation" principle for full s
 - Completion reviewer: validates prompt size for both assessment and self-validation
 - Reference selector: validates prompt size for abstract review and expansion requests
 - Paper title selector: validates prompt size before LLM call
-- Agents may shed optional feedback or cap summary fields first; if still too large, they return a rejection/None/error path for retry or diagnostics.
+- Agents may shed oldest whole feedback entries or use existing optional-summary fallbacks; newest-only rolling-feedback overflow must propagate through the existing durable context-overflow lifecycle, never become a semantic rejection, decline, or ordinary retry.
 
 **Error Handling**:
 - If prompt size exceeds context window even with full RAG offloading → raise ValueError with diagnostic info
 - If RAG retrieval fails in non-mandatory browsing/metadata helpers → log and return bounded summary/abstract/empty fallback as that helper defines
 - Mandatory source paths, especially proof/formalization, fail visibly instead of silently truncating
+- Rolling rejection and proof-attempt feedback is projected from durable state as at
+most the newest five whole entries. Prompt assembly removes only the oldest entry at
+a time after complete-prompt accounting, including provider context rejection; the
+newest entry remains mandatory, and newest-only overflow follows the existing durable
+Autonomous/proof context-overflow lifecycle.
 
 ### Rejection Feedback
 
@@ -1206,6 +1211,10 @@ Archive IDs are untrusted path components. Resolve `answer_id`, `paper_id`, and 
 
 ---
 
+## Opt-In Proof Competition
+
+Autonomous-only competition adds ordered formalization-only secondary roles, persisted in scoped settings/profiles/run snapshots; the primary keeps discovery, critique, novelty, and placement duties. Secondary work begins only after the preceding model's existing five attempts are exhausted, never after Lean success. Each model owns candidate-batch capacity and private feedback/checkpoints so primary work can advance while secondaries solve earlier failures; Lean and registration remain serialized. Secondary provider/config/context failures are visible nonfatal interruptions, not five failed attempts; primary safety policies, shared Lean infrastructure, cancellation, and post-Lean persistence remain authoritative. Papers-only and disabled runs do not compete. Autonomous user/history checks stay source/session bound and process-local; standalone Manual and LeanOJ paths are unchanged. Competition-only durable benchmarks compare shared actually-attempted candidates, exclude interrupted/incomplete opportunities from completed-opportunity solve-rate denominators, expose conditional rescue and evolving-context caveats, and survive API-log clearing. Resumed attempts retain their started identity rather than reverting to queued work. Secondary checkpoints depend on their own route, not primary-route edits; malformed secondary contracts follow bounded output recovery. Benchmark proof links are exact-occurrence scoped, and configured-lane scores distinguish observed effective routes from unknown attribution.
+
 ## Proof Verification Stage (Optional, Part 3 Checkpoint)
 
 Runs automatically after every completed brainstorm (Tier 1) and completed Tier 2 paper-library paper, gated on `system_config.lean4_enabled`. Tier 3 short-form final papers may reuse the same paper-completion path; long-form volume chapters are saved as final-answer artifacts and do not currently run this checkpoint. When disabled, proof verification must not invoke Lean/proof model work or block brainstorm/paper completion.
@@ -1452,6 +1461,7 @@ Main interface component:
 
 ### BrainstormList.jsx
 Brainstorm management component:
+- Background polling and unrelated parent renders preserve the mounted expanded reader; reset content/loading only for a real document or endpoint change, not API-wrapper object identity.
 - List of all brainstorm topics with status indicators
 - Expandable to show brainstorm database content
 - Status badges: In Progress uses the active accent state; Complete uses the green success state
@@ -1467,6 +1477,10 @@ Brainstorm management component:
 Paper library component:
 - Grid/list view of all completed papers
 - Paper cards showing title + abstract preview
+- Paper views default to rendered content, collapse each embedded verified proof into an
+ ordered expandable section, and report only paper-only, proof-only, and combined
+ word counts while preserving complete raw/download content. Paper tiles use a wider
+ responsive layout with counts in a dedicated three-column row below selection/identity.
 - Expandable to show full paper content
 - Word count, source brainstorm links
 - Download/export options:
@@ -1479,6 +1493,10 @@ Paper library component:
   - Prevents pruning of active paper during compilation
   - Calls `DELETE /api/auto-research/paper/{paper_id}?confirm=true`
   - Permanent cleanup is handled by explicit pruned/history deletion routes
+- Active paper cards in the current library and Stage 2 history also support
+  checkbox selection and atomic bulk pruning without opening each paper.
+  Select-all applies only to currently visible eligible papers; cross-session
+  targets remain session-qualified and any invalid target rejects the whole batch.
 
 ### CritiqueNotificationStack.jsx
 Persistent popup notification component for high-scoring paper critiques:

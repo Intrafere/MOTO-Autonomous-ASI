@@ -130,7 +130,8 @@ backend/logs/*
 .coverage
 htmlcov/
 playwright-report/
-test-results/playwright/
+test-results/
+.benchmarks/
 
 # Temporary files
 *.tmp

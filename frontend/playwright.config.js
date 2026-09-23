@@ -4,6 +4,8 @@ const port = Number(process.env.MOTO_BROWSER_TEST_PORT || 4173);
 const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
+  // Includes both workflow smoke specs and explicitly inventoried renderer
+  // stress specs (coverage_records.py). Classification never excludes execution.
   testDir: '../tests/workflow_browser_smoke',
   fullyParallel: false,
   workers: 1,

@@ -592,6 +592,17 @@ export const compilerAPI = {
 };
 
 // Autonomous Research API
+export const proofCompetitionBenchmarksAPI = {
+  list({ current = false, sessionId, offset = 0, limit = 25 } = {}) {
+    const query = new URLSearchParams({ current: String(current), offset: String(offset), limit: String(limit) });
+    if (sessionId) query.set('session_id', sessionId);
+    return requestJson(`${API_BASE}/proof-competition/benchmarks?${query}`, { cache: 'no-store' }, 'Failed to load benchmarks');
+  },
+  get(sessionId, reportId) {
+    return requestJson(`${API_BASE}/proof-competition/benchmarks/${encodeURIComponent(sessionId)}/${encodeURIComponent(reportId)}`, { cache: 'no-store' }, 'Failed to load benchmark report');
+  },
+};
+
 export const autonomousAPI = {
   // Start autonomous research
   async start(config) {
@@ -869,6 +880,29 @@ export const autonomousAPI = {
     }, 'Failed to update proof live context');
   },
 
+  async updateProofLiveContextBulk({
+    scope = 'autonomous',
+    proofSetRevision,
+    items = [],
+  }) {
+    return requestProofRunJson(withProofScope('/proofs/live-context/bulk', scope), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expected_proof_set_revision: proofSetRevision,
+        items: items.map((item) => ({
+          proof_id: item.proofId,
+          status: item.status,
+          actor: 'user',
+          expected_run_id: item.runId,
+          reason: item.reason || '',
+          expected_theorem_hash: item.theoremHash || '',
+          expected_lean_hash: item.leanHash || '',
+        })),
+      }),
+    }, 'Failed to update proof live context in bulk');
+  },
+
   // Get one proof with full Lean code
   async getProof(proofId, scope = 'autonomous') {
     const response = await fetch(`${API_BASE}${withProofScope(`/proofs/${encodeURIComponent(proofId)}`, scope)}`);
@@ -1010,6 +1044,24 @@ export const autonomousAPI = {
       throw new Error(errorData.detail || `Failed to delete paper ${paperId}`);
     }
     return response.json();
+  },
+
+  async prunePapersBatch(targets) {
+    const result = await requestJson(
+      `${API_BASE}/auto-research/papers/prune-batch`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targets, confirm: true }),
+      },
+      'Failed to prune selected papers',
+    );
+    if (result.success !== true) {
+      throw new MotoApiError('Failed to prune selected papers: the backend returned an unsupported response.', {
+        kind: API_ERROR_KINDS.OLD_CONTRACT,
+      });
+    }
+    return result;
   },
 
   async deleteAllPrunedPapers(sessionId = null) {

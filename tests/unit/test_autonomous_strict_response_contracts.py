@@ -11,6 +11,10 @@ from backend.autonomous.agents.paper_title_selector import PaperTitleSelectorAge
 from backend.autonomous.agents.topic_selector import TopicSelectorAgent
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.models import CertaintyAssessment
+from backend.shared.provider_errors import (
+    ProviderContextLengthError,
+    ProviderRouteIdentity,
+)
 
 
 def _response(payload: dict) -> dict:
@@ -62,6 +66,56 @@ async def test_answer_format_rejects_missing_invalid_or_blank_required_fields(
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_answer_format_provider_overflow_drops_one_oldest_feedback(
+    monkeypatch,
+) -> None:
+    prompts = []
+
+    async def fake_generate_completion(**kwargs):
+        prompts.append(kwargs["messages"][0]["content"])
+        if len(prompts) == 1:
+            raise ProviderContextLengthError(
+                "provider context limit",
+                route=ProviderRouteIdentity(provider="test", model="submitter"),
+            )
+        return _response(
+            {"answer_format": "short_form", "reasoning": "One narrative fits."}
+        )
+
+    async def fake_prewarm(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        api_client_manager, "generate_completion", fake_generate_completion
+    )
+    monkeypatch.setattr(
+        api_client_manager, "prewarm_assistant_memory_context", fake_prewarm
+    )
+    selector = AnswerFormatSelector("submitter", "validator", 8192, 1024)
+    rejections = (
+        {"summary": "oldest-feedback", "submission_preview": "old"},
+        {"summary": "newest-feedback", "submission_preview": "new"},
+    )
+
+    result = await selector._generate_selection(
+        "Exact objective",
+        CertaintyAssessment(
+            certainty_level="partial_answer",
+            known_certainties_summary="Some support",
+            reasoning="Evidence is incomplete",
+        ),
+        [{"paper_id": "p1", "title": "Paper"}],
+        rejections,
+    )
+
+    assert result is not None
+    assert "oldest-feedback" in prompts[0]
+    assert "oldest-feedback" not in prompts[1]
+    assert "newest-feedback" in prompts[1]
+    assert rejections[0]["summary"] == "oldest-feedback"
 
 
 @pytest.mark.asyncio

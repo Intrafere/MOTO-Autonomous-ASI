@@ -946,10 +946,19 @@ async def get_paper():
             full_content = f"OUTLINE:\n{'='*80}\n\n{outline}\n\n{'='*80}\n\nPAPER:\n{'='*80}\n\n{paper}"
         else:
             full_content = paper
-        
+        from backend.shared.paper_proofs import analyze_paper_content
+        analysis = analyze_paper_content(paper)
+        metrics = {
+            key: value
+            for key, value in analysis.items()
+            if key not in {"paper_content", "proofs"}
+        }
         return {
             "paper": full_content,
-            "word_count": word_count,
+            "paper_content": analysis["paper_content"],
+            "proofs": analysis["proofs"],
+            "word_count": metrics["total_word_count"],
+            **metrics,
             "version": paper_memory.get_version()
         }
     except Exception as e:
@@ -1041,6 +1050,8 @@ async def _save_paper_unlocked():
             full_content_parts.append(credits_section)
         
         full_content = "\n".join(full_content_parts)
+        from backend.shared.paper_proofs import paper_metric_fields
+        metrics = paper_metric_fields(full_content)
         
         # Save to output directory
         output_path = Path(system_config.data_dir) / "compiler_paper_saved.txt"
@@ -1094,7 +1105,8 @@ async def _save_paper_unlocked():
                 return {
                     "status": "saved",
                     "path": output_path.name,
-                    "word_count": word_count,
+                    "word_count": metrics["total_word_count"],
+                    **metrics,
                     "message": f"Paper saved to {output_path.name} ({word_count} words)",
                     "has_attribution": bool(attribution_section),
                     "proof_check_scheduled": False,
@@ -1116,7 +1128,8 @@ async def _save_paper_unlocked():
         return {
             "status": "saved",
             "path": output_path.name,
-            "word_count": word_count,
+            "word_count": metrics["total_word_count"],
+            **metrics,
             "message": f"Paper saved to {output_path.name} ({word_count} words)",
             "has_attribution": bool(attribution_section),
             "proof_check_scheduled": proof_check_scheduled

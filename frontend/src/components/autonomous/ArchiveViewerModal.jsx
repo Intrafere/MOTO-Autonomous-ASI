@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
-import LatexRenderer from '../LatexRenderer';
+import PaperProofViewer, { PaperProofMetrics } from '../PaperProofViewer';
 import './ArchiveViewerModal.css';
 
 const IconX = ({ className }) => (
@@ -145,7 +145,8 @@ function PapersListView({ papers, onSelectPaper }) {
               <h3 className="archive-card-title">{paper.title}</h3>
               <p className="archive-card-desc">{paper.abstract}</p>
               <div className="archive-card-meta">
-                {paper.word_count} words &bull; Paper ID: {paper.paper_id}
+                <PaperProofMetrics content="" metrics={paper} />
+                <span>Paper ID: {paper.paper_id}</span>
               </div>
             </div>
             <IconChevronRight className="archive-card-chevron" />
@@ -174,15 +175,11 @@ function PaperDetailView({ paper, onBack }) {
         <div className="archive-section">
           <h3 className="archive-section-heading">Paper Content</h3>
           <div className="archive-content-viewer">
-            <LatexRenderer
-              content={
-                paper.outline
-                  ? `${paper.outline}\n\n${'='.repeat(80)}\n\n${paper.content}`
-                  : paper.content
-              }
+            <PaperProofViewer
+              prefixContent={paper.outline ? `${paper.outline}\n\n${'='.repeat(80)}\n\n` : ''}
+              content={paper.content}
+              metrics={paper}
               className="archive-paper-renderer"
-              showToggle={true}
-              defaultRaw={false}
             />
           </div>
         </div>

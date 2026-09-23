@@ -3,7 +3,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './AutonomousResearch.css';
-import LatexRenderer from '../LatexRenderer';
+import PaperProofViewer, { PaperProofMetrics } from '../PaperProofViewer';
 import {
   PDF_UNAVAILABLE_MESSAGE,
   downloadRawText,
@@ -14,6 +14,10 @@ import {
 import PaperCritiqueModal from '../PaperCritiqueModal';
 import ProofCheckModeModal from './ProofCheckModeModal';
 import ProofRunStatusControls from './ProofRunStatusControls';
+import PaperBatchPruneControls, {
+  isPaperBatchPruneEligible,
+  paperTargetKey,
+} from './PaperBatchPruneControls';
 import { autonomousAPI } from '../../services/api';
 import { isProofRunBusy, useProofCheckRuntime } from '../../hooks/useProofCheckRuntime';
 import { getRuntimeDataPath } from '../../utils/runtimeConfig';
@@ -30,6 +34,10 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
   const [deletingAllPruned, setDeletingAllPruned] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [currentPrunedPapers, setCurrentPrunedPapers] = useState([]);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [selectedPaperKeys, setSelectedPaperKeys] = useState(() => new Set());
+  const [batchPruning, setBatchPruning] = useState(false);
+  const [batchPruneMessage, setBatchPruneMessage] = useState('');
   const pdfDownloadAvailable = isPDFDownloadAvailable(capabilities);
   const getAutonomousPaper = api?.getAutonomousPaper;
   const getCurrentSession = api?.getCurrentSession;
@@ -63,6 +71,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       const activeSessionId = sessionInfo?.is_active && sessionInfo?.session_id
         ? sessionInfo.session_id
         : 'legacy';
+      setCurrentSessionId(activeSessionId);
       const prunedHistory = await getPrunedPaperHistory();
       const currentSessionPruned = (prunedHistory.papers || [])
         .filter((paper) => paper.session_id === activeSessionId);
@@ -70,6 +79,7 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       setCurrentPrunedPapers(currentSessionPruned);
     } catch (error) {
       console.error('Failed to load current pruned papers:', error);
+      setCurrentSessionId(null);
       setCurrentPrunedPapers([]);
     }
   }, [getCurrentSession, getPrunedPaperHistory]);
@@ -79,7 +89,11 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
   }, [archivedCount, loadCurrentPrunedPapers]);
 
   const visiblePapers = useMemo(() => {
-    const activePapers = (papers || []).map((paper) => ({ ...paper, is_pruned: false }));
+    const activePapers = (papers || []).map((paper) => ({
+      ...paper,
+      session_id: paper.session_id || currentSessionId,
+      is_pruned: false,
+    }));
     const activeIds = new Set(activePapers.map((paper) => paper.paper_id));
     const prunedPapers = currentPrunedPapers
       .filter((paper) => !activeIds.has(paper.paper_id))
@@ -90,7 +104,66 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
       const bTime = new Date(b.created_at || b.pruned_at || 0).getTime();
       return bTime - aTime;
     });
-  }, [papers, currentPrunedPapers]);
+  }, [papers, currentPrunedPapers, currentSessionId]);
+
+  const eligibleTargets = useMemo(() => (
+    visiblePapers
+      .filter(isPaperBatchPruneEligible)
+      .map(({ session_id, paper_id }) => ({ session_id, paper_id }))
+  ), [visiblePapers]);
+
+  useEffect(() => {
+    const eligibleKeys = new Set(eligibleTargets.map(paperTargetKey));
+    setSelectedPaperKeys((current) => {
+      const reconciled = new Set([...current].filter((key) => eligibleKeys.has(key)));
+      return reconciled.size === current.size ? current : reconciled;
+    });
+  }, [eligibleTargets]);
+
+  const togglePaperSelection = (event, paper) => {
+    event.stopPropagation();
+    const key = paperTargetKey(paper);
+    setSelectedPaperKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setBatchPruneMessage('');
+  };
+
+  const handleBatchPrune = async () => {
+    const targets = eligibleTargets.filter((target) => selectedPaperKeys.has(paperTargetKey(target)));
+    if (targets.length === 0) return false;
+    setBatchPruning(true);
+    setBatchPruneMessage('');
+    try {
+      const result = await autonomousAPI.prunePapersBatch(targets);
+      setSelectedPaperKeys(new Set());
+      setBatchPruneMessage(`Pruned ${result.pruned_count ?? targets.length} selected ${targets.length === 1 ? 'paper' : 'papers'}.`);
+      const refreshResults = await Promise.allSettled([onRefresh(), loadCurrentPrunedPapers()]);
+      if (refreshResults.some((entry) => entry.status === 'rejected')) {
+        setBatchPruneMessage(`Pruned ${result.pruned_count ?? targets.length} selected ${targets.length === 1 ? 'paper' : 'papers'}, but refreshing the list failed. Reload to reconcile current state.`);
+      }
+      return true;
+    } catch (error) {
+      console.error('Failed to prune selected papers:', error);
+      const stale = error?.status === 404 || error?.status === 409;
+      const unknown = error?.kind === 'ambiguous_transport';
+      setBatchPruneMessage(
+        unknown
+          ? 'The batch outcome is unknown because no backend response was received. Refreshing current state before another attempt.'
+          : `Failed to prune selected papers. ${error.message}`
+      );
+      if (stale || unknown) {
+        setSelectedPaperKeys(new Set());
+        await Promise.allSettled([onRefresh(), loadCurrentPrunedPapers()]);
+      }
+      return false;
+    } finally {
+      setBatchPruning(false);
+    }
+  };
 
   useEffect(() => {
     const unsubscribeNovelProof = websocket.on('novel_proof_discovered', async (data) => {
@@ -414,6 +487,19 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
         </div>
       )}
 
+      <PaperBatchPruneControls
+        visibleTargets={eligibleTargets}
+        selectedKeys={selectedPaperKeys}
+        onSelectAllVisible={() => setSelectedPaperKeys(new Set(eligibleTargets.map(paperTargetKey)))}
+        onClear={() => {
+          setSelectedPaperKeys(new Set());
+          setBatchPruneMessage('');
+        }}
+        onPruneSelected={handleBatchPrune}
+        pruning={batchPruning}
+        message={batchPruneMessage}
+      />
+
       {proofCheckTarget && (
         <ProofCheckModeModal
           sourceTitle={proofCheckTarget.title || proofCheckTarget.paper_id}
@@ -439,12 +525,25 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
           >
             <div className="paper-card-header">
               <div className="paper-card-identifiers">
+                {isPaperBatchPruneEligible(paper) && (
+                  <label className="paper-selection-control" onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedPaperKeys.has(paperTargetKey(paper))}
+                      onChange={(event) => togglePaperSelection(event, paper)}
+                      aria-label={`Select ${paper.title || paper.paper_id} for batch pruning`}
+                    />
+                  </label>
+                )}
                 <span className="paper-card-id">{paper.paper_id}</span>
                 {paper.is_pruned && (
                   <span className="paper-pruned-badge">Pruned Paper</span>
                 )}
               </div>
-              <span className="paper-word-count">{paper.word_count?.toLocaleString()} words</span>
+              <PaperProofMetrics
+                content={expandedId === paper.paper_id ? expandedContent?.content || '' : ''}
+                metrics={paper}
+              />
             </div>
 
             <div className="paper-card-title">
@@ -594,15 +693,12 @@ const PaperLibrary = ({ papers, onRefresh, api, archivedCount = 0, capabilities 
                   ) : expandedContent && typeof expandedContent === 'object' ? (
                     <div className="paper-section">
                       <h4>Paper Content</h4>
-                      <LatexRenderer
-                        content={
-                          expandedContent.outline
-                            ? `${expandedContent.outline}\n\n${'='.repeat(80)}\n\n${expandedContent.content || 'No content available'}`
-                            : expandedContent.content || 'No content available'
-                        }
+                      <PaperProofViewer
+                        documentId={`paper:${paper.session_id || expandedContent.session_id || ''}:${paper.paper_id}`}
+                        prefixContent={expandedContent.outline ? `${expandedContent.outline}\n\n${'='.repeat(80)}\n\n` : ''}
+                        content={expandedContent.content || 'No content available'}
+                        metrics={{ ...paper, ...expandedContent }}
                         className="paper-content-renderer"
-                        showToggle={true}
-                        defaultRaw={false}
                       />
                     </div>
                   ) : (

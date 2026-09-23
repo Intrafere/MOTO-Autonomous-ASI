@@ -431,13 +431,149 @@ class OpenAICodexClientTests(IsolatedAsyncioTestCase):
             ("gpt-5.6-sol", None),
         )
         self.assertEqual(
-            OpenAICodexClient._resolve_model_request("gpt-5.6-luna", None),
-            ("gpt-5.6-sol", "high"),
+            OpenAICodexClient._resolve_model_request("gpt-5.6-luna", "xhigh"),
+            ("gpt-5.6-luna", "xhigh"),
         )
         self.assertEqual(
-            OpenAICodexClient._resolve_model_request("gpt-5.6-terra", None),
-            ("gpt-5.6-sol", "medium"),
+            OpenAICodexClient._resolve_model_request("gpt-5.6-terra", "low"),
+            ("gpt-5.6-terra", "low"),
         )
+
+    async def test_generate_completion_preserves_provider_listed_model_and_reasoning(self) -> None:
+        class FakeHttp:
+            async def post(self, url, json=None, headers=None):
+                import json as json_module
+
+                self.payload = json
+                response_text = json_module.dumps({
+                    "id": "resp_1",
+                    "output_text": "hello",
+                    "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                })
+
+                class Response:
+                    status_code = 200
+                    text = response_text
+
+                    def json(self):
+                        return {
+                            "id": "resp_1",
+                            "output_text": "hello",
+                            "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                        }
+
+                return Response()
+
+        for selected_model, selected_effort in (
+            ("gpt-5.6-terra", "low"),
+            ("gpt-5.6-luna", "xhigh"),
+            ("catalog-none", "none"),
+            ("catalog-minimal", "minimal"),
+            ("catalog-max", "max"),
+            ("catalog-high", "auto"),
+            ("catalog-max", "auto"),
+            ("gpt-5.5", "auto"),
+            ("gpt-5.3-codex-spark-high", "max"),
+        ):
+            with self.subTest(model=selected_model, reasoning_effort=selected_effort):
+                client = OpenAICodexClient()
+                fake_http = FakeHttp()
+                client.client = fake_http
+                client._model_reasoning_cache = {
+                    "catalog-high": {"supported_reasoning_levels": ["low", "medium", "high"]},
+                    "catalog-max": {"supported_reasoning_levels": ["low", "xhigh", "max"]},
+                }
+                with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+                    response = await client.generate_completion(
+                        model=selected_model,
+                        messages=[{"role": "user", "content": "user"}],
+                        reasoning_effort=selected_effort,
+                    )
+
+                expected_model = selected_model
+                expected_effort = selected_effort
+                if selected_effort == "auto":
+                    expected_effort = {"catalog-high": "high", "catalog-max": "max", "gpt-5.5": "xhigh"}[selected_model]
+                if selected_model == "gpt-5.3-codex-spark-high":
+                    expected_model, expected_effort = "gpt-5.3-codex-spark", "high"
+                self.assertEqual(fake_http.payload["model"], expected_model)
+                self.assertEqual(fake_http.payload["reasoning"]["effort"], expected_effort)
+                self.assertEqual(response["model"], selected_model)
+
+    def test_codex_models_response_preserves_reasoning_and_extra_metadata(self) -> None:
+        from backend.api.routes.cloud_access import CodexModelsResponse
+
+        response = CodexModelsResponse.model_validate({"success": True, "models": [{
+            "id": "provider-verbatim", "name": "Provider variant", "context_length": 123456,
+            "supported_reasoning_levels": ["minimal", "high", "max"],
+            "default_reasoning_level": "high",
+        }]})
+        row = response.model_dump(exclude_none=True)["models"][0]
+        self.assertEqual(row["supported_reasoning_levels"], ["minimal", "high", "max"])
+        self.assertEqual(row["default_reasoning_level"], "high")
+        self.assertEqual(row["context_length"], 123456)
+
+    def test_reasoning_catalog_normalization_and_unknown_safety(self) -> None:
+        normalized = OpenAICodexClient._normalize_model_metadata({
+            "slug": "provider-verbatim-variant",
+            "supported_reasoning_levels": [
+                {"effort": "high", "description": "deep"}, "minimal", "none", "max",
+                "high", {"effort": "invented"}, None,
+            ],
+            "default_reasoning_level": "minimal",
+        })
+        self.assertEqual(normalized["supported_reasoning_levels"], ["high", "minimal", "none", "max"])
+        self.assertEqual(normalized["default_reasoning_level"], "minimal")
+        self.assertEqual(OpenAICodexClient._reasoning_config("auto", normalized), {"effort": "max"})
+        self.assertIsNone(OpenAICodexClient._reasoning_config("auto", {"supported_reasoning_levels": []}))
+        malformed = OpenAICodexClient._normalize_reasoning_metadata({"supported_reasoning_levels": [None, {"effort": "invented"}]})
+        self.assertNotIn("supported_reasoning_levels", malformed)
+        for metadata in ({}, malformed, {"default_reasoning_level": "medium"}):
+            with self.assertRaises(OpenAICodexRequestError):
+                OpenAICodexClient._reasoning_config("auto", metadata)
+        for effort in ("minimal", "none", "max"):
+            self.assertEqual(OpenAICodexClient._reasoning_config(effort), {"effort": effort})
+        unknown = OpenAICodexClient._normalize_model_metadata({"slug": "gpt-5.5-unlisted-variant"})
+        self.assertNotIn("supported_reasoning_levels", unknown)
+        explicit_empty = OpenAICodexClient._normalize_model_metadata({"slug": "gpt-5.5", "supported_reasoning_levels": []})
+        self.assertEqual(explicit_empty["supported_reasoning_levels"], [])
+
+    def test_known_model_malformed_catalog_does_not_invent_reasoning_levels(self) -> None:
+        for raw_levels in ([None, {"effort": "invented"}], "high", None):
+            with self.subTest(raw_levels=raw_levels):
+                normalized = OpenAICodexClient._normalize_model_metadata({
+                    "slug": "gpt-5.5", "supported_reasoning_levels": raw_levels,
+                })
+                self.assertNotIn("supported_reasoning_levels", normalized)
+                with self.assertRaises(OpenAICodexRequestError):
+                    OpenAICodexClient._reasoning_config("auto", normalized)
+                self.assertEqual(
+                    OpenAICodexClient._reasoning_config("low", normalized),
+                    {"effort": "low"},
+                )
+        missing = OpenAICodexClient._normalize_model_metadata({"slug": "gpt-5.5"})
+        self.assertEqual(OpenAICodexClient._reasoning_config("auto", missing), {"effort": "xhigh"})
+
+    async def test_reasoning_cold_catalog_load_and_cache(self) -> None:
+        import httpx
+
+        client = OpenAICodexClient()
+        await client.client.aclose()
+        response = httpx.Response(200, json={"models": [{
+            "slug": "provider-cold-variant", "supported_reasoning_levels": [{"effort": "medium"}, {"effort": "high"}],
+            "default_reasoning_level": "medium",
+        }]})
+        client.client = mock.AsyncMock()
+        client.client.get.return_value = response
+        with mock.patch.object(client, "get_valid_tokens", return_value={"access_token": "access"}):
+            metadata = await client._model_reasoning_metadata("provider-cold-variant")
+            self.assertEqual(OpenAICodexClient._reasoning_config("auto", metadata), {"effort": "high"})
+            self.assertEqual(await client._model_reasoning_metadata("provider-cold-variant"), metadata)
+            client.client.get.assert_awaited_once()
+            unknown = await client._model_reasoning_metadata("unknown-variant")
+            self.assertEqual(unknown, {})
+            with self.assertRaises(OpenAICodexRequestError):
+                OpenAICodexClient._reasoning_config("auto", unknown)
 
     async def test_list_models_retries_with_newer_stored_token_after_revocation(self) -> None:
         client = OpenAICodexClient()

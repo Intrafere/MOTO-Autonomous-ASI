@@ -77,6 +77,7 @@ from backend.shared.provider_pause import (
     wait_for_provider_resume,
 )
 from backend.shared.provider_errors import ProviderContextLengthError, ProviderRouteIdentity
+from backend.shared.prompt_feedback_budget import fit_prompt_with_feedback_async
 from backend.shared.proof_search.assistant_coordinator import assistant_proof_search_coordinator
 from backend.shared.proof_search.assistant_models import AssistantTargetSnapshot
 from backend.shared.token_tracker import token_tracker
@@ -1760,7 +1761,7 @@ class LeanOJCoordinator:
                     capped_rejection_feedback=self._format_capped_rejection_feedback(
                         "RECENT FAILED / REJECTION FEEDBACK SUMMARIES",
                         prompt_failed_feedback,
-                        limit=10,
+                        limit=5,
                     ),
                 )
                 prompt = build_brainstorm_prompt(
@@ -1788,7 +1789,7 @@ class LeanOJCoordinator:
                         capped_rejection_feedback=self._format_capped_rejection_feedback(
                             "RECENT FAILED / REJECTION FEEDBACK SUMMARIES",
                             prompt_failed_feedback,
-                            limit=10,
+                            limit=5,
                         ),
                     )
                     prompt = build_brainstorm_prompt(
@@ -2599,7 +2600,7 @@ class LeanOJCoordinator:
                     capped_rejection_feedback=self._format_capped_rejection_feedback(
                         "RECENT FAILED / REJECTION FEEDBACK SUMMARIES",
                         prompt_failed_feedback,
-                        limit=10,
+                        limit=5,
                     ),
                 ),
             ),
@@ -2935,7 +2936,7 @@ class LeanOJCoordinator:
             record
             for record in self._failed_feedback
             if isinstance(record, dict) and not self._is_subproof_or_final_failure_feedback(record)
-        ]
+        ][-5:]
 
     async def _build_context_blocks(
         self,
@@ -2947,9 +2948,11 @@ class LeanOJCoordinator:
         include_current_final_cycle_packet: bool = False,
         capped_rejection_feedback: str = "",
         context_scope: str = "",
+        final_attempts_override: Optional[tuple[dict[str, Any], ...]] = None,
     ) -> dict[str, str]:
         resolved_scope = context_scope or self._infer_context_scope(mode)
         current_packet = self._current_final_cycle_packet if include_current_final_cycle_packet else None
+        current_packet = self._project_feedback_packet(current_packet, ())
         working_proof_attempt = None
         if resolved_scope == "recursive_brainstorm":
             working_proof_attempt = await self._working_proof_attempt_context_packet()
@@ -2980,8 +2983,14 @@ class LeanOJCoordinator:
                 else self._verified_subproof_dicts()
             ),
             partial_proofs=self._partial_proofs,
-            failed_subproofs=self._failed_context_dicts() if include_failed_subproofs else [],
-            final_attempts=self._final_attempts[-5:] if resolved_scope == "final_solver" else [],
+            failed_subproofs=self._failed_context_dicts()[-5:] if include_failed_subproofs else [],
+            final_attempts=(
+                list(final_attempts_override)
+                if resolved_scope == "final_solver" and final_attempts_override is not None
+                else self._final_attempts[-5:]
+                if resolved_scope == "final_solver"
+                else []
+            ),
             final_cycle_packets=[],
             refuted_constructions=refuted_constructions,
             current_final_cycle_packet=current_packet,
@@ -3138,13 +3147,14 @@ class LeanOJCoordinator:
                 "old_attempt_before_redo_apparent_issue": (
                     self._state.master_proof_old_attempt_before_redo_apparent_issue
                 ),
-                "recent_final_attempts": leanoj_context_manager._format_attempts(self._final_attempts[-10:]),
+                "recent_final_attempts": [dict(item) for item in self._final_attempts[-5:] if isinstance(item, dict)],
                 "verified_subproofs": self._verified_subproof_dicts(),
                 "partial_final_proofs": [
-                    proof for proof in self._partial_proofs[-10:] if str(proof.get("target") or "") == "final"
+                    proof for proof in self._partial_proofs if str(proof.get("target") or "") == "final"
                 ],
             }
         )
+        packet["partial_final_proofs"] = packet["partial_final_proofs"][-5:]
         return packet
 
     def _clear_current_final_cycle_packet(self) -> None:
@@ -3237,6 +3247,82 @@ class LeanOJCoordinator:
             for event in recent_events
             if event.get("event_type") == "failure" and self._is_final_prompt_feedback_safe(event)
         ]
+
+    @staticmethod
+    def _final_feedback_overlap_key(record: dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(record.get("request") or "").strip().lower(),
+            str(record.get("error_summary") or record.get("error_output") or "").strip().lower(),
+        )
+
+    def _final_prompt_feedback_entries(self) -> list[dict[str, Any]]:
+        """Build a prompt-only chronological projection, preferring richer attempts."""
+        attempts_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for attempt in self._final_attempts:
+            if not isinstance(attempt, dict) or not self._is_final_prompt_feedback_safe(attempt):
+                continue
+            attempts_by_key.setdefault(self._final_feedback_overlap_key(attempt), []).append(attempt)
+
+        projected: list[dict[str, Any]] = []
+        used_attempt_ids: set[int] = set()
+        for event in self._final_context_events:
+            if (
+                not isinstance(event, dict)
+                or event.get("event_type") != "failure"
+                or not self._is_final_prompt_feedback_safe(event)
+            ):
+                continue
+            matches = attempts_by_key.get(self._final_feedback_overlap_key(event), [])
+            richer = next((item for item in matches if id(item) not in used_attempt_ids), None)
+            if richer is not None:
+                projected.append(dict(richer))
+                used_attempt_ids.add(id(richer))
+            else:
+                projected.append(dict(event))
+
+        for attempt in self._final_attempts:
+            if (
+                isinstance(attempt, dict)
+                and id(attempt) not in used_attempt_ids
+                and self._is_final_prompt_feedback_safe(attempt)
+            ):
+                projected.append(dict(attempt))
+
+        known_keys = {self._final_feedback_overlap_key(item) for item in projected}
+        for feedback in self._failed_feedback:
+            if not isinstance(feedback, dict) or not self._is_final_prompt_feedback_safe(feedback):
+                continue
+            key = self._final_feedback_overlap_key(feedback)
+            if key not in known_keys:
+                projected.append(dict(feedback))
+                known_keys.add(key)
+        return projected[-5:]
+
+    @staticmethod
+    def _project_feedback_packet(
+        packet: Optional[dict[str, Any]],
+        selected_feedback: tuple[dict[str, Any], ...],
+    ) -> Optional[dict[str, Any]]:
+        if not packet:
+            return None
+        projected = dict(packet)
+        selected_keys = {
+            LeanOJCoordinator._final_feedback_overlap_key(record)
+            for record in selected_feedback
+        }
+        attempts = [
+            dict(record)
+            for record in (packet.get("attempts") or [])
+            if isinstance(record, dict)
+            and LeanOJCoordinator._final_feedback_overlap_key(record) not in selected_keys
+        ]
+        projected["attempts"] = attempts[-5:]
+        recent = packet.get("recent_final_attempts")
+        if isinstance(recent, list):
+            projected["recent_final_attempts"] = [
+                dict(record) for record in recent if isinstance(record, dict)
+            ][-5:]
+        return projected
 
     def _master_proof_path(self, session_id: str = "") -> Path:
         resolved_session_id = session_id or self._state.session_id or "latest"
@@ -4015,7 +4101,7 @@ class LeanOJCoordinator:
             if not self._owns_control_generation(attempt_generation):
                 return
             self._set_master_proof_metadata(current_master_proof)
-            final_prompt_feedback = self._final_solver_failure_window()
+            final_prompt_feedback = self._final_prompt_feedback_entries()
             await self._broadcast(
                 "leanoj_master_proof_edit_started",
                 {
@@ -4024,27 +4110,25 @@ class LeanOJCoordinator:
                 },
             )
             try:
-                context_blocks = await self._build_context_blocks(
-                    request,
-                    request.final_solver,
-                    mode="final_solver",
-                    task_request="Edit the durable Proof Solver master proof and decide whether it is ready for Lean verification.",
-                    capped_rejection_feedback=self._format_capped_rejection_feedback(
-                        "RECENT PROOF FEEDBACK SUMMARIES",
-                        final_prompt_feedback,
-                        limit=10,
-                    ),
-                )
-                master_proof_direct_context, direct_context_metadata = self._build_master_proof_direct_context(
-                    current_master_proof,
-                    request,
-                    context_blocks,
-                )
-                raw = await self._call_json(
-                    request.final_solver,
-                    "leanoj_final",
-                    "leanoj_final_solver",
-                    build_final_solver_prompt(
+                async def build_prompt(
+                    selected_feedback: tuple[dict[str, Any], ...],
+                ) -> str:
+                    context_blocks = await self._build_context_blocks(
+                        request,
+                        request.final_solver,
+                        mode="final_solver",
+                        task_request=(
+                            "Edit the durable Proof Solver master proof and decide whether it is ready for Lean "
+                            "verification."
+                        ),
+                        final_attempts_override=selected_feedback,
+                    )
+                    master_proof_direct_context, direct_context_metadata = self._build_master_proof_direct_context(
+                        current_master_proof,
+                        request,
+                        context_blocks,
+                    )
+                    return build_final_solver_prompt(
                         request.user_prompt,
                         request.lean_template,
                         master_proof_direct_context,
@@ -4063,10 +4147,32 @@ class LeanOJCoordinator:
                         self._final_solver_active_plan_items(),
                         self._final_solver_verified_subproof_dicts(),
                         self._partial_proofs,
-                        final_prompt_feedback,
-                        self._final_attempts[-5:],
+                        list(selected_feedback),
+                        list(selected_feedback),
                         context_blocks=context_blocks,
-                    ),
+                    )
+
+                available_tokens = rag_config.get_available_input_tokens(
+                    request.final_solver.context_window,
+                    request.final_solver.max_output_tokens,
+                )
+                fitted = await fit_prompt_with_feedback_async(
+                    final_prompt_feedback,
+                    build_prompt=build_prompt,
+                    available_tokens=available_tokens,
+                    max_entries=5,
+                )
+                provider_retry_prompts: list[str] = []
+                retry_feedback = fitted.retained_entries
+                while len(retry_feedback) > 1:
+                    retry_feedback = retry_feedback[1:]
+                    provider_retry_prompts.append(await build_prompt(retry_feedback))
+                raw = await self._call_json(
+                    request.final_solver,
+                    "leanoj_final",
+                    "leanoj_final_solver",
+                    fitted.prompt,
+                    context_rejection_prompts=provider_retry_prompts,
                 )
                 if not self._owns_control_generation(attempt_generation):
                     return
@@ -5042,6 +5148,7 @@ class LeanOJCoordinator:
         role_id: str,
         prompt: str,
         temperature: float = 0.0,
+        context_rejection_prompts: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         if not config.model_id:
             raise LeanOJConfigurationError(
@@ -5065,6 +5172,7 @@ class LeanOJCoordinator:
             )
         else:
             current_prompt = prompt
+        remaining_context_rejection_prompts = list(context_rejection_prompts or [])
         attempt_index = 0
         while not self._should_stop():
             attempt_index += 1
@@ -5222,6 +5330,16 @@ class LeanOJCoordinator:
                 continue
             except Exception as exc:
                 duration_ms = round((time.monotonic() - started) * 1000)
+                if self._is_context_overflow_exception(exc) and remaining_context_rejection_prompts:
+                    current_prompt = remaining_context_rejection_prompts.pop(0)
+                    logger.warning(
+                        "Proof Solver provider rejected prompt context; retrying with one older feedback entry removed "
+                        "(role=%s, task=%s, remaining_projections=%s).",
+                        role_id,
+                        task_id,
+                        len(remaining_context_rejection_prompts),
+                    )
+                    continue
                 if is_provider_credit_pause_error(exc):
                     message = self._summarize_error(str(exc), limit=700)
                     logger.warning(

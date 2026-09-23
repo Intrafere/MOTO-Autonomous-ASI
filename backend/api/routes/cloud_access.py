@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from backend.shared.api_client_manager import api_client_manager
 from backend.shared.config import rag_config, system_config
@@ -57,6 +57,20 @@ class _XAIGrokCallbackServerState:
 
 
 _XAI_GROK_CALLBACK_SERVER_STATE = _XAIGrokCallbackServerState()
+
+
+class CodexModelMetadata(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    name: str
+    supported_reasoning_levels: Optional[list[str]] = None
+    default_reasoning_level: Optional[str] = None
+
+
+class CodexModelsResponse(BaseModel):
+    success: bool
+    models: list[CodexModelMetadata]
 
 
 class CodexOAuthStartRequest(BaseModel):
@@ -478,7 +492,7 @@ async def get_openai_codex_status() -> Dict[str, Any]:
     return {"success": True, "status": await openai_codex_client.status()}
 
 
-@router.get("/openai-codex/models")
+@router.get("/openai-codex/models", response_model=CodexModelsResponse, response_model_exclude_none=True)
 async def get_openai_codex_models() -> Dict[str, Any]:
     """Return available Codex-backed models for the signed-in account."""
     _ensure_desktop_codex_allowed()

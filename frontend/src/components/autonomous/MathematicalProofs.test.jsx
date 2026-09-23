@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import MathematicalProofs from './MathematicalProofs';
 
@@ -18,7 +18,7 @@ const proof = {
 
 function buildApi() {
   return {
-    getProofs: vi.fn().mockResolvedValue({ proofs: [proof] }),
+    getProofs: vi.fn().mockResolvedValue({ proofs: [proof], proof_set_revision: 4 }),
     getProofStatus: vi.fn().mockResolvedValue({ lean4_enabled: false }),
     getBrainstorms: vi.fn().mockResolvedValue({ brainstorms: [] }),
     getPapers: vi.fn().mockResolvedValue({ papers: [] }),
@@ -90,4 +90,122 @@ test('does not offer undo for automatic pruning', async () => {
   await screen.findByText('Pruned from live context');
   await user.click(screen.getByRole('button', { name: 'View Details' }));
   expect(screen.queryByRole('button', { name: 'Undo user prune' })).not.toBeInTheDocument();
+});
+
+test('checks collapsed cards without expanding and selects all visible eligible proofs', async () => {
+  const activeTwo = { ...proof, proof_id: 'proof-2', theorem_statement: 'theorem second : True' };
+  const automaticPruned = {
+    ...userPrunedProof,
+    proof_id: 'proof-system-pruned',
+    live_context_pruned_by: 'automatic_proof_pruning',
+  };
+  const api = buildApi();
+  api.getProofs.mockResolvedValue({
+    proofs: [proof, activeTwo, userPrunedProof, automaticPruned],
+    proof_set_revision: 4,
+  });
+  const user = userEvent.setup();
+  render(<MathematicalProofs api={api} />);
+
+  await screen.findByRole('checkbox', { name: `Select proof ${proof.theorem_statement} (proof-1)` });
+  await user.click(screen.getByRole('checkbox', { name: `Select proof ${proof.theorem_statement} (proof-1)` }));
+  expect(screen.queryByText(proof.lean_code)).not.toBeInTheDocument();
+  expect(screen.getByText(/1 selected · 1 prunable · 0 restorable/)).toBeInTheDocument();
+
+  await user.click(screen.getByRole('checkbox', { name: /Select all visible eligible/ }));
+  expect(screen.getByText(/3 selected · 2 prunable · 1 restorable/)).toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: /Select all visible eligible/ })).toBeChecked();
+});
+
+test('bulk prunes only eligible selected proofs and refreshes once after the batch', async () => {
+  const activeTwo = { ...proof, proof_id: 'proof-2', theorem_statement: 'theorem second : True' };
+  const api = buildApi();
+  api.getProofs.mockResolvedValue({
+    proofs: [proof, activeTwo, userPrunedProof],
+    proof_set_revision: 4,
+  });
+  api.updateProofLiveContextBulk = vi.fn().mockResolvedValue({ proof_set_revision: 5 });
+  api.refreshProofGraph = vi.fn().mockResolvedValue({});
+  api.refreshLatestAssistantPack = vi.fn().mockResolvedValue({});
+  const user = userEvent.setup();
+  render(<MathematicalProofs api={api} />);
+
+  await screen.findByRole('checkbox', { name: `Select proof ${proof.theorem_statement} (proof-1)` });
+  expect(api.getProofs).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole('checkbox', { name: /Select all visible eligible/ }));
+  await user.click(screen.getByRole('button', { name: 'Bulk prune' }));
+  expect(screen.getByText(/Only proofs eligible for this action are included/)).toBeInTheDocument();
+  await user.type(screen.getByLabelText(/Reason \(optional, shared by this batch\)/), 'Shared route cleanup');
+  await user.click(screen.getByRole('button', { name: 'Confirm prune' }));
+
+  await waitFor(() => expect(api.updateProofLiveContextBulk).toHaveBeenCalledTimes(1));
+  expect(api.updateProofLiveContextBulk).toHaveBeenCalledWith({
+    scope: 'autonomous',
+    proofSetRevision: 4,
+    items: expect.arrayContaining([
+      expect.objectContaining({ proofId: 'proof-1', status: 'pruned', runId: 'run-1', reason: 'Shared route cleanup' }),
+      expect.objectContaining({ proofId: 'proof-2', status: 'pruned', runId: 'run-1', reason: 'Shared route cleanup' }),
+    ]),
+  });
+  expect(api.updateProofLiveContextBulk.mock.calls[0][0].items).toHaveLength(2);
+  await waitFor(() => expect(api.getProofs).toHaveBeenCalledTimes(2));
+  expect(api.refreshProofGraph).toHaveBeenCalledTimes(1);
+  expect(api.refreshLatestAssistantPack).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText('2 proofs pruned from this run’s live model context.')).toBeInTheDocument();
+});
+
+test('clears selection and reports all-none bulk eligibility', async () => {
+  const api = buildApi();
+  api.getProofs.mockResolvedValue({ proofs: [proof], proof_set_revision: 4 });
+  const user = userEvent.setup();
+  render(<MathematicalProofs api={api} />);
+
+  await screen.findByRole('checkbox', { name: `Select proof ${proof.theorem_statement} (proof-1)` });
+  await user.click(screen.getByRole('checkbox', { name: `Select proof ${proof.theorem_statement} (proof-1)` }));
+  await user.click(screen.getByRole('button', { name: 'Bulk restore' }));
+  expect(screen.getByText('None of the selected proofs are user-pruned and eligible for restore.')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Clear selection' }));
+  expect(screen.getByText('0 selected')).toBeInTheDocument();
+});
+
+test('bulk restores the frozen user-pruned occurrence identity', async () => {
+  const api = buildApi();
+  api.getProofs.mockResolvedValue({ proofs: [userPrunedProof], proof_set_revision: 4 });
+  api.updateProofLiveContextBulk = vi.fn().mockResolvedValue({ proof_set_revision: 5 });
+  api.refreshProofGraph = vi.fn().mockResolvedValue({});
+  api.refreshLatestAssistantPack = vi.fn().mockResolvedValue({});
+  const user = userEvent.setup();
+  render(<MathematicalProofs api={api} />);
+
+  await user.click(await screen.findByRole('checkbox', { name: /Select proof/ }));
+  await user.click(screen.getByRole('button', { name: 'Bulk restore' }));
+  await user.click(screen.getByRole('button', { name: 'Confirm restore' }));
+
+  await waitFor(() => expect(api.updateProofLiveContextBulk).toHaveBeenCalledWith({
+    scope: 'autonomous',
+    proofSetRevision: 4,
+    items: [expect.objectContaining({
+      proofId: 'proof-pruned',
+      runId: 'run-1',
+      status: 'active',
+    })],
+  }));
+});
+
+test('clears stale bulk selection and refreshes current state', async () => {
+  const api = buildApi();
+  api.updateProofLiveContextBulk = vi.fn().mockRejectedValue(
+    Object.assign(new Error('revision conflict'), { status: 409 })
+  );
+  const user = userEvent.setup();
+  render(<MathematicalProofs api={api} />);
+
+  await screen.findByRole('checkbox', { name: `Select proof ${proof.theorem_statement} (proof-1)` });
+  await user.click(screen.getByRole('checkbox', { name: `Select proof ${proof.theorem_statement} (proof-1)` }));
+  await user.click(screen.getByRole('button', { name: 'Bulk prune' }));
+  await user.click(screen.getByRole('button', { name: 'Confirm prune' }));
+
+  expect(await screen.findByText(/proof set changed before the batch completed/i)).toBeInTheDocument();
+  expect(screen.getByText('0 selected')).toBeInTheDocument();
+  await waitFor(() => expect(api.getProofs).toHaveBeenCalledTimes(2));
 });

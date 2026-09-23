@@ -75,6 +75,9 @@ from backend.shared.models import (
     ProofCandidate,
     ProofLiveContextMutationRequest,
     ProofLiveContextMutationResponse,
+    ProofLiveContextBulkMutationRequest,
+    ProofLiveContextBulkMutationResponse,
+    ProofLiveContextBulkMutationResult,
     ProofLibraryEntry,
     ProofLibraryResponse,
     ProofStageResult,
@@ -630,6 +633,21 @@ async def _get_runtime_snapshot(request: Optional[ProofCheckRequest] = None) -> 
     request_snapshot = _get_request_runtime_snapshot(request)
     if request_snapshot is not None:
         return request_snapshot
+
+    if request and request.source_type == "paper" and ":" in request.source_id:
+        # A historical source must never inherit the currently active session's routes.
+        import json
+        session_id, _ = request.source_id.split(":", 1)
+        session_dir = _history_session_dir(session_id)
+        if session_dir is None:
+            return None
+        metadata_path = session_dir / "session_metadata.json"
+        try:
+            metadata = json.loads(await asyncio.to_thread(metadata_path.read_text, encoding="utf-8"))
+            stored = metadata.get("proof_runtime_config")
+            return ProofRuntimeConfigSnapshot.model_validate(stored) if stored else None
+        except (OSError, ValueError, TypeError):
+            return None
 
     snapshot_dict = autonomous_coordinator.get_proof_runtime_config()
     if not snapshot_dict:
@@ -1431,6 +1449,8 @@ async def _run_manual_proof_check(
                     append_proof_callback=refreshed.append_proof_callback,
                     should_stop=run_control.stop_event.is_set,
                     release_source_on_exit=False,
+                    competition_config=(snapshot.proof_competition if refreshed.scope == PROOF_SCOPE_AUTONOMOUS else None),
+                    checkpoint_competition_state=(saved_checkpoint or {}).get("competition_state"),
                     proof_run_context={
                         "proof_run_id": run_control.snapshot.proof_run_id,
                         "run_mode": run_control.snapshot.run_mode,
@@ -1439,6 +1459,12 @@ async def _run_manual_proof_check(
                         "round_index": round_index,
                         "round_trigger": round_trigger,
                         "prior_round_results": prior_round_results,
+                        "scope": refreshed.scope,
+                        "proof_competition": (
+                            snapshot.proof_competition.model_dump(mode="json")
+                            if refreshed.scope == PROOF_SCOPE_AUTONOMOUS
+                            else {"enabled": False, "secondaries": []}
+                        ),
                     },
                     proof_pruning_registered_callback=pruning_coordinator.notify_proof_registered,
                     proof_pruning_pressure_callback=pruning_coordinator.notify_context_pressure,
@@ -2278,6 +2304,86 @@ async def update_proof_live_context(
         proof_search_refresh_scheduled=True,
         proof_set_revision=revision,
         warnings=warnings,
+    )
+
+
+@router.patch(
+    "/live-context/bulk",
+    response_model=ProofLiveContextBulkMutationResponse,
+)
+async def update_proof_live_context_bulk(
+    request: ProofLiveContextBulkMutationRequest,
+    scope: Literal["autonomous", "manual"] = Query(default=PROOF_SCOPE_AUTONOMOUS),
+):
+    scoped_database = _get_scoped_proof_database(scope)
+    try:
+        updated_records, changed_proof_ids, revision = (
+            await scoped_database.set_live_context_status_bulk(
+                items=[item.model_dump() for item in request.items],
+                expected_proof_set_revision=request.expected_proof_set_revision,
+            )
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Proof not found")
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    normalized_scope = (scope or PROOF_SCOPE_AUTONOMOUS).strip().lower()
+    changed_ids = set(changed_proof_ids)
+    results = []
+    for updated in updated_records:
+        warnings = []
+        dependents = await scoped_database.get_proofs_depending_on(updated.proof_id)
+        if dependents:
+            warnings.append(f"{len(dependents)} stored proof(s) depend on this occurrence.")
+        if updated.source_type in {"leanoj_final"}:
+            warnings.append("This occurrence is a verified final-solution proof.")
+        results.append(
+            ProofLiveContextBulkMutationResult(
+                proof_id=updated.proof_id,
+                run_id=str(updated.run_id or f"legacy:{updated.source_type}:{updated.source_id}"),
+                live_context_status=updated.live_context_status,
+                live_context_pruned_at=updated.live_context_pruned_at,
+                warnings=warnings,
+            )
+        )
+
+    if changed_proof_ids:
+        for proof_id in changed_proof_ids:
+            assistant_proof_search_coordinator.invalidate_live_context_occurrence(proof_id)
+
+        async def _refresh_proof_search_after_bulk_live_context_update() -> None:
+            try:
+                await proof_search_service.rebuild_index()
+            except Exception as exc:
+                logger.warning(
+                    "Proof-search refresh failed after bulk live-context update for %s: %s",
+                    ",".join(changed_proof_ids)[:240],
+                    str(exc)[:240],
+                )
+
+        asyncio.create_task(_refresh_proof_search_after_bulk_live_context_update())
+
+        for result in results:
+            if result.proof_id not in changed_ids:
+                continue
+            await websocket.broadcast_event(
+                "proof_live_context_updated",
+                {
+                    "scope": normalized_scope,
+                    "proof_id": result.proof_id,
+                    "run_id": result.run_id,
+                    "live_context_status": result.live_context_status,
+                    "proof_set_revision": revision,
+                },
+            )
+
+    return ProofLiveContextBulkMutationResponse(
+        scope=normalized_scope,
+        results=results,
+        changed_proof_ids=changed_proof_ids,
+        proof_search_refresh_scheduled=bool(changed_proof_ids),
+        proof_set_revision=revision,
     )
 
 
